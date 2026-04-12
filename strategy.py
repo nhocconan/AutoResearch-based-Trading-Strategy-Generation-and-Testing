@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d_1w_donchian_breakout_v1
-# Uses weekly Donchian breakout with volume confirmation and ATR stop on daily chart.
-# In bull markets: buy breakouts above weekly high with volume.
-# In bear markets: sell breakdowns below weekly low with volume.
-# Weekly timeframe reduces noise, daily execution improves timing.
-# Target: 20-40 trades per year (80-160 over 4 years) to minimize fee drag.
-name = "1d_1w_donchian_breakout_v1"
-timeframe = "1d"
+# Hypothesis: 6h_12h_1d_elder_ray_power_v1
+# Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13) on 1d timeframe.
+# Trend filter: 12h EMA50 slope (rising/falling). Entry on 6h when power aligns with trend.
+# Bull Power > 0 and rising + 12h EMA50 rising → long. Bear Power < 0 and falling + 12h EMA50 falling → short.
+# Volume confirmation: current volume > 1.5x 20-period average.
+# Designed to capture institutional moves in both bull and bear markets via power imbalance.
+# Target: 15-30 trades/year per symbol for low friction.
+name = "6h_12h_1d_elder_ray_power_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,40 +24,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Donchian channels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for Elder Ray calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate weekly Donchian channels (20-period)
-    high_20w = df_1w['high'].rolling(window=20, min_periods=20).max().values
-    low_20w = df_1w['low'].rolling(window=20, min_periods=20).min().values
+    # Calculate EMA13 on 1d close
+    close_1d = df_1d['close'].values
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Align to daily timeframe (wait for weekly close)
-    donchian_high = align_htf_to_ltf(prices, df_1w, high_20w)
-    donchian_low = align_htf_to_ltf(prices, df_1w, low_20w)
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = df_1d['high'].values - ema13_1d
+    bear_power = df_1d['low'].values - ema13_1d
     
-    # Volume confirmation: volume > 2.0 * 50-period average on daily
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    vol_confirm = volume > (vol_ma * 2.0)
+    # Align Elder Ray to 6h timeframe (will be available after 1d bar closes)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
-    # ATR for dynamic sizing and stop (14-period)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Get 12h data for trend filter (EMA50)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    
+    # EMA50 slope: rising if current > previous, falling if current < previous
+    ema50_slope = np.zeros_like(ema50_12h_aligned)
+    ema50_slope[1:] = np.where(ema50_12h_aligned[1:] > ema50_12h_aligned[:-1], 1,
+                               np.where(ema50_12h_aligned[1:] < ema50_12h_aligned[:-1], -1, 0))
+    
+    # Volume confirmation: volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # start after warmup
-        # Skip if Donchian levels not ready
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
+    for i in range(20, n):  # start after warmup
+        # Skip if data not ready
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(ema50_slope[i])):
             signals[i] = 0.0
             continue
         
-        # Skip if volume confirmation fails
+        # Check volume filter
         if not vol_confirm[i]:
             # Hold current position if volume filter fails
             if position == 1:
@@ -67,30 +80,32 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above weekly Donchian high with volume
-        if close[i] > donchian_high[i] and position != 1:
+        # Long conditions: Bull Power > 0 and rising, EMA50 slope rising
+        if (bull_power_aligned[i] > 0 and 
+            i > 0 and bull_power_aligned[i] > bull_power_aligned[i-1] and
+            ema50_slope[i] > 0 and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below weekly Donchian low with volume
-        elif close[i] < donchian_low[i] and position != -1:
+        # Short conditions: Bear Power < 0 and falling, EMA50 slope falling
+        elif (bear_power_aligned[i] < 0 and 
+              i > 0 and bear_power_aligned[i] < bear_power_aligned[i-1] and
+              ema50_slope[i] < 0 and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit conditions: opposite breakout or ATR-based stop
-        elif position == 1:
-            # Exit long on breakdown below weekly low or 2*ATR stop
-            if close[i] < donchian_low[i] or close[i] < prices['close'].iloc[i-1] - 2.0 * atr[i]:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.25
-        elif position == -1:
-            # Exit short on breakout above weekly high or 2*ATR stop
-            if close[i] > donchian_high[i] or close[i] > prices['close'].iloc[i-1] + 2.0 * atr[i]:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = -0.25
-        else:
+        # Exit conditions: opposite power signal or trend change
+        elif ((bear_power_aligned[i] < 0 and position == 1) or
+              (bull_power_aligned[i] > 0 and position == -1) or
+              (position == 1 and ema50_slope[i] < 0) or
+              (position == -1 and ema50_slope[i] > 0)):
+            position = 0
             signals[i] = 0.0
+        else:
+            # Hold current position
+            if position == 1:
+                signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.0
     
     return signals
