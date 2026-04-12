@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_1d_1w_Camarilla_Breakout_Volume_Regime_v6
-Hypothesis: Further reduce trade frequency by requiring volume > 1.8x average AND ADX(14) > 30 on 1d. Only trade breakouts of daily R3/S3 when weekly price is between S3 and R3 (range-bound weekly context). Exit at daily pivot. Target: 10-20 trades/year.
+4h_1d_1w_Camarilla_Breakout_Volume_Regime_v7
+Hypothesis: Reduce trade frequency by tightening volume filter to 2.5x average and requiring ADX(14) > 35 on daily. Trade breakouts of daily R3/S3 only when weekly price is between S3 and R3 (range-bound weekly). Exit at daily pivot. Target: 15-25 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_1w_Camarilla_Breakout_Volume_Regime_v6"
+name = "4h_1d_1w_Camarilla_Breakout_Volume_Regime_v7"
 timeframe = "4h"
 leverage = 1.0
 
@@ -133,11 +133,11 @@ def generate_signals(prices):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: at least 1.8x average (moderate)
-        vol_confirm = volume[i] > 1.8 * vol_avg[i]
+        # Volume confirmation: at least 2.5x average (tight)
+        vol_confirm = volume[i] > 2.5 * vol_avg[i]
         
-        # Trend filter: ADX > 30 indicates strong trend (moderate)
-        strong_trend = adx_aligned[i] > 30
+        # Trend filter: ADX > 35 indicates strong trend (tight)
+        strong_trend = adx_aligned[i] > 35
         
         # Weekly range-bound context: price between S3 and R3
         weekly_range = (close[i] > s3_1w_aligned[i]) & (close[i] < r3_1w_aligned[i])
