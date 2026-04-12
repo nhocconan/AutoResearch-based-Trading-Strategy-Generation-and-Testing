@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v3"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -35,11 +35,11 @@ def generate_signals(prices):
     h3_prev = pivot_prev + (range_1d_prev * 1.1 / 4)
     l3_prev = pivot_prev - (range_1d_prev * 1.1 / 4)
     
-    # Align levels to 12h timeframe
+    # Align levels to 4h timeframe
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3_prev)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3_prev)
     
-    # Volume filter - 20-period average on 12h data
+    # Volume filter - 20-period average on 4h data
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
@@ -59,7 +59,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if not ready
         if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
             np.isnan(volume_ok[i]) or np.isnan(rsi_ok[i])):
