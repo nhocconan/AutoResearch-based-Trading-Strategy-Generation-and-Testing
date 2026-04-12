@@ -8,13 +8,13 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and chop regime
-    # Camarilla levels from 1d provide intraday support/resistance
-    # Volume spike filters false breakouts
-    # Chop regime adapts: mean revert in range, follow trend in trending markets
-    # Designed for low frequency (12-37 trades/year) to minimize fee drag
+    # Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and chop regime filter
+    # Uses proven Camarilla levels from 1d as strong support/resistance
+    # Volume spike confirms breakout validity
+    # Chop regime filter adapts: mean revert in range, follow breakouts in trend
+    # Target: 20-50 trades/year per symbol (80-200 total over 4 years)
     
-    # Session filter: 8:00-20:00 UTC
+    # Session filter: 8:00-20:00 UTC (avoid low volume Asian session)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
@@ -25,7 +25,7 @@ def generate_signals(prices):
     
     # Get 1d data for Camarilla pivots and volume context
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
@@ -33,16 +33,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Camarilla levels (based on previous day)
-    # H4 = close + 1.1*(high-low)*1.1/2
-    # L4 = close - 1.1*(high-low)*1.1/2
-    # H3 = close + 1.1*(high-low)*1.1/4
-    # L3 = close - 1.1*(high-low)*1.1/4
-    # H2 = close + 1.1*(high-low)*1.1/6
-    # L2 = close - 1.1*(high-low)*1.1/6
-    # H1 = close + 1.1*(high-low)*1.1/12
-    # L1 = close - 1.1*(high-low)*1.1/12
-    
+    # Calculate 1d Camarilla pivot levels (based on previous day)
     camarilla_h4 = np.full(len(df_1d), np.nan)
     camarilla_l4 = np.full(len(df_1d), np.nan)
     camarilla_h3 = np.full(len(df_1d), np.nan)
@@ -51,21 +42,27 @@ def generate_signals(prices):
     camarilla_l2 = np.full(len(df_1d), np.nan)
     camarilla_h1 = np.full(len(df_1d), np.nan)
     camarilla_l1 = np.full(len(df_1d), np.nan)
-    camarilla_close = np.full(len(df_1d), np.nan)  # pivot point
+    camarilla_pivot = np.full(len(df_1d), np.nan)
     
     for i in range(1, len(df_1d)):
-        high_low_range = high_1d[i-1] - low_1d[i-1]
-        camarilla_close[i] = (high_1d[i-1] + low_1d[i-1] + close_1d[i-1]) / 3
-        camarilla_h4[i] = camarilla_close[i] + 1.1 * high_low_range * 1.1 / 2
-        camarilla_l4[i] = camarilla_close[i] - 1.1 * high_low_range * 1.1 / 2
-        camarilla_h3[i] = camarilla_close[i] + 1.1 * high_low_range * 1.1 / 4
-        camarilla_l3[i] = camarilla_close[i] - 1.1 * high_low_range * 1.1 / 4
-        camarilla_h2[i] = camarilla_close[i] + 1.1 * high_low_range * 1.1 / 6
-        camarilla_l2[i] = camarilla_close[i] - 1.1 * high_low_range * 1.1 / 6
-        camarilla_h1[i] = camarilla_close[i] + 1.1 * high_low_range * 1.1 / 12
-        camarilla_l1[i] = camarilla_close[i] - 1.1 * high_low_range * 1.1 / 12
+        # Use previous day's OHLC
+        high_prev = high_1d[i-1]
+        low_prev = low_1d[i-1]
+        close_prev = close_1d[i-1]
+        
+        # Camarilla calculations
+        range_prev = high_prev - low_prev
+        camarilla_pivot[i] = (high_prev + low_prev + close_prev) / 3
+        camarilla_h1[i] = camarilla_pivot[i] + (range_prev * 1.1 / 12)
+        camarilla_l1[i] = camarilla_pivot[i] - (range_prev * 1.1 / 12)
+        camarilla_h2[i] = camarilla_pivot[i] + (range_prev * 1.1 / 6)
+        camarilla_l2[i] = camarilla_pivot[i] - (range_prev * 1.1 / 6)
+        camarilla_h3[i] = camarilla_pivot[i] + (range_prev * 1.1 / 4)
+        camarilla_l3[i] = camarilla_pivot[i] - (range_prev * 1.1 / 4)
+        camarilla_h4[i] = camarilla_pivot[i] + (range_prev * 1.1 / 2)
+        camarilla_l4[i] = camarilla_pivot[i] - (range_prev * 1.1 / 2)
     
-    # Align Camarilla levels to 12h timeframe
+    # Align 1d Camarilla levels to 4h timeframe
     h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
     l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
@@ -74,14 +71,14 @@ def generate_signals(prices):
     l2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l2)
     h1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h1)
     l1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l1)
-    close_aligned = align_htf_to_ltf(prices, df_1d, camarilla_close)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
     
-    # 1d volume spike filter (current volume > 2.0 * 20-day average)
+    # 1d volume spike filter (current volume > 1.8 * 20-day average)
     vol_ma_20_1d = np.full(len(df_1d), np.nan)
     for i in range(19, len(df_1d)):
         vol_ma_20_1d[i] = np.mean(volume_1d[i-19:i+1])
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    volume_spike = volume > 2.0 * vol_ma_20_1d_aligned
+    volume_spike = volume > 1.8 * vol_ma_20_1d_aligned
     
     # Chop regime filter (using 1d data)
     atr_1d = np.full(len(df_1d), np.nan)
@@ -99,9 +96,10 @@ def generate_signals(prices):
     # Calculate Chop (14-period)
     sum_tr_14 = np.full(len(df_1d), np.nan)
     max_min_range_14 = np.full(len(df_1d), np.nan)
-    chop = np.full(len(df_1d), 50.0)
+    chop = np.full(len(df_1d), 50.0)  # default neutral
     
     for i in range(13, len(df_1d)):
+        # Sum of true range over 14 periods
         tr_sum = 0
         for j in range(i-13, i+1):
             tr = np.max([
@@ -112,6 +110,7 @@ def generate_signals(prices):
             tr_sum += tr
         sum_tr_14[i] = tr_sum
         
+        # Max high - min low over 14 periods
         max_high = np.max(high_1d[i-13:i+1])
         min_low = np.min(low_1d[i-13:i+1])
         max_min_range_14[i] = max_high - min_low
@@ -122,26 +121,27 @@ def generate_signals(prices):
     chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         if not in_session[i]:
             signals[i] = 0.0
             continue
         
+        # Skip if data not ready
         if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
             np.isnan(volume_spike[i]) or np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Regime-based logic
-        if chop_aligned[i] > 61.8:  # Ranging market - mean revert at H3/L3
+        if chop_aligned[i] > 61.8:  # Ranging market - mean revert at Camarilla H3/L3
             # Long near L3, short near H3
             long_entry = close[i] <= l3_aligned[i] and volume_spike[i]
             short_entry = close[i] >= h3_aligned[i] and volume_spike[i]
-            long_exit = close[i] >= close_aligned[i]
-            short_exit = close[i] <= close_aligned[i]
-        else:  # Trending market - breakout H4/L4
+            long_exit = close[i] >= pivot_aligned[i]
+            short_exit = close[i] <= pivot_aligned[i]
+        else:  # Trending market - follow breakouts at H4/L4
             # Breakout entries
             long_entry = close[i] > h4_aligned[i] and volume_spike[i]
             short_entry = close[i] < l4_aligned[i] and volume_spike[i]
@@ -172,6 +172,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_camarilla_breakout_vol_chop_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_vol_chop_v1"
+timeframe = "4h"
 leverage = 1.0
