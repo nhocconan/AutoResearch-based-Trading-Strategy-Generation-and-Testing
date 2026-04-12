@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-4h_12h_1d_Camarilla_Breakout_Plus_v2
-Hypothesis: On 4h timeframe, trade Camarilla breakouts with 12h trend filter and 1d volatility regime.
-Long when price breaks above H4 with 12h uptrend and low volatility regime; short when breaks below L4 with 12h downtrend and low volatility.
-Exit at opposite H3/L3 levels. Uses volume confirmation (1.5x average) to avoid false breakouts.
-Designed for low trade frequency (20-40/year) by requiring Camarilla level confluence, trend alignment, and volatility filter.
-Works in bull/bear via 12h trend filter and mean-reversion exit at Camarilla levels.
+4h_1d_Camarilla_Breakout_v26
+Hypothesis: On 4h timeframe, enter long when price closes above Camarilla H3 with 1d trend filter (EMA50),
+enter short when price closes below L3 with 1d downtrend. Exit at opposite H3/L3 level.
+Uses volume confirmation (1.5x 20-period average) to avoid false breakouts.
+Designed for low trade frequency (20-40/year) by requiring Camarilla level confluence and trend alignment.
+Works in bull/bear via 1d EMA50 trend filter and mean-reversion exit at Camarilla levels.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_1d_Camarilla_Breakout_Plus_v2"
+name = "4h_1d_Camarilla_Breakout_v26"
 timeframe = "4h"
 leverage = 1.0
 
@@ -35,51 +35,37 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla levels (based on previous day)
+    # Camarilla levels: based on previous day's range
     range_1d = high_1d - low_1d
+    close_prev = close_1d  # same as close for level calculation
     
-    # H4, L4, H3, L3 levels
-    h4 = close_1d + range_1d * 1.1 / 2
-    l4 = close_1d - range_1d * 1.1 / 2
-    h3 = close_1d + range_1d * 1.1 / 4
-    l3 = close_1d - range_1d * 1.1 / 4
+    # Camarilla formula: H4/L4 = close ± 1.5*range, H3/L3 = close ± 1.25*range
+    h3_1d = close_prev + 1.125 * range_1d  # equivalent to close + 1.25*range/2? Let's use standard
+    l3_1d = close_prev - 1.125 * range_1d
+    h4_1d = close_prev + 1.5 * range_1d
+    l4_1d = close_prev - 1.5 * range_1d
     
-    # === 12H EMA(20) FOR TREND FILTER ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
+    # Actually standard Camarilla:
+    # H3 = close + 1.1*(high-low)/2, L3 = close - 1.1*(high-low)/2
+    # H4 = close + 1.5*(high-low)/2, L4 = close - 1.5*(high-low)/2
+    range_hl = high_1d - low_1d
+    h3_1d = close_1d + 1.1 * range_hl / 2
+    l3_1d = close_1d - 1.1 * range_hl / 2
+    h4_1d = close_1d + 1.5 * range_hl / 2
+    l4_1d = close_1d - 1.5 * range_hl / 2
     
-    close_12h = df_12h['close'].values
-    if len(close_12h) >= 20:
-        ema_20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # === 1D EMA(50) FOR TREND FILTER ===
+    if len(close_1d) >= 50:
+        ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     else:
-        ema_20_12h = np.full_like(close_12h, np.nan)
-    
-    # === 1D VOLATILITY REGIME (ATR RATIO) ===
-    # Calculate daily ATR(10) and its 20-period moving average
-    if len(high_1d) >= 10:
-        tr1 = high_1d[1:] - low_1d[:-1]
-        tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-        tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        atr_10 = np.zeros_like(close_1d)
-        atr_10[9:] = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
-        atr_ma_20 = np.zeros_like(close_1d)
-        atr_ma_20[19:] = pd.Series(atr_10).rolling(window=20, min_periods=20).mean().values
-        # Avoid division by zero
-        atr_ratio = np.zeros_like(close_1d)
-        mask = atr_ma_20 > 0
-        atr_ratio[mask] = atr_10[mask] / atr_ma_20[mask]
-    else:
-        atr_ratio = np.zeros_like(close_1d)
+        ema_50_1d = np.full_like(close_1d, np.nan)
     
     # Align data to 4h timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
+    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume average (20-period for 4h = ~3.3 days) for confirmation
     vol_avg = np.zeros(n)
@@ -101,29 +87,25 @@ def generate_signals(prices):
     
     for i in range(50, n):  # start after warmup
         # Skip if indicators not available
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(ema_20_12h_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or vol_avg[i] == 0.0):
+        if (np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or vol_avg[i] == 0.0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Volume confirmation: at least 1.5x average
         vol_confirm = volume[i] > 1.5 * vol_avg[i]
         
-        # Trend filter: price above/below 12h EMA(20)
-        price_above_ema = close[i] > ema_20_12h_aligned[i]
-        price_below_ema = close[i] < ema_20_12h_aligned[i]
+        # Trend filter: price above/below 1d EMA(50)
+        price_above_ema = close[i] > ema_50_1d_aligned[i]
+        price_below_ema = close[i] < ema_50_1d_aligned[i]
         
-        # Volatility regime: low volatility (ATR ratio < 0.8) for better breakout quality
-        low_vol = atr_ratio_aligned[i] < 0.8
+        # Entry conditions: close above H3 or below L3 with volume and trend
+        long_setup = (close[i] > h3_1d_aligned[i]) and vol_confirm and price_above_ema
+        short_setup = (close[i] < l3_1d_aligned[i]) and vol_confirm and price_below_ema
         
-        # Entry conditions
-        long_setup = (close[i] > h4_aligned[i]) and vol_confirm and price_above_ema and low_vol
-        short_setup = (close[i] < l4_aligned[i]) and vol_confirm and price_below_ema and low_vol
-        
-        # Exit conditions: mean reversion to H3/L3 levels
-        exit_long = close[i] < l3_aligned[i]
-        exit_short = close[i] > h3_aligned[i]
+        # Exit conditions: mean reversion to opposite H3/L3 level
+        exit_long = close[i] < l3_1d_aligned[i]
+        exit_short = close[i] > h3_1d_aligned[i]
         
         if long_setup and position != 1:
             position = 1
