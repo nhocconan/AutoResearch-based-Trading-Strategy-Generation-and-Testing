@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v26"
-timeframe = "4h"
+name = "12h_1w_camarilla_volatility_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,78 +17,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels from daily data (once before loop)
+    # Get 1d data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 5:
         return np.zeros(n)
-    
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla levels: H4/L4 (resistance/support)
-    # Formula: H4 = C + 1.5*(H-L), L4 = C - 1.5*(H-L)
-    camarilla_H4 = close_1d + 1.5 * (high_1d - low_1d)
-    camarilla_L4 = close_1d - 1.5 * (high_1d - low_1d)
+    # Calculate Camarilla levels for previous day
+    # Camarilla: H4 = C + ((H-L) * 1.1/2), L4 = C - ((H-L) * 1.1/2)
+    # Where H, L, C are previous day's high, low, close
+    camarilla_high = np.zeros(len(close_1d))
+    camarilla_low = np.zeros(len(close_1d))
     
-    # Align to 4h timeframe
-    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
-    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
+    for i in range(1, len(close_1d)):
+        H = high_1d[i-1]
+        L = low_1d[i-1]
+        C = close_1d[i-1]
+        camarilla_high[i] = C + ((H - L) * 1.1 / 2)
+        camarilla_low[i] = C - ((H - L) * 1.1 / 2)
     
-    # Volume confirmation: current volume > 20-period average
+    # Align to 12h timeframe
+    camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
+    camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
+    
+    # Volume filter: current volume > 20-period average (on 12h data)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
     
-    # Choppiness regime filter (from daily)
-    # Chop > 61.8 = ranging (mean revert), Chop < 38.2 = trending (trend follow)
-    hl14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    atr14 = pd.Series(hl14 - ll14).rolling(window=14, min_periods=14).mean().values
-    sum_true_range = pd.Series(hl14 - ll14).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(sum_true_range / atr14) / np.log10(14)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Market regime: chop < 50 = trending, chop >= 50 = ranging
-    trending_market = chop_aligned < 50
-    ranging_market = chop_aligned >= 50
+    # Volatility filter: ATR(14) > 20-period average ATR (to avoid choppy markets)
+    tr = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1]))
+    tr = np.concatenate([[np.nan], tr])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
+    volatility_ok = atr > atr_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):  # warmup for chop calculation
+    for i in range(20, n):  # warmup for volatility and volume filters
         # Skip if not ready
-        if (np.isnan(camarilla_H4_aligned[i]) or np.isnan(camarilla_L4_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]) or 
+            np.isnan(volume_ok[i]) or np.isnan(volatility_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Price levels
-        price = close[i]
-        H4 = camarilla_H4_aligned[i]
-        L4 = camarilla_L4_aligned[i]
-        vol_ok = volume_ok[i]
+        # Breakout conditions with volume and volatility confirmation
+        breakout_up = close[i] > camarilla_high_aligned[i]
+        breakout_down = close[i] < camarilla_low_aligned[i]
         
-        # In trending markets: breakout strategy
-        # In ranging markets: mean reversion at extremes
-        if trending_market[i]:
-            # Trending: breakout of H4/L4 with volume
-            long_signal = (price > H4) and vol_ok
-            short_signal = (price < L4) and vol_ok
-            
-            # Exit when price returns to midpoint
-            midpoint = (H4 + L4) / 2
-            exit_long = price < midpoint
-            exit_short = price > midpoint
-            
-        else:
-            # Ranging: mean reversion at H4/L4
-            long_signal = (price < L4) and vol_ok  # buy at support
-            short_signal = (price > H4) and vol_ok  # sell at resistance
-            
-            # Exit when price returns to midpoint
-            midpoint = (H4 + L4) / 2
-            exit_long = price > midpoint
-            exit_short = price < midpoint
+        # Volume and volatility confirmation
+        vol_ok = volume_ok[i]
+        vol_filter_ok = volatility_ok[i]
+        
+        # Entry signals
+        long_signal = breakout_up and vol_ok and vol_filter_ok
+        short_signal = breakout_down and vol_ok and vol_filter_ok
+        
+        # Exit when price returns to the Camarilla pivot (close of previous day)
+        # Calculate pivot point: (H + L + C) / 3
+        pivot_point = np.zeros(len(close_1d))
+        for j in range(1, len(close_1d)):
+            H = high_1d[j-1]
+            L = low_1d[j-1]
+            C = close_1d[j-1]
+            pivot_point[j] = (H + L + C) / 3
+        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_point)
+        
+        exit_long = close[i] < pivot_aligned[i]
+        exit_short = close[i] > pivot_aligned[i]
         
         # Execute trades
         if long_signal and position != 1:
