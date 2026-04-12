@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-1d_1w_KAMA_Trend_Filter_v1
-Hypothesis: Use 1d KAMA (Kaufman Adaptive Moving Average) to detect trend direction, filtered by 1w RSI for overbought/oversold conditions.
-Long when KAMA turns upward and 1w RSI < 50 (avoiding overbought); short when KAMA turns downward and 1w RSI > 50 (avoiding oversold).
-Exit when KAMA reverses direction. Uses volume confirmation (1.5x 20-bar average) to filter false signals.
-Designed for low trade frequency (<10/year) by requiring trend alignment and volume confirmation.
-Works in bull via KAMA uptrend and in bear via KAMA downtrend, with RSI filter preventing entries at extremes.
+4h_1d_Donchian_Breakout_Trend_v1
+Hypothesis: On 4h timeframe, trade breakouts of daily Donchian channels (20-period) with 1d trend filter.
+Long when price breaks above 20-day high with 1d uptrend; short when breaks below 20-day low with 1d downtrend.
+Exit when price returns to the 20-day midpoint. Uses volume confirmation to avoid false breakouts.
+Designed for low trade frequency (20-40/year) by requiring multi-timeframe confluence.
+Works in bull/bear via 1d trend filter and mean-reversion exit at channel midpoint.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_KAMA_Trend_Filter_v1"
-timeframe = "1d"
+name = "4h_1d_Donchian_Breakout_Trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,69 +26,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1W RSI(14) FOR OVERBOUGHT/OVERSOLD FILTER ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 15:
+    # === DAILY DONCHIAN CHANNEL (20-period) ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    avg_gain = np.zeros_like(close_1w)
-    avg_loss = np.zeros_like(close_1w)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    # 20-day high and low
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    for i in range(14, len(close_1w)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Midpoint for exit
+    mid_20 = (high_20 + low_20) / 2
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi_1w = np.where(avg_loss == 0, 100, 100 - (100 / (1 + rs)))
+    # === 1D EMA(50) FOR TREND FILTER ===
+    if len(close_1d) >= 50:
+        ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    else:
+        ema_50_1d = np.full_like(close_1d, np.nan)
     
-    # === 1D KAMA FOR TREND DIRECTION ===
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close, k=10, prepend=close[:10]))
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)
-    # Volatility needs to be sum of absolute changes over 10 periods
-    volatility_sum = np.zeros(n)
-    vol_sum = 0.0
-    for i in range(n):
-        vol_sum += np.abs(close[i] - (close[i-1] if i > 0 else close[i]))
-        if i >= 10:
-            vol_sum -= np.abs(close[i-10] - (close[i-11] if i >= 11 else 0))
-        if i >= 9:
-            volatility_sum[i] = vol_sum
+    # Align data to 4h timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    mid_20_aligned = align_htf_to_ltf(prices, df_1d, mid_20)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Avoid division by zero
-    er = np.where(volatility_sum > 0, change / volatility_sum, 0)
-    
-    # Smoothing constants
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # fast=2, slow=30
-    
-    # KAMA calculation
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # KAMA direction: 1 if rising, -1 if falling
-    kama_dir = np.zeros(n)
-    kama_dir[0] = 0
-    for i in range(1, n):
-        if kama[i] > kama[i-1]:
-            kama_dir[i] = 1
-        elif kama[i] < kama[i-1]:
-            kama_dir[i] = -1
-        else:
-            kama_dir[i] = kama_dir[i-1]
-    
-    # Align 1w RSI to 1d
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
-    
-    # Volume average (20-period for confirmation)
+    # Volume average (20-period for 4h = ~10 days) for confirmation
     vol_avg = np.zeros(n)
     vol_sum = 0.0
     vol_count = 0
@@ -106,22 +72,27 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # start after warmup
+    for i in range(50, n):  # start after warmup
         # Skip if indicators not available
-        if np.isnan(rsi_1w_aligned[i]) or vol_avg[i] == 0.0:
+        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
+            np.isnan(mid_20_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or vol_avg[i] == 0.0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Volume confirmation: at least 1.5x average
         vol_confirm = volume[i] > 1.5 * vol_avg[i]
         
-        # Entry conditions
-        long_setup = (kama_dir[i] == 1) and (rsi_1w_aligned[i] < 50) and vol_confirm
-        short_setup = (kama_dir[i] == -1) and (rsi_1w_aligned[i] > 50) and vol_confirm
+        # Trend filter: price above/below 1d EMA(50)
+        price_above_ema = close[i] > ema_50_1d_aligned[i]
+        price_below_ema = close[i] < ema_50_1d_aligned[i]
         
-        # Exit when KAMA reverses direction
-        exit_long = (kama_dir[i] == -1)
-        exit_short = (kama_dir[i] == 1)
+        # Entry conditions
+        long_setup = (close[i] > high_20_aligned[i]) and vol_confirm and price_above_ema
+        short_setup = (close[i] < low_20_aligned[i]) and vol_confirm and price_below_ema
+        
+        # Exit conditions: mean reversion to 20-day midpoint
+        exit_long = close[i] < mid_20_aligned[i]
+        exit_short = close[i] > mid_20_aligned[i]
         
         if long_setup and position != 1:
             position = 1
