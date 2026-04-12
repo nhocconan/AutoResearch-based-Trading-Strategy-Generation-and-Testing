@@ -1,14 +1,14 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 """
-4h_1d_Camarilla_Breakout_Volume_v2
-Hypothesis: On 4h timeframe, enter long when price breaks above daily Camarilla R3 with volume confirmation (volume > 1.5x average), enter short when price breaks below daily Camarilla S3 with volume confirmation. Uses daily Camarilla levels for structure and volume filter to avoid false breakouts. Designed for moderate trade frequency (target 20-50/year) to balance opportunity and cost, effective in both bull and bear markets by requiring strong volume-backed breakouts.
+4h_1d_Camarilla_Breakout_Volume_v3
+Hypothesis: On 4h timeframe, enter long when price breaks above daily Camarilla R4 with volume confirmation (>1.5x average), enter short when price breaks below daily Camarilla S4. Uses daily timeframe for structure and volume filter to avoid false breakouts. Targets 20-50 trades per year by requiring strong breakouts at extreme levels.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_Breakout_Volume_v2"
+name = "4h_1d_Camarilla_Breakout_Volume_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -35,13 +35,13 @@ def generate_signals(prices):
     pivot = (high_1d + low_1d + close_1d) / 3
     range_1d = high_1d - low_1d
     
-    # Camarilla R3 and S3 levels (key reversal levels)
-    r3 = close_1d + range_1d * 1.1 / 4
-    s3 = close_1d - range_1d * 1.1 / 4
+    # Camarilla R4 and S4 levels (extreme reversal levels)
+    r4 = close_1d + range_1d * 1.1 / 2
+    s4 = close_1d - range_1d * 1.1 / 2
     
     # Align to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # Volume average (20-period) for confirmation
     vol_avg = np.zeros(n)
@@ -63,24 +63,24 @@ def generate_signals(prices):
     
     for i in range(50, n):  # start after warmup
         # Skip if indicators not available
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
             vol_avg[i] == 0.0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Breakout conditions with volume confirmation
         vol_confirm = volume[i] > 1.5 * vol_avg[i]
-        long_breakout = (close[i] > r3_aligned[i]) and vol_confirm
-        short_breakout = (close[i] < s3_aligned[i]) and vol_confirm
+        long_breakout = (close[i] > r4_aligned[i]) and vol_confirm
+        short_breakout = (close[i] < s4_aligned[i]) and vol_confirm
         
-        # Exit conditions: reversal back inside Camarilla H3-L3 range
-        h3 = close_1d + range_1d * 1.1 / 2
-        l3 = close_1d - range_1d * 1.1 / 2
-        h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-        l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+        # Exit conditions: reversal back inside Camarilla R3-S3 range
+        r3 = close_1d + range_1d * 1.1 / 4
+        s3 = close_1d - range_1d * 1.1 / 4
+        r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+        s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
         
-        exit_long = close[i] < h3_aligned[i]
-        exit_short = close[i] > l3_aligned[i]
+        exit_long = close[i] < r3_aligned[i]
+        exit_short = close[i] > s3_aligned[i]
         
         if long_breakout and position != 1:
             position = 1
