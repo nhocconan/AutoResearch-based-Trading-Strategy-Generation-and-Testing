@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-1d_1w_camarilla_breakout_with_volume_and_atr_v3
-Hypothesis: Daily chart Camarilla breakout with weekly trend filter, volume confirmation, and ATR volatility filter.
-Works in bull/bear by trading breakouts in direction of weekly trend, using volume to avoid false signals, and ATR to filter low-volatility environments.
-Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drift.
+6h_1d_limited_range_breakout_v1
+Hypothesis: In BTC/ETH, price often consolidates in tight ranges (low volatility) before explosive moves.
+We detect tight ranges using 24-period ATR% (ATR/Close) on 1d timeframe. When volatility contracts below
+the 20th percentile, we wait for a breakout of the prior 20-period high/low on 6s timeframe with volume
+confirmation. This avoids whipsaws in high volatility and captures momentum after consolidation.
+Works in bull/bear because it trades breakouts regardless of direction, using volatility regime filter.
+Target: 20-40 trades/year (80-160 total over 4 years).
 """
 
-name = "1d_1w_camarilla_breakout_with_volume_and_atr_v3"
-timeframe = "1d"
+name = "6h_1d_limited_range_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +19,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,86 +27,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Weekly EMA20 for trend
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Get daily data for Camarilla and ATR
+    # Get daily data for volatility and range calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's range for Camarilla
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    
-    # Camarilla levels (based on previous day)
-    range_ = prev_high - prev_low
-    r3 = prev_close + range_ * 1.1 / 2
-    r4 = prev_close + range_ * 1.1
-    s3 = prev_close - range_ * 1.1 / 2
-    s4 = prev_close - range_ * 1.1
-    
-    # ATR for volatility filter (14-day ATR)
+    # 24-period ATR on daily
     tr1 = np.abs(np.subtract(high_1d, low_1d))
     tr2 = np.abs(np.subtract(high_1d, np.roll(close_1d, 1)))
     tr3 = np.abs(np.subtract(low_1d, np.roll(close_1d, 1)))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_24 = pd.Series(tr).rolling(window=24, min_periods=24).mean().values
     
-    # Align daily levels to daily timeframe (no alignment needed as we're on 1d)
-    # But we'll use align_htf_to_ltf for consistency and proper handling
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    # ATR as percentage of price (volatility measure)
+    atr_pct = atr_24 / close_1d
     
-    # Volume confirmation: volume > 1.5x 20-day average
+    # 20-period high/low for breakout levels
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Volatility regime: low volatility when ATR% < 20th percentile (lookback 100 days)
+    atr_pct_series = pd.Series(atr_pct)
+    vol_percentile = atr_pct_series.rolling(window=100, min_periods=50).quantile(0.20).values
+    low_vol_regime = atr_pct < vol_percentile
+    
+    # Align all daily indicators to 6s timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    low_vol_aligned = align_htf_to_ltf(prices, df_1d, low_vol_regime.astype(float))
+    
+    # Volume confirmation on 6s: volume > 1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    vol_confirm = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(atr_aligned[i]) or np.isnan(ema_20_1w_aligned[i])):
+        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
+            np.isnan(low_vol_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Determine weekly trend: price above/below EMA20
-        weekly_uptrend = close[i] > ema_20_1w_aligned[i]
-        weekly_downtrend = close[i] < ema_20_1w_aligned[i]
-        
-        # Long entry: price breaks above R4, in weekly uptrend, with volume and volatility
-        if (close[i] > r4_aligned[i] and weekly_uptrend and vol_confirm[i] and 
-            atr_aligned[i] > 0 and position != 1):
+        # Long entry: break above 20-period high in low volatility regime with volume
+        if (close[i] > high_20_aligned[i] and low_vol_aligned[i] > 0.5 and 
+            vol_confirm[i] and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: price breaks below S4, in weekly downtrend, with volume and volatility
-        elif (close[i] < s4_aligned[i] and weekly_downtrend and vol_confirm[i] and 
-              atr_aligned[i] > 0 and position != -1):
+        # Short entry: break below 20-period low in low volatility regime with volume
+        elif (close[i] < low_20_aligned[i] and low_vol_aligned[i] > 0.5 and 
+              vol_confirm[i] and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: reverse signal or price crosses back to opposite S3/R3
-        elif position == 1 and close[i] < s3_aligned[i]:
+        # Exit: reverse signal or volatility expands (exit consolidation breakout)
+        elif position == 1 and (low_vol_aligned[i] < 0.5 or close[i] < low_20_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > r3_aligned[i]:
+        elif position == -1 and (low_vol_aligned[i] < 0.5 or close[i] > high_20_aligned[i]):
             position = 0
             signals[i] = 0.0
         else:
