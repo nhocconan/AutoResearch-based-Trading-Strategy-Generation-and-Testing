@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v2"
-timeframe = "4h"
+name = "6h_1d_adx_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,66 +17,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla levels (HTF)
+    # 1d data for ADX (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate previous 1d bar's Camarilla levels
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Calculate ADX on 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    H_minus_L = prev_high - prev_low
-    R4 = prev_close + H_minus_L * 1.1 / 2
-    R3 = prev_close + H_minus_L * 1.1 / 4
-    S3 = prev_close - H_minus_L * 1.1 / 4
-    S4 = prev_close - H_minus_L * 1.1 / 2
-    
-    # Align 1d Camarilla levels to 4h bars using proper HTF alignment
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
-    
-    # Volume confirmation: current 4h volume > 20-period average of aligned 1d volume
-    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)
-    vol_ma = pd.Series(vol_1d_aligned).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_filter = volume > vol_ma
-    
-    # Chop index for regime filter (4h)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    atr_4h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    chop_raw = 100 * np.log10(tr_sum / (atr_4h * 14)) / np.log10(14)
-    chop = np.where(tr_sum > 0, chop_raw, 50)
+    
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smooth TR, +DM, -DM
+    tr_smooth = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # DI+ and DI-
+    plus_di = 100 * plus_dm_smooth / tr_smooth
+    minus_di = 100 * minus_dm_smooth / tr_smooth
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # 6h trend: EMA crossover (fast/slow)
+    ema_fast = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema_slow = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    
+    # Volume filter: current volume > 20-period EMA
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_filter = volume > vol_ema
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if not ready
-        if (np.isnan(R4_aligned[i]) or np.isnan(R3_aligned[i]) or 
-            np.isnan(S3_aligned[i]) or np.isnan(S4_aligned[i]) or
-            np.isnan(chop[i]) or np.isnan(volume_filter[i])):
+        if np.isnan(adx_aligned[i]) or np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or np.isnan(volume_filter[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Chop regime: Chop < 40 = trending (favor breakouts), Chop > 60 = ranging (avoid)
-        trending_regime = chop[i] < 40
+        # ADX > 25 indicates strong trend
+        strong_trend = adx_aligned[i] > 25
         
-        # Long: price breaks above R4 (strong resistance) in trending market with volume
-        long_signal = (close[i] > R4_aligned[i] and trending_regime and volume_filter[i])
+        # Long: EMA fast > slow in strong trend with volume
+        long_signal = strong_trend and (ema_fast[i] > ema_slow[i]) and volume_filter[i]
         
-        # Short: price breaks below S4 (strong support) in trending market with volume
-        short_signal = (close[i] < S4_aligned[i] and trending_regime and volume_filter[i])
+        # Short: EMA fast < slow in strong trend with volume
+        short_signal = strong_trend and (ema_fast[i] < ema_slow[i]) and volume_filter[i]
         
-        # Exit: chop increases (range) or price returns to mid-point (S3/R3)
-        exit_long = (position == 1 and (chop[i] > 60 or close[i] < (R3_aligned[i] + S3_aligned[i])/2))
-        exit_short = (position == -1 and (chop[i] > 60 or close[i] > (R3_aligned[i] + S3_aligned[i])/2))
+        # Exit: trend weakens (ADX < 20) or EMA crossover reverses
+        exit_long = position == 1 and (adx_aligned[i] < 20 or ema_fast[i] < ema_slow[i])
+        exit_short = position == -1 and (adx_aligned[i] < 20 or ema_fast[i] > ema_slow[i])
         
         # Execute trades
         if long_signal and position != 1:
