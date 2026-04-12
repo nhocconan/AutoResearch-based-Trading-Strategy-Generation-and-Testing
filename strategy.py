@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Pivot_Breakout_With_Range_Filter_v1
-Hypothesis: On 12h timeframe, take long when price breaks above Camarilla R4 with volume expansion in trending markets (ADX>25), and short when price breaks below Camarilla S4 with volume expansion in trending markets. Uses ADX regime filter to avoid false breakouts in ranging conditions, reducing whipsaws. Designed for 15-30 trades/year by requiring ADX>25 and volume spike (2x average) for entry. Works in bull markets via R4 breakouts and bear markets via S4 breakdowns, while avoiding choppy markets where breakouts fail.
+12h_1d_RSI_Trend_Reversal_v1
+Hypothesis: On 12h timeframe, take long when RSI(14) shows bullish momentum in trending markets (ADX>25) and price is above EMA(50), and short when RSI shows bearish momentum with price below EMA(50). Uses EMA for trend direction and RSI for momentum timing to capture reversals within trends. Designed for 20-40 trades/year by requiring aligned trend/momentum conditions, avoiding whipsaws in ranging markets. Works in bull markets via RSI>50 longs and bear markets via RSI<50 shorts, with EMA filter ensuring trades follow the dominant trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_Pivot_Breakout_With_Range_Filter_v1"
+name = "12h_1d_RSI_Trend_Reversal_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -21,22 +21,41 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Volume average (20 period) for spike detection
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # EMA(50) for trend direction
+    close_series = pd.Series(close)
+    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # ADX calculation for trend strength (14 period)
-    # ADX uses +DI, -DI, and TR
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    # RSI(14) for momentum
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    gain_ma = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    loss_ma = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = gain_ma / loss_ma
+    rs[loss_ma == 0] = np.inf  # Avoid division by zero
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Load 1d data ONCE for ADX trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # Calculate ADX(14) on 1d for trend strength
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
+    tr[0] = tr1[0]
     
-    # Directional movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
@@ -48,58 +67,44 @@ def generate_signals(prices):
     # DI values
     plus_di = 100 * plus_dm_14 / tr_14
     minus_di = 100 * minus_dm_14 / tr_14
+    plus_di[tr_14 == 0] = 0
+    minus_di[tr_14 == 0] = 0
     
     # DX and ADX
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    dx[(plus_di + minus_di) == 0] = 0
+    adx_1d = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Load 1d data ONCE for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Calculate Camarilla pivot levels from prior 1d OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    camarilla_r4 = close_1d + 1.5 * (high_1d - low_1d)
-    camarilla_s4 = close_1d - 1.5 * (high_1d - low_1d)
-    
-    # Align to 12h timeframe
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    # Align ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after ADX warmup
+    for i in range(50, n):  # Start after EMA/RSI warmup
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(adx[i])):
+        if (np.isnan(ema50[i]) or np.isnan(rsi[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Regime filter: only trade in trending markets (ADX > 25)
-        trending = adx[i] > 25
+        # Trend filter: only trade with the trend (ADX > 25 on 1d)
+        trending = adx_aligned[i] > 25
         
-        # Camarilla breakout conditions
-        breakout_r4 = close[i] > camarilla_r4_aligned[i]  # Break above R4
-        breakout_s4 = close[i] < camarilla_s4_aligned[i]  # Break below S4
+        # Trend direction from EMA(50)
+        above_ema = close[i] > ema50[i]
+        below_ema = close[i] < ema50[i]
         
-        # Volume confirmation: current volume > 2x average (strong breakout)
-        volume_spike = volume[i] > vol_ma[i] * 2.0
+        # Momentum from RSI(14)
+        rsi_bullish = rsi[i] > 50  # Bullish momentum
+        rsi_bearish = rsi[i] < 50  # Bearish momentum
         
-        # Entry conditions: breakout + volume + trending
-        long_entry = breakout_r4 and volume_spike and trending
-        short_entry = breakout_s4 and volume_spike and trending
+        # Entry conditions: trend + momentum alignment
+        long_entry = trending and above_ema and rsi_bullish
+        short_entry = trending and below_ema and rsi_bearish
         
-        # Exit conditions: price returns to Camarilla pivot point (midpoint)
-        pivot_point = (high_1d + low_1d + close_1d) / 3
-        pivot_point_aligned = align_htf_to_ltf(prices, df_1d, pivot_point)
-        
-        long_exit = close[i] < pivot_point_aligned[i]
-        short_exit = close[i] > pivot_point_aligned[i]
+        # Exit conditions: opposite momentum or trend weakness
+        long_exit = not rsi_bullish or adx_aligned[i] < 20  # RSI turns bearish or trend weakens
+        short_exit = not rsi_bearish or adx_aligned[i] < 20  # RSI turns bullish or trend weakens
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
