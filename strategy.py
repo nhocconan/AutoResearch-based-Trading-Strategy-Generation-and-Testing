@@ -1,138 +1,172 @@
 #!/usr/bin/env python3
 """
-12h_1d_rsi_divergence_v1
-Uses daily RSI for trend bias and 12h RSI divergence for entry.
-Long when daily RSI > 50 and 12h shows bullish RSI divergence (price lower low, RSI higher low).
-Short when daily RSI < 50 and 12h shows bearish RSI divergence (price higher high, RSI lower high).
-Volume confirmation required. Designed for low trade frequency (~20-30 trades/year).
-Works in bull markets via trend-following and in bear markets via mean-reversion divergences.
+1d_1w_adx_rsi_momentum
+Uses weekly ADX for trend strength and daily RSI for momentum.
+Enters long when weekly ADX > 25 (trending) and daily RSI crosses above 50 from below.
+Enters short when weekly ADX > 25 and daily RSI crosses below 50 from above.
+Exits when RSI crosses back to 50 or ADX falls below 20.
+Designed for low trade frequency (target: 10-25 trades/year) to minimize fee drag.
+Works in trending markets by following momentum with trend filter.
 """
 
-name = "12h_1d_rsi_divergence_v1"
-timeframe = "12h"
+name = "1d_1w_adx_rsi_momentum"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def rsi(series, period=14):
-    """Relative Strength Index"""
-    delta = np.diff(series)
+def true_range(high, low, close):
+    """Calculate True Range"""
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    return np.maximum(tr1, np.maximum(tr2, tr3))
+
+def adx(high, low, close, period=14):
+    """Calculate ADX (Average Directional Index)"""
+    if len(high) < period + 1:
+        return np.full_like(high, np.nan, dtype=float)
+    
+    # Calculate True Range
+    tr = true_range(high, low, close)
+    
+    # Calculate Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smooth the values
+    atr = np.zeros_like(tr)
+    plus_di = np.zeros_like(tr)
+    minus_di = np.zeros_like(tr)
+    
+    # Initial values
+    atr[period-1] = np.mean(tr[:period])
+    plus_dm_sum = np.sum(plus_dm[:period])
+    minus_dm_sum = np.sum(minus_dm[:period])
+    
+    # Smooth subsequent values
+    for i in range(period, len(tr)):
+        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        plus_dm_sum = plus_dm_sum - (plus_dm_sum / period) + plus_dm[i]
+        minus_dm_sum = minus_dm_sum - (minus_dm_sum / period) + minus_dm[i]
+        plus_di[i] = 100 * plus_dm_sum / atr[i] if atr[i] != 0 else 0
+        minus_di[i] = 100 * minus_dm_sum / atr[i] if atr[i] != 0 else 0
+    
+    # Calculate DX and ADX
+    dx = np.zeros_like(tr)
+    adx_val = np.zeros_like(tr)
+    
+    for i in range(period, len(tr)):
+        di_sum = plus_di[i] + minus_di[i]
+        if di_sum != 0:
+            dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / di_sum
+        else:
+            dx[i] = 0
+    
+    # Smooth DX to get ADX
+    adx_val[2*period-2] = np.mean(dx[period-1:2*period-1])
+    for i in range(2*period-1, len(tr)):
+        adx_val[i] = (adx_val[i-1] * (period-1) + dx[i]) / period
+    
+    return adx_val
+
+def rsi(close, period=14):
+    """Calculate RSI"""
+    if len(close) < period + 1:
+        return np.full_like(close, np.nan, dtype=float)
+    
+    delta = np.diff(close)
+    delta = np.insert(delta, 0, 0)
+    
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     
-    avg_gain = np.zeros_like(series)
-    avg_loss = np.zeros_like(series)
+    avg_gain = np.zeros_like(close)
+    avg_loss = np.zeros_like(close)
     
-    avg_gain[period] = np.mean(gain[:period])
-    avg_loss[period] = np.mean(loss[:period])
+    avg_gain[period] = np.mean(gain[1:period+1])
+    avg_loss[period] = np.mean(loss[1:period+1])
     
-    for i in range(period + 1, len(series)):
-        avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
+    for i in range(period+1, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_val = 100 - (100 / (1 + rs))
+    rs = np.zeros_like(close)
+    rsi_val = np.zeros_like(close)
     
-    # Pad beginning
-    rsi_full = np.full_like(series, np.nan)
-    rsi_full[period:] = rsi_val[period:]
-    return rsi_full
-
-def find_divergence(price, rsi_val, lookback=5):
-    """
-    Find bullish/bearish divergence
-    Returns: 1 for bullish divergence, -1 for bearish divergence, 0 otherwise
-    """
-    if len(price) < lookback * 2:
-        return 0
+    for i in range(period, len(close)):
+        if avg_loss[i] != 0:
+            rs[i] = avg_gain[i] / avg_loss[i]
+            rsi_val[i] = 100 - (100 / (1 + rs[i]))
+        else:
+            rsi_val[i] = 100
     
-    # Look for recent swing low/high
-    bullish_div = 0
-    bearish_div = 0
-    
-    # Check for bullish divergence: price makes lower low, RSI makes higher low
-    for i in range(lookback, len(price)-lookback):
-        # Find local minimum in price
-        if price[i] == np.min(price[i-lookback:i+lookback+1]):
-            # Check if this is lower than previous low
-            prev_low_idx = np.argmin(price[i-2*lookback:i-lookback+1]) + i-2*lookback
-            if price[i] < price[prev_low_idx] and rsi_val[i] > rsi_val[prev_low_idx]:
-                bullish_div = 1
-                break
-    
-    # Check for bearish divergence: price makes higher high, RSI makes lower high
-    for i in range(lookback, len(price)-lookback):
-        # Find local maximum in price
-        if price[i] == np.max(price[i-lookback:i+lookback+1]):
-            # Check if this is higher than previous high
-            prev_high_idx = np.argmax(price[i-2*lookback:i-lookback+1]) + i-2*lookback
-            if price[i] > price[prev_high_idx] and rsi_val[i] < rsi_val[prev_high_idx]:
-                bearish_div = -1
-                break
-    
-    return bullish_div if bullish_div != 0 else bearish_div
+    return rsi_val
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get daily data for RSI trend bias
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for ADX calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Daily RSI for trend bias (>50 = bullish bias, <50 = bearish bias)
-    rsi_1d = rsi(close_1d, 14)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Calculate weekly ADX
+    adx_1w = adx(high_1w, low_1w, close_1w, period=14)
     
-    # 12h RSI for divergence detection
-    rsi_12h = rsi(close, 14)
+    # Align ADX to daily timeframe
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    # Calculate daily RSI
+    rsi_1d = rsi(close, period=14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if data not ready
-        if np.isnan(rsi_1d_aligned[i]) or np.isnan(rsi_12h[i]):
+        if np.isnan(adx_1w_aligned[i]) or np.isnan(rsi_1d[i]):
             signals[i] = 0.0
             continue
         
-        # Check for divergence on recent window
-        lookback = 10
-        if i >= lookback:
-            div_signal = find_divergence(close[i-lookback:i+1], rsi_12h[i-lookback:i+1], lookback//2)
-        else:
-            div_signal = 0
-        
-        # Long entry: daily RSI bullish (>50) + bullish divergence + volume
-        if (rsi_1d_aligned[i] > 50 and div_signal == 1 and 
-            vol_confirm[i] and position != 1):
+        # Long entry: weekly ADX > 25 (trending) and daily RSI crosses above 50 from below
+        if (adx_1w_aligned[i] > 25 and 
+            rsi_1d[i] > 50 and 
+            i > 0 and rsi_1d[i-1] <= 50 and
+            position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: daily RSI bearish (<50) + bearish divergence + volume
-        elif (rsi_1d_aligned[i] < 50 and div_signal == -1 and 
-              vol_confirm[i] and position != -1):
+        # Short entry: weekly ADX > 25 and daily RSI crosses below 50 from above
+        elif (adx_1w_aligned[i] > 25 and 
+              rsi_1d[i] < 50 and 
+              i > 0 and rsi_1d[i-1] >= 50 and
+              position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: RSI crosses back to neutral zone (40-60) or opposite divergence
-        elif position == 1 and (rsi_1d_aligned[i] < 40 or div_signal == -1):
+        # Exit conditions: RSI crosses back to 50 or ADX falls below 20
+        elif position == 1 and (rsi_1d[i] < 50 or adx_1w_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (rsi_1d_aligned[i] > 60 or div_signal == 1):
+        elif position == -1 and (rsi_1d[i] > 50 or adx_1w_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
         else:
