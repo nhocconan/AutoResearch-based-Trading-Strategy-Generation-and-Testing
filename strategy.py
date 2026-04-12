@@ -1,108 +1,98 @@
 #!/usr/bin/env python3
 """
-6h_1w_1d_OrderBlock_Flow_v1
-Hypothesis: Combine weekly order blocks with daily momentum on 6h timeframe.
-Long when price breaks above bullish order block (from weekly swing low) with daily RSI > 50,
-short when breaks below bearish order block (from weekly swing high) with daily RSI < 50.
-Order blocks represent institutional supply/demand zones; RSI filters for momentum alignment.
-Designed for low trade frequency (target: 50-150 total over 4 years) to minimize fee drag.
-Works in bull via continuation from demand zones, in bear via reversal at supply zones.
+12h_1d_Camarilla_Pivot_Reversal_v1
+Hypothesis: Use daily Camarilla pivot levels with mean reversion on 12h timeframe.
+Long when price touches or breaks below S3 with reversal confirmation, short when touches or breaks above R3.
+Camarilla levels work well in ranging markets (common in 2025-2026) and provide clear reversal zones.
+Designed for low trade frequency (target: 50-150 total over 4 years) to minimize fee drift.
+Works in bull via buying dips to support, in bear via selling rallies to resistance.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_1d_OrderBlock_Flow_v1"
-timeframe = "6h"
+name = "12h_1d_Camarilla_Pivot_Reversal_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Weekly data for swing points and order blocks
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Daily data for RSI momentum filter
+    # Daily data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly swing high/low for order blocks (using 5-bar lookback)
-    # Swing high: high surrounded by lower highs on both sides
-    # Swing low: low surrounded by higher lows on both sides
-    swing_high = np.full(len(df_1w), np.nan)
-    swing_low = np.full(len(df_1w), np.nan)
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = df_1d['high'].iloc[-2] if len(df_1d) >= 2 else df_1d['high'].iloc[-1]
+    prev_low = df_1d['low'].iloc[-2] if len(df_1d) >= 2 else df_1d['low'].iloc[-1]
+    prev_close = df_1d['close'].iloc[-2] if len(df_1d) >= 2 else df_1d['close'].iloc[-1]
     
-    for i in range(2, len(df_1w) - 2):
-        # Swing high condition
-        if (df_1w['high'].iloc[i] > df_1w['high'].iloc[i-1] and 
-            df_1w['high'].iloc[i] > df_1w['high'].iloc[i-2] and
-            df_1w['high'].iloc[i] > df_1w['high'].iloc[i+1] and
-            df_1w['high'].iloc[i] > df_1w['high'].iloc[i+2]):
-            swing_high[i] = df_1w['high'].iloc[i]
-        
-        # Swing low condition
-        if (df_1w['low'].iloc[i] < df_1w['low'].iloc[i-1] and 
-            df_1w['low'].iloc[i] < df_1w['low'].iloc[i-2] and
-            df_1w['low'].iloc[i] < df_1w['low'].iloc[i+1] and
-            df_1w['low'].iloc[i] < df_1w['low'].iloc[i+2]):
-            swing_low[i] = df_1w['low'].iloc[i]
+    # Calculate Camarilla pivot levels
+    range_val = prev_high - prev_low
+    if range_val <= 0:
+        return np.zeros(n)
     
-    # Forward fill swing points to create order block zones
-    swing_high_series = pd.Series(swing_high)
-    swing_low_series = pd.Series(swing_low)
-    ob_high = swing_high_series.ffill().bfill().values  # Bearish OB (from swing high)
-    ob_low = swing_low_series.ffill().bfill().values    # Bullish OB (from swing low)
+    # Camarilla levels: R3, R4, S3, S4
+    camarilla_r3 = prev_close + range_val * 1.1 / 2
+    camarilla_r4 = prev_close + range_val * 1.1
+    camarilla_s3 = prev_close - range_val * 1.1 / 2
+    camarilla_s4 = prev_close - range_val * 1.1
     
-    # Calculate daily RSI (14-period)
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Align daily levels to 12h timeframe
+    camarilla_r3_array = np.full(len(df_1d), camarilla_r3)
+    camarilla_r4_array = np.full(len(df_1d), camarilla_r4)
+    camarilla_s3_array = np.full(len(df_1d), camarilla_s3)
+    camarilla_s4_array = np.full(len(df_1d), camarilla_s4)
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_array)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4_array)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_array)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4_array)
     
-    # Align weekly order blocks and daily RSI to 6h timeframe
-    ob_high_aligned = align_htf_to_ltf(prices, df_1w, ob_high)
-    ob_low_aligned = align_htf_to_ltf(prices, df_1w, ob_low)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Volume filter: current volume > 1.3x 20-period average
+    volume_series = pd.Series(volume)
+    vol_ma = volume_series.rolling(window=20, min_periods=20).mean()
+    vol_ratio = volume_series / vol_ma
+    vol_ratio = vol_ratio.fillna(1.0).values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any data invalid
-        if (np.isnan(ob_high_aligned[i]) or np.isnan(ob_low_aligned[i]) or 
-            np.isnan(rsi_aligned[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_r4_aligned[i]) or
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Entry conditions: price breaks order block with RSI filter
-        long_entry = (close[i] > ob_high_aligned[i] and rsi_aligned[i] > 50)
-        short_entry = (close[i] < ob_low_aligned[i] and rsi_aligned[i] < 50)
+        # Mean reversion conditions with volume filter
+        long_setup = low[i] <= camarilla_s3_aligned[i] and vol_ratio[i] > 1.3
+        short_setup = high[i] >= camarilla_r3_aligned[i] and vol_ratio[i] > 1.3
         
-        # Exit conditions: price returns to opposite order block
-        long_exit = close[i] < ob_low_aligned[i]
-        short_exit = close[i] > ob_high_aligned[i]
+        # Exit conditions: return to daily pivot (mean reversion complete)
+        camarilla_pivot = (prev_high + prev_low + 2 * prev_close) / 4
+        camarilla_pivot_array = np.full(len(df_1d), camarilla_pivot)
+        camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot_array)
+        
+        long_exit = close[i] >= camarilla_pivot_aligned[i]
+        short_exit = close[i] <= camarilla_pivot_aligned[i]
         
         # Signal logic
-        if long_entry and position != 1:
+        if long_setup and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_entry and position != -1:
+        elif short_setup and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
