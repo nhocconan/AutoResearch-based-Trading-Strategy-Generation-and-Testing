@@ -1,25 +1,24 @@
 #!/usr/bin/env python3
 """
-4h_12h_TRIX_Volume_Regime_v1
-Hypothesis: On 4h timeframe, use TRIX momentum with 12h trend filter and volume confirmation.
-Long when TRIX crosses above zero with 12h bullish trend and volume spike.
-Short when TRIX crosses below zero with 12h bearish trend and volume spike.
-Exit when TRIX crosses back in opposite direction.
-Designed for low trade frequency (20-40/year) by requiring multiple confluence factors.
-Works in bull/bear via 12h trend filter and momentum confirmation.
+6h_1w_1d_Volume_Weighted_RSI_Breakout_v1
+Hypothesis: On 6h timeframe, buy when price breaks above weekly VWAP with RSI(14)<30 and volume spike,
+sell when price breaks below weekly VWAP with RSI(14)>70 and volume spike. Exit when RSI reverts to 50.
+Uses daily trend filter (price > EMA50 for longs, < EMA50 for shorts) to avoid counter-trend trades.
+Designed for low trade frequency (15-30/year) by requiring multiple confluence factors.
+Works in bull/bear via daily trend filter and mean-reversion exit at RSI=50.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_TRIX_Volume_Regime_v1"
-timeframe = "4h"
+name = "6h_1w_1d_Volume_Weighted_RSI_Breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,28 +26,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h TRIX INDICATOR ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # === WEEKLY VWAP ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    # TRIX: triple exponential moving average
-    ema1 = pd.Series(close_12h).ewm(span=12, adjust=False, min_periods=12).mean()
-    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
-    # Calculate TRIX: (ema3 - ema3_prev) / ema3_prev * 100
-    ema3_prev = np.roll(ema3, 1)
-    ema3_prev[0] = 0
-    trix = np.where(ema3_prev != 0, (ema3 - ema3_prev) / ema3_prev * 100, 0)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # === 12h TREND FILTER (EMA CROSSOVER) ===
-    ema_fast = pd.Series(close_12h).ewm(span=25, adjust=False, min_periods=25).mean()
-    ema_slow = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean()
-    trend_bullish = ema_fast > ema_slow
-    trend_bearish = ema_fast < ema_slow
+    # Typical price
+    typical_price_1w = (high_1w + low_1w + close_1w) / 3.0
+    # VWAP calculation
+    vwap_num = np.cumsum(typical_price_1w * volume_1w)
+    vwap_den = np.cumsum(volume_1w)
+    vwap_1w = np.where(vwap_den != 0, vwap_num / vwap_den, np.nan)
     
-    # === 4h VOLUME CONFIRMATION ===
+    # === DAILY TREND FILTER (EMA50) ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    # EMA50 calculation
+    ema50_1d = np.zeros_like(close_1d)
+    ema50_1d[:] = np.nan
+    multiplier = 2 / (50 + 1)
+    for i in range(len(close_1d)):
+        if i == 0:
+            ema50_1d[i] = close_1d[i]
+        elif not np.isnan(close_1d[i]):
+            ema50_1d[i] = (close_1d[i] - ema50_1d[i-1]) * multiplier + ema50_1d[i-1]
+        else:
+            ema50_1d[i] = ema50_1d[i-1]
+    
+    # === 6h RSI(14) ===
+    # RSI calculation with proper handling
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing
+    rsi = np.full(n, np.nan)
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    
+    # Initial values
+    if n >= 14:
+        avg_gain[13] = np.mean(gain[1:14])
+        avg_loss[13] = np.mean(loss[1:14])
+        for i in range(14, n):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+            rs = np.where(avg_loss[i] != 0, avg_gain[i] / avg_loss[i], 0)
+            rsi[i] = 100 - (100 / (1 + rs))
+    
+    # Align weekly VWAP to 6h
+    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
+    
+    # Align daily EMA50 to 6h
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Volume average (20-period for 6h = ~5 days) for confirmation
     vol_avg = np.zeros(n)
     vol_sum = 0.0
     vol_count = 0
@@ -63,35 +103,26 @@ def generate_signals(prices):
         else:
             vol_avg[i] = 0.0
     
-    # Align 12h indicators to 4h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_12h, trix)
-    trend_bullish_aligned = align_htf_to_ltf(prices, df_12h, trend_bullish.astype(float))
-    trend_bearish_aligned = align_htf_to_ltf(prices, df_12h, trend_bearish.astype(float))
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # start after warmup
+    for i in range(100, n):  # start after warmup
         # Skip if indicators not available
-        if (np.isnan(trix_aligned[i]) or np.isnan(trend_bullish_aligned[i]) or 
-            np.isnan(trend_bearish_aligned[i]) or vol_avg[i] == 0.0):
+        if (np.isnan(vwap_1w_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(rsi[i]) or vol_avg[i] == 0.0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: at least 1.5x average
-        vol_confirm = volume[i] > 1.5 * vol_avg[i]
-        
-        # TRIX crossover signals
-        trix_cross_up = trix_aligned[i] > 0 and (i == 50 or trix_aligned[i-1] <= 0)
-        trix_cross_down = trix_aligned[i] < 0 and (i == 50 or trix_aligned[i-1] >= 0)
+        # Volume confirmation: at least 2x average
+        vol_confirm = volume[i] > 2.0 * vol_avg[i]
         
         # Entry conditions
-        long_setup = trix_cross_up and trend_bullish_aligned[i] > 0.5 and vol_confirm
-        short_setup = trix_cross_down and trend_bearish_aligned[i] > 0.5 and vol_confirm
+        long_setup = (close[i] > vwap_1w_aligned[i]) and (rsi[i] < 30) and vol_confirm and (close[i] > ema50_1d_aligned[i])
+        short_setup = (close[i] < vwap_1w_aligned[i]) and (rsi[i] > 70) and vol_confirm and (close[i] < ema50_1d_aligned[i])
         
-        # Exit conditions: TRIX crosses back in opposite direction
-        exit_long = trix_aligned[i] < 0 and (i == 50 or trix_aligned[i-1] >= 0)
-        exit_short = trix_aligned[i] > 0 and (i == 50 or trix_aligned[i-1] <= 0)
+        # Exit conditions: RSI mean reversion to 50
+        exit_long = rsi[i] > 50
+        exit_short = rsi[i] < 50
         
         if long_setup and position != 1:
             position = 1
