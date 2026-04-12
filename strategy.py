@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-4h_12h_Camarilla_Pivot_Breakout_2025
-Hypothesis: Combine daily Camarilla pivot levels with 12h trend filter and volume confirmation.
-Long when price breaks above H4 with bullish 12h trend and volume spike.
-Short when price breaks below L4 with bearish 12h trend and volume spike.
-Uses tight entry conditions to limit trades (<50/year) and avoid fee drag.
-Works in bull markets via breakout follow-through and in bear via mean reversion at extremes.
+12h_1d_Volume_Pivot_Range_v1
+Hypothesis: Combine 1d pivot levels with volume confirmation and range-bound conditions to trade mean reversion in 12H timeframe.
+Works in bull: buy near support, sell near resistance in uptrend.
+Works in bear: sell near resistance, buy near support in downtrend.
+Uses 1d pivot points (PP, R1, S1) for structure, volume spike for conviction, and RSI for overbought/oversold.
+Targets 20-30 trades per year to minimize fee drag. Effective in ranging and trending markets with mean-reverting tendencies.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_Camarilla_Pivot_Breakout_2025"
-timeframe = "4h"
+name = "12h_1d_Volume_Pivot_Range_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,78 +22,88 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Price arrays
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla pivots
+    # Daily data for pivots and volume average
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    ph = df_1d['high'].values
-    pl = df_1d['low'].values
-    pc = df_1d['close'].values
+    # Calculate daily pivot points: PP, R1, S1
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
+    pp = (daily_high + daily_low + daily_close) / 3
+    r1 = 2 * pp - daily_low
+    s1 = 2 * pp - daily_high
     
-    # Camarilla: H4 = C + (H-L)*1.1/2, L4 = C - (H-L)*1.1/2
-    camarilla_h4 = pc + (ph - pl) * 1.1 / 2
-    camarilla_l4 = pc - (ph - pl) * 1.1 / 2
+    # Align pivot levels to 12h
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Align to 4h (previous day's levels available at open)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # Average daily volume for volume spike detection
+    daily_volume = df_1d['volume'].values
+    avg_vol = np.full(len(daily_volume), np.nan)
+    for i in range(len(daily_volume)):
+        if i >= 19:
+            avg_vol[i] = np.mean(daily_volume[i-19:i+1])
+    avg_vol_aligned = align_htf_to_ltf(prices, df_1d, avg_vol)
     
-    # 12h trend filter: EMA25
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 25:
-        return np.zeros(n)
+    # RSI(14) on 12h close for overbought/oversold
+    def rsi(close, length=14):
+        if len(close) < length + 1:
+            return np.full(len(close), np.nan)
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.zeros_like(close)
+        avg_loss = np.zeros_like(close)
+        avg_gain[length] = np.mean(gain[:length])
+        avg_loss[length] = np.mean(loss[:length])
+        for i in range(length + 1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (length-1) + gain[i-1]) / length
+            avg_loss[i] = (avg_loss[i-1] * (length-1) + loss[i-1]) / length
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+        rsi_vals = np.zeros_like(close)
+        rsi_vals[:] = 100 - (100 / (1 + rs))
+        rsi_vals[:length] = np.nan
+        return rsi_vals
     
-    close_12h = df_12h['close'].values
-    ema25 = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= 25:
-        alpha = 2 / (25 + 1)
-        ema25[0] = close_12h[0]
-        for i in range(1, len(close_12h)):
-            ema25[i] = alpha * close_12h[i] + (1 - alpha) * ema25[i-1]
-    
-    ema25_aligned = align_htf_to_ltf(prices, df_12h, ema25)
-    
-    # Volume confirmation: 1.5x 20-period average
-    if len(volume) >= 20:
-        vol_avg = np.full(n, np.nan)
-        for i in range(20, n):
-            vol_avg[i] = np.mean(volume[i-20:i])
-        vol_spike = volume > (vol_avg * 1.5)
-    else:
-        vol_spike = np.ones(n, dtype=bool)
+    rsi_vals = rsi(close, 14)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any data invalid
-        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
-            np.isnan(ema25_aligned[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(avg_vol_aligned[i]) or np.isnan(rsi_vals[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Breakout conditions
-        breakout_up = close[i] > camarilla_h4_aligned[i]
-        breakout_down = low[i] < camarilla_l4_aligned[i]
+        # Volume spike: current volume > 1.5x average daily volume (scaled to 12h)
+        # Approximate 12h volume as 1/2 of daily volume since 2x12h = 1d
+        vol_spike = volume[i] > 1.5 * (avg_vol_aligned[i] / 2)
         
-        # Trend filter
-        trend_up = close[i] > ema25_aligned[i]
-        trend_down = close[i] < ema25_aligned[i]
+        # Price near pivot levels: within 0.5% of S1 (long) or R1 (short)
+        near_s1 = abs(close[i] - s1_aligned[i]) / close[i] < 0.005
+        near_r1 = abs(close[i] - r1_aligned[i]) / close[i] < 0.005
         
-        # Entry logic
-        long_entry = breakout_up and trend_up and vol_spike[i]
-        short_entry = breakout_down and trend_down and vol_spike[i]
+        # RSI conditions: oversold (<30) for long, overbought (>70) for short
+        rsi_oversold = rsi_vals[i] < 30
+        rsi_overbought = rsi_vals[i] > 70
         
-        # Exit logic: opposite breakout or trend reversal
-        long_exit = (close[i] < camarilla_l4_aligned[i]) or (trend_down and not trend_up)
-        short_exit = (close[i] > camarilla_h4_aligned[i]) or (trend_up and not trend_down)
+        # Entry logic: mean reversion at pivot levels with volume confirmation
+        long_entry = vol_spike and near_s1 and rsi_oversold
+        short_entry = vol_spike and near_r1 and rsi_overbought
+        
+        # Exit logic: price moves to opposite pivot or RSI normalizes
+        long_exit = close[i] >= pp_aligned[i] or rsi_vals[i] >= 50
+        short_exit = close[i] <= pp_aligned[i] or rsi_vals[i] <= 50
         
         # Signal logic
         if long_entry and position != 1:
