@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Breakout_Volume_v2
+4h_1d_Camarilla_Breakout_Volume_v3
 Hypothesis: Daily Camarilla pivot levels (R4/S4) with volume confirmation and 
 4h ATR volatility filter. Long when price breaks above R4 with volume spike and 
 ATR < median ATR (low volatility). Short when price breaks below S4 with volume 
 spike and ATR < median ATR. Uses 1d Camarilla for structure, volume confirmation 
 for conviction, and ATR filter to avoid whipsaws. Targets 50-150 total trades 
-over 4 years to minimize fee drag.
+over 4 years to minimize fee drift.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_Breakout_Volume_v2"
+name = "4h_1d_Camarilla_Breakout_Volume_v3"
 timeframe = "4h"
 leverage = 1.0
 
