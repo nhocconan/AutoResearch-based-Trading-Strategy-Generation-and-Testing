@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_12h_camarilla_breakout_v1
-# Camarilla pivot levels from 12h combined with volume confirmation and 4h trend filter.
-# Captures breakouts from key pivot levels in trending markets with volume confirmation.
-# Designed to work in both bull and bear markets by filtering trades with trend.
-# Target: 20-40 trades/year to avoid fee drag.
-
-name = "4h_12h_camarilla_breakout_v1"
-timeframe = "4h"
+# Hypothesis: 1d_1w_fib_retracement_v1
+# Uses weekly Fibonacci retracement levels (38.2%, 61.8%) as support/resistance in trending markets.
+# In bull markets: buy near 61.8% retracement of weekly uptrend; in bear markets: sell near 38.2% retracement of weekly downtrend.
+# Filters: price must be above/below 200 EMA on daily for trend alignment, and volume must be above average.
+# Low trade frequency expected (10-25/year) due to specific price levels and trend filter.
+# Works in both bull and bear markets by trading pullbacks in the direction of the weekly trend.
+name = "1d_1w_fib_retracement_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,81 +23,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla pivot calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get weekly data for Fibonacci levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels for 12h
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate weekly high and low over last 52 weeks (approx 1 year)
+    lookback = min(52, len(df_1w))
+    weekly_high = np.max(df_1w['high'][-lookback:].values)
+    weekly_low = np.min(df_1w['low'][-lookback:].values)
+    weekly_range = weekly_high - weekly_low
     
-    pivot = (high_12h + low_12h + close_12h) / 3
-    range_12h = high_12h - low_12h
+    # Calculate Fibonacci levels
+    fib_382 = weekly_low + 0.382 * weekly_range
+    fib_618 = weekly_low + 0.618 * weekly_range
     
-    # Camarilla levels
-    r4 = close_12h + range_12h * 1.1 / 2
-    r3 = close_12h + range_12h * 1.1 / 4
-    r2 = close_12h + range_12h * 1.1 / 6
-    r1 = close_12h + range_12h * 1.1 / 12
-    s1 = close_12h - range_12h * 1.1 / 12
-    s2 = close_12h - range_12h * 1.1 / 6
-    s3 = close_12h - range_12h * 1.1 / 4
-    s4 = close_12h - range_12h * 1.1 / 2
+    # Align weekly Fib levels to daily
+    fib_382_arr = np.full_like(df_1w['high'], fib_382)
+    fib_618_arr = np.full_like(df_1w['high'], fib_618)
+    fib_382_aligned = align_htf_to_ltf(prices, df_1w, fib_382_arr)
+    fib_618_aligned = align_htf_to_ltf(prices, df_1w, fib_618_arr)
     
-    # Combine levels into arrays
-    camarilla_high = np.maximum.reduce([r1, r2, r3, r4])
-    camarilla_low = np.minimum.reduce([s1, s2, s3, s4])
+    # Daily 200 EMA for trend filter
+    ema_200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_high_aligned = align_htf_to_ltf(prices, df_12h, camarilla_high)
-    camarilla_low_aligned = align_htf_to_ltf(prices, df_12h, camarilla_low)
-    
-    # 4h trend filter: EMA50
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume filter: above 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Skip if Camarilla levels not ready
-        if np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]):
+    for i in range(200, n):  # Start after EMA warmup
+        # Skip if any data not ready
+        if np.isnan(ema_200[i]) or np.isnan(fib_382_aligned[i]) or np.isnan(fib_618_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long signal: price breaks above Camarilla resistance with volume and uptrend
-        long_signal = (
-            close[i] > camarilla_high_aligned[i] and
-            vol_confirm[i] and
-            close[i] > ema_50[i]
-        )
+        # Bullish setup: price near 61.8% fib level, above 200 EMA, volume above average
+        near_fib_618 = abs(close[i] - fib_618_aligned[i]) / close[i] < 0.015  # Within 1.5%
+        uptrend = close[i] > ema_200[i]
+        vol_filter = volume[i] > vol_ma[i]
         
-        # Short signal: price breaks below Camarilla support with volume and downtrend
-        short_signal = (
-            close[i] < camarilla_low_aligned[i] and
-            vol_confirm[i] and
-            close[i] < ema_50[i]
-        )
+        # Bearish setup: price near 38.2% fib level, below 200 EMA, volume above average
+        near_fib_382 = abs(close[i] - fib_382_aligned[i]) / close[i] < 0.015  # Within 1.5%
+        downtrend = close[i] < ema_200[i]
         
-        # Exit conditions: opposite Camarilla level touch
-        exit_long = close[i] < camarilla_low_aligned[i]
-        exit_short = close[i] > camarilla_high_aligned[i]
-        
-        if long_signal and position != 1:
+        if near_fib_618 and uptrend and vol_filter and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_signal and position != -1:
+        elif near_fib_382 and downtrend and vol_filter and position != -1:
             position = -1
             signals[i] = -0.25
-        elif exit_long and position == 1:
+        elif position == 1 and (close[i] < fib_382_aligned[i] or close[i] < ema_200[i]):
+            # Exit long if price breaks below 38.2% or below EMA200
             position = 0
             signals[i] = 0.0
-        elif exit_short and position == -1:
+        elif position == -1 and (close[i] > fib_618_aligned[i] or close[i] > ema_200[i]):
+            # Exit short if price breaks above 61.8% or above EMA200
             position = 0
             signals[i] = 0.0
         else:
