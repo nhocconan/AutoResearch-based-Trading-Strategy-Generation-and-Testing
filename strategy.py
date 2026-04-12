@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h_1d_camarilla_pivot_breakout_volume
-# Uses daily Camarilla pivot levels as breakout levels on 12h chart.
-# Long when price breaks above Camarilla H4 resistance with volume confirmation.
-# Short when price breaks below Camarilla L4 support with volume confirmation.
-# Exits when price returns to Camarilla pivot point (mean reversion).
-# Designed for low trade frequency (target: 12-37/year) to minimize fee drag.
-# Works in trending markets via breakouts and ranging markets via mean reversion to pivot.
+# Hypothesis: 4h_1d_rsi_divergence_volume
+# Uses daily RSI divergence with price action to identify reversals in both bull and bear markets.
+# Long when price makes lower low but RSI makes higher low (bullish divergence) with volume confirmation.
+# Short when price makes higher high but RSI makes lower high (bearish divergence) with volume confirmation.
+# Exits when RSI crosses opposite extreme (RSI > 70 for long exit, RSI < 30 for short exit).
+# Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drift.
+# Works in trending markets via continuation signals and ranging markets via mean reversion.
 # Focus on BTC/ETH as primary targets.
 
-name = "12h_1d_camarilla_pivot_breakout_volume"
-timeframe = "12h"
+name = "4h_1d_rsi_divergence_volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,39 +26,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
+    # Get daily data for RSI calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate daily RSI (14-period)
     close_1d = df_1d['close'].values
+    delta = pd.Series(close_1d).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    # Camarilla pivot point
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    # Range
-    range_1d = high_1d - low_1d
+    # Align daily RSI to 4h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_values)
     
-    # Resistance levels
-    r1 = close_1d + (range_1d * 1.1 / 12)
-    r2 = close_1d + (range_1d * 1.1 / 6)
-    r3 = close_1d + (range_1d * 1.1 / 4)
-    r4 = close_1d + (range_1d * 1.1 / 2)  # Primary breakout level
-    
-    # Support levels
-    s1 = close_1d - (range_1d * 1.1 / 12)
-    s2 = close_1d - (range_1d * 1.1 / 6)
-    s3 = close_1d - (range_1d * 1.1 / 4)
-    s4 = close_1d - (range_1d * 1.1 / 2)  # Primary breakout level
-    
-    # Align daily Camarilla levels to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Volume confirmation: volume > 1.3 * 20-period average (12h timeframe)
+    # Volume confirmation: volume > 1.3 * 20-period average (4h timeframe)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.3)
     
@@ -67,7 +54,7 @@ def generate_signals(prices):
     
     for i in range(50, n):  # start after warmup
         # Skip if data not ready
-        if np.isnan(pivot_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]):
+        if np.isnan(rsi_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -82,23 +69,42 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above Camarilla R4
-        if close[i] > r4_aligned[i] and position != 1:
-            position = 1
-            signals[i] = 0.25
-        # Short signal: price breaks below Camarilla S4
-        elif close[i] < s4_aligned[i] and position != -1:
-            position = -1
-            signals[i] = -0.25
-        # Exit conditions: price returns to pivot point (mean reversion)
-        elif position == 1 and close[i] <= pivot_aligned[i]:
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and close[i] >= pivot_aligned[i]:
-            position = 0
-            signals[i] = 0.0
+        # Bullish divergence: price makes lower low, RSI makes higher low
+        if i >= 2:
+            price_lower_low = low[i] < low[i-1] and low[i-1] < low[i-2]
+            rsi_higher_low = rsi_aligned[i] > rsi_aligned[i-1] and rsi_aligned[i-1] > rsi_aligned[i-2]
+            bullish_div = price_lower_low and rsi_higher_low and rsi_aligned[i] < 40
+            
+            # Bearish divergence: price makes higher high, RSI makes lower high
+            price_higher_high = high[i] > high[i-1] and high[i-1] > high[i-2]
+            rsi_lower_high = rsi_aligned[i] < rsi_aligned[i-1] and rsi_aligned[i-1] < rsi_aligned[i-2]
+            bearish_div = price_higher_high and rsi_lower_high and rsi_aligned[i] > 60
+            
+            # Long signal: bullish divergence
+            if bullish_div and position != 1:
+                position = 1
+                signals[i] = 0.25
+            # Short signal: bearish divergence
+            elif bearish_div and position != -1:
+                position = -1
+                signals[i] = -0.25
+            # Exit conditions: RSI crosses opposite extreme
+            elif position == 1 and rsi_aligned[i] >= 70:
+                position = 0
+                signals[i] = 0.0
+            elif position == -1 and rsi_aligned[i] <= 30:
+                position = 0
+                signals[i] = 0.0
+            else:
+                # Hold current position
+                if position == 1:
+                    signals[i] = 0.25
+                elif position == -1:
+                    signals[i] = -0.25
+                else:
+                    signals[i] = 0.0
         else:
-            # Hold current position
+            # Hold current position for first few bars
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
