@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend and volatility context
+    # Get 1d data for context
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -22,9 +22,9 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Calculate daily EMA(21) for trend
+    # Calculate daily EMA(50) for trend
     close_1d_series = pd.Series(close_1d)
-    ema_21_1d = close_1d_series.ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Calculate daily ATR(14) for volatility
     tr1 = np.abs(high_1d - low_1d)
@@ -36,57 +36,57 @@ def generate_signals(prices):
     for i in range(14, len(df_1d)):
         atr_1d[i] = np.mean(tr[i-14:i+1])
     
-    # Align daily indicators to 12h timeframe
-    ema_21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
+    # Align daily indicators to 4h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate 12h ATR(14) for position sizing and volatility
+    # Calculate 4h ATR(14) for position sizing and volatility filter
     tr1_h = np.abs(high - low)
     tr2_h = np.abs(high - np.roll(close, 1))
     tr3_h = np.abs(low - np.roll(close, 1))
     tr1_h[0] = tr2_h[0] = tr3_h[0] = np.nan
     tr_h = np.maximum(tr1_h, np.maximum(tr2_h, tr3_h))
-    atr_12h = np.full(n, np.nan)
+    atr_4h = np.full(n, np.nan)
     for i in range(14, n):
-        atr_12h[i] = np.mean(tr_h[i-14:i+1])
+        atr_4h[i] = np.mean(tr_h[i-14:i+1])
     
-    # Calculate 12h volume moving average
+    # Calculate 4h volume moving average
     vol_s_h = pd.Series(volume)
     vol_ma_20_h = vol_s_h.rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 12h ATR(14) moving average for volatility filter
+    # Calculate 4h ATR(14) moving average for volatility filter
     atr_ma_10 = np.full(n, np.nan)
     for i in range(23, n):  # 14 + 9 for 10-period MA
-        if not np.isnan(np.mean(atr_12h[i-9:i+1])):
-            atr_ma_10[i] = np.mean(atr_12h[i-9:i+1])
+        if not np.isnan(np.mean(atr_4h[i-9:i+1])):
+            atr_ma_10[i] = np.mean(atr_4h[i-9:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema_21_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(atr_12h[i]) or np.isnan(vol_ma_20_h[i]) or np.isnan(atr_ma_10[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(atr_4h[i]) or np.isnan(vol_ma_20_h[i]) or np.isnan(atr_ma_10[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: ATR > 0.5 * ATR MA(10) to avoid low volatility
-        vol_filter = atr_12h[i] > 0.5 * atr_ma_10[i]
+        # Volatility filter: ATR > 0.6 * ATR MA(10) to avoid low volatility
+        vol_filter = atr_4h[i] > 0.6 * atr_ma_10[i]
         
-        # Volume filter: volume > 1.5 * 20-period MA
-        vol_spike = volume[i] > 1.5 * vol_ma_20_h[i]
+        # Volume filter: volume > 1.6 * 20-period MA
+        vol_spike = volume[i] > 1.6 * vol_ma_20_h[i]
         
-        # Trend filter: price relative to daily EMA21
-        uptrend = close[i] > ema_21_1d_aligned[i]
-        downtrend = close[i] < ema_21_1d_aligned[i]
+        # Trend filter: price relative to daily EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
         # Entry conditions: price above/below daily EMA with volatility and volume filters
         long_entry = uptrend and vol_filter and vol_spike
         short_entry = downtrend and vol_filter and vol_spike
         
-        # Exit conditions: price crosses back to daily EMA21
-        long_exit = close[i] < ema_21_1d_aligned[i]
-        short_exit = close[i] > ema_21_1d_aligned[i]
+        # Exit conditions: price crosses back to daily EMA50
+        long_exit = close[i] < ema_50_1d_aligned[i]
+        short_exit = close[i] > ema_50_1d_aligned[i]
         
         if long_entry and position != 1:
             position = 1
@@ -111,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_ema21_trend_vol_vol_filter_v2"
-timeframe = "12h"
+name = "4h_1d_ema50_trend_vol_vol_filter_v2"
+timeframe = "4h"
 leverage = 1.0
