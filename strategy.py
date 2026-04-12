@@ -1,13 +1,18 @@
-# 4h_12h_Camarilla_Breakout_Momentum_v1
-# Hypothesis: 4h price breakouts at 12h Camarilla H3/L3 levels with 12h momentum confirmation (RSI > 55 for long, < 45 for short) and volume filter (>1.3x 20-period average). 
-# Uses 12h timeframe for structure (Camarilla levels, momentum) and 4h for entry timing. Designed for 20-40 trades/year per symbol with clear trend momentum bias that works in bull (breakouts continue) and bear (failed breaks reverse) markets.
-# Momentum filter avoids choppy breakouts, volume confirmation avoids low-liquidity false signals.
+#!/usr/bin/env python3
+"""
+4h_12h_Camarilla_Breakout_Volume_Regime_v2
+Hypothesis: 4h breakouts at 12h Camarilla H3/L3 levels with volume confirmation and 
+12h Choppiness Index regime filter to avoid false breakouts in sideways markets.
+Uses 12h for structure (pivots, chop) and 4h for entry timing. Designed for 20-30 
+trades/year per symbol with clear trend bias that works in bull (breakouts continue) 
+and bear (failed breaks reverse) markets. Regime filter prevents whipsaws in chop.
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_Camarilla_Breakout_Momentum_v1"
+name = "4h_12h_Camarilla_Breakout_Volume_Regime_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -21,7 +26,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12H DATA FOR CAMARILLA AND MOMENTUM ===
+    # === 12H DATA FOR CAMARILLA AND REGIME ===
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) < 30:
         return np.zeros(n)
@@ -30,52 +35,56 @@ def generate_signals(prices):
     low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
     
-    # Calculate 12h RSI (14-period) for momentum
-    delta = np.diff(close_12h, prepend=close_12h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # === 12H CHOPPINESS INDEX (14-period) ===
+    def true_range(high, low, close_prev):
+        tr1 = high - low
+        tr2 = np.abs(high - close_prev)
+        tr3 = np.abs(low - close_prev)
+        return np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Wilder's smoothing for RSI
-    def wilders_rsi(gain, loss, period=14):
-        avg_gain = np.full_like(gain, np.nan)
-        avg_loss = np.full_like(loss, np.nan)
-        if len(gain) < period:
-            return np.full_like(gain, 50.0)  # neutral when insufficient data
-        avg_gain[period-1] = np.mean(gain[:period])
-        avg_loss[period-1] = np.mean(loss[:period])
-        for i in range(period, len(gain)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+    # Calculate true range for 12h
+    close_12h_prev = np.roll(close_12h, 1)
+    close_12h_prev[0] = close_12h[0]
+    tr_12h = true_range(high_12h, low_12h, close_12h_prev)
     
-    rsi_12h = wilders_rsi(gain, loss, 14)
-    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
+    # Sum of true ranges over 14 periods
+    atr_14 = pd.Series(tr_12h).rolling(window=14, min_periods=14).sum().values
+    
+    # Absolute price change over 14 periods
+    price_change = np.abs(close_12h - np.roll(close_12h, 14))
+    price_change[:14] = 0  # Not enough data
+    
+    # Chop = 100 * log10(sum(tr14) / (atr * n)) / log10(n)
+    chop = np.full_like(close_12h, 50.0)  # Default neutral
+    for i in range(14, len(close_12h)):
+        if atr_14[i] > 0:
+            chop[i] = 100 * np.log10(atr_14[i] / price_change[i]) / np.log10(14)
+    
+    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
     
     # === 12H CAMARILLA LEVELS FROM PREVIOUS DAY ===
-    # Map each 12h bar to previous day's OHLC for pivot calculation
+    # Get daily data for proper OHLC
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
+        return np.zeros(n)
+    
+    # Map each 12h bar to previous day's OHLC
     pivots_high = np.full(n, np.nan)
     pivots_low = np.full(n, np.nan)
     pivots_close = np.full(n, np.nan)
+    
+    # Create date lookup for 1d data
+    date_to_idx = {}
+    for idx in range(len(df_1d)):
+        dt = pd.Timestamp(df_1d.iloc[idx]['open_time']).date()
+        date_to_idx[dt] = idx
     
     for i in range(n):
         current_date = pd.Timestamp(prices.iloc[i]['open_time']).date()
         prev_date = current_date - pd.Timedelta(days=1)
         
-        # Find previous day in 12h data (need daily data, so use 1d)
-        # Get 1d data for proper daily OHLC
-        df_1d = get_htf_data(prices, '1d')
-        if len(df_1d) == 0:
-            continue
-            
-        prev_day_idx = None
-        for j in range(len(df_1d)):
-            if pd.Timestamp(df_1d.iloc[j]['open_time']).date() == prev_date:
-                prev_day_idx = j
-                break
-        
-        if prev_day_idx is not None and len(df_1d) > prev_day_idx:
+        if prev_date in date_to_idx:
+            prev_day_idx = date_to_idx[prev_date]
             ph = df_1d['high'].iloc[prev_day_idx]
             pl = df_1d['low'].iloc[prev_day_idx]
             pc = df_1d['close'].iloc[prev_day_idx]
@@ -97,32 +106,31 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if not ready
         if (np.isnan(H3[i]) or np.isnan(L3[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(rsi_12h_aligned[i])):
+            np.isnan(vol_ma[i]) or np.isnan(chop_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Momentum filters: RSI > 55 for long bias, < 45 for short bias
-        long_momentum = rsi_12h_aligned[i] > 55
-        short_momentum = rsi_12h_aligned[i] < 45
+        # Regime filter: Chop < 50 = trending (favor breakouts), Chop > 50 = ranging (avoid)
+        trending_regime = chop_aligned[i] < 50
         
         # Volume strength
-        strong_volume = volume[i] > (vol_ma[i] * 1.3)
+        strong_volume = volume[i] > (vol_ma[i] * 1.5)  # Increased threshold for fewer trades
         
-        # Long: price breaks above H3 with volume and bullish momentum
+        # Long: price breaks above H3 with volume and trending regime
         long_signal = (close[i] > H3[i] and 
                       strong_volume and 
-                      long_momentum)
+                      trending_regime)
         
-        # Short: price breaks below L3 with volume and bearish momentum
+        # Short: price breaks below L3 with volume and trending regime
         short_signal = (close[i] < L3[i] and 
                        strong_volume and 
-                       short_momentum)
+                       trending_regime)
         
-        # Exit: price returns to pivot level or momentum reverses
+        # Exit: price returns to midpoint or regime changes to choppy
         exit_long = (position == 1 and 
-                    (close[i] < pivots_close[i] or rsi_12h_aligned[i] < 50))
+                    (close[i] < pivots_close[i] or chop_aligned[i] > 55))
         exit_short = (position == -1 and 
-                     (close[i] > pivots_close[i] or rsi_12h_aligned[i] > 50))
+                     (close[i] > pivots_close[i] or chop_aligned[i] > 55))
         
         # Execute trades
         if long_signal and position != 1:
