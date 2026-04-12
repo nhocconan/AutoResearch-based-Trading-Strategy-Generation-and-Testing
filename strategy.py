@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_keltner_breakout_v4"
+name = "1d_1w_camarilla_breakout_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -17,38 +17,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Keltner calculation
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 20:
+    # Get weekly data for Camarilla pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly = df_weekly['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate ATR on weekly data (period=10)
-    atr_weekly = np.zeros_like(close_weekly)
-    tr_weekly = np.maximum(
-        high_weekly[1:] - low_weekly[1:],
-        np.maximum(
-            np.abs(high_weekly[1:] - close_weekly[:-1]),
-            np.abs(low_weekly[1:] - close_weekly[:-1])
-        )
-    )
-    atr_weekly[10:] = pd.Series(tr_weekly).rolling(window=10, min_periods=10).mean().values
-    atr_weekly[:10] = np.nan
+    # Calculate Camarilla pivot levels from weekly data
+    pivot = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
     
-    # Calculate EMA on weekly data (period=20)
-    ema_weekly = pd.Series(close_weekly).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Camarilla levels (using standard multipliers)
+    h3 = pivot + (range_1w * 1.1 / 4)   # Resistance 3
+    l3 = pivot - (range_1w * 1.1 / 4)   # Support 3
     
-    # Keltner channels on weekly data
-    upper_weekly = ema_weekly + (2 * atr_weekly)
-    lower_weekly = ema_weekly - (2 * atr_weekly)
-    
-    # Align Keltner channels to daily timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_weekly, upper_weekly)
-    lower_aligned = align_htf_to_ltf(prices, df_weekly, lower_weekly)
-    ema_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
+    # Align Camarilla levels to daily timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1w, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1w, l3)
     
     # Volume filter - 20-day average
     vol_series = pd.Series(volume)
@@ -60,19 +48,21 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(ema_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+            np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: price breaks above upper Keltner band with volume confirmation
-        long_signal = close[i] > upper_aligned[i] and volume_ok[i]
-        # Short: price breaks below lower Keltner band with volume confirmation
-        short_signal = close[i] < lower_aligned[i] and volume_ok[i]
+        # Long: price breaks above H3 with volume confirmation
+        long_signal = close[i] > h3_aligned[i] and volume_ok[i]
+        # Short: price breaks below L3 with volume confirmation
+        short_signal = close[i] < l3_aligned[i] and volume_ok[i]
         
-        # Exit when price returns to EMA (middle line)
-        exit_long = close[i] < ema_aligned[i]
-        exit_short = close[i] > ema_aligned[i]
+        # Exit when price returns to pivot
+        pivot_val = (high_1w + low_1w + close_1w) / 3.0
+        pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_val)
+        exit_long = close[i] < pivot_aligned[i]
+        exit_short = close[i] > pivot_aligned[i]
         
         # Execute trades
         if long_signal and position != 1:
