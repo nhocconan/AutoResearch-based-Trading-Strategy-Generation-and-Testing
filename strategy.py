@@ -8,13 +8,9 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Elder Ray + ADX regime filter
-    # Elder Ray measures bull/bear power via EMA13
-    # ADX > 25 indicates trending market (avoid chop)
-    # Long: Bull Power > 0 AND Bear Power < 0 AND ADX > 25
-    # Short: Bull Power < 0 AND Bear Power > 0 AND ADX > 25
-    # Works in bull/bear by only taking strong directional moves
-    # Target: 12-37 trades/year per symbol.
+    # Hypothesis: 4h Camarilla pivot breakout with 1d volume spike and chop regime filter
+    # Works in bull/bear by trading institutional levels with volume confirmation
+    # Chop filter avoids whipsaws in ranging markets. Target: 20-50 trades/year per symbol.
     
     # Session filter: 8:00-20:00 UTC (avoid low volume Asian session)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -25,51 +21,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # EMA13 for Elder Ray
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Get 1d data for Camarilla pivots and volume context (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # Bull Power = High - EMA13
-    bull_power = high - ema13
-    # Bear Power = Low - EMA13
-    bear_power = low - ema13
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # ADX(14) calculation
-    # True Range
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = tr2[0] = tr3[0] = np.nan
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # 1d Camarilla pivot levels (using previous day's OHLC)
+    camarilla_h4 = np.full(len(df_1d), np.nan)  # resistance
+    camarilla_l4 = np.full(len(df_1d), np.nan)  # support
+    camarilla_h3 = np.full(len(df_1d), np.nan)  # resistance
+    camarilla_l3 = np.full(len(df_1d), np.nan)  # support
     
-    # +DM and -DM
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    up_move[0] = down_move[0] = np.nan
+    for i in range(1, len(df_1d)):
+        # Calculate pivot from previous day
+        high_prev = high_1d[i-1]
+        low_prev = low_1d[i-1]
+        close_prev = close_1d[i-1]
+        
+        # Camarilla formulas
+        camarilla_h4[i] = close_prev + 1.5 * (high_prev - low_prev)
+        camarilla_l4[i] = close_prev - 1.5 * (high_prev - low_prev)
+        camarilla_h3[i] = close_prev + 1.25 * (high_prev - low_prev)
+        camarilla_l3[i] = close_prev - 1.25 * (high_prev - low_prev)
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Align Camarilla levels to 4h timeframe
+    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Smoothed TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
-    def wilder_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(data[0:period])
-        # Subsequent values: prev * (1 - 1/period) + current * (1/period)
-        for i in range(period, len(data)):
-            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                result[i] = result[i-1] * (1 - 1/period) + data[i] * (1/period)
-            else:
-                result[i] = np.nan
-        return result
+    # 1d volume spike filter: current volume > 2.0 * 20-period average
+    vol_ma_20_1d = np.full(len(df_1d), np.nan)
+    for i in range(20, len(df_1d)):
+        vol_ma_20_1d[i] = np.mean(volume_1d[i-20:i])
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    volume_filter = volume > (2.0 * vol_ma_20_1d_aligned)
     
-    atr = wilder_smooth(tr, 14)
-    plus_di = 100 * wilder_smooth(plus_dm, 14) / atr
-    minus_di = 100 * wilder_smooth(minus_dm, 14) / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilder_smooth(dx, 14)
+    # 1d Choppiness Index regime filter: CHOP > 61.8 = ranging (mean revert), CHOP < 38.2 = trending
+    # We'll use CHOP < 50 as our filter to avoid strong trends where breakouts fail
+    atr_1d = np.full(len(df_1d), np.nan)
+    for i in range(1, len(df_1d)):
+        tr = max(
+            high_1d[i] - low_1d[i],
+            abs(high_1d[i] - close_1d[i-1]),
+            abs(low_1d[i] - close_1d[i-1])
+        )
+        if i == 1:
+            atr_1d[i] = tr
+        else:
+            atr_1d[i] = (atr_1d[i-1] * 13 + tr) / 14  # 14-period ATR
+    
+    # Calculate highest high and lowest low over 14 periods
+    hh_1d = np.full(len(df_1d), np.nan)
+    ll_1d = np.full(len(df_1d), np.nan)
+    for i in range(14, len(df_1d)):
+        hh_1d[i] = np.max(high_1d[i-14:i+1])
+        ll_1d[i] = np.min(low_1d[i-14:i+1])
+    
+    # Chop = 100 * log10(sum(atr14) / log10(hh14 - ll14)) / log10(14)
+    sum_atr_14 = np.full(len(df_1d), np.nan)
+    for i in range(14, len(df_1d)):
+        sum_atr_14[i] = np.sum(atr_1d[i-14:i+1])
+    
+    chop = np.full(len(df_1d), np.nan)
+    for i in range(14, len(df_1d)):
+        if hh_1d[i] > ll_1d[i] and sum_atr_14[i] > 0:
+            chop[i] = 100 * np.log10(sum_atr_14[i]) / np.log10(hh_1d[i] - ll_1d[i])
+    
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    chop_filter = chop_aligned < 50.0  # Avoid strong trending markets
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -80,20 +105,23 @@ def generate_signals(prices):
             continue
         
         # Skip if data not ready
-        if (np.isnan(adx[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
+            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+            np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: ADX > 25 indicates trending market
-        strong_trend = adx[i] > 25
+        # Breakout conditions
+        breakout_long = close[i] > h4_aligned[i]  # Break above H4 resistance
+        breakout_short = close[i] < l4_aligned[i]  # Break below L4 support
         
-        # Entry conditions
-        long_entry = (bull_power[i] > 0) and (bear_power[i] < 0) and strong_trend
-        short_entry = (bull_power[i] < 0) and (bear_power[i] > 0) and strong_trend
+        # Entry conditions: breakout + volume filter + chop filter
+        long_entry = breakout_long and volume_filter[i] and chop_filter[i]
+        short_entry = breakout_short and volume_filter[i] and chop_filter[i]
         
-        # Exit conditions: trend weakening or power reversal
-        long_exit = (adx[i] < 20) or (bull_power[i] < 0) or (bear_power[i] > 0)
-        short_exit = (adx[i] < 20) or (bull_power[i] > 0) or (bear_power[i] < 0)
+        # Exit conditions: opposite breakout or loss of filters
+        long_exit = (close[i] < l3_aligned[i]) or (not volume_filter[i]) or (not chop_filter[i])
+        short_exit = (close[i] > h3_aligned[i]) or (not volume_filter[i]) or (not chop_filter[i])
         
         if long_entry and position != 1:
             position = 1
@@ -118,6 +146,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_elder_ray_adx_regime_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_vol_chop_v1"
+timeframe = "4h"
 leverage = 1.0
