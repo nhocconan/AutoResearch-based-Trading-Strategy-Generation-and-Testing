@@ -3,88 +3,91 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h_1d_ichimoku_cloud_v1
-# Ichimoku Cloud on daily timeframe with price breakout above/below cloud.
-# Works in both bull and bear markets by capturing trend continuation breaks.
-# Low trade frequency expected (15-30/year) due to strict cloud breakout condition.
-# Uses 12h timeframe for execution with 1d Ichimoku for trend filter.
-name = "12h_1d_ichimoku_cloud_v1"
-timeframe = "12h"
+# Hypothesis: 4h_12h_camarilla_pivot_volume_v1
+# Uses Camarilla pivot levels from 12h timeframe for entry/exit signals on 4h chart.
+# Long when price touches S3 level with volume confirmation, short when touches R3 level.
+# Volume confirmation requires current volume > 1.5x average volume of last 20 periods.
+# Includes volatility filter using ATR to avoid whipsaws in low volatility conditions.
+# Designed to work in both bull and bear markets by capturing mean reversion at extreme levels.
+name = "4h_12h_camarilla_pivot_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for Ichimoku Cloud calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    # Get 12h data for Camarilla pivot calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Calculate Ichimoku Components on 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Camarilla levels for 12h timeframe
+    # Using previous period's high, low, close
+    ph = df_12h['high'].shift(1).values  # previous high
+    pl = df_12h['low'].shift(1).values   # previous low
+    pc = df_12h['close'].shift(1).values # previous close
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2
+    # Calculate pivot and ranges
+    pivot = (ph + pl + pc) / 3
+    range_ = ph - pl
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2
+    # Camarilla levels
+    s3 = pc - (range_ * 1.1 / 2)
+    s2 = pc - (range_ * 1.1 / 4)
+    s1 = pc - (range_ * 1.1 / 6)
+    r1 = pc + (range_ * 1.1 / 6)
+    r2 = pc + (range_ * 1.1 / 4)
+    r3 = pc + (range_ * 1.1 / 2)
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
+    # Align Camarilla levels to 4h timeframe
+    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
+    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_span_b = ((period52_high + period52_low) / 2)
+    # Volume confirmation: current volume > 1.5x average of last 20 periods
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
+    volume_confirm = volume > (vol_ma * 1.5)
     
-    # Chikou Span (Lagging Span): Close shifted 26 periods behind
-    chikou_span = close_1d  # We'll use current close for comparison
-    
-    # Align Ichimoku components to 12h timeframe
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    # Volatility filter using ATR to avoid low volatility whipsaws
+    # Calculate ATR(14)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=1).mean().values
+    # Only trade when ATR is above its 50-period average (avoid low volatility)
+    atr_ma = pd.Series(atr).rolling(window=50, min_periods=1).mean().values
+    volatility_filter = atr >= (atr_ma * 0.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(52, n):  # Start after Ichimoku calculation period
-        # Skip if Ichimoku not ready
-        if np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]):
+    for i in range(1, n):
+        # Skip if data not ready
+        if np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(volume_confirm[i]) or np.isnan(volatility_filter[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine cloud boundaries (Senkou Span A and B)
-        upper_cloud = np.maximum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        lower_cloud = np.minimum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        # Long signal: price touches or goes below S3 with volume and volatility confirmation
+        long_signal = (low[i] <= s3_aligned[i]) and volume_confirm[i] and volatility_filter[i]
         
-        # Bullish signal: price breaks above cloud
-        bullish_breakout = close[i] > upper_cloud
+        # Short signal: price touches or goes above R3 with volume and volatility confirmation
+        short_signal = (high[i] >= r3_aligned[i]) and volume_confirm[i] and volatility_filter[i]
         
-        # Bearish signal: price breaks below cloud
-        bearish_breakout = close[i] < lower_cloud
+        # Exit conditions: opposite touch or reversal
+        exit_long = (high[i] >= s3_aligned[i])  # exit long when price moves back above S3
+        exit_short = (low[i] <= r3_aligned[i])  # exit short when price moves back below R3
         
-        # Exit conditions: price returns into cloud
-        exit_long = close[i] < upper_cloud and close[i] > lower_cloud
-        exit_short = exit_long  # Same condition for both
-        
-        if bullish_breakout and position != 1:
+        if long_signal and position != 1:
             position = 1
             signals[i] = 0.25
-        elif bearish_breakout and position != -1:
+        elif short_signal and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
