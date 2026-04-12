@@ -5,14 +5,14 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Hypothesis: 12h Camarilla H4/L4 breakout with volume confirmation and chop regime filter
-    # Uses 1d Camarilla levels as key institutional support/resistance
-    # Volume > 2.0x 30-period MA confirms strong participation
-    # Chop > 61.8 ensures ranging markets where mean reversion works
-    # Discrete sizing 0.25 to minimize fee churn. Target: 12-25 trades/year on 12h.
+    # Hypothesis: 4h Camarilla H4/L4 breakout with volume confirmation in low volatility regimes
+    # Uses 1d Camarilla levels as institutional support/resistance
+    # Volume > 2.0x 20-period MA confirms institutional participation
+    # ATR(14) < ATR(50) filter ensures low volatility breakouts (avoid fakeouts)
+    # Discrete sizing 0.25 to minimize fee churn. Target: 20-40 trades/year.
     
     close = prices['close'].values
     high = prices['high'].values
@@ -33,47 +33,43 @@ def generate_signals(prices):
     camarilla_h4 = close_1d + 1.1 * (high_1d - low_1d) / 2
     camarilla_l4 = close_1d - 1.1 * (high_1d - low_1d) / 2
     
-    # Align to 12h timeframe (use previous day's levels)
+    # Align to 4h timeframe (use previous day's levels)
     camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
     camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
-    # Volume confirmation: current volume > 2.0x 30-period MA
-    vol_ma_30 = np.full(n, np.nan)
-    for i in range(30, n):
-        vol_ma_30[i] = np.mean(volume[i-30:i])
+    # Volume confirmation: current volume > 2.0x 20-period MA
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma_20[i] = np.mean(volume[i-20:i])
     
     vol_ratio = np.full(n, np.nan)
-    for i in range(30, n):
-        if vol_ma_30[i] > 0:
-            vol_ratio[i] = volume[i] / vol_ma_30[i]
+    for i in range(20, n):
+        if vol_ma_20[i] > 0:
+            vol_ratio[i] = volume[i] / vol_ma_20[i]
         else:
             vol_ratio[i] = 1.0
     
-    # Chop regime filter: CHOP > 61.8 = ranging market (good for mean reversion)
-    # Calculate ATR(14)
-    atr = np.full(n, np.nan)
+    # Volatility filter: ATR(14) < ATR(50) = low volatility environment
+    # Calculate True Range
     tr = np.full(n, np.nan)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
+    # ATR(14)
+    atr_14 = np.full(n, np.nan)
     for i in range(14, n):
-        atr[i] = np.mean(tr[i-14:i])
+        atr_14[i] = np.mean(tr[i-14:i])
     
-    # Calculate highest high and lowest low over 14 periods
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    for i in range(14, n):
-        highest_high[i] = np.max(high[i-14:i])
-        lowest_low[i] = np.min(low[i-14:i])
+    # ATR(50)
+    atr_50 = np.full(n, np.nan)
+    for i in range(50, n):
+        atr_50[i] = np.mean(tr[i-50:i])
     
-    # Chop = log10(sum(atr(14))/abs(highest_high - lowest_low)) * log10(14) * 100
-    chop = np.full(n, np.nan)
-    for i in range(14, n):
-        if highest_high[i] != lowest_low[i] and atr[i] > 0:
-            sum_atr = np.sum(atr[i-14:i])
-            chop[i] = np.log10(sum_atr / abs(highest_high[i] - lowest_low[i])) * np.log10(14) * 100
-        else:
-            chop[i] = 50.0
+    # Low volatility condition
+    low_vol = np.full(n, False)
+    for i in range(50, n):
+        if not np.isnan(atr_14[i]) and not np.isnan(atr_50[i]) and atr_50[i] > 0:
+            low_vol[i] = atr_14[i] < atr_50[i]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -81,25 +77,21 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if data not ready
         if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
-            np.isnan(vol_ratio[i]) or np.isnan(chop[i])):
+            np.isnan(vol_ratio[i]) or np.isnan(atr_14[i]) or np.isnan(atr_50[i])):
             signals[i] = 0.0
             continue
         
-        # Determine market regime: Chop > 61.8 = ranging (good for mean reversion)
-        ranging_market = chop[i] > 61.8
-        
-        # Breakout conditions with volume confirmation
+        # Breakout conditions with volume confirmation in low volatility
         breakout_up = close[i] > camarilla_h4_aligned[i]
         breakout_down = close[i] < camarilla_l4_aligned[i]
         
-        # Entry conditions: breakout with volume confirmation in ranging market
-        long_entry = breakout_up and (vol_ratio[i] > 2.0) and ranging_market
-        short_entry = breakout_down and (vol_ratio[i] > 2.0) and ranging_market
+        # Entry conditions: breakout with volume confirmation in low volatility
+        long_entry = breakout_up and (vol_ratio[i] > 2.0) and low_vol[i]
+        short_entry = breakout_down and (vol_ratio[i] > 2.0) and low_vol[i]
         
-        # Exit conditions: price returns to midpoint between H4 and L4
-        midpoint = (camarilla_h4_aligned[i] + camarilla_l4_aligned[i]) / 2
-        long_exit = close[i] < midpoint
-        short_exit = close[i] > midpoint
+        # Exit conditions: price returns to 1d close (intraday mean reversion)
+        long_exit = close[i] < close_1d[-1] if len(close_1d) > 0 else False
+        short_exit = close[i] > close_1d[-1] if len(close_1d) > 0 else False
         
         if long_entry and position != 1:
             position = 1
@@ -124,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_camarilla_breakout_vol_chop_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_vol_lowvol_v1"
+timeframe = "4h"
 leverage = 1.0
