@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-1d_1w_ThreeLegTrend_v1
-Hypothesis: On daily timeframe, use weekly EMA(21) trend filter + daily Donchian(20) breakout + volume confirmation (2x average).
-Trades only in direction of weekly trend to avoid counter-trend whipsaws. Designed for low frequency (10-25 trades/year) by requiring strong breakouts with trend and volume confirmation.
-Works in bull/bear via weekly trend filter - only takes longs in weekly uptrend, shorts in weekly downtrend.
+6h_12h_1d_Pivot_Reversal_v1
+Hypothesis: On 6h timeframe, look for reversals at daily pivot levels (R1/S1, R2/S2) with 12h trend filter.
+Long when price breaks above R1 with 12h uptrend; short when breaks below S1 with 12h downtrend.
+Exit at opposite pivot level (S1 for longs, R1 for shorts). Uses volume confirmation to avoid false breakouts.
+Designed for low trade frequency (15-30/year) by requiring pivot-level confluence and trend alignment.
+Works in bull/bear via 12h trend filter and mean-reversion exit at pivot levels.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_ThreeLegTrend_v1"
-timeframe = "1d"
+name = "6h_12h_1d_Pivot_Reversal_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,42 +26,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === WEEKLY DATA (HTF) ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # === DAILY PIVOT LEVELS ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # Weekly EMA(21) for trend filter
-    if len(close_1w) >= 21:
-        ema_21_1w = np.zeros_like(close_1w)
-        ema_21_1w[0] = close_1w[0]
-        alpha = 2.0 / (21 + 1)
-        for i in range(1, len(close_1w)):
-            ema_21_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_21_1w[i-1]
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Daily pivot points
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    
+    # Support and resistance levels
+    r1_1d = 2 * pivot_1d - low_1d
+    s1_1d = 2 * pivot_1d - high_1d
+    r2_1d = pivot_1d + range_1d
+    s2_1d = pivot_1d - range_1d
+    
+    # === 12H EMA(25) FOR TREND FILTER ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    if len(close_12h) >= 25:
+        ema_25_12h = pd.Series(close_12h).ewm(span=25, adjust=False, min_periods=25).mean().values
     else:
-        ema_21_1w = np.full_like(close_1w, np.nan)
+        ema_25_12h = np.full_like(close_12h, np.nan)
     
-    # Align weekly EMA to daily timeframe
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Align data to 6h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    ema_25_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_25_12h)
     
-    # === DAILY INDICATORS ===
-    # Donchian channels (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
-    
-    # Volume average (20-period)
+    # Volume average (24-period for 6h = ~6 days) for confirmation
     vol_avg = np.zeros(n)
     vol_sum = 0.0
     vol_count = 0
     for i in range(n):
         vol_sum += volume[i]
         vol_count += 1
-        if i >= 20:
-            vol_sum -= volume[i-20]
+        if i >= 24:
+            vol_sum -= volume[i-24]
             vol_count -= 1
         if vol_count > 0:
             vol_avg[i] = vol_sum / vol_count
@@ -71,28 +84,25 @@ def generate_signals(prices):
     
     for i in range(50, n):  # start after warmup
         # Skip if indicators not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_21_1w_aligned[i]) or vol_avg[i] == 0.0):
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or np.isnan(ema_25_12h_aligned[i]) or vol_avg[i] == 0.0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: at least 2.0x average
-        vol_confirm = volume[i] > 2.0 * vol_avg[i]
+        # Volume confirmation: at least 1.8x average
+        vol_confirm = volume[i] > 1.8 * vol_avg[i]
         
-        # Trend filter: price relative to weekly EMA(21)
-        price_above_weekly_ema = close[i] > ema_21_1w_aligned[i]
-        price_below_weekly_ema = close[i] < ema_21_1w_aligned[i]
+        # Trend filter: price above/below 12h EMA(25)
+        price_above_ema = close[i] > ema_25_12h_aligned[i]
+        price_below_ema = close[i] < ema_25_12h_aligned[i]
         
-        # Breakout entries with volume and trend filters
-        long_setup = (close[i] > donchian_high[i]) and vol_confirm and price_above_weekly_ema
-        short_setup = (close[i] < donchian_low[i]) and vol_confirm and price_below_weekly_ema
+        # Entry conditions
+        long_setup = (close[i] > r1_1d_aligned[i]) and vol_confirm and price_above_ema
+        short_setup = (close[i] < s1_1d_aligned[i]) and vol_confirm and price_below_ema
         
-        # Exit when price crosses the 20-day EMA (trend change signal)
-        ema_20 = np.zeros(n)
-        if i >= 20:
-            ema_20[i] = np.mean(close[i-20:i])
-        exit_long = i >= 20 and close[i] < ema_20[i]
-        exit_short = i >= 20 and close[i] > ema_20[i]
+        # Exit conditions: mean reversion to opposite pivot level
+        exit_long = close[i] < s1_1d_aligned[i]
+        exit_short = close[i] > r1_1d_aligned[i]
         
         if long_setup and position != 1:
             position = 1
