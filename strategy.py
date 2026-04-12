@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""
-4h_1d_vortex_vortex_trend_v1
-Hypothesis: 4-hour Vortex Indicator trend with 1-day volume confirmation and ATR volatility filter.
-Vortex identifies trending markets (VI+ > VI-) and avoids ranging periods. Works in bull/bear by
-filtering trades only when trend is strong. Uses volatility-adjusted position sizing to manage risk.
-Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
-"""
+# 1d_1w_camarilla_breakout_volume_regime_v2
+# Hypothesis: Daily Camarilla breakout with weekly trend filter and volume confirmation.
+# Uses weekly EMA to filter long/short bias, reducing false signals in chop.
+# Volume > 1.3x 20-day average confirms breakout strength.
+# Target: 15-25 trades/year (60-100 total) to minimize fee drag.
+# Works in bull/bear by aligning with weekly trend.
 
-name = "4h_1d_vortex_vortex_trend_v1"
-timeframe = "4h"
+name = "1d_1w_camarilla_breakout_volume_regime_v2"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -25,74 +24,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Vortex calculation
+    # Get daily data for Camarilla
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # Vortex Indicator calculation (14-period)
-    # True Range
-    tr1 = np.abs(np.subtract(high_1d, low_1d))
-    tr2 = np.abs(np.subtract(high_1d, np.roll(close_1d, 1)))
-    tr3 = np.abs(np.subtract(low_1d, np.roll(close_1d, 1)))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Previous day's range for Camarilla
+    prev_high = np.roll(df_1d['high'].values, 1)
+    prev_low = np.roll(df_1d['low'].values, 1)
+    prev_close = np.roll(df_1d['close'].values, 1)
     
-    # VM+ and VM-
-    vm_plus = np.abs(np.subtract(high_1d, np.roll(low_1d, 1)))
-    vm_minus = np.abs(np.subtract(low_1d, np.roll(high_1d, 1)))
+    range_ = prev_high - prev_low
+    # Resistance levels
+    r3 = prev_close + range_ * 1.1 / 2
+    r4 = prev_close + range_ * 1.1
+    # Support levels
+    s3 = prev_close - range_ * 1.1 / 2
+    s4 = prev_close - range_ * 1.1
     
-    # Sum over 14 periods
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    vm_plus_sum = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
-    vm_minus_sum = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
+    # Weekly EMA for trend filter (21-period)
+    weekly_close = df_1w['close'].values
+    ema_21 = pd.Series(weekly_close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # VI+ and VI-
-    vi_plus = vm_plus_sum / tr_sum
-    vi_minus = vm_minus_sum / tr_sum
+    # Align all to daily timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    ema_21_aligned = align_htf_to_ltf(prices, df_1w, ema_21)
     
-    # Vortex trend: VI+ > VI- indicates uptrend, VI- > VI+ indicates downtrend
-    vortex_trend = vi_plus - vi_minus  # Positive = uptrend, Negative = downtrend
-    
-    # ATR for volatility filter (14-day ATR)
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Volume confirmation: volume > 1.3x 20-period average
+    # Volume confirmation: volume > 1.3x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.3)
-    
-    # Align Vortex trend and ATR to 4h timeframe
-    vortex_trend_aligned = align_htf_to_ltf(prices, df_1d, vortex_trend)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(vortex_trend_aligned[i]) or 
-            np.isnan(atr_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(ema_21_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: strong uptrend (VI+ > VI-) with volume and volatility filter
-        if (vortex_trend_aligned[i] > 0.1 and vol_confirm[i] and 
-            atr_aligned[i] > 0 and position != 1):
+        # Long entry: close above R4, above weekly EMA, with volume
+        if (close[i] > r4_aligned[i] and 
+            close[i] > ema_21_aligned[i] and 
+            vol_confirm[i] and 
+            position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: strong downtrend (VI- > VI+) with volume and volatility filter
-        elif (vortex_trend_aligned[i] < -0.1 and vol_confirm[i] and 
-              atr_aligned[i] > 0 and position != -1):
+        # Short entry: close below S4, below weekly EMA, with volume
+        elif (close[i] < s4_aligned[i] and 
+              close[i] < ema_21_aligned[i] and 
+              vol_confirm[i] and 
+              position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: trend reversal or volatility collapse
-        elif position == 1 and (vortex_trend_aligned[i] < -0.05 or not vol_confirm[i]):
+        # Exit: reverse signal or close crosses back to opposite S3/R3
+        elif position == 1 and close[i] < s3_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (vortex_trend_aligned[i] > 0.05 or not vol_confirm[i]):
+        elif position == -1 and close[i] > r3_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
