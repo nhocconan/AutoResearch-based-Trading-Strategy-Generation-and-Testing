@@ -8,12 +8,12 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Camarilla pivot breakout with 1d volume spike and chop regime filter
+    # Hypothesis: 4h Camarilla pivot breakout with 1d volume spike and chop regime filter
     # Camarilla levels from 1d provide institutional support/resistance
     # Volume spike confirms institutional participation
     # Chop regime filter avoids whipsaws in ranging markets
     # Works in bull/bear by fading extremes in range and following breakouts in trend
-    # Target: 12-37 trades/year per symbol (50-150 total over 4 years)
+    # Target: 20-50 trades/year per symbol.
     
     # Session filter: 8:00-20:00 UTC (avoid low volume Asian session)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -67,7 +67,7 @@ def generate_signals(prices):
         camarilla_h1[i] = camarilla_pivot[i] + rng * 1.1 / 12
         camarilla_l1[i] = camarilla_pivot[i] - rng * 1.1 / 12
     
-    # Align 1d Camarilla levels to 12h timeframe
+    # Align 1d Camarilla levels to 4h timeframe
     h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
     l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
@@ -180,6 +180,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_camarilla_breakout_vol_chop_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_vol_chop_v1"
+timeframe = "4h"
 leverage = 1.0
