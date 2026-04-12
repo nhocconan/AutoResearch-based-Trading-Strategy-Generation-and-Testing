@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""
-4h_12h_camarilla_breakout_volatility_regime
-Hypothesis: Combine 12h Camarilla breakout with volatility regime filter (ATR ratio) and volume confirmation.
-In bull markets: trend-following breakouts work. In bear markets: volatility filter reduces false signals during low-volatility chop.
-Uses 4h timeframe with 12h HTF for structure. Target: 20-40 trades/year (80-160 total) to minimize fee drag.
-"""
+# 1h_4d_camarilla_breakout_volume
+# Hypothesis: 1-hour Camarilla breakout with volume confirmation, using daily levels for structure.
+# Uses 1d Camarilla levels (R4/S4) for breakout direction, 1h for entry timing with volume filter.
+# Designed to work in both bull and bear markets by filtering false breakouts with volume.
+# Target: 15-37 trades/year (60-150 total over 4 years) to minimize fee drag.
 
-name = "4h_12h_camarilla_breakout_volatility_regime"
-timeframe = "4h"
+name = "1h_4d_camarilla_breakout_volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -24,21 +23,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla and ATR calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get daily data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Previous 12h bar's range
-    prev_high = np.roll(high_12h, 1)
-    prev_low = np.roll(low_12h, 1)
-    prev_close = np.roll(close_12h, 1)
+    # Previous day's range
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
     
-    # Camarilla levels (based on previous 12h bar)
+    # Camarilla levels (based on previous day)
     range_ = prev_high - prev_low
     # Resistance levels
     r3 = prev_close + range_ * 1.1 / 2
@@ -47,27 +46,15 @@ def generate_signals(prices):
     s3 = prev_close - range_ * 1.1 / 2
     s4 = prev_close - range_ * 1.1
     
-    # ATR for volatility filter (14-period ATR on 12h)
-    tr1 = np.abs(np.subtract(high_12h, low_12h))
-    tr2 = np.abs(np.subtract(high_12h, np.roll(close_12h, 1)))
-    tr3 = np.abs(np.subtract(low_12h, np.roll(close_12h, 1)))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align Camarilla levels to 1h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Calculate ATR ratio: current ATR / 50-period average ATR (volatility regime)
-    atr_ma = pd.Series(atr_12h).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr_12h / atr_ma  # >1 = high volatility, <1 = low volatility
-    
-    # Align Camarilla levels and ATR ratio to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_12h, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_12h, s4)
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_12h, atr_ratio)
-    
-    # Volume confirmation: volume > 1.3x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.3)
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -75,22 +62,18 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if data not ready
         if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(atr_ratio_aligned[i])):
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility regime filter: only trade when volatility is elevated (ATR ratio > 0.8)
-        vol_regime = atr_ratio_aligned[i] > 0.8
-        
-        # Long entry: close breaks above R4 with volume and volatility regime
-        if (close[i] > r4_aligned[i] and vol_confirm[i] and vol_regime and position != 1):
+        # Long entry: close breaks above R4 with volume confirmation
+        if (close[i] > r4_aligned[i] and vol_confirm[i] and position != 1):
             position = 1
-            signals[i] = 0.25
-        # Short entry: close breaks below S4 with volume and volatility regime
-        elif (close[i] < s4_aligned[i] and vol_confirm[i] and vol_regime and position != -1):
+            signals[i] = 0.20
+        # Short entry: close breaks below S4 with volume confirmation
+        elif (close[i] < s4_aligned[i] and vol_confirm[i] and position != -1):
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.20
         # Exit: reverse signal or close crosses back to opposite S3/R3
         elif position == 1 and close[i] < s3_aligned[i]:
             position = 0
@@ -101,9 +84,9 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
