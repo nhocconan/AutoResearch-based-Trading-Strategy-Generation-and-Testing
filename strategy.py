@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_kama_rsi_chop_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_breakout_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,83 +17,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get daily data for 1-day lookback (previous day's data)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    # Use previous day's data to avoid look-ahead
+    high_1d_prev = df_1d['high'].shift(1).values
+    low_1d_prev = df_1d['low'].shift(1).values
+    close_1d_prev = df_1d['close'].shift(1).values
     
-    # KAMA on daily close
-    close_series = pd.Series(close)
-    change = np.abs(np.diff(close_series, prepend=close_series.iloc[0]))
-    volatility = pd.Series(change).rolling(window=10, min_periods=10).sum().values
-    er = np.divide(np.abs(np.diff(close_series, periods=10)), volatility, out=np.zeros_like(volatility), where=volatility!=0)
-    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate Camarilla pivot levels from previous day's data
+    pivot_prev = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
+    range_1d_prev = high_1d_prev - low_1d_prev
     
-    # RSI(14) on daily
+    # Camarilla levels (H3 and L3)
+    h3_prev = pivot_prev + (range_1d_prev * 1.1 / 4)
+    l3_prev = pivot_prev - (range_1d_prev * 1.1 / 4)
+    
+    # Align levels to 12h timeframe (using previous day's data)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3_prev)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3_prev)
+    
+    # Volume filter - 10-period average on 12h data
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=10, min_periods=10).mean().values
+    volume_ok = volume > vol_ma
+    
+    # RSI for momentum filter (14-period)
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
     avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss + 1e-10)
+    rs = avg_gain / (avg_loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
     
-    # Choppiness Index (14) on daily
-    atr_list = []
-    for i in range(n):
-        if i == 0:
-            tr = high[i] - low[i]
-        else:
-            tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        atr_list.append(tr)
-    atr = np.array(atr_list)
-    sum_atr14 = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    hh14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    ll14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(sum_atr14 / (hh14 - ll14 + 1e-10)) / np.log10(14)
-    
-    # Weekly EMA(34) for trend filter
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # RSI range: 30-70 to avoid extremes but allow momentum
+    rsi_ok = (rsi >= 30) & (rsi <= 70)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or
-            np.isnan(ema_34_1w_aligned[i])):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+            np.isnan(volume_ok[i]) or np.isnan(rsi_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter: price above/below weekly EMA34
-        uptrend = close[i] > ema_34_1w_aligned[i]
-        downtrend = close[i] < ema_34_1w_aligned[i]
+        # Long: price breaks above H3 with volume confirmation
+        long_signal = close[i] > h3_aligned[i] and volume_ok[i] and rsi_ok[i]
+        # Short: price breaks below L3 with volume confirmation
+        short_signal = close[i] < l3_aligned[i] and volume_ok[i] and rsi_ok[i]
         
-        # KAMA direction
-        kama_up = kama[i] > kama[i-1]
-        kama_down = kama[i] < kama[i-1]
-        
-        # RSI in normal range (avoid extremes)
-        rsi_ok = (rsi[i] >= 30) and (rsi[i] <= 70)
-        
-        # Chop filter: only trade when chop > 50 (ranging market)
-        chop_ok = chop[i] > 50
-        
-        # Long: KAMA up + RSI OK + chop > 50 + uptrend
-        long_signal = kama_up and rsi_ok and chop_ok and uptrend
-        # Short: KAMA down + RSI OK + chop > 50 + downtrend
-        short_signal = kama_down and rsi_ok and chop_ok and downtrend
-        
-        # Exit when KAMA reverses
-        exit_long = not kama_up
-        exit_short = not kama_down
+        # Exit when price returns to pivot
+        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_prev)
+        exit_long = close[i] < pivot_aligned[i]
+        exit_short = close[i] > pivot_aligned[i]
         
         # Execute trades
         if long_signal and position != 1:
