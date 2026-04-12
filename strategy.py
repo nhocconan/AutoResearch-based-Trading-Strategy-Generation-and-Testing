@@ -1,19 +1,18 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_camarilla_pivot_volume_v2
-# Uses daily Camarilla pivot levels (L3, H3) as entry triggers with volume confirmation.
-# Long when price crosses above H3 with volume > 1.5x 20-period average.
-# Short when price crosses below L3 with volume > 1.5x 20-period average.
-# Exits when price returns to the daily pivot point (mean reversion).
-# Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drag.
-# Works in trending markets via breakouts and ranging markets via mean reversion to pivot.
-# Focus on BTC/ETH as primary targets.
+# Hypothesis: 1d_1w_cci_trend_follow
+# Uses weekly CCI (20-period) to determine trend direction on daily chart.
+# Long when weekly CCI > 100 and daily close > daily EMA(50).
+# Short when weekly CCI < -100 and daily close < daily EMA(50).
+# Exit when weekly CCI crosses back to neutral zone (-100 to 100).
+# Designed for very low trade frequency (<10 trades/year) to minimize fee drag.
+# Works in trending markets via trend following and avoids whipsaws in ranging markets.
 
-name = "4h_1d_camarilla_pivot_volume_v2"
-timeframe = "4h"
+name = "1d_1w_cci_trend_follow"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,80 +23,62 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for CCI calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly CCI (20-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Pivot point (PP) = (H + L + C) / 3
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    # Range = H - L
-    range_ = high_1d - low_1d
-    # Camarilla levels
-    # H3 = C + (H-L) * 1.1/2
-    # L3 = C - (H-L) * 1.1/2
-    camarilla_h3 = close_1d + range_ * 1.1 / 2.0
-    camarilla_l3 = close_1d - range_ * 1.1 / 2.0
-    # Pivot for exit
-    camarilla_pivot = pivot
+    # Typical price
+    tp_1w = (high_1w + low_1w + close_1w) / 3.0
+    # SMA of typical price
+    sma_tp = pd.Series(tp_1w).rolling(window=20, min_periods=20).mean().values
+    # Mean deviation
+    md = pd.Series(tp_1w).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
+    # CCI calculation
+    cci = (tp_1w - sma_tp) / (0.015 * md)
     
-    # Align daily Camarilla levels to 4h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    # Align weekly CCI to daily timeframe
+    cci_aligned = align_htf_to_ltf(prices, df_1w, cci)
     
-    # Volume confirmation: volume > 1.5 * 20-period average (4h timeframe)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    # Daily EMA(50) for trend confirmation
+    ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):  # start after warmup
         # Skip if data not ready
-        if np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or np.isnan(camarilla_pivot_aligned[i]):
+        if np.isnan(cci_aligned[i]) or np.isnan(ema_50[i]):
             signals[i] = 0.0
             continue
         
-        # Require volume confirmation for new entries
-        if not vol_confirm[i]:
-            # Hold current position if volume filter fails
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Long signal: price crosses above H3
-        if close[i] > camarilla_h3_aligned[i] and position != 1:
+        # Long signal: weekly CCI > 100 and daily close > EMA(50)
+        if cci_aligned[i] > 100 and close[i] > ema_50[i] and position != 1:
             position = 1
-            signals[i] = 0.25
-        # Short signal: price crosses below L3
-        elif close[i] < camarilla_l3_aligned[i] and position != -1:
+            signals[i] = 0.30
+        # Short signal: weekly CCI < -100 and daily close < EMA(50)
+        elif cci_aligned[i] < -100 and close[i] < ema_50[i] and position != -1:
             position = -1
-            signals[i] = -0.25
-        # Exit conditions: price returns to pivot point (mean reversion)
-        elif position == 1 and close[i] <= camarilla_pivot_aligned[i]:
+            signals[i] = -0.30
+        # Exit conditions: weekly CCI crosses back to neutral zone
+        elif position == 1 and cci_aligned[i] < 100:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] >= camarilla_pivot_aligned[i]:
+        elif position == -1 and cci_aligned[i] > -100:
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
