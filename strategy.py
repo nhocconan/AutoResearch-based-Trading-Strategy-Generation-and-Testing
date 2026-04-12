@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h_1d_donchian_breakout_volume_trend_v1
-# Breakout from 1d Donchian channel with volume confirmation and 12h EMA trend filter.
-# Works in bull markets (breakouts above upper band) and bear markets (breakdowns below lower band).
-# Low trade frequency expected due to 12h timeframe and multiple confirmation requirements.
-name = "12h_1d_donchian_breakout_volume_trend_v1"
-timeframe = "12h"
+# Hypothesis: 4h_1d_donchian_breakout_volume_v1
+# Donchian(20) breakout on 4h timeframe confirmed by 1d volume surge and price > 1d VWAP.
+# Works in bull markets via breakouts and in bear markets via short breakdowns.
+# Volume confirmation reduces false breakouts. Target: 20-40 trades/year.
+name = "4h_1d_donchian_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,61 +21,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels and volume average
+    # Get 1d data for volume surge and VWAP
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d Donchian channels (20-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d VWAP (volume-weighted average price)
+    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
+    vwap_1d = (typical_price_1d * df_1d['volume'].values).cumsum() / df_1d['volume'].values.cumsum()
+    vwap_1d = vwap_1d.values
     
-    # Calculate 1d average volume (20-period)
-    vol_1d = df_1d['volume'].values
-    avg_vol_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1d volume average (20-period)
+    vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
     
-    # Align 1d indicators to 12h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d)
+    # Align 1d indicators to 4h timeframe
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Calculate 12h EMA21 for trend filter
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Calculate 4h Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):
-        # Skip if indicators not ready
-        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(avg_vol_1d_aligned[i]):
+    for i in range(20, n):
+        # Skip if 1d indicators not ready
+        if np.isnan(vwap_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.5x average 1d volume
-        vol_confirm = volume[i] > 1.5 * avg_vol_1d_aligned[i]
+        # Volume surge condition: current 4h volume > 1.5x 1d average volume
+        volume_surge = volume[i] > 1.5 * vol_ma_1d_aligned[i]
         
         # Breakout conditions
-        breakout_up = close[i] > donchian_high_aligned[i]  # price above upper Donchian band
-        breakout_down = close[i] < donchian_low_aligned[i]  # price below lower Donchian band
+        bullish_breakout = (close[i] > highest_high[i-1]) and volume_surge and (close[i] > vwap_1d_aligned[i])
+        bearish_breakout = (close[i] < lowest_low[i-1]) and volume_surge and (close[i] < vwap_1d_aligned[i])
         
-        # Trend filter: EMA21 direction
-        uptrend = close[i] > ema_21[i]
-        downtrend = close[i] < ema_21[i]
+        # Exit conditions: opposite breakout or loss of momentum
+        exit_long = (close[i] < lowest_low[i-1]) and volume_surge
+        exit_short = (close[i] > highest_high[i-1]) and volume_surge
         
-        # Entry signals: breakout in direction of trend with volume confirmation
-        long_entry = breakout_up and uptrend and vol_confirm
-        short_entry = breakout_down and downtrend and vol_confirm
-        
-        # Exit conditions: opposite breakout or trend reversal
-        exit_long = breakout_down or (close[i] < ema_21[i] and position == 1)
-        exit_short = breakout_up or (close[i] > ema_21[i] and position == -1)
-        
-        if long_entry and position != 1:
+        if bullish_breakout and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_entry and position != -1:
+        elif bearish_breakout and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
