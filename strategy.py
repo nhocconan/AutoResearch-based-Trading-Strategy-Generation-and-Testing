@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""
-12h_1d_ema_crossover_with_volume_and_regime
-Hypothesis: 12-hour EMA crossover (8/21) with volume confirmation and 1-day ATR regime filter.
-Works in bull/bear by using trend-following EMA crossovers only when volatility is elevated
-(avoiding choppy markets) and volume confirms institutional participation.
-Target: 15-35 trades/year (60-140 total over 4 years) to minimize fee drag.
-"""
+# 1h_4d_rsi_momentum_breakout
+# Hypothesis: 1-hour RSI momentum breakout with 4-hour trend filter and volume confirmation
+# Uses 4h RSI(14) for trend direction (above 50 = bullish, below 50 = bearish)
+# 1h RSI(14) crosses above/below 50/70/30 with volume confirmation for entry
+# Designed for 15-30 trades/year (60-120 over 4 years) to minimize fee drag
+# Works in bull/bear by aligning with higher timeframe momentum
 
-name = "12h_1d_ema_crossover_with_volume_and_regime"
-timeframe = "12h"
+name = "1h_4d_rsi_momentum_breakout"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -25,74 +24,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA and ATR calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_4h = df_4h['close'].values
     
-    # EMA crossover (8/21) on daily
-    ema8 = pd.Series(close_1d).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema21 = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # 4h RSI(14) for trend filter
+    delta_4h = np.diff(close_4h, prepend=close_4h[0])
+    gain_4h = np.where(delta_4h > 0, delta_4h, 0)
+    loss_4h = np.where(delta_4h < 0, -delta_4h, 0)
+    avg_gain_4h = pd.Series(gain_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss_4h = pd.Series(loss_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs_4h = avg_gain_4h / (avg_loss_4h + 1e-10)
+    rsi_4h = 100 - (100 / (1 + rs_4h))
+    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
     
-    # ATR for regime filter (14-day ATR)
-    tr1 = np.abs(np.subtract(high_1d, low_1d))
-    tr2 = np.abs(np.subtract(high_1d, np.roll(close_1d, 1)))
-    tr3 = np.abs(np.subtract(low_1d, np.roll(close_1d, 1)))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # 1h RSI(14) for entry signals
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Align EMA and ATR to 12h timeframe
-    ema8_aligned = align_htf_to_ltf(prices, df_1d, ema8)
-    ema21_aligned = align_htf_to_ltf(prices, df_1d, ema21)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
-    
-    # Volume confirmation: volume > 1.3x 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume confirmation: volume > 1.3x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema8_aligned[i]) or np.isnan(ema21_aligned[i]) or 
-            np.isnan(atr_aligned[i])):
+        if (np.isnan(rsi_4h_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: EMA8 crosses above EMA21 with volume and volatility filter
-        if (ema8_aligned[i] > ema21_aligned[i] and 
-            ema8_aligned[i-1] <= ema21_aligned[i-1] and
-            vol_confirm[i] and 
-            atr_aligned[i] > 0 and 
-            position != 1):
+        # Determine trend from 4h RSI
+        bullish_trend = rsi_4h_aligned[i] > 50
+        bearish_trend = rsi_4h_aligned[i] < 50
+        
+        # Long entry: 1h RSI crosses above 50 in bullish trend with volume
+        if (rsi[i] > 50 and rsi[i-1] <= 50 and bullish_trend and 
+            vol_confirm[i] and position != 1):
             position = 1
-            signals[i] = 0.25
-        # Short entry: EMA8 crosses below EMA21 with volume and volatility filter
-        elif (ema8_aligned[i] < ema21_aligned[i] and 
-              ema8_aligned[i-1] >= ema21_aligned[i-1] and
-              vol_confirm[i] and 
-              atr_aligned[i] > 0 and 
-              position != -1):
+            signals[i] = 0.20
+        # Short entry: 1h RSI crosses below 50 in bearish trend with volume
+        elif (rsi[i] < 50 and rsi[i-1] >= 50 and bearish_trend and 
+              vol_confirm[i] and position != -1):
             position = -1
-            signals[i] = -0.25
-        # Exit: reverse signal
-        elif position == 1 and ema8_aligned[i] < ema21_aligned[i]:
+            signals[i] = -0.20
+        # Exit: reverse signal or RSI reaches extreme levels
+        elif position == 1 and (rsi[i] >= 70 or rsi[i] < 50):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and ema8_aligned[i] > ema21_aligned[i]:
+        elif position == -1 and (rsi[i] <= 30 or rsi[i] > 50):
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
