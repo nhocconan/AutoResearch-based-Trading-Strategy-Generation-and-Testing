@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-12h_1d_KAMA_Direction_RSI_MeanReversion_v1
-Hypothesis: Use daily KAMA to detect long-term trend, RSI for mean-reversion entries on 12h.
-Long when KAMA rising and RSI < 40 (oversold), short when KAMA falling and RSI > 60 (overbought).
-Exits when RSI returns to 50 or trend reverses. Works in bull via trend-following entries,
-in bear via mean-reversion from extremes. Low trade frequency expected (~15-30/year).
+6h_1d_Camarilla_Breakout_Momentum_v1
+Hypothesis: Use daily Camarilla pivot levels with momentum confirmation on 6h.
+Long when price breaks above H4 (daily) with RSI < 60, short when breaks below L4 (daily) with RSI > 40.
+Focus on strong momentum breakouts to avoid false signals and reduce trade frequency.
+Designed for low trade frequency (target: 50-150 total over 4 years) to minimize fee drift.
+Works in bull via breakouts, in bear via mean-reversion from extreme levels.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_KAMA_Direction_RSI_MeanReversion_v1"
-timeframe = "12h"
+name = "6h_1d_Camarilla_Breakout_Momentum_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,47 +25,31 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Daily data for KAMA and RSI
+    # Daily data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # KAMA calculation (ER=10, slow=2, fast=30)
-    close_1d = df_1d['close'].values
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    er = np.zeros_like(close_1d)
-    for i in range(10, len(close_1d)):
-        direction = np.abs(close_1d[i] - close_1d[i-10])
-        volatility_sum = np.sum(volatility[i-9:i+1])
-        er[i] = direction / volatility_sum if volatility_sum > 0 else 0
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.full_like(close_1d, np.nan)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = df_1d['high'].iloc[-2] if len(df_1d) >= 2 else df_1d['high'].iloc[-1]
+    prev_low = df_1d['low'].iloc[-2] if len(df_1d) >= 2 else df_1d['low'].iloc[-1]
+    prev_close = df_1d['close'].iloc[-2] if len(df_1d) >= 2 else df_1d['close'].iloc[-1]
     
-    # RSI (14-period) on daily
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.zeros_like(close_1d)
-    avg_loss = np.zeros_like(close_1d)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
-    for i in range(14, len(close_1d)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi_1d = 100 - (100 / (1 + rs))
+    # Calculate daily Camarilla levels
+    range_val = prev_high - prev_low
+    if range_val <= 0:
+        return np.zeros(n)
+    daily_h4 = prev_close + 1.1 * range_val * 1.1 / 2
+    daily_l4 = prev_close - 1.1 * range_val * 1.1 / 2
     
-    # Align to 12h
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Align daily levels to 6h timeframe
+    daily_h4_array = np.full(len(df_1d), daily_h4)
+    daily_l4_array = np.full(len(df_1d), daily_l4)
+    daily_h4_aligned = align_htf_to_ltf(prices, df_1d, daily_h4_array)
+    daily_l4_aligned = align_htf_to_ltf(prices, df_1d, daily_l4_array)
     
-    # 12h RSI for entry timing
+    # RSI (14-period) for momentum filter
     close_series = pd.Series(close)
     delta = close_series.diff()
     gain = delta.clip(lower=0)
@@ -72,36 +57,36 @@ def generate_signals(prices):
     avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
     avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
     rs = avg_gain / avg_loss
-    rsi_12h = 100 - (100 / (1 + rs))
-    rsi_12h_values = rsi_12h.fillna(50).values
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.fillna(50).values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any data invalid
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or
-            np.isnan(rsi_12h_values[i])):
+        if (np.isnan(daily_h4_aligned[i]) or np.isnan(daily_l4_aligned[i]) or
+            np.isnan(rsi_values[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # KAMA direction (rising/falling)
-        kama_rising = kama_aligned[i] > kama_aligned[i-1]
-        kama_falling = kama_aligned[i] < kama_aligned[i-1]
+        # Breakout conditions with momentum filter
+        long_breakout = close[i] > daily_h4_aligned[i] and rsi_values[i] < 60
+        short_breakout = close[i] < daily_l4_aligned[i] and rsi_values[i] > 40
         
-        # Entry conditions
-        long_entry = kama_rising and rsi_12h_values[i] < 40
-        short_entry = kama_falling and rsi_12h_values[i] > 60
+        # Exit conditions: return to pivot
+        daily_pivot = (prev_high + prev_low + prev_close) / 3
+        daily_pivot_array = np.full(len(df_1d), daily_pivot)
+        daily_pivot_aligned = align_htf_to_ltf(prices, df_1d, daily_pivot_array)
         
-        # Exit conditions
-        long_exit = not kama_rising or rsi_12h_values[i] > 50
-        short_exit = not kama_falling or rsi_12h_values[i] < 50
+        long_exit = close[i] < daily_pivot_aligned[i]
+        short_exit = close[i] > daily_pivot_aligned[i]
         
         # Signal logic
-        if long_entry and position != 1:
+        if long_breakout and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_entry and position != -1:
+        elif short_breakout and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
