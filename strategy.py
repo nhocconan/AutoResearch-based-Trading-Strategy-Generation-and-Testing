@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_1d_Camarilla_Breakout_Volume_Regime_v4"
-timeframe = "12h"
+name = "4h_1d_camarilla_volume_regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,21 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1W DATA FOR TREND (EMA 13) ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 13:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # === 1W VOLUME FOR CONFIRMATION ===
-    vol_1w = df_1w['volume'].values
-    vol_ma_1w = pd.Series(vol_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
-    
-    # === 1D DATA FOR CAMARILLA LEVELS ===
+    # Daily data for Camarilla levels and volume
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -39,92 +25,68 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    vol_1d = df_1d['volume'].values
     
-    # Map each 12h bar to previous day's OHLC using pandas merge (vectorized)
-    # Convert to datetime for merge
-    prices_dt = pd.to_datetime(prices['open_time'])
-    df_1d_dt = pd.to_datetime(df_1d['open_time'])
+    # Map each 4h bar to previous day's OHLC
+    pivots_high = np.full(n, np.nan)
+    pivots_low = np.full(n, np.nan)
+    pivots_close = np.full(n, np.nan)
+    pivots_volume = np.full(n, np.nan)
     
-    # Previous day's date for each 12h bar
-    prev_day = prices_dt - pd.Timedelta(days=1)
+    for i in range(n):
+        current_time = pd.Timestamp(prices.iloc[i]['open_time'])
+        prev_date = current_time.date() - pd.Timedelta(days=1)
+        
+        # Find previous day in daily data
+        for j in range(len(df_1d)):
+            if pd.Timestamp(df_1d.iloc[j]['open_time']).date() == prev_date:
+                pivots_high[i] = high_1d[j]
+                pivots_low[i] = low_1d[j]
+                pivots_close[i] = close_1d[j]
+                pivots_volume[i] = vol_1d[j]
+                break
     
-    # Create DataFrames for merge
-    df_prev = pd.DataFrame({'date': prev_day.dt.date, 'idx': np.arange(n)})
-    df_1d_date = pd.DataFrame({'date': df_1d_dt.dt.date, 
-                               'high': high_1d, 'low': low_1d, 'close': close_1d})
+    # Calculate Camarilla H3 and L3 levels (entry levels)
+    H3 = pivots_close + (pivots_high - pivots_low) * 1.1 / 4
+    L3 = pivots_close - (pivots_high - pivots_low) * 1.1 / 4
     
-    # Merge to get previous day's OHLC
-    merged = df_prev.merge(df_1d_date, on='date', how='left')
-    pivots_high = merged['high'].values
-    pivots_low = merged['low'].values
-    pivots_close = merged['close'].values
+    # Daily volume confirmation
+    vol_ma_1d = pd.Series(pivots_volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    strong_volume = volume > vol_ma_1d
     
-    # Calculate Camarilla H4 and L4 levels
-    H4 = pivots_close + (pivots_high - pivots_low) * 1.1 / 2
-    L4 = pivots_close - (pivots_high - pivots_low) * 1.1 / 2
-    
-    # === 12H DATA FOR CHOPPINESS INDEX ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # True Range for Chop Index
-    tr1 = high_12h[1:] - low_12h[1:]
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    # Chop index on 4h for regime filter
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # ATR(14)
-    atr_12h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    # Sum of true range over 14 periods
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    # Chop Index: 100 * log10(tr_sum / (atr * 14)) / log10(14)
-    chop_raw = 100 * np.log10(tr_sum / (atr_12h * 14)) / np.log10(14)
-    chop = np.where(tr_sum > 0, chop_raw, 50)  # neutral when invalid
-    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
+    chop_raw = 100 * np.log10(tr_sum / (atr * 14)) / np.log10(14)
+    chop = np.where(tr_sum > 0, chop_raw, 50)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(20, n):
         # Skip if not ready
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(vol_ma_1w_aligned[i]) or np.isnan(H4[i]) or 
-            np.isnan(L4[i]) or np.isnan(pivots_close[i])):
+        if (np.isnan(H3[i]) or np.isnan(L3[i]) or np.isnan(pivots_close[i]) or
+            np.isnan(chop[i]) or np.isnan(strong_volume[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend: price above/below weekly EMA
-        above_week_ema = close[i] > ema_1w_aligned[i]
-        below_week_ema = close[i] < ema_1w_aligned[i]
+        # Chop regime: Chop < 40 = trending (favor breakouts), Chop > 60 = ranging (avoid)
+        trending_regime = chop[i] < 40
         
-        # Chop regime: Chop < 50 = trending (trend follow), Chop > 50 = ranging (mean revert)
-        chop_low = chop_aligned[i] < 50
+        # Long: price breaks above H3 in trending market with volume
+        long_signal = (close[i] > H3[i] and trending_regime and strong_volume[i])
         
-        # Volume confirmation: current volume > weekly average
-        strong_volume = volume[i] > vol_ma_1w_aligned[i]
-        
-        # Long: price breaks above H4 in trending/up market with volume
-        long_signal = (close[i] > H4[i] and 
-                      above_week_ema and 
-                      chop_low and 
-                      strong_volume)
-        
-        # Short: price breaks below L4 in trending/down market with volume
-        short_signal = (close[i] < L4[i] and 
-                       below_week_ema and 
-                       chop_low and 
-                       strong_volume)
+        # Short: price breaks below L3 in trending market with volume
+        short_signal = (close[i] < L3[i] and trending_regime and strong_volume[i])
         
         # Exit: chop increases (range) or price returns to pivot
-        exit_long = (position == 1 and 
-                    (chop_aligned[i] > 60 or close[i] < pivots_close[i]))
-        exit_short = (position == -1 and 
-                     (chop_aligned[i] > 60 or close[i] > pivots_close[i]))
+        exit_long = (position == 1 and (chop[i] > 60 or close[i] < pivots_close[i]))
+        exit_short = (position == -1 and (chop[i] > 60 or close[i] > pivots_close[i]))
         
         # Execute trades
         if long_signal and position != 1:
