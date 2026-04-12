@@ -1,96 +1,87 @@
 #!/usr/bin/env python3
 """
-1d_1w_Volume_Spike_Camarilla_Pivot_Bounce_v1
-Hypothesis: On daily timeframe, price reacts strongly to weekly Camarilla pivot levels (especially L3/H3) when accompanied by volume spikes.
-In bull markets: buy dips to L3/H3 with volume confirmation. In bear markets: sell rallies to H3/L3 with volume confirmation.
-Uses weekly Camarilla levels calculated from prior week's OHLC, ensuring no look-ahead. Volume spike filter reduces false signals.
-Designed for 10-25 trades/year by requiring confluence of pivot level touch + volume spike.
+12h_1d_Williams_Alligator_Trend_v1
+Hypothesis: On 12h timeframe, trade in direction of Williams Alligator (three SMAs) with 1d trend filter.
+Long when price > Alligator Mouth (13-period SMA) and 1d close > 1d EMA50.
+Short when price < Alligator Lips (34-period SMA) and 1d close < 1d EMA50.
+Exit when price crosses back inside Alligator jaws or 1d trend reverses.
+Designed for low trade frequency (15-30 trades/year) by requiring strong trend alignment.
+Works in bull markets via long trends and bear markets via short trends.
+Williams Alligator is effective in trending markets and avoids whipsaws in ranging conditions.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_hlf  # Note: using align_ltf_to_hlf for weekly to daily alignment
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Volume_Spike_Camarilla_Pivot_Bounce_v1"
-timeframe = "1d"
+name = "12h_1d_Williams_Alligator_Trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 10:
+    if n < 60:
         return np.zeros(n)
     
     # Price arrays
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Calculate weekly Camarilla levels from prior week's OHLC (no look-ahead)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    # Williams Alligator (13, 8, 5 SMAs shifted forward)
+    # Jaw: 13-period SMA shifted by 8 bars
+    # Teeth: 8-period SMA shifted by 5 bars
+    # Lips: 5-period SMA shifted by 3 bars
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8)
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5)
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3)
+    
+    # Alligator values (no shift for alignment - we'll handle via alignment function)
+    jaw_raw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
+    teeth_raw = pd.Series(close).rolling(window=8, min_periods=8).mean().values
+    lips_raw = pd.Series(close).rolling(window=5, min_periods=5).mean().values
+    
+    # Load 1d data ONCE for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each week: based on prior week's OHLC
-    # H4 = close + 1.5*(high - low)
-    # H3 = close + 1.1*(high - low)
-    # L3 = close - 1.1*(high - low)
-    # L4 = close - 1.5*(high - low)
-    # We'll use H3 and L3 as primary levels
-    wk_high = df_1w['high'].values
-    wk_low = df_1w['low'].values
-    wk_close = df_1w['close'].values
+    # Calculate 1d EMA50
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate levels based on prior week (shift by 1 to avoid look-ahead)
-    wk_high_prev = np.roll(wk_high, 1)
-    wk_low_prev = np.roll(wk_low, 1)
-    wk_close_prev = np.roll(wk_close, 1)
-    # First week has no prior, set to zeros (will be handled by alignment)
-    wk_high_prev[0] = 0
-    wk_low_prev[0] = 0
-    wk_close_prev[0] = 0
-    
-    wk_range = wk_high_prev - wk_low_prev
-    # Camarilla H3 and L3
-    camarilla_h3 = wk_close_prev + 1.1 * wk_range
-    camarilla_l3 = wk_close_prev - 1.1 * wk_range
-    
-    # Align weekly levels to daily timeframe (with proper delay for weekly bar close)
-    camarilla_h3_daily = align_ltf_to_hlf(prices, df_1w, camarilla_h3)
-    camarilla_l3_daily = align_ltf_to_hlf(prices, df_1w, camarilla_l3)
-    
-    # Volume spike filter: 20-period volume average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align Alligator components to 12h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_raw)  # Using 1d as reference for simplicity
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_raw)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_raw)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after volume MA warmup
+    for i in range(60, n):
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_daily[i]) or np.isnan(camarilla_l3_daily[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Price proximity to Camarilla levels (within 0.3%)
-        dist_to_h3_pct = abs(close[i] - camarilla_h3_daily[i]) / camarilla_h3_daily[i] * 100
-        dist_to_l3_pct = abs(close[i] - camarilla_l3_daily[i]) / camarilla_l3_daily[i] * 100
-        near_h3 = dist_to_h3_pct <= 0.3
-        near_l3 = dist_to_l3_pct <= 0.3
+        # Trend conditions
+        price_above_jaw = close[i] > jaw_aligned[i]
+        price_below_lips = close[i] < lips_aligned[i]
+        price_between_teeth = (close[i] > teeth_aligned[i]) and (close[i] < jaw_aligned[i])  # In mouth
         
-        # Volume spike: current volume > 2.0x average
-        volume_spike = volume[i] > vol_ma[i] * 2.0
+        # 1d trend filter
+        above_ema = close[i] > ema_50_1d_aligned[i]
+        below_ema = close[i] < ema_50_1d_aligned[i]
         
-        # Entry conditions: bounce off levels with volume
-        long_entry = near_l3 and volume_spike  # Bounce off L3 support
-        short_entry = near_h3 and volume_spike  # Rejection at H3 resistance
+        # Entry conditions: strong trend alignment
+        long_entry = price_above_jaw and above_ema and not price_between_teeth
+        short_entry = price_below_lips and below_ema and not price_between_teeth
         
-        # Exit conditions: price moves back toward midpoint or opposite level
-        # Calculate midpoint between H3 and L3 for exit reference
-        midpoint = (camarilla_h3_daily[i] + camarilla_l3_daily[i]) / 2
-        
-        long_exit = close[i] >= midpoint  # Price reached midpoint, take profit
-        short_exit = close[i] <= midpoint  # Price reached midpoint, take profit
+        # Exit conditions: price returns to Alligator mouth or trend reversal
+        long_exit = price_between_teeth or below_ema
+        short_exit = price_between_teeth or above_ema
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
