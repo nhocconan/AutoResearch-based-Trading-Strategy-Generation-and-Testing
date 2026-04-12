@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-1d_1w_KAMA_Trend_With_RSI_Filter_v1
-Hypothesis: On daily timeframe, use Kaufman Adaptive Moving Average (KAMA) to determine trend direction,
-filtered by RSI to avoid whipsaws, and enter only when price crosses KAMA with volume confirmation.
-Exit when price reverts to KAMA. Weekly trend filter ensures alignment with higher timeframe momentum.
-Designed for low trade frequency (10-20/year) by requiring multiple confluence factors.
-Works in bull/bear via weekly trend filter and mean-reversion exit at KAMA.
+6h_1w_1d_WilliamsVixFix_v1
+Hypothesis: On 6h timeframe, use weekly Williams Vix Fix (WVF) to identify extreme fear/greed
+combined with daily trend filter. WVF > 0.8 indicates extreme fear (oversold) for long entries
+in uptrend, WVF < 0.2 indicates extreme greed (overbought) for short entries in downtrend.
+Exit when WVF returns to neutral zone (0.4-0.6). Works in bull/bear via daily trend filter
+and mean-reversion exit. Low trade frequency expected due to extreme threshold requirements.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_KAMA_Trend_With_RSI_Filter_v1"
-timeframe = "1d"
+name = "6h_1w_1d_WilliamsVixFix_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,85 +26,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === WEEKLY TREND FILTER ===
+    # === WEEKLY WILLIAMS VIX FIX ===
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    if len(df_1w) < 22:
         return np.zeros(n)
     
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    # Weekly EMA(21) for trend direction
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
-    # === DAILY KAMA (10, 2, 30) ===
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, n=10))
-    abs_change = np.zeros(n)
-    for i in range(10, n):
-        abs_change[i] = np.sum(np.abs(np.diff(close[i-9:i+1])))
-    er = np.zeros(n)
-    er[:10] = np.nan
-    er[10:] = change[9:] / np.where(abs_change[10:] == 0, 1, abs_change[10:])
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # KAMA
-    kama = np.zeros(n)
-    kama[:10] = close[:10]
-    for i in range(10, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # === DAILY RSI(14) ===
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    for i in range(14, n):
-        if i == 14:
-            avg_gain[i] = np.mean(gain[1:15])
-            avg_loss[i] = np.mean(loss[1:15])
+    # Calculate WVF: (highest high - low) / (highest high - lowest low) * 100
+    # Using 22-period lookback (approx 1 month)
+    wvf = np.full(len(close_1w), np.nan)
+    for i in range(21, len(close_1w)):
+        highest_high = np.max(high_1w[i-21:i+1])
+        lowest_low = np.min(low_1w[i-21:i+1])
+        if highest_high > lowest_low:
+            wvf[i] = (highest_high - low_1w[i]) / (highest_high - lowest_low) * 100
         else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    rs = np.where(avg_loss == 0, 100, avg_gain / avg_loss)
-    rsi = 100 - (100 / (1 + rs))
+            wvf[i] = 50.0  # neutral when range is zero
     
-    # === DAILY VOLUME AVERAGE (20) ===
-    vol_avg = np.zeros(n)
-    vol_sum = 0.0
-    vol_count = 0
-    for i in range(n):
-        vol_sum += volume[i]
-        vol_count += 1
-        if i >= 20:
-            vol_sum -= volume[i-20]
-            vol_count -= 1
-        vol_avg[i] = vol_sum / vol_count if vol_count > 0 else 0.0
+    # === DAILY TREND FILTER ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    # Daily EMA(50) for trend
+    ema_50 = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema_50[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_50[i] = (close_1d[i] * 0.0377) + (ema_50[i-1] * 0.9623)  # alpha = 2/(50+1)
+    
+    # Align data to 6h timeframe
+    wvf_aligned = align_htf_to_ltf(prices, df_1w, wvf)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # start after warmup
+    for i in range(100, n):
         # Skip if indicators not available
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
-            np.isnan(ema_21_1w_aligned[i]) or vol_avg[i] == 0.0):
+        if (np.isnan(wvf_aligned[i]) or np.isnan(ema_50_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: at least 1.3x average
-        vol_confirm = volume[i] > 1.3 * vol_avg[i]
-        
-        # Weekly trend alignment: price above/below weekly EMA21
-        weekly_uptrend = close[i] > ema_21_1w_aligned[i]
-        weekly_downtrend = close[i] < ema_21_1w_aligned[i]
+        wvf_val = wvf_aligned[i]
+        ema_50_val = ema_50_aligned[i]
+        close_val = close[i]
         
         # Entry conditions
-        long_setup = (close[i] > kama[i]) and (rsi[i] > 50) and vol_confirm and weekly_uptrend
-        short_setup = (close[i] < kama[i]) and (rsi[i] < 50) and vol_confirm and weekly_downtrend
+        # Long: WVF > 80 (extreme fear) and price above daily EMA50 (uptrend)
+        long_setup = (wvf_val > 80) and (close_val > ema_50_val)
+        # Short: WVF < 20 (extreme greed) and price below daily EMA50 (downtrend)
+        short_setup = (wvf_val < 20) and (close_val < ema_50_val)
         
-        # Exit conditions: mean reversion to KAMA
-        exit_long = close[i] < kama[i]
-        exit_short = close[i] > kama[i]
+        # Exit conditions: WVF returns to neutral zone (40-60)
+        exit_long = wvf_val < 40
+        exit_short = wvf_val > 60
         
         if long_setup and position != 1:
             position = 1
