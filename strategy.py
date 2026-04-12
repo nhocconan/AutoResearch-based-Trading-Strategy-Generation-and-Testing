@@ -1,15 +1,19 @@
-# 4h_1d_Camarilla_Breakout_Volume_Regime_v2
-# Hypothesis: Tighten entry conditions by requiring price to close beyond H3/L3, volume > 2x average,
-# and volatility regime filter (ATR < MA) to reduce trades to ~25-35/year. Uses mean-reversion exits
-# at H4/L4. Works in bull/bear via 1d trend filter (price > EMA50 for long, < EMA50 for short).
-# Target: <40 total trades over 4 years to minimize fee drag while maintaining edge.
+#!/usr/bin/env python3
+"""
+12h_1d_Donchian_Breakout_Trend_v1
+Hypothesis: On 12h timeframe, buy when price breaks above 20-period Donchian high with daily uptrend (close > SMA50),
+sell when price breaks below 20-period Donchian low with daily downtrend (close < SMA50). Exit when price crosses the
+midpoint of the Donchian channel. Uses volume confirmation (>1.5x average volume) to avoid false breakouts.
+Designed for low trade frequency (15-30/year) by requiring multiple confluence factors. Works in bull/bear via daily
+trend filter and mean-reversion exit at midpoint.
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_Breakout_Volume_Regime_v2"
-timeframe = "4h"
+name = "12h_1d_Donchian_Breakout_Trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,66 +26,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY CAMARILLA LEVELS ===
+    # === DAILY TREND FILTER (SMA50) ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Previous day's values for today's Camarilla levels
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close[0] = close_1d[0]  # first day fallback
-    
-    range_1d = prev_high - prev_low
-    
-    h5 = prev_close + (range_1d * 1.1 / 2)
-    h4 = prev_close + (range_1d * 1.1)
-    h3 = prev_close + (range_1d * 1.1 / 4)
-    l3 = prev_close - (range_1d * 1.1 / 4)
-    l4 = prev_close - (range_1d * 1.1)
-    l5 = prev_close - (range_1d * 1.1 / 2)
-    
-    # === DAILY EMA50 TREND FILTER ===
-    ema50 = np.zeros_like(close_1d)
-    ema50[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        ema50[i] = 0.02 * close_1d[i] + 0.98 * ema50[i-1]  # alpha = 2/(50+1)
-    
-    # === DAILY VOLATILITY REGIME (ATR < MA) ===
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = np.full_like(tr, np.nan)
-    for i in range(len(tr)):
-        if i < 14:
-            atr[i] = np.nan
-        elif i == 14:
-            atr[i] = np.nanmean(tr[1:i+1])
+    sma_50 = np.full_like(close_1d, np.nan)
+    for i in range(len(close_1d)):
+        if i < 49:
+            sma_50[i] = np.nan
         else:
-            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-    atr_ma = np.full_like(atr, np.nan)
-    for i in range(len(atr)):
-        if i < 29:
-            atr_ma[i] = np.nan
+            sma_50[i] = np.mean(close_1d[i-49:i+1])
+    
+    # Trend: 1 for uptrend (close > SMA50), -1 for downtrend (close < SMA50), 0 otherwise
+    trend_1d = np.zeros_like(close_1d)
+    for i in range(len(close_1d)):
+        if not np.isnan(sma_50[i]):
+            if close_1d[i] > sma_50[i]:
+                trend_1d[i] = 1
+            elif close_1d[i] < sma_50[i]:
+                trend_1d[i] = -1
+    
+    # === 12H DONCHIAN CHANNEL (20-period) ===
+    donchian_period = 20
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    donchian_mid = np.full(n, np.nan)
+    
+    for i in range(n):
+        if i < donchian_period - 1:
+            donchian_high[i] = np.nan
+            donchian_low[i] = np.nan
         else:
-            atr_ma[i] = np.mean(atr[i-29:i+1])
-    vol_regime = atr < atr_ma  # True when low volatility (trending)
+            start_idx = i - donchian_period + 1
+            donchian_high[i] = np.max(high[start_idx:i+1])
+            donchian_low[i] = np.min(low[start_idx:i+1])
+            donchian_mid[i] = (donchian_high[i] + donchian_low[i]) / 2.0
     
-    # Align all daily data to 4h
-    h3_a = align_htf_to_ltf(prices, df_1d, h3)
-    l3_a = align_htf_to_ltf(prices, df_1d, l3)
-    h4_a = align_htf_to_ltf(prices, df_1d, h4)
-    l4_a = align_htf_to_ltf(prices, df_1d, l4)
-    ema50_a = align_htf_to_ltf(prices, df_1d, ema50)
-    vol_regime_a = align_htf_to_ltf(prices, df_1d, vol_regime.astype(float))
-    
-    # Volume average (20-period for confirmation)
+    # === VOLUME AVERAGE (20-period) ===
     vol_avg = np.zeros(n)
     vol_sum = 0.0
     vol_count = 0
@@ -91,31 +74,35 @@ def generate_signals(prices):
         if i >= 20:
             vol_sum -= volume[i-20]
             vol_count -= 1
-        vol_avg[i] = vol_sum / vol_count if vol_count > 0 else 0.0
+        if vol_count > 0:
+            vol_avg[i] = vol_sum / vol_count
+        else:
+            vol_avg[i] = 0.0
+    
+    # Align daily trend to 12h timeframe
+    trend_aligned = align_htf_to_ltf(prices, df_1d, trend_1d.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
-        # Skip if data not ready
-        if (np.isnan(h3_a[i]) or np.isnan(l3_a[i]) or np.isnan(h4_a[i]) or 
-            np.isnan(l4_a[i]) or np.isnan(ema50_a[i]) or np.isnan(vol_regime_a[i]) or 
+    for i in range(50, n):  # start after warmup
+        # Skip if indicators not available
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(trend_aligned[i]) or 
             vol_avg[i] == 0.0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # TIGHTENED CONDITIONS
-        vol_confirm = volume[i] > 2.0 * vol_avg[i]  # Increased from 1.5x to 2.0x
-        in_trend_regime = vol_regime_a[i] > 0.5
+        # Volume confirmation: at least 1.5x average
+        vol_confirm = volume[i] > 1.5 * vol_avg[i]
         
-        # LONG: price closes above H3, volume spike, low vol regime, price > EMA50 (uptrend)
-        long_setup = (close[i] > h3_a[i]) and vol_confirm and in_trend_regime and (close[i] > ema50_a[i])
-        # SHORT: price closes below L3, volume spike, low vol regime, price < EMA50 (downtrend)
-        short_setup = (close[i] < l3_a[i]) and vol_confirm and in_trend_regime and (close[i] < ema50_a[i])
+        # Entry conditions
+        long_setup = (close[i] > donchian_high[i]) and (trend_aligned[i] > 0.5) and vol_confirm
+        short_setup = (close[i] < donchian_low[i]) and (trend_aligned[i] < -0.5) and vol_confirm
         
-        # EXIT: mean reversion to opposite H4/L4
-        exit_long = close[i] < l4_a[i]
-        exit_short = close[i] > h4_a[i]
+        # Exit conditions: mean reversion to midpoint
+        exit_long = close[i] < donchian_mid[i]
+        exit_short = close[i] > donchian_mid[i]
         
         if long_setup and position != 1:
             position = 1
@@ -130,6 +117,7 @@ def generate_signals(prices):
             position = 0
             signals[i] = 0.0
         else:
+            # Hold current position
             signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
