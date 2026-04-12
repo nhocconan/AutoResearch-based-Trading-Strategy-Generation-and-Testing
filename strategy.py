@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-4h_1D_KAMA_Trend_RSI_Momentum
-Hypothesis: 4h timeframe using 1d KAMA trend direction and RSI momentum for entries.
-KAMA adapts to market noise, reducing whipsaw in choppy markets. RSI filters for momentum strength.
-Works in bull markets (trend + momentum) and bear markets (only takes counter-trend bounces when RSI extreme).
-Target: 20-40 trades/year by requiring both trend alignment and RSI extreme.
+1d_1w_Camarilla_Pivot_Breakout_Volume_Trend_v1
+Hypothesis: 1d timeframe with 1w Camarilla pivot levels, volume confirmation, and 1w EMA trend filter.
+Designed for 10-30 trades/year by requiring breakouts of H3/L3 levels with volume > 1.5x average
+and price aligned with 1w EMA trend. Works in bull/bear markets by only taking trend-aligned breakouts.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1D_KAMA_Trend_RSI_Momentum"
-timeframe = "4h"
+name = "1d_1w_Camarilla_Pivot_Breakout_Volume_Trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,47 +25,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for KAMA and RSI
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load 1w data ONCE before loop for Camarilla pivots and EMA
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 1d KAMA (adaptive moving average)
-    close_1d = df_1d['close'].values
-    # Efficiency Ratio (ER)
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)  # placeholder, will compute properly below
-    # Recompute volatility as sum of absolute changes over ER period
-    er_period = 10
-    change_vec = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility_sum = np.convolve(change_vec, np.ones(er_period), 'same')
-    volatility_sum[:er_period-1] = np.cumsum(change_vec[:er_period-1])[::-1][:er_period-1]  # fix edges
-    er = np.where(volatility_sum != 0, change_vec / volatility_sum, 0)
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    # KAMA calculation
-    kama = np.full_like(close_1d, np.nan, dtype=float)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    kama_1d = kama
+    # Calculate Camarilla levels from previous week
+    prev_close = df_1w['close'].shift(1).values
+    prev_high = df_1w['high'].shift(1).values
+    prev_low = df_1w['low'].shift(1).values
     
-    # Calculate 1d RSI (14 period)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1d = 100 - (100 / (1 + rs))
+    # Calculate pivot and ranges
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
     
-    # Align to 4h timeframe
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Camarilla levels
+    H3 = pivot + range_hl * 1.1 / 4
+    L3 = pivot - range_hl * 1.1 / 4
+    H4 = pivot + range_hl * 1.1 / 2
+    L4 = pivot - range_hl * 1.1 / 2
     
-    # Volume average (20 period) for confirmation
+    # Align to 1d timeframe
+    H3_1d = align_htf_to_ltf(prices, df_1w, H3)
+    L3_1d = align_htf_to_ltf(prices, df_1w, L3)
+    H4_1d = align_htf_to_ltf(prices, df_1w, H4)
+    L4_1d = align_htf_to_ltf(prices, df_1w, L4)
+    
+    # Calculate 1w EMA (21 period) for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # Volume average (20 period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -74,31 +64,25 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(H3_1d[i]) or np.isnan(L3_1d[i]) or 
+            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > average
-        volume_confirm = volume[i] > vol_ma[i]
+        # Volume spike: current volume > 1.5x average
+        volume_spike = volume[i] > vol_ma[i] * 1.5
         
-        # Trend and momentum conditions
-        above_kama = close[i] > kama_1d_aligned[i]
-        below_kama = close[i] < kama_1d_aligned[i]
-        rsi_overbought = rsi_1d_aligned[i] > 70
-        rsi_oversold = rsi_1d_aligned[i] < 30
+        # Trend filter: price above/below 1w EMA
+        above_ema = close[i] > ema_1w_aligned[i]
+        below_ema = close[i] < ema_1w_aligned[i]
         
-        # Entry conditions:
-        # Long: price above KAMA (uptrend) AND RSI not overbought AND volume confirmation
-        # Short: price below KAMA (downtrend) AND RSI not oversold AND volume confirmation
-        long_entry = above_kama and (not rsi_overbought) and volume_confirm
-        short_entry = below_kama and (not rsi_oversold) and volume_confirm
+        # Entry conditions: breakout of H3/L3 with volume and trend
+        long_entry = (close[i] > H3_1d[i]) and volume_spike and above_ema
+        short_entry = (close[i] < L3_1d[i]) and volume_spike and below_ema
         
-        # Exit conditions:
-        # Long exit: price crosses below KAMA OR RSI becomes overbought
-        # Short exit: price crosses above KAMA OR RSI becomes oversold
-        long_exit = (not above_kama) or rsi_overbought
-        short_exit = (not below_kama) or rsi_oversold
+        # Exit conditions: return to H4/L4 levels or trend reversal
+        long_exit = (close[i] < H4_1d[i]) or (close[i] < ema_1w_aligned[i])
+        short_exit = (close[i] > L4_1d[i]) or (close[i] > ema_1w_aligned[i])
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
