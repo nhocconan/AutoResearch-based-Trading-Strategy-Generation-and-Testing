@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation_v1
-Hypothesis: On 12h timeframe, buy when price breaks above Camarilla R4 resistance level (calculated from prior 1d OHLC) with volume confirmation, sell when price breaks below Camarilla S4 support level with volume confirmation. Uses Camarilla pivot levels for institutional reference points, volume confirmation for breakout strength, and avoids overtrading by requiring significant breaks of key levels. Designed for 12-30 trades/year by requiring breaks of outer Camarilla levels (R4/S4) which occur less frequently than inner levels. Works in bull markets via R4 breakouts and in bear markets via S4 breakdowns.
+4h_1d_KAMA_Trend_RSI_Momentum_v1
+Hypothesis: On 4h timeframe, use 1d KAMA to determine trend direction, then enter long when RSI(14) crosses above 30 and short when RSI(14) crosses below 70, with momentum confirmation via ROC(10). This avoids overtrading by requiring both trend alignment and momentum confirmation. Designed for 20-50 trades/year by using higher timeframe trend filter and momentum thresholds. Works in bull markets via KAMA-up/RSI-long and in bear markets via KAMA-down/RSI-short.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation_v1"
-timeframe = "12h"
+name = "4h_1d_KAMA_Trend_RSI_Momentum_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,55 +23,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume average (20 period) for spike detection
+    # Volume average (20 period) for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Load 1d data ONCE for Camarilla pivot levels
+    # Load 1d data ONCE for KAMA trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from prior 1d OHLC
-    # Camarilla: R4 = Close + 1.5 * (High - Low), S4 = Close - 1.5 * (High - Low)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate KAMA on 1d close
     close_1d = df_1d['close'].values
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close_1d, n=10))  # |close[t] - close[t-10]|
+    volatility = np.sum(np.abs(np.diff(close_1d, n=1)), axis=0)  # sum |diff| over 10 periods
+    # Fix dimensions: change length = len-10, volatility length = len-1
+    change_padded = np.concatenate([np.full(10, np.nan), change])
+    volatility_padded = np.concatenate([np.full(1, np.nan), volatility])
+    # Align to same length
+    min_len = min(len(change_padded), len(volatility_padded))
+    change_padded = change_padded[:min_len]
+    volatility_padded = volatility_padded[:min_len]
+    # Pad to full length
+    er = np.full(len(close_1d), np.nan)
+    er[10:] = change_padded[10:] / volatility_padded[10:]
+    er = np.where(volatility_padded[10:] == 0, 0, er[10:])
+    er = np.concatenate([np.full(10, np.nan), er])
+    # Smoothing constants
+    sc = (er * 0.29 + 0.06) ** 2  # where 0.29 = 2/(2+1), 0.06 = 2/(30+1)
+    # KAMA calculation
+    kama = np.full(len(close_1d), np.nan)
+    kama[9] = close_1d[9]  # start at index 9
+    for i in range(10, len(close_1d)):
+        if np.isnan(kama[i-1]) or np.isnan(sc[i]):
+            kama[i] = close_1d[i]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    camarilla_r4 = close_1d + 1.5 * (high_1d - low_1d)
-    camarilla_s4 = close_1d - 1.5 * (high_1d - low_1d)
+    # Align KAMA to 4h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
-    # Align to 12h timeframe (values from prior 1d bar available at 12h bar open)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    # Calculate RSI(14) on 4h close
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Calculate ROC(10) for momentum confirmation
+    roc = np.zeros_like(close)
+    roc[:10] = np.nan
+    roc[10:] = (close[10:] - close[:-10]) / close[:-10] * 100
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(roc[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Camarilla breakout conditions
-        breakout_r4 = close[i] > camarilla_r4_aligned[i]  # Break above R4
-        breakout_s4 = close[i] < camarilla_s4_aligned[i]  # Break below S4
+        # Trend condition: price relative to KAMA
+        price_above_kama = close[i] > kama_aligned[i]
+        price_below_kama = close[i] < kama_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x average
-        volume_spike = volume[i] > vol_ma[i] * 1.5
+        # RSI conditions with momentum confirmation
+        rsi_oversold = rsi[i] < 30 and roc[i] > 0  # RSI below 30 with positive momentum
+        rsi_overbought = rsi[i] > 70 and roc[i] < 0  # RSI above 70 with negative momentum
+        
+        # Volume confirmation: current volume > 1.2x average
+        volume_confirm = volume[i] > vol_ma[i] * 1.2
         
         # Entry conditions
-        long_entry = breakout_r4 and volume_spike
-        short_entry = breakout_s4 and volume_spike
+        long_entry = price_above_kama and rsi_oversold and volume_confirm
+        short_entry = price_below_kama and rsi_overbought and volume_confirm
         
-        # Exit conditions: price returns to Camarilla pivot point (midpoint)
-        # Pivot point = (High + Low + Close) / 3
-        pivot_point = (high_1d + low_1d + close_1d) / 3
-        pivot_point_aligned = align_htf_to_ltf(prices, df_1d, pivot_point)
-        
-        long_exit = close[i] < pivot_point_aligned[i]
-        short_exit = close[i] > pivot_point_aligned[i]
+        # Exit conditions: opposite RSI extreme
+        long_exit = rsi[i] > 70
+        short_exit = rsi[i] < 30
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
