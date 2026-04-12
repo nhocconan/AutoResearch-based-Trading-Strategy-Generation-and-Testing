@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h_4h_1d_camarilla_filtered_v3
-# Uses daily Camarilla pivot levels (H4/L4) with volume confirmation and ADX trend filter.
-# In bull markets, buys breakouts above H4 resistance with volume.
-# In bear markets, shorts breakdowns below L4 support with volume.
-# ADX > 25 ensures we only trade in trending markets, avoiding false signals in ranges.
-# Target: 15-35 trades/year per symbol (60-140 total over 4 years) for low friction and high edge.
-# Session filter: 08-20 UTC to avoid low-liquidity hours.
+# Hypothesis: 6h_1w_1d_williams_fractal_reversal_v1
+# Uses weekly Williams fractal reversal with daily trend filter on 6h timeframe.
+# In bull markets, buys at bullish fractal (support) when price > daily EMA50.
+# In bear markets, shorts at bearish fractal (resistance) when price < daily EMA50.
+# Weekly fractals provide high-probability reversal zones, daily EMA filters counter-trend noise.
+# Target: 15-25 trades/year per symbol for low friction and high edge in ranging/trending markets.
 
-name = "1h_4h_1d_camarilla_filtered_v3"
-timeframe = "1h"
+name = "6h_1w_1d_williams_fractal_reversal_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,117 +22,102 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for Williams fractals
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day (H4/L4)
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    close_prev = df_1d['close'].shift(1).values
+    # Get daily data for EMA filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Camarilla formulas for H4/L4 (wider bands)
-    range_prev = high_prev - low_prev
-    camarilla_h4 = close_prev + range_prev * 1.1 / 2
-    camarilla_l4 = close_prev - range_prev * 1.1 / 2
+    # Calculate Williams fractals on weekly data
+    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n-3] < high[n-1] > high[n+1]
+    # Bullish fractal: low[n-2] > low[n-1] < low[n] and low[n-3] > low[n-1] < low[n+1]
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Align to 1h timeframe (already delayed by 1 day due to shift)
-    h4_level = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_level = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    bearish_fractal = np.full(len(high_1w), np.nan)
+    bullish_fractal = np.full(len(low_1w), np.nan)
     
-    # Volume confirmation: volume > 1.8 * 20-period average (stricter)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.8)
+    # Need at least 5 points for fractal calculation (2 left, 2 right)
+    for i in range(2, len(high_1w) - 2):
+        # Bearish fractal: peak with lower highs on both sides
+        if (high_1w[i-2] < high_1w[i-1] and 
+            high_1w[i] > high_1w[i-1] and 
+            high_1w[i] > high_1w[i+1] and 
+            high_1w[i-3] < high_1w[i-1] and 
+            high_1w[i] > high_1w[i+2]):
+            bearish_fractal[i] = high_1w[i]
+        
+        # Bullish fractal: trough with higher lows on both sides
+        if (low_1w[i-2] > low_1w[i-1] and 
+            low_1w[i] < low_1w[i-1] and 
+            low_1w[i] < low_1w[i+1] and 
+            low_1w[i-3] > low_1w[i-1] and 
+            low_1w[i] < low_1w[i+2]):
+            bullish_fractal[i] = low_1w[i]
     
-    # ADX trend filter: only trade when ADX > 25 (strong trending market)
-    # Calculate True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Weekly fractals need 2-bar confirmation after the fractal bar
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bullish_fractal, additional_delay_bars=2)
     
-    # Plus and Minus Directional Movement
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    
-    # Smooth TR, +DM, -DM using Welles Wilder's smoothing (alpha = 1/period)
-    def wilders_smooth(data, period):
-        result = np.full_like(data, np.nan, dtype=float)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(data[:period])
-        # Subsequent values: Wilder's smoothing
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    atr = wilders_smooth(tr, 14)
-    plus_dm_smooth = wilders_smooth(plus_dm, 14)
-    minus_dm_smooth = wilders_smooth(minus_dm, 14)
-    
-    # Avoid division by zero
-    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
-    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = wilders_smooth(dx, 14)
-    adx_filter = adx > 25  # Only strong trends
+    # Daily EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    for i in range(30, n):  # start after warmup
-        # Skip if levels not ready or outside session
-        if np.isnan(h4_level[i]) or np.isnan(l4_level[i]) or np.isnan(adx_filter[i]) or not in_session[i]:
-            # Hold current position if outside session or not ready
-            if position == 1:
-                signals[i] = 0.20
-            elif position == -1:
-                signals[i] = -0.20
-            else:
-                signals[i] = 0.0
+    for i in range(50, n):  # start after warmup
+        # Skip if data not ready
+        if (np.isnan(bearish_fractal_aligned[i]) or 
+            np.isnan(bullish_fractal_aligned[i]) or 
+            np.isnan(ema_50_aligned[i])):
+            signals[i] = 0.0
             continue
         
-        # Check volume and trend filters
-        if not (vol_confirm[i] and adx_filter[i]):
-            # Hold current position if filters fail
-            if position == 1:
-                signals[i] = 0.20
-            elif position == -1:
-                signals[i] = -0.20
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Long signal: price breaks above H4 with volume
-        if close[i] > h4_level[i] and position != 1:
+        # Long signal: price at bullish fractal support and above daily EMA50
+        if (not np.isnan(bullish_fractal_aligned[i]) and 
+            close[i] <= bullish_fractal_aligned[i] * 1.005 and  # allow small tolerance
+            close[i] > ema_50_aligned[i] and 
+            position != 1):
             position = 1
-            signals[i] = 0.20
-        # Short signal: price breaks below L4 with volume
-        elif close[i] < l4_level[i] and position != -1:
+            signals[i] = 0.25
+        
+        # Short signal: price at bearish fractal resistance and below daily EMA50
+        elif (not np.isnan(bearish_fractal_aligned[i]) and 
+              close[i] >= bearish_fractal_aligned[i] * 0.995 and  # allow small tolerance
+              close[i] < ema_50_aligned[i] and 
+              position != -1):
             position = -1
-            signals[i] = -0.20
-        # Exit conditions: opposite breakout
-        elif close[i] < l4_level[i] and position == 1:
-            position = 0
-            signals[i] = 0.0
-        elif close[i] > h4_level[i] and position == -1:
-            position = 0
-            signals[i] = 0.0
-        else:
-            # Hold current position
-            if position == 1:
-                signals[i] = 0.20
-            elif position == -1:
-                signals[i] = -0.20
-            else:
+            signals[i] = -0.25
+        
+        # Exit conditions: opposite fractal touch or EMA cross
+        elif position == 1:
+            # Exit long if price touches bearish fractal or falls below EMA50
+            if ((not np.isnan(bearish_fractal_aligned[i]) and 
+                 close[i] >= bearish_fractal_aligned[i] * 0.995) or
+                close[i] < ema_50_aligned[i]):
+                position = 0
                 signals[i] = 0.0
+            else:
+                signals[i] = 0.25  # hold long
+        
+        elif position == -1:
+            # Exit short if price touches bullish fractal or rises above EMA50
+            if ((not np.isnan(bullish_fractal_aligned[i]) and 
+                 close[i] <= bullish_fractal_aligned[i] * 1.005) or
+                close[i] > ema_50_aligned[i]):
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -0.25  # hold short
+        
+        else:
+            signals[i] = 0.0  # remain flat
     
     return signals
