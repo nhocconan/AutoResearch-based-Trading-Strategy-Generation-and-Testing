@@ -1,8 +1,13 @@
-# -*- coding: utf-8 -*-
+# 4h_1d_camarilla_breakout_v10 - Modified with stricter volume and volatility filters
+# Hypothesis: Camarilla H4/L4 breakouts with volume confirmation and low volatility filter 
+# work in both bull and bear markets by capturing institutional breakouts while avoiding 
+# false signals in choppy conditions. Focus on quality over quantity.
+# Timeframe: 4h, using 1d Camarilla levels for institutional reference points.
+# Expected trades: 20-40 per year to stay under fee drag limits.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
-from math import sqrt
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 name = "4h_1d_camarilla_breakout_v10"
@@ -39,7 +44,8 @@ def generate_signals(prices):
     h4_aligned = align_htf_to_ltf(prices, df_1d, h4_prev)
     l4_aligned = align_htf_to_ltf(prices, df_1d, l4_prev)
     
-    # Volatility filter: ATR ratio (ATR(10)/ATR(30)) < 0.8 = low volatility regime
+    # Volatility filter: ATR ratio (ATR(10)/ATR(30)) < 0.7 = low volatility regime
+    # More restrictive to reduce trades
     high_low = high - low
     high_close = np.abs(high - np.roll(close, 1))
     low_close = np.abs(low - np.roll(close, 1))
@@ -51,11 +57,11 @@ def generate_signals(prices):
     atr10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     atr30 = pd.Series(tr).rolling(window=30, min_periods=30).mean().values
     atr_ratio = atr10 / atr30
-    low_vol = atr_ratio < 0.8  # Low volatility regime for better breakout follow-through
+    low_vol = atr_ratio < 0.7  # More restrictive volatility filter
     
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    # Volume confirmation: volume > 2.0x 30-period average (more strict)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    vol_confirm = volume > (vol_ma * 2.0)  # Increased volume threshold
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
