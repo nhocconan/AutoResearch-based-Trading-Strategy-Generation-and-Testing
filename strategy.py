@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_12h_donchian_breakout_volume_trend_v1
-# 4-hour Donchian breakout with 12-hour trend confirmation (EMA50) and volume filter.
-# In bull markets: breakouts above upper band with volume and uptrend signal long.
-# In bear markets: breakdowns below lower band with volume and downtrend signal short.
-# Uses volume confirmation to avoid false breakouts and trend filter to align with higher timeframe momentum.
-# Target: 20-40 trades/year per symbol for low friction and high edge.
-name = "4h_12h_donchian_breakout_volume_trend_v1"
-timeframe = "4h"
+# Hypothesis: 1d_1w_camarilla_breakout_v1
+# Daily chart strategy using weekly Camarilla levels for trend direction and daily price action for entries.
+# Uses weekly Camarilla H4/L4 as trend filter: only long when price above weekly H4, short when below weekly L4.
+# Daily entries triggered by price crossing daily Camarilla H3/L3 levels with volume confirmation.
+# Weekly timeframe reduces noise and avoids false signals in choppy markets.
+# Designed for low trade frequency (target: 10-25 trades/year) to minimize fee drag.
+# Works in bull markets via breakouts above weekly resistance and in bear markets via breakdowns below weekly support.
+name = "1d_1w_camarilla_breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,19 +24,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter (EMA50)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get weekly data for Camarilla calculation (trend filter)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate EMA50 on 12h close
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate weekly Camarilla levels from previous week
+    high_prev_w = df_1w['high'].shift(1).values
+    low_prev_w = df_1w['low'].shift(1).values
+    close_prev_w = df_1w['close'].shift(1).values
     
-    # Calculate Donchian channels (20-period) on 4h
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    range_prev_w = high_prev_w - low_prev_w
+    # Weekly H4 and L4 levels (strong support/resistance)
+    weekly_h4 = close_prev_w + range_prev_w * 1.1 / 2
+    weekly_l4 = close_prev_w - range_prev_w * 1.1 / 2
+    
+    # Align weekly levels to daily timeframe
+    weekly_h4_aligned = align_htf_to_ltf(prices, df_1w, weekly_h4)
+    weekly_l4_aligned = align_htf_to_ltf(prices, df_1w, weekly_l4)
+    
+    # Get daily data for entry signals
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Calculate daily Camarilla levels from previous day (for entry timing)
+    high_prev_d = df_1d['high'].shift(1).values
+    low_prev_d = df_1d['low'].shift(1).values
+    close_prev_d = df_1d['close'].shift(1).values
+    
+    range_prev_d = high_prev_d - low_prev_d
+    # Daily H3 and L3 levels (entry triggers)
+    daily_h3 = close_prev_d + range_prev_d * 1.1 / 4
+    daily_l3 = close_prev_d - range_prev_d * 1.1 / 4
+    
+    # Align daily levels to daily timeframe (already aligned, but keep for consistency)
+    daily_h3_aligned = align_htf_to_ltf(prices, df_1d, daily_h3)
+    daily_l3_aligned = align_htf_to_ltf(prices, df_1d, daily_l3)
     
     # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -44,13 +69,18 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # start after warmup
-        # Skip if Donchian levels not ready
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
+    for i in range(20, n):  # start after warmup
+        # Skip if weekly levels not ready
+        if np.isnan(weekly_h4_aligned[i]) or np.isnan(weekly_l4_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Skip if volume or trend filter fails
+        # Skip if daily levels not ready
+        if np.isnan(daily_h3_aligned[i]) or np.isnan(daily_l3_aligned[i]):
+            signals[i] = 0.0
+            continue
+        
+        # Check volume filter
         if not vol_confirm[i]:
             # Hold current position if volume filter fails
             if position == 1:
@@ -61,27 +91,19 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Determine trend from 12h EMA50
-        if np.isnan(ema_50_12h_aligned[i]):
-            trend_up = False
-            trend_down = False
-        else:
-            trend_up = close[i] > ema_50_12h_aligned[i]
-            trend_down = close[i] < ema_50_12h_aligned[i]
-        
-        # Long signal: breakout above upper Donchian with volume and uptrend
-        if high[i] > highest_high[i] and vol_confirm[i] and trend_up and position != 1:
+        # Long signal: price above weekly H4 (uptrend) and breaks above daily H3 with volume
+        if close[i] > weekly_h4_aligned[i] and close[i] > daily_h3_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: breakdown below lower Donchian with volume and downtrend
-        elif low[i] < lowest_low[i] and vol_confirm[i] and trend_down and position != -1:
+        # Short signal: price below weekly L4 (downtrend) and breaks below daily L3 with volume
+        elif close[i] < weekly_l4_aligned[i] and close[i] < daily_l3_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: opposite breakout
-        elif low[i] < lowest_low[i] and position == 1:
+        # Exit conditions: opposite daily level break
+        elif close[i] < daily_l3_aligned[i] and position == 1:
             position = 0
             signals[i] = 0.0
-        elif high[i] > highest_high[i] and position == -1:
+        elif close[i] > daily_h3_aligned[i] and position == -1:
             position = 0
             signals[i] = 0.0
         else:
