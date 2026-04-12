@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Breakout_Volume_Regime_v1
-Hypothesis: Trade Camarilla pivot breakouts (H4/L4 levels) on 12h chart with volume confirmation and 1-day Choppiness Index regime filter. 
-In trending markets (CHOP < 38.2), trade breakouts in direction of trend. In ranging markets (CHOP > 61.8), trade mean reversion at extreme levels (H5/L5).
-Designed for 15-25 trades/year with clear rules that work in both bull (breakouts continue) and bear (mean reversion in ranges) markets.
+12h_1w_Camarilla_Breakout_Volume_Regime_v1
+Hypothesis: Trade breakouts from weekly Camarilla pivot levels with volume confirmation and 1d ADX trend filter. 
+Designed for 12-30 trades/year on 12h timeframe, works in bull markets (breakouts continue) and bear markets (breakouts fail, reverse to mean).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_Breakout_Volume_Regime_v1"
+name = "12h_1w_Camarilla_Breakout_Volume_Regime_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -24,7 +23,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY DATA FOR CAMARILLA PIVOTS AND CHOPPINESS ===
+    # === WEEKLY DATA FOR CAMARILLA PIVOTS ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly Camarilla levels
+    camarilla_levels = []
+    for i in range(len(high_1w)):
+        if i == 0:
+            camarilla_levels.append({
+                'H4': np.nan, 'H3': np.nan, 'H2': np.nan, 'H1': np.nan,
+                'L1': np.nan, 'L2': np.nan, 'L3': np.nan, 'L4': np.nan
+            })
+        else:
+            ph = high_1w[i-1]
+            pl = low_1w[i-1]
+            pc = close_1w[i-1]
+            range_val = ph - pl
+            
+            if range_val == 0:
+                camarilla_levels.append({
+                    'H4': pc, 'H3': pc, 'H2': pc, 'H1': pc,
+                    'L1': pc, 'L2': pc, 'L3': pc, 'L4': pc
+                })
+            else:
+                camarilla_levels.append({
+                    'H4': pc + range_val * 1.1 / 2,
+                    'H3': pc + range_val * 1.1 / 4,
+                    'H2': pc + range_val * 1.1 / 6,
+                    'H1': pc + range_val * 1.1 / 12,
+                    'L1': pc - range_val * 1.1 / 12,
+                    'L2': pc - range_val * 1.1 / 6,
+                    'L3': pc - range_val * 1.1 / 4,
+                    'L4': pc - range_val * 1.1 / 2
+                })
+    
+    # Extract arrays
+    H4 = np.array([x['H4'] for x in camarilla_levels])
+    H3 = np.array([x['H3'] for x in camarilla_levels])
+    H2 = np.array([x['H2'] for x in camarilla_levels])
+    H1 = np.array([x['H1'] for x in camarilla_levels])
+    L1 = np.array([x['L1'] for x in camarilla_levels])
+    L2 = np.array([x['L2'] for x in camarilla_levels])
+    L3 = np.array([x['L3'] for x in camarilla_levels])
+    L4 = np.array([x['L4'] for x in camarilla_levels])
+    
+    # Align Camarilla levels to 12h timeframe
+    H4_12h = align_htf_to_ltf(prices, df_1w, H4)
+    H3_12h = align_htf_to_ltf(prices, df_1w, H3)
+    H2_12h = align_htf_to_ltf(prices, df_1w, H2)
+    H1_12h = align_htf_to_ltf(prices, df_1w, H1)
+    L1_12h = align_htf_to_ltf(prices, df_1w, L1)
+    L2_12h = align_htf_to_ltf(prices, df_1w, L2)
+    L3_12h = align_htf_to_ltf(prices, df_1w, L3)
+    L4_12h = align_htf_to_ltf(prices, df_1w, L4)
+    
+    # === DAILY DATA FOR ADX TREND FILTER ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -33,72 +92,43 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for each day (based on previous day)
-    camarilla_h5 = np.full_like(close_1d, np.nan)
-    laughter_h4 = np.full_like(close_1d, np.nan)
-    camarilla_l4 = np.full_like(close_1d, np.nan)
-    camarilla_l5 = np.full_like(close_1d, np.nan)
+    # Calculate ADX (14-period)
+    plus_dm = np.zeros_like(high_1d)
+    minus_dm = np.zeros_like(low_1d)
+    tr = np.zeros_like(high_1d)
     
-    for i in range(1, len(close_1d)):
-        # Previous day's range
-        prev_high = high_1d[i-1]
-        prev_low = low_1d[i-1]
-        prev_close = close_1d[i-1]
-        range_val = prev_high - prev_low
-        
-        if range_val > 0:
-            camarilla_h5[i] = prev_close + 1.1 * range_val * 1.1
-            laughter_h4[i] = prev_close + 1.1 * range_val * 0.5
-            camarilla_l4[i] = prev_close - 1.1 * range_val * 0.5
-            camarilla_l5[i] = prev_close - 1.1 * range_val * 1.1
-        else:
-            camarilla_h5[i] = prev_close
-            laughter_h4[i] = prev_close
-            camarilla_l4[i] = prev_close
-            camarilla_l5[i] = prev_close
-    
-    # Calculate Choppiness Index (14-period)
-    chop_period = 14
-    atr_1d = np.zeros_like(high_1d)
     for i in range(1, len(high_1d)):
-        atr_1d[i] = max(high_1d[i] - low_1d[i], 
-                       abs(high_1d[i] - close_1d[i-1]), 
-                       abs(low_1d[i] - close_1d[i-1]))
+        plus_dm[i] = max(high_1d[i] - high_1d[i-1], 0)
+        minus_dm[i] = max(low_1d[i-1] - low_1d[i], 0)
+        tr[i] = max(high_1d[i] - low_1d[i], 
+                   abs(high_1d[i] - close_1d[i-1]), 
+                   abs(low_1d[i] - close_1d[i-1]))
     
-    # True Range sum and highest/lowest over period
-    tr_sum = np.zeros_like(high_1d)
-    highest_high = np.zeros_like(high_1d)
-    lowest_low = np.zeros_like(high_1d)
+    # Wilder's smoothing
+    def wilders_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        result[period-1] = np.nansum(data[:period])
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
     
-    for i in range(len(high_1d)):
-        if i == 0:
-            tr_sum[i] = atr_1d[i]
-            highest_high[i] = high_1d[i]
-            lowest_low[i] = low_1d[i]
-        else:
-            tr_sum[i] = tr_sum[i-1] + atr_1d[i]
-            if i >= chop_period:
-                tr_sum[i] = tr_sum[i-1] - atr_1d[i-chop_period] + atr_1d[i]
-            highest_high[i] = max(high_1d[i], highest_high[i-1] if i>0 else high_1d[i])
-            lowest_low[i] = min(low_1d[i], lowest_low[i-1] if i>0 else low_1d[i])
-            if i >= chop_period:
-                highest_high[i] = max(high_1d[i-chop_period+1:i+1]) if i >= chop_period-1 else highest_high[i]
-                lowest_low[i] = min(low_1d[i-chop_period+1:i+1]) if i >= chop_period-1 else lowest_low[i]
+    period = 14
+    tr_smooth = wilders_smooth(tr, period)
+    plus_dm_smooth = wilders_smooth(plus_dm, period)
+    minus_dm_smooth = wilders_smooth(minus_dm, period)
     
-    # Choppiness Index formula
-    chop = np.full_like(high_1d, 50.0)  # default neutral
-    for i in range(chop_period-1, len(high_1d)):
-        if highest_high[i] > lowest_low[i] and tr_sum[i] > 0:
-            chop[i] = 100 * np.log10(tr_sum[i] / (highest_high[i] - lowest_low[i])) / np.log10(chop_period)
+    plus_di = np.where(tr_smooth != 0, 100 * plus_dm_smooth / tr_smooth, 0)
+    minus_di = np.where(tr_smooth != 0, 100 * minus_dm_smooth / tr_smooth, 0)
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = wilders_smooth(dx, period)
     
-    # Align Camarilla levels and Chop to 12h timeframe
-    h5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h5)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, laughter_h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    l5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l5)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Align ADX to 12h timeframe
+    adx_12h = align_htf_to_ltf(prices, df_1d, adx)
     
-    # === 12H INDICATORS: VOLUME FILTER ===
+    # === 12H INDICATORS ===
+    # Volume filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -106,71 +136,48 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(h5_aligned[i]) or np.isnan(h4_aligned[i]) or 
-            np.isnan(l4_aligned[i]) or np.isnan(l5_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(H4_12h[i]) or np.isnan(L4_12h[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(adx_12h[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
+        
+        # Trend filter: ADX > 20 indicates trending market
+        trending = adx_12h[i] > 20
         
         # Volume strength
         strong_volume = volume[i] > (vol_ma[i] * 1.5)
         
-        # Regime filters
-        trending_market = chop_aligned[i] < 38.2  # Trending: chop < 38.2
-        ranging_market = chop_aligned[i] > 61.8   # Ranging: chop > 61.8
+        # Long: price breaks above H4 with volume and trend
+        long_signal = (close[i] > H4_12h[i] and 
+                      strong_volume and 
+                      trending)
         
-        # Initialize signal
-        signal_generated = False
+        # Short: price breaks below L4 with volume and trend
+        short_signal = (close[i] < L4_12h[i] and 
+                       strong_volume and 
+                       trending)
         
-        if trending_market and strong_volume:
-            # In trending market: trade breakouts in direction of trend
-            # Use price action to determine trend (price vs 20-period EMA)
-            if i >= 20:
-                ema20 = pd.Series(close[:i+1]).ewm(span=20, adjust=False).mean().iloc[-1]
-                uptrend = close[i] > ema20
-                downtrend = close[i] < ema20
-                
-                # Long breakout above H4 in uptrend
-                if uptrend and close[i] > h4_aligned[i]:
-                    position = 1
-                    signals[i] = 0.25
-                    signal_generated = True
-                # Short breakdown below L4 in downtrend
-                elif downtrend and close[i] < l4_aligned[i]:
-                    position = -1
-                    signals[i] = -0.25
-                    signal_generated = True
-                    
-        elif ranging_market and strong_volume:
-            # In ranging market: mean reversion at extreme levels
-            # Long near L5 (strong support)
-            if close[i] <= l5_aligned[i] * 1.001:  # Allow small slippage
-                position = 1
-                signals[i] = 0.25
-                signal_generated = True
-            # Short near H5 (strong resistance)
-            elif close[i] >= h5_aligned[i] * 0.999:  # Allow small slippage
-                position = -1
-                signals[i] = -0.25
-                signal_generated = True
+        # Exit: price returns to H2/L2 or trend weakens
+        exit_long = (position == 1 and 
+                    (close[i] < H2_12h[i] or adx_12h[i] < 15))
+        exit_short = (position == -1 and 
+                     (close[i] > L2_12h[i] or adx_12h[i] < 15))
         
-        # Exit conditions (apply regardless of regime)
-        if not signal_generated:
-            if position == 1:
-                # Exit long: price reaches H4 (take profit) or L4 (stop loss)
-                if close[i] >= h4_aligned[i] or close[i] <= l4_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = 0.25
-            elif position == -1:
-                # Exit short: price reaches L4 (take profit) or H4 (stop loss)
-                if close[i] <= l4_aligned[i] or close[i] >= h4_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -0.25
-            else:
-                signals[i] = 0.0
+        # Execute trades
+        if long_signal and position != 1:
+            position = 1
+            signals[i] = 0.25
+        elif short_signal and position != -1:
+            position = -1
+            signals[i] = -0.25
+        elif exit_long and position == 1:
+            position = 0
+            signals[i] = 0.0
+        elif exit_short and position == -1:
+            position = 0
+            signals[i] = 0.0
+        else:
+            # Hold position
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
