@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-6h_12h_Donchian_Breakout_Volume_Regime
-Hypothesis: On 6h timeframe, use 12h Donchian channel breakouts with volume confirmation and volatility regime filter.
-In low volatility (12h ATR < 50th percentile): require stronger breakout (2x ATR) and higher volume (2x avg).
-In high volatility: trade standard breakout with volume confirmation.
-Designed to work in both bull and bear by adapting to volatility conditions.
+4h_1D_Chaikin_Money_Flow_Strategy
+Hypothesis: Chaikin Money Flow (CMF) on daily timeframe detects institutional accumulation/distribution.
+Long when CMF > 0.15 with price above 4h EMA50, short when CMF < -0.15 with price below EMA50.
+Uses volume-weighted money flow to capture smart money moves, effective in both bull (accumulation) and bear (distribution) markets.
+Low trade frequency (~25/year) reduces fee drag while capturing significant moves.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_Donchian_Breakout_Volume_Regime"
-timeframe = "6h"
+name = "4h_1D_Chaikin_Money_Flow_Strategy"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,93 +25,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12H DATA FOR DONCHIAN CHANNEL AND REGIME ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # === DAILY DATA FOR CHAIKIN MONEY FLOW ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # 12h Donchian channel (20-period)
-    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Money Flow Multiplier: ((Close - Low) - (High - Close)) / (High - Low)
+    # Avoid division by zero
+    hl_range = high_1d - low_1d
+    hl_range = np.where(hl_range == 0, 1, hl_range)  # Replace zeros with 1 to avoid div/0
+    mf_multiplier = ((close_1d - low_1d) - (high_1d - close_1d)) / hl_range
     
-    # 12h ATR for volatility regime and breakout filter
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr_12h = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_12h = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Money Flow Volume
+    mf_volume = mf_multiplier * volume_1d
     
-    # 12h ATR percentile (50-period lookback) - regime filter
-    atr_series = pd.Series(atr_12h)
-    atr_percentile = atr_series.rolling(window=50, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
-    ).values
-    atr_regime = align_htf_to_ltf(prices, df_12h, atr_percentile)  # < 0.5 = low vol regime
+    # Chaikin Money Flow (20-period)
+    mf_volume_sum = pd.Series(mf_volume).rolling(window=20, min_periods=20).sum().values
+    volume_sum = pd.Series(volume_1d).rolling(window=20, min_periods=20).sum().values
+    cmf = np.where(volume_sum != 0, mf_volume_sum / volume_sum, 0)
     
-    # Align Donchian channels to 6h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
-    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
+    # Align CMF to 4h timeframe (wait for daily bar to close)
+    cmf_aligned = align_htf_to_ltf(prices, df_1d, cmf)
     
-    # === 6H DATA FOR VOLUME CONFIRMATION ===
+    # === 4H INDICATORS ===
+    # EMA50 for trend filter
+    close_series = pd.Series(close)
+    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Volume confirmation (4h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Need enough lookback for indicators
+    for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(atr_12h_aligned[i]) or np.isnan(atr_regime[i]) or
+        if (np.isnan(cmf_aligned[i]) or np.isnan(ema50[i]) or 
             np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Regime: low volatility (< 50th percentile) = stricter entry
-        low_vol_regime = atr_regime[i] < 0.5
+        # Long setup: CMF positive (accumulation) + price above EMA50 + volume confirmation
+        long_setup = (cmf_aligned[i] > 0.15) and (close[i] > ema50[i]) and (vol_ratio[i] > 1.2)
         
-        if low_vol_regime:
-            # LOW VOL: Require stronger breakout and higher volume
-            breakout_threshold = atr_12h_aligned[i] * 2.0
-            volume_threshold = 2.0
-            
-            bullish_breakout = (close[i] > donchian_high_aligned[i] + breakout_threshold) and (vol_ratio[i] > volume_threshold)
-            bearish_breakout = (close[i] < donchian_low_aligned[i] - breakout_threshold) and (vol_ratio[i] > volume_threshold)
-            
-            bullish_setup = bullish_breakout
-            bearish_setup = bearish_breakout
-            
-            # Exit when price returns to Donchian channel
-            exit_long = close[i] <= donchian_high_aligned[i]
-            exit_short = close[i] >= donchian_low_aligned[i]
-            
-        else:
-            # HIGH VOL: Standard breakout with volume confirmation
-            breakout_threshold = atr_12h_aligned[i] * 0.5
-            volume_threshold = 1.5
-            
-            bullish_breakout = (close[i] > donchian_high_aligned[i] + breakout_threshold) and (vol_ratio[i] > volume_threshold)
-            bearish_breakout = (close[i] < donchian_low_aligned[i] - breakout_threshold) and (vol_ratio[i] > volume_threshold)
-            
-            bullish_setup = bullish_breakout
-            bearish_setup = bearish_breakout
-            
-            # Exit when price returns to opposite Donchian band (mean reversion tendency)
-            exit_long = close[i] <= donchian_low_aligned[i]
-            exit_short = close[i] >= donchian_high_aligned[i]
+        # Short setup: CMF negative (distribution) + price below EMA50 + volume confirmation
+        short_setup = (cmf_aligned[i] < -0.15) and (close[i] < ema50[i]) and (vol_ratio[i] > 1.2)
+        
+        # Exit when CMF crosses zero (change in money flow direction)
+        exit_long = cmf_aligned[i] < 0
+        exit_short = cmf_aligned[i] > 0
         
         # Execute trades
-        if bullish_setup and position != 1:
+        if long_setup and position != 1:
             position = 1
             signals[i] = 0.25
-        elif bearish_setup and position != -1:
+        elif short_setup and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
