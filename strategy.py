@@ -1,20 +1,15 @@
 #!/usr/bin/env python3
 """
-1d_1w_Weekly_Pullback_to_Trend_v1
-Hypothesis: Price pulls back to weekly trend (EMA21) during ranging markets (low volatility) and resumes trend. Uses daily chart for entry timing.
-Long when price touches weekly EMA21 during low volatility (weekly ATR < 50th percentile) and daily RSI < 40.
-Short when price touches weekly EMA21 during low volatility and daily RSI > 60.
-Uses volatility regime to avoid whipsaws in high volatility markets.
-Targets 10-25 trades/year to minimize fee drag.
-Works in bull (buy dips in uptrend) and bear (sell rallies in downtrend).
+6h_1d_Alligator_Range_Filter_v1
+Hypothesis: Bill Williams Alligator identifies trending vs ranging markets. In range (JAW>TEETH>LIPS or reverse), fade price extremes at Bollinger Bands (20,2) on 6h. In trend (JAW<TEETH<LIPS or reverse), follow Alligator crossovers. Uses 1d Alligator for regime, 6h for entries. Avoids whipsaw in chop, catches trends. Works in bull (trend follow) and bear (range fade). Target 15-30 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Weekly_Pullback_to_Trend_v1"
-timeframe = "1d"
+name = "6h_1d_Alligator_Range_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,69 +21,105 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get weekly data for trend and volatility regime
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 1D data for Alligator regime
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    weekly_close = df_1w['close'].values
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
+    # === 1D ALLIGATOR (13,8,5 SMMA) ===
+    def smma(arr, period):
+        """Smoothed Moving Average"""
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        res = np.full(len(arr), np.nan)
+        sma = np.mean(arr[:period])
+        res[period-1] = sma
+        for i in range(period, len(arr)):
+            res[i] = (res[i-1] * (period-1) + arr[i]) / period
+        return res
     
-    # === WEEKLY EMA21 (trend) ===
-    ema21 = pd.Series(weekly_close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_daily = align_htf_to_ltf(prices, df_1w, ema21)
+    ma13 = smma(df_1d['close'].values, 13)
+    ma8 = smma(df_1d['close'].values, 8)
+    ma5 = smma(df_1d['close'].values, 5)
     
-    # === WEEKLY ATR(14) for volatility regime ===
-    tr1 = weekly_high - weekly_low
-    tr2 = np.abs(weekly_high[1:] - weekly_close[:-1])
-    tr3 = np.abs(weekly_low[1:] - weekly_close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr14_daily = align_htf_to_ltf(prices, df_1w, atr14)
+    # Align Alligator lines to 6h
+    jaw_6h = align_htf_to_ltf(prices, df_1d, ma13)
+    teeth_6h = align_htf_to_ltf(prices, df_1d, ma8)
+    lips_6h = align_htf_to_ltf(prices, df_1d, ma5)
     
-    # === WEEKLY ATR PERCENTILE (50-day lookback) ===
-    atr_percentile = np.full(n, np.nan)
-    if n >= 50:
-        for i in range(50, n):
-            window = atr14_daily[i-50:i]
-            valid = window[~np.isnan(window)]
-            if len(valid) > 0:
-                percentile = (np.sum(valid <= atr14_daily[i]) / len(valid)) * 100
-                atr_percentile[i] = percentile
+    # === 6H BOLLINGER BANDS (20, 2) ===
+    if n < 20:
+        return np.zeros(n)
     
-    # === DAILY RSI(14) for entry timing ===
-    delta = pd.Series(close).diff().values
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    sma20 = np.full(n, np.nan)
+    std20 = np.full(n, np.nan)
+    sum_close = np.sum(close[:20])
+    sum_sq = np.sum(close[:20]**2)
+    sma20[19] = sum_close / 20
+    var20 = (sum_sq / 20) - (sma20[19]**2)
+    std20[19] = np.sqrt(max(var20, 0))
+    upper_bb = sma20 + 2 * std20
+    lower_bb = sma20 - 2 * std20
     
+    for i in range(20, n):
+        sum_close = sum_close - close[i-20] + close[i]
+        sum_sq = sum_sq - close[i-20]**2 + close[i]**2
+        sma20[i] = sum_close / 20
+        var20 = (sum_sq / 20) - (sma20[i]**2)
+        std20[i] = np.sqrt(max(var20, 0))
+        upper_bb[i] = sma20[i] + 2 * std20[i]
+        lower_bb[i] = sma20[i] - 2 * std20[i]
+    
+    # === SIGNAL LOGIC ===
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any data invalid
-        if (np.isnan(ema21_daily[i]) or np.isnan(atr14_daily[i]) or 
-            np.isnan(atr_percentile[i]) or np.isnan(rsi[i])):
+        if (np.isnan(jaw_6h[i]) or np.isnan(teeth_6h[i]) or np.isnan(lips_6h[i]) or
+            np.isnan(upper_bb[i]) or np.isnan(lower_bb[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Low volatility regime: weekly ATR below 50th percentile
-        low_vol = atr_percentile[i] < 50
+        # Determine regime: trending or ranging
+        # Trend: JAW < TEETH < LIPS (bull) or JAW > TEETH > LIPS (bear)
+        # Range: JAW > TEETH > LIPS (bull alignment but prices in range) or JAW < TEETH < LIPS (bear alignment but ranging)
+        # Actually: Alligator sleeping (all intertwined) = range; waking up (separated) = trend
+        # Simpler: if lips > teeth > jaw OR lips < teeth < jaw = trending, else ranging
+        lips_above_teeth = lips_6h[i] > teeth_6h[i]
+        teeth_above_jaw = teeth_6h[i] > jaw_6h[i]
+        lips_below_teeth = lips_6h[i] < teeth_6h[i]
+        teeth_below_jaw = teeth_6h[i] < jaw_6h[i]
         
-        # Price near weekly EMA21 (within 0.5%)
-        price_near_ema = np.abs(close[i] - ema21_daily[i]) / ema21_daily[i] < 0.005
+        trending = (lips_above_teeth and teeth_above_jaw) or (lips_below_teeth and teeth_below_jaw)
+        ranging = not trending
         
-        # Entry conditions
-        long_entry = low_vol and price_near_ema and (rsi[i] < 40)
-        short_entry = low_vol and price_near_ema and (rsi[i] > 60)
-        
-        # Exit: volatility increases or price moves away from EMA
-        high_vol = atr_percentile[i] > 70
-        price_far = np.abs(close[i] - ema21_daily[i]) / ema21_daily[i] > 0.02
+        if ranging:
+            # Fade Bollinger Band extremes
+            long_entry = close[i] <= lower_bb[i]
+            short_entry = close[i] >= upper_bb[i]
+            long_exit = close[i] >= (sma20[i])  # Exit at middle BB
+            short_exit = close[i] <= (sma20[i])
+        else:
+            # Follow Alligator crossover (Lips cross Teeth)
+            # Need previous values for crossover
+            if i == 50:
+                prev_lips = lips_6h[i-1] if not np.isnan(lips_6h[i-1]) else lips_6h[i]
+                prev_teeth = teeth_6h[i-1] if not np.isnan(teeth_6h[i-1]) else teeth_6h[i]
+            else:
+                prev_lips = lips_6h[i-1]
+                prev_teeth = teeth_6h[i-1]
+            
+            # Bullish crossover: Lips crosses above Teeth
+            bullish_cross = (prev_lips <= prev_teeth) and (lips_6h[i] > teeth_6h[i])
+            # Bearish crossover: Lips crosses below Teeth
+            bearish_cross = (prev_lips >= prev_teeth) and (lips_6h[i] < teeth_6h[i])
+            
+            long_entry = bullish_cross
+            short_entry = bearish_cross
+            # Exit when cross reverses
+            long_exit = bearish_cross
+            short_exit = bullish_cross
         
         # Signal logic
         if long_entry and position != 1:
@@ -97,10 +128,10 @@ def generate_signals(prices):
         elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
-        elif position == 1 and (high_vol or price_far):
+        elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (high_vol or price_far):
+        elif position == -1 and short_exit:
             position = 0
             signals[i] = 0.0
         else:
