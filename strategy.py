@@ -1,16 +1,15 @@
-# %%
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v1"
-timeframe = "12h"
+name = "6h_1d_ichimoku_cloud_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,80 +17,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots (HTF)
+    # Get 1d data for Ichimoku cloud and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 52:  # Need at least 52 periods for Ichimoku
         return np.zeros(n)
     
-    # Previous 1d bar data to avoid look-ahead
-    high_1d_prev = df_1d['high'].shift(1).values
-    low_1d_prev = df_1d['low'].shift(1).values
-    close_1d_prev = df_1d['close'].shift(1).values
+    # Ichimoku components on daily
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d Camarilla levels (H4/L4 breakout)
-    pivot_prev = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-    range_1d_prev = high_1d_prev - low_1d_prev
-    h4_prev = pivot_prev + (range_1d_prev * 1.1 / 2)
-    l4_prev = pivot_prev - (range_1d_prev * 1.1 / 2)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
     
-    # Align to 12h
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4_prev)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4_prev)
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = (period52_high + period52_low) / 2
+    
+    # Align Ichimoku components to 6h
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    
+    # Volume confirmation: volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
-    
-    # ADX for trend strength (14-period) - to avoid ranging markets
-    # ADX > 25 indicates trending market
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - low[:-1]), np.abs(low[1:] - high[:-1])))
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean() / pd.Series(tr).ewm(alpha=1/14, adjust=False).mean()
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean() / pd.Series(tr).ewm(alpha=1/14, adjust=False).mean()
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    adx = np.concatenate([[np.nan], adx])  # align with original array length
+    vol_confirm = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0
     
-    for i in range(200, n):
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(vol_confirm[i]) or np.isnan(adx[i])):
+    for i in range(52, n):  # Start after Ichimoku calculation period
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or
+            np.isnan(vol_confirm[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Only trade in trending markets (ADX > 25)
-        if adx[i] <= 25:
-            if position == 1:
-                signals[i] = 0.0
-                position = 0
-            elif position == -1:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
+        # Determine cloud top and bottom
+        cloud_top = max(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        cloud_bottom = min(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
         
-        long_signal = close[i] > h4_aligned[i] and vol_confirm[i]
-        short_signal = close[i] < l4_aligned[i] and vol_confirm[i]
+        # Bullish: price above cloud AND Tenkan > Kijun
+        bullish = (close[i] > cloud_top) and (tenkan_sen_aligned[i] > kijun_sen_aligned[i])
         
-        pivot_prev_val = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_prev_val)
-        exit_long = close[i] < pivot_aligned[i]
-        exit_short = close[i] > pivot_aligned[i]
+        # Bearish: price below cloud AND Tenkan < Kijun
+        bearish = (close[i] < cloud_bottom) and (tenkan_sen_aligned[i] < kijun_sen_aligned[i])
         
-        if long_signal and position != 1:
+        # Exit conditions: price crosses back into cloud or Tenkan/Kijun cross reverses
+        exit_bullish = close[i] < cloud_top or tenkan_sen_aligned[i] < kijun_sen_aligned[i]
+        exit_bearish = close[i] > cloud_bottom or tenkan_sen_aligned[i] > kijun_sen_aligned[i]
+        
+        if bullish and vol_confirm[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_signal and position != -1:
+        elif bearish and vol_confirm[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        elif exit_long and position == 1:
+        elif exit_bullish and position == 1:
             position = 0
             signals[i] = 0.0
-        elif exit_short and position == -1:
+        elif exit_bearish and position == -1:
             position = 0
             signals[i] = 0.0
         else:
@@ -103,527 +100,3 @@ def generate_signals(prices):
                 signals[i] = 0.0
     
     return signals
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-name = "12h_1d_camarilla_breakout_v1"
-timeframe = "12h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 200:
-        return np.zeros(n)
-    
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
-    
-    # Get 1d data for Camarilla pivots (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Previous 1d bar data to avoid look-ahead
-    high_1d_prev = df_1d['high'].shift(1).values
-    low_1d_prev = df_1d['low'].shift(1).values
-    close_1d_prev = df_1d['close'].shift(1).values
-    
-    # Calculate 1d Camarilla levels (H4/L4 breakout)
-    pivot_prev = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-    range_1d_prev = high_1d_prev - low_1d_prev
-    h4_prev = pivot_prev + (range_1d_prev * 1.1 / 2)
-    l4_prev = pivot_prev - (range_1d_prev * 1.1 / 2)
-    
-    # Align to 12h
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4_prev)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4_prev)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
-    
-    # ADX for trend strength (14-period) - to avoid ranging markets
-    # ADX > 25 indicates trending market
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - low[:-1]), np.abs(low[1:] - high[:-1])))
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean() / pd.Series(tr).ewm(alpha=1/14, adjust=False).mean()
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean() / pd.Series(tr).ewm(alpha=1/14, adjust=False).mean()
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    adx = np.concatenate([[np.nan], adx])  # align with original array length
-    
-    signals = np.zeros(n)
-    position = 0
-    
-    for i in range(200, n):
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(vol_confirm[i]) or np.isnan(adx[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
-            continue
-        
-        # Only trade in trending markets (ADX > 25)
-        if adx[i] <= 25:
-            if position == 1:
-                signals[i] = 0.0
-                position = 0
-            elif position == -1:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        long_signal = close[i] > h4_aligned[i] and vol_confirm[i]
-        short_signal = close[i] < l4_aligned[i] and vol_confirm[i]
-        
-        pivot_prev_val = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_prev_val)
-        exit_long = close[i] < pivot_aligned[i]
-        exit_short = close[i] > pivot_aligned[i]
-        
-        if long_signal and position != 1:
-            position = 1
-            signals[i] = 0.25
-        elif short_signal and position != -1:
-            position = -1
-            signals[i] = -0.25
-        elif exit_long and position == 1:
-            position = 0
-            signals[i] = 0.0
-        elif exit_short and position == -1:
-            position = 0
-            signals[i] = 0.0
-        else:
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
-    
-    return signals
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-name = "12h_1d_camarilla_breakout_v1"
-timeframe = "12h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 200:
-        return np.zeros(n)
-    
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
-    
-    # Get 1d data for Camarilla pivots (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Previous 1d bar data to avoid look-ahead
-    high_1d_prev = df_1d['high'].shift(1).values
-    low_1d_prev = df_1d['low'].shift(1).values
-    close_1d_prev = df_1d['close'].shift(1).values
-    
-    # Calculate 1d Camarilla levels (H4/L4 breakout)
-    pivot_prev = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-    range_1d_prev = high_1d_prev - low_1d_prev
-    h4_prev = pivot_prev + (range_1d_prev * 1.1 / 2)
-    l4_prev = pivot_prev - (range_1d_prev * 1.1 / 2)
-    
-    # Align to 12h
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4_prev)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4_prev)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
-    
-    # ADX for trend strength (14-period) - to avoid ranging markets
-    # ADX > 25 indicates trending market
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - low[:-1]), np.abs(low[1:] - high[:-1])))
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean() / pd.Series(tr).ewm(alpha=1/14, adjust=False).mean()
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean() / pd.Series(tr).ewm(alpha=1/14, adjust=False).mean()
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    adx = np.concatenate([[np.nan], adx])  # align with original array length
-    
-    signals = np.zeros(n)
-    position = 0
-    
-    for i in range(200, n):
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(vol_confirm[i]) or np.isnan(adx[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
-            continue
-        
-        # Only trade in trending markets (ADX > 25)
-        if adx[i] <= 25:
-            if position == 1:
-                signals[i] = 0.0
-                position = 0
-            elif position == -1:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        long_signal = close[i] > h4_aligned[i] and vol_confirm[i]
-        short_signal = close[i] < l4_aligned[i] and vol_confirm[i]
-        
-        pivot_prev_val = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_prev_val)
-        exit_long = close[i] < pivot_aligned[i]
-        exit_short = close[i] > pivot_aligned[i]
-        
-        if long_signal and position != 1:
-            position = 1
-            signals[i] = 0.25
-        elif short_signal and position != -1:
-            position = -1
-            signals[i] = -0.25
-        elif exit_long and position == 1:
-            position = 0
-            signals[i] = 0.0
-        elif exit_short and position == -1:
-            position = 0
-            signals[i] = 0.0
-        else:
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
-    
-    return signals
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-name = "12h_1d_camarilla_breakout_v1"
-timeframe = "12h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 200:
-        return np.zeros(n)
-    
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
-    
-    # Get 1d data for Camarilla pivots (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Previous 1d bar data to avoid look-ahead
-    high_1d_prev = df_1d['high'].shift(1).values
-    low_1d_prev = df_1d['low'].shift(1).values
-    close_1d_prev = df_1d['close'].shift(1).values
-    
-    # Calculate 1d Camarilla levels (H4/L4 breakout)
-    pivot_prev = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-    range_1d_prev = high_1d_prev - low_1d_prev
-    h4_prev = pivot_prev + (range_1d_prev * 1.1 / 2)
-    l4_prev = pivot_prev - (range_1d_prev * 1.1 / 2)
-    
-    # Align to 12h
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4_prev)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4_prev)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
-    
-    # ADX for trend strength (14-period) - to avoid ranging markets
-    # ADX > 25 indicates trending market
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - low[:-1]), np.abs(low[1:] - high[:-1])))
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean() / pd.Series(tr).ewm(alpha=1/14, adjust=False).mean()
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean() / pd.Series(tr).ewm(alpha=1/14, adjust=False).mean()
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    adx = np.concatenate([[np.nan], adx])  # align with original array length
-    
-    signals = np.zeros(n)
-    position = 0
-    
-    for i in range(200, n):
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(vol_confirm[i]) or np.isnan(adx[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
-            continue
-        
-        # Only trade in trending markets (ADX > 25)
-        if adx[i] <= 25:
-            if position == 1:
-                signals[i] = 0.0
-                position = 0
-            elif position == -1:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        long_signal = close[i] > h4_aligned[i] and vol_confirm[i]
-        short_signal = close[i] < l4_aligned[i] and vol_confirm[i]
-        
-        pivot_prev_val = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_prev_val)
-        exit_long = close[i] < pivot_aligned[i]
-        exit_short = close[i] > pivot_aligned[i]
-        
-        if long_signal and position != 1:
-            position = 1
-            signals[i] = 0.25
-        elif short_signal and position != -1:
-            position = -1
-            signals[i] = -0.25
-        elif exit_long and position == 1:
-            position = 0
-            signals[i] = 0.0
-        elif exit_short and position == -1:
-            position = 0
-            signals[i] = 0.0
-        else:
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
-    
-    return signals
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-name = "12h_1d_camarilla_breakout_v1"
-timeframe = "12h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 200:
-        return np.zeros(n)
-    
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
-    
-    # Get 1d data for Camarilla pivots (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Previous 1d bar data to avoid look-ahead
-    high_1d_prev = df_1d['high'].shift(1).values
-    low_1d_prev = df_1d['low'].shift(1).values
-    close_1d_prev = df_1d['close'].shift(1).values
-    
-    # Calculate 1d Camarilla levels (H4/L4 breakout)
-    pivot_prev = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-    range_1d_prev = high_1d_prev - low_1d_prev
-    h4_prev = pivot_prev + (range_1d_prev * 1.1 / 2)
-    l4_prev = pivot_prev - (range_1d_prev * 1.1 / 2)
-    
-    # Align to 12h
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4_prev)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4_prev)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
-    
-    # ADX for trend strength (14-period) - to avoid ranging markets
-    # ADX > 25 indicates trending market
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - low[:-1]), np.abs(low[1:] - high[:-1])))
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean() / pd.Series(tr).ewm(alpha=1/14, adjust=False).mean()
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean() / pd.Series(tr).ewm(alpha=1/14, adjust=False).mean()
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    adx = np.concatenate([[np.nan], adx])  # align with original array length
-    
-    signals = np.zeros(n)
-    position = 0
-    
-    for i in range(200, n):
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(vol_confirm[i]) or np.isnan(adx[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
-            continue
-        
-        # Only trade in trending markets (ADX > 25)
-        if adx[i] <= 25:
-            if position == 1:
-                signals[i] = 0.0
-                position = 0
-            elif position == -1:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        long_signal = close[i] > h4_aligned[i] and vol_confirm[i]
-        short_signal = close[i] < l4_aligned[i] and vol_confirm[i]
-        
-        pivot_prev_val = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_prev_val)
-        exit_long = close[i] < pivot_aligned[i]
-        exit_short = close[i] > pivot_aligned[i]
-        
-        if long_signal and position != 1:
-            position = 1
-            signals[i] = 0.25
-        elif short_signal and position != -1:
-            position = -1
-            signals[i] = -0.25
-        elif exit_long and position == 1:
-            position = 0
-            signals[i] = 0.0
-        elif exit_short and position == -1:
-            position = 0
-            signals[i] = 0.0
-        else:
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
-    
-    return signals
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-name = "12h_1d_camarilla_breakout_v1"
-timeframe = "12h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 200:
-        return np.zeros(n)
-    
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
-    
-    # Get 1d data for Camarilla pivots (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Previous 1d bar data to avoid look-ahead
-    high_1d_prev = df_1d['high'].shift(1).values
-    low_1d_prev = df_1d['low'].shift(1).values
-    close_1d_prev = df_1d['close'].shift(1).values
-    
-    # Calculate 1d Camarilla levels (H4/L4 breakout)
-    pivot_prev = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-    range_1d_prev = high_1d_prev - low_1d_prev
-    h4_prev = pivot_prev + (range_1d_prev * 1.1 / 2)
-    l4_prev = pivot_prev - (range_1d_prev * 1.1 / 2)
-    
-    # Align to 12h
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4_prev)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4_prev)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
-    
-    # ADX for trend strength (14-period) - to avoid ranging markets
-    # ADX > 25 indicates trending market
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - low[:-1]), np.abs(low[1:] - high[:-1])))
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean() / pd.Series(tr).ewm(alpha=1/14, adjust=False).mean()
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean() / pd.Series(tr).ewm(alpha=1/14, adjust=False).mean()
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    adx = np.concatenate([[np.nan], adx])  # align with original array length
-    
-    signals = np.zeros(n)
-    position = 0
-    
-    for i in range(200, n):
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(vol_confirm[i]) or np.isnan(adx[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
-            continue
-        
-        # Only trade in trending markets (ADX > 25)
-        if adx[i] <= 25:
-            if position == 1:
-                signals[i] = 0.0
-                position = 0
-            elif position == -1:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        long_signal = close[i] > h4_aligned[i] and vol_confirm[i]
-        short_signal = close[i] < l4_aligned[i] and vol_confirm[i]
-        
-        pivot_prev_val = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_prev_val)
-        exit_long = close[i] < pivot_aligned[i]
-        exit_short = close[i] > pivot_aligned[i]
-        
-        if long_signal and position != 1:
-            position = 1
-            signals[i] = 0.25
-        elif short_signal and position != -1:
-            position = -1
-            signals[i] = -0.25
-        elif exit_long and position == 1:
-            position = 0
-            signals[i] = 0.0
-        elif exit_short and position == -1:
-            position = 0
-            signals[i] = 0.0
-        else:
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
-    
-    return signals
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_lt
