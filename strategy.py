@@ -1,19 +1,19 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h_1d_camarilla_pivot_breakout_volume
-# Uses daily Camarilla pivot levels (based on previous day's range) as support/resistance.
-# Long when price breaks above H4 level with volume confirmation (volume > 1.5x 20-period avg).
-# Short when price breaks below L4 level with volume confirmation.
-# Exits when price crosses the daily pivot (mean reversion).
-# Designed for low trade frequency (target: 12-37 trades/year) on 12h timeframe.
+# Hypothesis: 4h_1d_camarilla_pivot_volume_v2
+# Uses daily Camarilla pivot levels (L3, H3) as entry triggers with volume confirmation.
+# Long when price crosses above H3 with volume > 1.5x 20-period average.
+# Short when price crosses below L3 with volume > 1.5x 20-period average.
+# Exits when price returns to the daily pivot point (mean reversion).
+# Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drag.
 # Works in trending markets via breakouts and ranging markets via mean reversion to pivot.
 # Focus on BTC/ETH as primary targets.
 
-name = "12h_1d_camarilla_pivot_breakout_volume"
-timeframe = "12h"
+name = "4h_1d_camarilla_pivot_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,24 +31,29 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels (based on previous day's range)
-    # H4 = Close + 1.5 * (High - Low)
-    # L4 = Close - 1.5 * (High - Low)
-    # Pivot = (High + Low + Close) / 3
+    # Calculate daily Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    camarilla_high = close_1d + 1.5 * (high_1d - low_1d)
-    camarilla_low = close_1d - 1.5 * (high_1d - low_1d)
-    camarilla_pivot = (high_1d + low_1d + close_1d) / 3.0
+    # Pivot point (PP) = (H + L + C) / 3
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    # Range = H - L
+    range_ = high_1d - low_1d
+    # Camarilla levels
+    # H3 = C + (H-L) * 1.1/2
+    # L3 = C - (H-L) * 1.1/2
+    camarilla_h3 = close_1d + range_ * 1.1 / 2.0
+    camarilla_l3 = close_1d - range_ * 1.1 / 2.0
+    # Pivot for exit
+    camarilla_pivot = pivot
     
-    # Align daily Camarilla levels to 12h timeframe
-    camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
-    camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
+    # Align daily Camarilla levels to 4h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
     
-    # Volume confirmation: volume > 1.5 * 20-period average (12h timeframe)
+    # Volume confirmation: volume > 1.5 * 20-period average (4h timeframe)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
@@ -57,7 +62,7 @@ def generate_signals(prices):
     
     for i in range(50, n):  # start after warmup
         # Skip if data not ready
-        if np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]) or np.isnan(camarilla_pivot_aligned[i]):
+        if np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or np.isnan(camarilla_pivot_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -72,15 +77,15 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above H4 level
-        if close[i] > camarilla_high_aligned[i] and position != 1:
+        # Long signal: price crosses above H3
+        if close[i] > camarilla_h3_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below L4 level
-        elif close[i] < camarilla_low_aligned[i] and position != -1:
+        # Short signal: price crosses below L3
+        elif close[i] < camarilla_l3_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: price crosses daily pivot (mean reversion)
+        # Exit conditions: price returns to pivot point (mean reversion)
         elif position == 1 and close[i] <= camarilla_pivot_aligned[i]:
             position = 0
             signals[i] = 0.0
