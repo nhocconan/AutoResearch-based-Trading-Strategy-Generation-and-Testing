@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_1d_camarilla_pivot_volume_reversion
-Hypothesis: Mean-reversion at daily Camarilla pivot levels on 12h timeframe.
-Uses daily Camarilla pivot levels (H4, L4, H3, L3) from prior day as support/resistance.
-Enters long near L3/L4 with volume confirmation, short near H3/H4 with volume confirmation.
-Filters trades using 12h Choppiness Index to avoid trending markets.
-Designed to work in both bull and bear markets by fading extremes at key daily levels.
-Target: 25-35 trades/year (100-140 total over 4 years) to minimize fee drag.
+4h_1d_1w_triple_timeframe_momentum
+Hypothesis: Combine 4h momentum (RSI), 1d trend (EMA200), and 1w structure (price vs weekly high/low) for high-conviction trades.
+Only takes long when: 4h RSI > 55 (bullish momentum), price > 1d EMA200 (uptrend), and price > 1w low + 20% of weekly range (strong above weekly support).
+Only takes short when: 4h RSI < 45 (bearish momentum), price < 1d EMA200 (downtrend), and price < 1w high - 20% of weekly range (weak below weekly resistance).
+Uses 0.25 position size to limit risk. Designed for 4-8 trades/year per symbol, avoiding fee drag.
 """
 
 import numpy as np
@@ -15,124 +13,100 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots
+    # Get daily data for trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     
-    # Calculate previous day's Camarilla pivot levels
-    # H4 = Close + 1.5 * (High - Low) * 1.1/2
-    # L4 = Close - 1.5 * (High - Low) * 1.1/2
-    # H3 = Close + 1.0 * (High - Low) * 1.1/2
-    # L3 = Close - 1.0 * (High - Low) * 1.1/2
-    # Using prior day's values (shifted by 1)
-    range_1d = high_1d - low_1d
-    H4 = close_1d + 1.5 * range_1d * 1.1 / 2
-    L4 = close_1d - 1.5 * range_1d * 1.1 / 2
-    H3 = close_1d + 1.0 * range_1d * 1.1 / 2
-    L3 = close_1d - 1.0 * range_1d * 1.1 / 2
+    # Daily EMA200 for trend
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Shift to use prior day's levels (avoid look-ahead)
-    H4 = np.roll(H4, 1)
-    L4 = np.roll(L4, 1)
-    H3 = np.roll(H3, 1)
-    L3 = np.roll(L3, 1)
-    # First day has no prior day
-    H4[0] = L4[0] = H3[0] = L3[0] = np.nan
+    # Get weekly data for structure
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Align pivot levels to 12h timeframe
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 12h Choppiness Index for regime filter
-    def calculate_choppiness(high, low, close, window=14):
-        """Calculate Choppiness Index"""
-        atr = []
-        for i in range(len(high)):
-            if i == 0:
-                tr = high[i] - low[i]
-            else:
-                tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-            atr.append(tr)
-        
-        atr = np.array(atr)
-        atr_sum = pd.Series(atr).rolling(window=window, min_periods=window).sum().values
-        
-        hh = pd.Series(high).rolling(window=window, min_periods=1).max().values
-        ll = pd.Series(low).rolling(window=window, min_periods=1).min().values
-        range_max = hh - ll
-        
-        chop = 100 * np.log10(atr_sum / range_max) / np.log10(window)
-        return chop
+    # Weekly high and low for structure
+    weekly_high = high_1w
+    weekly_low = low_1w
     
-    chop = calculate_choppiness(high, low, close, window=14)
+    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
     
-    # Volume filter: volume above 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 4h RSI for momentum
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(200, n):
         # Skip if data not ready
-        if (np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or 
-            np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
-            np.isnan(chop[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(weekly_high_aligned[i]) or 
+            np.isnan(weekly_low_aligned[i]) or np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
-        # Choppy market filter: only trade when Choppiness > 61.8 (ranging market)
-        if chop[i] <= 61.8:
-            # In trending market, reduce position or stay flat
+        # Calculate weekly range and levels
+        weekly_range = weekly_high_aligned[i] - weekly_low_aligned[i]
+        if weekly_range <= 0:
             signals[i] = 0.0
             continue
+            
+        weekly_support = weekly_low_aligned[i] + 0.2 * weekly_range  # 20% above weekly low
+        weekly_resistance = weekly_high_aligned[i] - 0.2 * weekly_range  # 20% below weekly high
         
-        # Volume confirmation: volume above average
-        if volume[i] < vol_ma[i]:
-            signals[i] = 0.0
-            continue
-        
-        # Mean reversion at Camarilla levels
-        # Long near L3/L4 (support)
-        long_entry = False
-        short_entry = False
-        
-        # Long conditions: price near L3 or L4 with bullish bias
-        if (abs(close[i] - L3_aligned[i]) / L3_aligned[i] < 0.002 or 
-            abs(close[i] - L4_aligned[i]) / L4_aligned[i] < 0.002):
-            # Additional confirmation: price above L4
-            if close[i] > L4_aligned[i]:
-                long_entry = True
-        
-        # Short conditions: price near H3/H4 (resistance)
-        if (abs(close[i] - H3_aligned[i]) / H3_aligned[i] < 0.002 or 
-            abs(close[i] - H4_aligned[i]) / H4_aligned[i] < 0.002):
-            # Additional confirmation: price below H4
-            if close[i] < H4_aligned[i]:
-                short_entry = True
-        
-        if long_entry:
+        # Long conditions: bullish momentum + uptrend + above weekly support
+        if (rsi[i] > 55 and 
+            close[i] > ema200_1d_aligned[i] and 
+            close[i] > weekly_support and
+            position != 1):
+            position = 1
             signals[i] = 0.25
-        elif short_entry:
+        # Short conditions: bearish momentum + downtrend + below weekly resistance
+        elif (rsi[i] < 45 and 
+              close[i] < ema200_1d_aligned[i] and 
+              close[i] < weekly_resistance and
+              position != -1):
+            position = -1
             signals[i] = -0.25
-        else:
+        # Exit conditions: momentum divergence
+        elif position == 1 and rsi[i] < 50:
+            position = 0
             signals[i] = 0.0
+        elif position == -1 and rsi[i] > 50:
+            position = 0
+            signals[i] = 0.0
+        else:
+            # Hold current position
+            if position == 1:
+                signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.0
     
     return signals
 
-name = "12h_1d_camarilla_pivot_volume_reversion"
-timeframe = "12h"
+name = "4h_1d_1w_triple_timeframe_momentum"
+timeframe = "4h"
 leverage = 1.0
