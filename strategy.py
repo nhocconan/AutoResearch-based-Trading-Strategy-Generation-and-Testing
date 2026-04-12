@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_1d_keltner_breakout_trend
-Hypothesis: 6-hour Keltner breakout with daily trend filter. Uses daily EMA50 as trend filter and Keltner bands (ATR-based) for breakout signals. Works in both bull and bear by only taking long trades when above daily EMA50 and short trades when below. ATR filter prevents trading in low volatility. Target: 20-50 trades/year.
+4h_12h_camarilla_breakout_volatility_regime
+Hypothesis: Combine 12h Camarilla breakout with volatility regime filter (ATR ratio) and volume confirmation.
+In bull markets: trend-following breakouts work. In bear markets: volatility filter reduces false signals during low-volatility chop.
+Uses 4h timeframe with 12h HTF for structure. Target: 20-40 trades/year (80-160 total) to minimize fee drag.
 """
 
-name = "6h_1d_keltner_breakout_trend"
-timeframe = "6h"
+name = "4h_12h_camarilla_breakout_volatility_regime"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,68 +24,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend and Keltner calculations
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data for Camarilla and ATR calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Daily EMA50 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Previous 12h bar's range
+    prev_high = np.roll(high_12h, 1)
+    prev_low = np.roll(low_12h, 1)
+    prev_close = np.roll(close_12h, 1)
     
-    # Daily ATR(10) for Keltner bands
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # Camarilla levels (based on previous 12h bar)
+    range_ = prev_high - prev_low
+    # Resistance levels
+    r3 = prev_close + range_ * 1.1 / 2
+    r4 = prev_close + range_ * 1.1
+    # Support levels
+    s3 = prev_close - range_ * 1.1 / 2
+    s4 = prev_close - range_ * 1.1
+    
+    # ATR for volatility filter (14-period ATR on 12h)
+    tr1 = np.abs(np.subtract(high_12h, low_12h))
+    tr2 = np.abs(np.subtract(high_12h, np.roll(close_12h, 1)))
+    tr3 = np.abs(np.subtract(low_12h, np.roll(close_12h, 1)))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Daily EMA20 for Keltner center line
-    ema20_1d = close_1d_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate ATR ratio: current ATR / 50-period average ATR (volatility regime)
+    atr_ma = pd.Series(atr_12h).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr_12h / atr_ma  # >1 = high volatility, <1 = low volatility
     
-    # Keltner Bands: Upper = EMA20 + 2*ATR, Lower = EMA20 - 2*ATR
-    keltner_upper = ema20_1d + 2.0 * atr_1d
-    keltner_lower = ema20_1d - 2.0 * atr_1d
+    # Align Camarilla levels and ATR ratio to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_12h, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_12h, s4)
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_12h, atr_ratio)
     
-    # Align daily indicators to 6h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    keltner_upper_aligned = align_htf_to_ltf(prices, df_1d, keltner_upper)
-    keltner_lower_aligned = align_htf_to_ltf(prices, df_1d, keltner_lower)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    vol_confirm = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(keltner_upper_aligned[i]) or 
-            np.isnan(keltner_lower_aligned[i]) or np.isnan(atr_1d_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(atr_ratio_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: close breaks above Keltner Upper with volume, above daily EMA50, and sufficient volatility
-        if (close[i] > keltner_upper_aligned[i] and vol_confirm[i] and 
-            close[i] > ema50_1d_aligned[i] and atr_1d_aligned[i] > 0 and position != 1):
+        # Volatility regime filter: only trade when volatility is elevated (ATR ratio > 0.8)
+        vol_regime = atr_ratio_aligned[i] > 0.8
+        
+        # Long entry: close breaks above R4 with volume and volatility regime
+        if (close[i] > r4_aligned[i] and vol_confirm[i] and vol_regime and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: close breaks below Keltner Lower with volume, below daily EMA50, and sufficient volatility
-        elif (close[i] < keltner_lower_aligned[i] and vol_confirm[i] and 
-              close[i] < ema50_1d_aligned[i] and atr_1d_aligned[i] > 0 and position != -1):
+        # Short entry: close breaks below S4 with volume and volatility regime
+        elif (close[i] < s4_aligned[i] and vol_confirm[i] and vol_regime and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: reverse signal or close crosses back to opposite Keltner band
-        elif position == 1 and close[i] < keltner_lower_aligned[i]:
+        # Exit: reverse signal or close crosses back to opposite S3/R3
+        elif position == 1 and close[i] < s3_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > keltner_upper_aligned[i]:
+        elif position == -1 and close[i] > r3_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
