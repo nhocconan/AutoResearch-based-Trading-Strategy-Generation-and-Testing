@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-6h_1w_Camarilla_Pullback_v1
-Hypothesis: On 6h timeframe, buy pullbacks to weekly Camarilla H3/H4 with 1d uptrend and volume confirmation,
-sell pullbacks to weekly L3/L4 with 1d downtrend and volume confirmation. Exit at weekly H5/L5 levels.
-Uses weekly volatility regime filter to avoid choppy markets. Designed for low trade frequency
-(10-30/year) by requiring multiple confluence factors. Works in bull/bear via 1d trend filter
-and mean-reversion exit at weekly Camarilla levels.
+4h_1d_Camarilla_Breakout_Volume_Regime_v2
+Hypothesis: On 4h timeframe, buy breakouts above Camarilla H3 with 1d uptrend filter and volume confirmation,
+sell breakdowns below L3 with 1d downtrend and volume confirmation. Exit at H4/L4 levels.
+Uses daily volatility regime filter to avoid choppy markets. Designed for low trade frequency
+(20-40/year) by requiring multiple confluence factors. Works in bull/bear via 1d trend filter
+and mean-reversion exit at Camarilla levels.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_Camarilla_Pullback_v1"
-timeframe = "6h"
+name = "4h_1d_Camarilla_Breakout_Volume_Regime_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,31 +26,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === WEEKLY CAMARILLA LEVELS ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # === DAILY CAMARILLA LEVELS ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly Camarilla pivot levels (using previous week's close)
-    close_prev = np.concatenate([[close_1w[0]], close_1w[:-1]])  # previous week's close
-    range_1w = high_1w - low_1w
+    # Use previous day's close for proper Camarilla calculation
+    close_prev = np.roll(close_1d, 1)
+    close_prev[0] = close_1d[0]  # first day uses same day's close
+    range_1d = high_1d - low_1d
     
-    h5 = close_prev + (range_1w * 1.1 / 2)
-    h4 = close_prev + (range_1w * 1.1)
-    h3 = close_prev + (range_1w * 1.1 / 4)
-    l3 = close_prev - (range_1w * 1.1 / 4)
-    l4 = close_prev - (range_1w * 1.1)
-    l5 = close_prev - (range_1w * 1.1 / 2)
+    h5 = close_prev + (range_1d * 1.1 / 2)
+    h4 = close_prev + (range_1d * 1.1)
+    h3 = close_prev + (range_1d * 1.1 / 4)
+    l3 = close_prev - (range_1d * 1.1 / 4)
+    l4 = close_prev - (range_1d * 1.1)
+    l5 = close_prev - (range_1d * 1.1 / 2)
     
-    # === WEEKLY VOLATILITY REGIME FILTER ===
-    # Weekly ATR(14) for volatility measurement
-    tr1 = np.abs(high_1w[1:] - low_1w[:-1])
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    # === DAILY VOLATILITY REGIME FILTER ===
+    # Daily ATR(14) for volatility measurement
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr_14 = np.zeros_like(tr)
     for i in range(len(tr)):
@@ -70,16 +71,14 @@ def generate_signals(prices):
     # Low volatility regime (trending) when current ATR < MA
     vol_regime = atr_14 < vol_ma
     
-    # Align data to 6h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1w, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1w, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1w, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1w, l4)
-    h5_aligned = align_htf_to_ltf(prices, df_1w, h5)
-    l5_aligned = align_htf_to_ltf(prices, df_1w, l5)
-    vol_regime_aligned = align_htf_to_ltf(prices, df_1w, vol_regime.astype(float))
+    # Align data to 4h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    vol_regime_aligned = align_htf_to_ltf(prices, df_1d, vol_regime.astype(float))
     
-    # Volume average (20-period for 6h = ~5 days) for confirmation
+    # Volume average (20-period for 4h = ~5 days) for confirmation
     vol_avg = np.zeros(n)
     vol_sum = 0.0
     vol_count = 0
@@ -97,11 +96,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):  # start after warmup
+    for i in range(50, n):  # start after warmup
         # Skip if indicators not available
         if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(h5_aligned[i]) or np.isnan(l5_aligned[i]) or
+            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
             np.isnan(vol_regime_aligned[i]) or vol_avg[i] == 0.0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
@@ -112,13 +110,13 @@ def generate_signals(prices):
         # Only trade in low volatility (trending) regime
         in_trend_regime = vol_regime_aligned[i] > 0.5
         
-        # Entry conditions: pullback to H3/H4 (long) or L3/L4 (short)
-        long_setup = (close[i] <= h4_aligned[i] and close[i] >= h3_aligned[i]) and vol_confirm and in_trend_regime
-        short_setup = (close[i] >= l4_aligned[i] and close[i] <= l3_aligned[i]) and vol_confirm and in_trend_regime
+        # Entry conditions
+        long_setup = (close[i] > h3_aligned[i]) and vol_confirm and in_trend_regime
+        short_setup = (close[i] < l3_aligned[i]) and vol_confirm and in_trend_regime
         
-        # Exit conditions: mean reversion to H5/L5 levels
-        exit_long = close[i] > h5_aligned[i]
-        exit_short = close[i] < l5_aligned[i]
+        # Exit conditions: mean reversion to H4/L4 levels
+        exit_long = close[i] < l4_aligned[i]
+        exit_short = close[i] > h4_aligned[i]
         
         if long_setup and position != 1:
             position = 1
