@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-4h_1d_Combined_Momentum_and_Volume_Surge
-Hypothesis: Combine price momentum with volume surge and volatility contraction.
-Long when: Price above 20-period SMA, RSI above 50, volume > 1.8x 20-period average, and Bollinger Band width contracting.
-Short when: Price below 20-period SMA, RSI below 50, volume > 1.8x 20-period average, and Bollinger Band width contracting.
-Exit when momentum fades (RSI crosses 50) or volatility expands.
-Uses Bollinger Band width as a regime filter to trade during low volatility periods before breakouts.
-Aims for 20-40 trades per year per symbol to minimize fee drag.
+12h_1d_Camarilla_Breakout_Trend_Filter_v1
+Hypothesis: Use daily Camarilla pivot levels with 20-period EMA trend filter on 12h timeframe.
+Buy when price breaks above H4 level with EMA > 50-period EMA (bullish trend).
+Sell when price breaks below L4 level with EMA < 50-period EMA (bearish trend).
+Trades only in direction of higher timeframe trend to avoid counter-trend whipsaws.
+Designed for low trade frequency (<150 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Combined_Momentum_and_Volume_Surge"
-timeframe = "4h"
+name = "12h_1d_Camarilla_Breakout_Trend_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,68 +25,64 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Calculate Bollinger Bands and width on close
+    # Daily data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = df_1d['high'].iloc[-2] if len(df_1d) >= 2 else df_1d['high'].iloc[-1]
+    prev_low = df_1d['low'].iloc[-2] if len(df_1d) >= 2 else df_1d['low'].iloc[-1]
+    prev_close = df_1d['close'].iloc[-2] if len(df_1d) >= 2 else df_1d['close'].iloc[-1]
+    
+    # Camarilla levels (based on previous day)
+    range_val = prev_high - prev_low
+    h4 = prev_close + 1.1 * range_val * 1.1 / 2
+    l4 = prev_close - 1.1 * range_val * 1.1 / 2
+    
+    # Align Camarilla levels to 12h timeframe
+    h4_array = np.full(len(df_1d), h4)
+    l4_array = np.full(len(df_1d), l4)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4_array)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4_array)
+    
+    # Trend filter: 50-period EMA on 12h timeframe
     close_series = pd.Series(close)
-    bb_middle = close_series.rolling(window=20, min_periods=20).mean()
-    bb_std = close_series.rolling(window=20, min_periods=20).std()
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_width = (bb_upper - bb_lower) / bb_middle  # Normalized width
-    bb_width_avg = bb_width.rolling(window=20, min_periods=20).mean()
-    bb_width_values = bb_width.values
-    bb_width_avg_values = bb_width_avg.values
-    
-    # Calculate RSI
-    delta = close_series.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
-    
-    # Volume moving average
-    volume_series = pd.Series(volume)
-    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
-    
-    # Price relative to 20-period SMA
-    sma_20 = bb_middle.values  # Same as BB middle
+    ema_fast = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_slow = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any data invalid
-        if (np.isnan(sma_20[i]) or np.isnan(rsi_values[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(bb_width_values[i]) or 
-            np.isnan(bb_width_avg_values[i])):
+        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
+            np.isnan(ema_fast[i]) or np.isnan(ema_slow[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Conditions
-        price_above_sma = close[i] > sma_20[i]
-        price_below_sma = close[i] < sma_20[i]
-        rsi_bullish = rsi_values[i] > 50
-        rsi_bearish = rsi_values[i] < 50
-        volume_surge = volume[i] > 1.8 * vol_ma[i]
-        volatility_contracting = bb_width_values[i] < bb_width_avg_values[i]
+        # Trend condition
+        bullish_trend = ema_fast[i] > ema_slow[i]
+        bearish_trend = ema_fast[i] < ema_slow[i]
         
-        # Entry conditions
-        long_entry = price_above_sma and rsi_bullish and volume_surge and volatility_contracting
-        short_entry = price_below_sma and rsi_bearish and volume_surge and volatility_contracting
+        # Breakout conditions with trend filter
+        long_breakout = close[i] > h4_aligned[i] and bullish_trend
+        short_breakout = close[i] < l4_aligned[i] and bearish_trend
         
-        # Exit conditions: momentum fade or volatility expansion
-        long_exit = not (price_above_sma and rsi_bullish) or bb_width_values[i] > bb_width_avg_values[i] * 1.2
-        short_exit = not (price_below_sma and rsi_bearish) or bb_width_values[i] > bb_width_avg_values[i] * 1.2
+        # Exit conditions: return to mid-point (pivot)
+        pivot = (prev_high + prev_low + prev_close) / 3
+        pivot_array = np.full(len(df_1d), pivot)
+        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_array)
+        
+        long_exit = close[i] < pivot_aligned[i]
+        short_exit = close[i] > pivot_aligned[i]
         
         # Signal logic
-        if long_entry and position != 1:
+        if long_breakout and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_entry and position != -1:
+        elif short_breakout and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
