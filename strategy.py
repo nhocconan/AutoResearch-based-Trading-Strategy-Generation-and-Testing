@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Breakout_Regime_v1
-Hypothesis: Daily Camarilla breakout with 1d regime filter (chop > 61.8 = range, chop < 38.2 = trend)
-Enter long when price breaks above daily R4 AND chop < 38.2 (trending up).
-Enter short when price breaks below daily S4 AND chop < 38.2 (trending down).
-Exit when price returns to daily midpoint or chop > 61.8 (range).
-Uses 12h primary timeframe for execution, targeting 50-150 total trades over 4 years.
+4h_1d_Multi_Signal_Confluence_v1
+Hypothesis: Combine Donchian(20) breakout, 1d EMA200 trend, and volume spike for high-probability entries.
+Long when price breaks above Donchian high AND above 1d EMA200 AND volume > 1.5x 20-period average.
+Short when price breaks below Donchian low AND below 1d EMA200 AND volume > 1.5x 20-period average.
+Exit when price crosses Donchian midpoint or opposite breakout occurs.
+Uses tight entry conditions to limit trades (~30-50/year) and reduce fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_Breakout_Regime_v1"
-timeframe = "12h"
+name = "4h_1d_Multi_Signal_Confluence_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,69 +25,53 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Daily data for regime and levels
+    # 4h Donchian(20) channels
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
+    
+    # 1d EMA200 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    daily_close = df_1d['close'].values
+    ema200 = pd.Series(daily_close).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200)
     
-    # Calculate Camarilla levels
-    range_ = prev_high - prev_low
-    camarilla_r4 = prev_close + range_ * 1.1 / 2
-    camarilla_s4 = prev_close - range_ * 1.1 / 2
-    camarilla_midpoint = prev_close
-    
-    # Handle invalid ranges
-    valid_range = range_ > 0
-    camarilla_r4 = np.where(valid_range, camarilla_r4, np.nan)
-    camarilla_s4 = np.where(valid_range, camarilla_s4, np.nan)
-    camarilla_midpoint = np.where(valid_range, camarilla_midpoint, np.nan)
-    
-    # Chop index for regime detection (14-period)
-    hl_range = df_1d['high'] - df_1d['low']
-    atr14 = hl_range.rolling(window=14, min_periods=14).mean()
-    sum_abs_change = ((df_1d['close'] - df_1d['close'].shift(1)).abs()).rolling(window=14, min_periods=14).sum()
-    chop = 100 * np.log10(sum_abs_change / atr14 / 14) / np.log10(2)
-    chop_values = chop.values
-    
-    # Align to 12h timeframe
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    camarilla_midpoint_aligned = align_htf_to_ltf(prices, df_1d, camarilla_midpoint)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_values)
+    # Volume spike filter: current volume > 1.5x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any data invalid
-        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or
-            np.isnan(camarilla_midpoint_aligned[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(ema200_aligned[i]) or np.isnan(vol_ma20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Regime filter: chop < 38.2 = trending, chop > 61.8 = ranging
-        is_trending = chop_aligned[i] < 38.2
-        is_ranging = chop_aligned[i] > 61.8
+        # Entry conditions
+        long_entry = (close[i] > donchian_high[i] and 
+                     close[i] > ema200_aligned[i] and 
+                     volume_spike[i])
+        short_entry = (close[i] < donchian_low[i] and 
+                      close[i] < ema200_aligned[i] and 
+                      volume_spike[i])
         
-        # Breakout conditions (only in trending regime)
-        long_breakout = is_trending and high[i] > camarilla_r4_aligned[i]
-        short_breakout = is_trending and low[i] < camarilla_s4_aligned[i]
-        
-        # Exit conditions: return to midpoint OR entering ranging regime
-        long_exit = (not is_trending) or close[i] < camarilla_midpoint_aligned[i]
-        short_exit = (not is_trending) or close[i] > camarilla_midpoint_aligned[i]
+        # Exit conditions
+        long_exit = close[i] < donchian_mid[i]
+        short_exit = close[i] > donchian_mid[i]
         
         # Signal logic
-        if long_breakout and position != 1:
+        if long_entry and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_breakout and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
