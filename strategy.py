@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-# 1d_1w_Camarilla_Pivot_Breakout_v3
-# Hypothesis: Use weekly Camarilla pivot levels on 1d timeframe with volume confirmation.
-# Long when price breaks above weekly R4 with volume > 1.3x 20-period average,
-# short when breaks below weekly S4 with volume > 1.3x 20-period average.
-# Weekly Camarilla levels provide strong institutional support/resistance.
-# Volume confirms breakout strength to avoid false signals.
-# Designed for low trade frequency (target: 30-100 total over 4 years) to minimize fee drag.
-# Works in bull via breakouts above resistance, in bear via breakdowns below support.
+# 4h_1d_Triple_Barrier_Breakout_v1
+# Hypothesis: Combine 1d volatility bands (ATR-based) with 4h price action and volume confirmation.
+# Long when price breaks above 1d ATR(20) upper band with volume > 1.8x 20-period average,
+# short when breaks below 1d ATR(20) lower band with volume > 1.8x 20-period average.
+# Exit when price returns to 1d close or ATR band midpoint.
+# Designed for low trade frequency (<50/year) to minimize fee drift in ranging markets.
+# Works in bull via breakouts above volatility expansion, in bear via breakdowns.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Camarilla_Pivot_Breakout_v3"
-timeframe = "1d"
+name = "4h_1d_Triple_Barrier_Breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,32 +26,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for Camarilla pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Daily data for volatility bands
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 22:  # Need 20 for ATR + 1 for prev close
         return np.zeros(n)
     
-    # Previous week's OHLC for Camarilla calculation
-    prev_high = df_1w['high'].iloc[-2] if len(df_1w) >= 2 else df_1w['high'].iloc[-1]
-    prev_low = df_1w['low'].iloc[-2] if len(df_1w) >= 2 else df_1w['low'].iloc[-1]
-    prev_close = df_1w['close'].iloc[-2] if len(df_1w) >= 2 else df_1w['close'].iloc[-1]
+    # Calculate ATR(20) on daily
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly Camarilla pivot levels
-    range_val = prev_high - prev_low
-    if range_val <= 0:
-        return np.zeros(n)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # Weekly R4 and S4 levels (Camarilla formula)
-    weekly_r4 = prev_close + range_val * 1.1 / 2  # R4 = Close + (Range * 1.1/2)
-    weekly_s4 = prev_close - range_val * 1.1 / 2  # S4 = Close - (Range * 1.1/2)
+    # Daily bands: upper = close + 2.0*ATR, lower = close - 2.0*ATR, mid = close
+    upper_band = close_1d + 2.0 * atr
+    lower_band = close_1d - 2.0 * atr
+    mid_band = close_1d
     
-    # Align weekly levels to 1d timeframe
-    weekly_r4_array = np.full(len(df_1w), weekly_r4)
-    weekly_s4_array = np.full(len(df_1w), weekly_s4)
-    weekly_r4_aligned = align_htf_to_ltf(prices, df_1w, weekly_r4_array)
-    weekly_s4_aligned = align_htf_to_ltf(prices, df_1w, weekly_s4_array)
+    # Align daily bands to 4h timeframe
+    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
+    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
+    mid_band_aligned = align_htf_to_ltf(prices, df_1d, mid_band)
     
-    # Volume confirmation: current volume > 1.3x 20-period average
+    # Volume confirmation: current volume > 1.8x 20-period average
     volume_series = pd.Series(volume)
     vol_ma = volume_series.rolling(window=20, min_periods=20).mean()
     vol_ratio = volume_series / vol_ma
@@ -63,27 +64,18 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any data invalid
-        if (np.isnan(weekly_r4_aligned[i]) or np.isnan(weekly_s4_aligned[i]) or
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or
+            np.isnan(mid_band_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Breakout conditions with volume filter
-        long_breakout = close[i] > weekly_r4_aligned[i] and vol_ratio[i] > 1.3
-        short_breakout = close[i] < weekly_s4_aligned[i] and vol_ratio[i] > 1.3
+        long_breakout = close[i] > upper_band_aligned[i] and vol_ratio[i] > 1.8
+        short_breakout = close[i] < lower_band_aligned[i] and vol_ratio[i] > 1.8
         
-        # Exit conditions: return to weekly Camarilla pivot level (R3/S3)
-        weekly_pivot = (prev_high + prev_low + prev_close) / 3
-        weekly_r3 = prev_close + range_val * 1.1 / 4  # R3 = Close + (Range * 1.1/4)
-        weekly_s3 = prev_close - range_val * 1.1 / 4  # S3 = Close - (Range * 1.1/4)
-        
-        weekly_r3_array = np.full(len(df_1w), weekly_r3)
-        weekly_s3_array = np.full(len(df_1w), weekly_s3)
-        weekly_r3_aligned = align_htf_to_ltf(prices, df_1w, weekly_r3_array)
-        weekly_s3_aligned = align_htf_to_ltf(prices, df_1w, weekly_s3_array)
-        
-        long_exit = close[i] < weekly_r3_aligned[i]
-        short_exit = close[i] > weekly_s3_aligned[i]
+        # Exit conditions: return to daily midpoint
+        long_exit = close[i] < mid_band_aligned[i]
+        short_exit = close[i] > mid_band_aligned[i]
         
         # Signal logic
         if long_breakout and position != 1:
