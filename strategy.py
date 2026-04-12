@@ -1,19 +1,11 @@
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+# This strategy uses 1d primary timeframe with 1h trend filter
+# Long when: price above 50-period EMA (1h) + price breaks above daily high of previous 3 days + volume > 1.5x 20-day avg
+# Short when: price below 50-period EMA (1h) + price breaks below daily low of previous 3 days + volume > 1.5x 20-day avg
+# Exit when: price crosses back below/above the 50-period EMA (1h)
+# Designed for low trade frequency with trend-following edge in both bull and bear markets
 
-# Hypothesis: 4h_1d_camarilla_breakout_v1
-# Uses daily Camarilla pivot levels (H4/L4) as key support/resistance on 4h chart.
-# Long when price breaks above H4 with volume confirmation (volume > 1.5x 20-period avg).
-# Short when price breaks below L4 with volume confirmation.
-# Exits when price returns to daily pivot point (PP).
-# Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drag.
-# Works in trending markets via breakouts and in ranging markets via mean reversion to pivot.
-# Targets BTC/ETH primarily with proven Camarilla edge.
-
-name = "4h_1d_camarilla_breakout_v1"
-timeframe = "4h"
+name = "1d_1h_trend_filter_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,68 +18,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1h data for trend filter
+    df_1h = get_htf_data(prices, '1h')
+    if len(df_1h) < 50:
         return np.zeros(n)
     
-    # Calculate daily Camarilla levels
-    # Based on previous day's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 50-period EMA on 1h close
+    close_1h = df_1h['close'].values
+    ema_50 = pd.Series(close_1h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1h, ema_50)
     
-    # Calculate pivot point and Camarilla levels for each day
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Calculate 3-day high/low for breakout levels
+    high_3d = pd.Series(high).rolling(window=3, min_periods=3).max().values
+    low_3d = pd.Series(low).rolling(window=3, min_periods=3).min().values
     
-    # Camarilla levels: H4 = PP + 1.1/2 * range, L4 = PP - 1.1/2 * range
-    h4 = pp + (1.1 / 2) * range_1d
-    l4 = pp - (1.1 / 2) * range_1d
-    
-    # Align daily levels to 4h timeframe (daily values update after daily bar closes)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    
-    # Volume confirmation: volume > 1.5 * 20-period average (4h timeframe)
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # start after warmup
+    for i in range(50, n):
         # Skip if data not ready
-        if np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(pp_aligned[i]):
+        if np.isnan(ema_50_aligned[i]) or np.isnan(high_3d[i]) or np.isnan(low_3d[i]):
             signals[i] = 0.0
             continue
         
-        # Require volume confirmation for new entries
-        if not vol_confirm[i]:
-            # Hold current position if volume filter fails
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Long signal: price breaks above H4
-        if close[i] > h4_aligned[i] and position != 1:
+        # Long conditions: price above 1h EMA50 + breaks above 3-day high + volume confirmation
+        if close[i] > ema_50_aligned[i] and close[i] > high_3d[i] and vol_confirm[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below L4
-        elif close[i] < l4_aligned[i] and position != -1:
+        # Short conditions: price below 1h EMA50 + breaks below 3-day low + volume confirmation
+        elif close[i] < ema_50_aligned[i] and close[i] < low_3d[i] and vol_confirm[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: price returns to daily pivot point (mean reversion)
-        elif position == 1 and close[i] <= pp_aligned[i]:
+        # Exit when price crosses back below/above 1h EMA50
+        elif position == 1 and close[i] < ema_50_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] >= pp_aligned[i]:
+        elif position == -1 and close[i] > ema_50_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
