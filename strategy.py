@@ -8,34 +8,35 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Donchian(20) breakout with 1d trend filter and volume confirmation
-    # Uses 1d EMA(50) for trend direction (long only in uptrend, short only in downtrend)
-    # Breakout confirmed by volume > 2.0x 20-period MA to avoid false breakouts
-    # Discrete sizing 0.25 to minimize fee churn. Target: 15-25 trades/year.
+    # Hypothesis: 12h Camarilla H3/L3 breakout with volume confirmation
+    # Uses 1d Camarilla levels from previous day as institutional support/resistance
+    # Volume > 1.5x 20-period MA confirms institutional participation
+    # Discrete sizing 0.25 to minimize fee churn. Target: 12-25 trades/year on 12h.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50) for trend filter
+    # Calculate Camarilla levels from previous 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 6h Donchian channels (20-period)
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    for i in range(20, n):
-        highest_high[i] = np.max(high[i-20:i])
-        lowest_low[i] = np.min(low[i-20:i])
+    # Camarilla H3 and L3 levels
+    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 4
+    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 4
     
-    # Volume confirmation: current volume > 2.0x 20-period MA
+    # Align to 12h timeframe (use previous day's levels)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    
+    # Volume confirmation: current volume > 1.5x 20-period MA
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
@@ -52,26 +53,23 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: EMA50 slope from 1d (using previous day's value)
-        trend_up = ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] if i > 0 else False
-        trend_down = ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] if i > 0 else False
+        # Breakout conditions with volume confirmation
+        breakout_up = close[i] > camarilla_h3_aligned[i]
+        breakout_down = close[i] < camarilla_l3_aligned[i]
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > highest_high[i]
-        breakout_down = close[i] < lowest_low[i]
+        # Entry conditions: breakout with volume confirmation
+        long_entry = breakout_up and (vol_ratio[i] > 1.5)
+        short_entry = breakout_down and (vol_ratio[i] > 1.5)
         
-        # Entry conditions: breakout in direction of trend with volume confirmation
-        long_entry = breakout_up and trend_up and (vol_ratio[i] > 2.0)
-        short_entry = breakout_down and trend_down and (vol_ratio[i] > 2.0)
-        
-        # Exit conditions: opposite Donchian breakout
-        long_exit = close[i] < lowest_low[i]
-        short_exit = close[i] > highest_high[i]
+        # Exit conditions: price returns to midpoint between H3 and L3
+        midpoint = (camarilla_h3_aligned[i] + camarilla_l3_aligned[i]) / 2
+        long_exit = close[i] < midpoint
+        short_exit = close[i] > midpoint
         
         if long_entry and position != 1:
             position = 1
@@ -96,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_donchian_breakout_ema_volume_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
