@@ -13,75 +13,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points
+    # Get daily data for ATR and volume
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily pivot points using previous day's data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
-    
-    # Key levels: S1, R1 (Camarilla) - tighter range for fewer trades
-    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
-    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    
-    # Align levels to 4h timeframe
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    
-    # Volume filter: 20-period EMA
-    vol_ema = np.full(n, np.nan)
-    vol_series = pd.Series(volume)
-    vol_ema_values = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_ema[:] = vol_ema_values
-    
-    # ATR for volatility filter
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    # Calculate 14-day ATR
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr1[0] = tr2[0] = tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = np.full(n, np.nan)
+    atr_14 = np.full(len(df_1d), np.nan)
+    for i in range(14, len(df_1d)):
+        atr_14[i] = np.nanmean(tr[i-14:i+1])
+    
+    # Calculate 20-day volume average
+    vol_20 = np.full(len(df_1d), np.nan)
+    vol_series = pd.Series(volume_1d)
+    vol_20_values = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_20[:] = vol_20_values
+    
+    # Align ATR and volume average to 4h timeframe
+    atr_14_4h = align_htf_to_ltf(prices, df_1d, atr_14)
+    vol_20_4h = align_htf_to_ltf(prices, df_1d, vol_20)
+    
+    # Calculate 4h ATR for volatility filter
+    tr1_4h = np.abs(high - low)
+    tr2_4h = np.abs(high - np.roll(close, 1))
+    tr3_4h = np.abs(low - np.roll(close, 1))
+    tr1_4h[0] = tr2_4h[0] = tr3_4h[0] = np.nan
+    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
+    atr_4h = np.full(n, np.nan)
     for i in range(14, n):
-        atr[i] = np.nanmean(tr[i-14:i+1])
+        atr_4h[i] = np.nanmean(tr_4h[i-14:i+1])
+    
+    # Calculate 4h 20-period ATR average for volatility regime
+    atr_ma_20 = np.full(n, np.nan)
+    atr_series = pd.Series(atr_4h)
+    atr_ma_20_values = atr_series.rolling(window=20, min_periods=20).mean().values
+    atr_ma_20[:] = atr_ma_20_values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(s1_4h[i]) or np.isnan(r1_4h[i]) or 
-            np.isnan(vol_ema[i]) or np.isnan(atr[i])):
+        if (np.isnan(atr_14_4h[i]) or np.isnan(vol_20_4h[i]) or 
+            np.isnan(atr_4h[i]) or np.isnan(atr_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x EMA
-        volume_filter = volume[i] > vol_ema[i] * 1.5
+        # Volatility filter: current ATR > 1.5x 20-period ATR average
+        vol_filter = atr_4h[i] > atr_ma_20[i] * 1.5
         
-        # Volatility filter: ATR > 0.5 * 20-period ATR mean
-        atr_ma = np.full(n, np.nan)
-        if i >= 34:
-            atr_ma[i] = np.nanmean(atr[i-20:i])
-        vol_filter = atr[i] > atr_ma[i] * 0.5 if not np.isnan(atr_ma[i]) else True
+        # Volume filter: current volume > 1.5x 20-day average volume
+        volume_filter = volume[i] > vol_20_4h[i] * 1.5
         
-        # Entry conditions: Touch of S1/R1 with volume and volatility (mean reversion)
-        long_entry = (low[i] <= s1_4h[i]) and volume_filter and vol_filter
-        short_entry = (high[i] >= r1_4h[i]) and volume_filter and vol_filter
+        # Entry conditions: High volatility + high volume (momentum breakout)
+        # Long when price breaks above recent high with expansion
+        # Short when price breaks below recent low with expansion
+        high_20 = np.full(n, np.nan)
+        low_20 = np.full(n, np.nan)
+        if i >= 20:
+            high_20[i] = np.max(high[i-20:i])
+            low_20[i] = np.min(low[i-20:i])
         
-        # Exit conditions: Return to pivot
-        pivot = (prev_high + prev_low + prev_close) / 3
-        pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
-        long_exit = close[i] > pivot_4h[i] if not np.isnan(pivot_4h[i]) else False
-        short_exit = close[i] < pivot_4h[i] if not np.isnan(pivot_4h[i]) else False
+        long_breakout = (not np.isnan(high_20[i])) and (close[i] > high_20[i])
+        short_breakout = (not np.isnan(low_20[i])) and (close[i] < low_20[i])
+        
+        long_entry = long_breakout and vol_filter and volume_filter
+        short_entry = short_breakout and vol_filter and volume_filter
+        
+        # Exit conditions: Volatility contraction or opposite breakout
+        long_exit = (not np.isnan(low_20[i])) and (close[i] < low_20[i]) or (atr_4h[i] < atr_ma_20[i] * 0.8)
+        short_exit = (not np.isnan(high_20[i])) and (close[i] > high_20[i]) or (atr_4h[i] < atr_ma_20[i] * 0.8)
         
         if long_entry and position != 1:
             position = 1
@@ -106,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_camarilla_s1r1_mean_reversion_vol_filter_v1"
+name = "4h_1d_volatility_volume_breakout_v1"
 timeframe = "4h"
 leverage = 1.0
