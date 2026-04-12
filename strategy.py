@@ -1,10 +1,3 @@
-# 1d_1w_rsi_momentum_trend_v1
-# Hypothesis: Daily RSI momentum filtered by weekly trend and volatility regime.
-# In bull markets, RSI > 60 with weekly uptrend captures momentum.
-# In bear markets, RSI < 40 with weekly downtrend captures mean-reversion bounces.
-# Weekly trend filter reduces whipsaws; volatility filter avoids chop.
-# Target: 15-25 trades/year, discretionary sizing 0.25.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -20,80 +13,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 12h data for weekly pivot points
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 3:
         return np.zeros(n)
     
-    # Weekly 20-period EMA for trend
-    close_1w = df_1w['close'].values
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Calculate weekly pivot points from 12h data (3 bars = ~1.5 days, use lookback of 3)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Daily 14-period RSI
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Use last 3 periods to calculate pivot (weekly approximation)
+    pivot = np.full(len(close_12h), np.nan)
+    r1 = np.full(len(close_12h), np.nan)
+    s1 = np.full(len(close_12h), np.nan)
+    r2 = np.full(len(close_12h), np.nan)
+    s2 = np.full(len(close_12h), np.nan)
+    r3 = np.full(len(close_12h), np.nan)
+    s3 = np.full(len(close_12h), np.nan)
+    r4 = np.full(len(close_12h), np.nan)
+    s4 = np.full(len(close_12h), np.nan)
     
-    # Daily ATR(10) for volatility filter
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = tr2[0] = tr3[0] = np.nan
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr10 = np.full(n, np.nan)
-    for i in range(9, n):
-        atr10[i] = np.nanmean(tr[i-9:i+1])
+    for i in range(2, len(close_12h)):
+        # Use previous 3 periods for pivot calculation
+        phigh = np.max(high_12h[i-2:i+1])
+        plow = np.min(low_12h[i-2:i+1])
+        pclose = close_12h[i]
+        pivot[i] = (phigh + plow + pclose) / 3.0
+        r1[i] = 2 * pivot[i] - plow
+        s1[i] = 2 * pivot[i] - phigh
+        r2[i] = pivot[i] + (phigh - plow)
+        s2[i] = pivot[i] - (phigh - plow)
+        r3[i] = phigh + 2 * (pivot[i] - plow)
+        s3[i] = plow - 2 * (phigh - pivot[i])
+        r4[i] = r3[i] + (r2[i] - r1[i])
+        s4[i] = s3[i] - (s2[i] - s1[i])
     
-    # ATR(10) EMA(20) for volatility regime
-    atr_ema20 = np.full(n, np.nan)
-    atr_series = pd.Series(atr10)
-    atr_ema20_values = atr_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    atr_ema20[:] = atr_ema20_values
+    # Align pivot levels to 6h timeframe
+    pivot_6h = align_htf_to_ltf(prices, df_12h, pivot)
+    r1_6h = align_htf_to_ltf(prices, df_12h, r1)
+    s1_6h = align_htf_to_ltf(prices, df_12h, s1)
+    r2_6h = align_htf_to_ltf(prices, df_12h, r2)
+    s2_6h = align_htf_to_ltf(prices, df_12h, s2)
+    r3_6h = align_htf_to_ltf(prices, df_12h, r3)
+    s3_6h = align_htf_to_ltf(prices, df_12h, s3)
+    r4_6h = align_htf_to_ltf(prices, df_12h, r4)
+    s4_6h = align_htf_to_ltf(prices, df_12h, s4)
+    
+    # Volume confirmation - 20-period average
+    vol_ma20 = np.full(n, np.nan)
+    vol_series = pd.Series(volume)
+    vol_ma20_values = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_ma20[:] = vol_ma20_values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # warmup for RSI and ATR
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(rsi[i]) or np.isnan(ema20_1w_aligned[i]) or 
-            np.isnan(atr10[i]) or np.isnan(atr_ema20[i])):
+        if (np.isnan(pivot_6h[i]) or np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or 
+            np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or np.isnan(vol_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # Weekly trend filter
-        weekly_uptrend = close[i] > ema20_1w_aligned[i]
-        weekly_downtrend = close[i] < ema20_1w_aligned[i]
+        # Volume filter: current volume > 1.5x 20-period average
+        vol_filter = volume[i] > vol_ma20[i] * 1.5
         
-        # Volatility filter: elevated volatility (avoid chop)
-        vol_filter = atr10[i] > atr_ema20[i] * 0.8
+        # Fade at R3/S3, breakout continuation at R4/S4
+        long_setup = (close[i] <= s3_6h[i] and close[i] > s4_6h[i]) and vol_filter  # bounce from S3, above S4
+        short_setup = (close[i] >= r3_6h[i] and close[i] < r4_6h[i]) and vol_filter  # reject at R3, below R4
+        long_breakout = close[i] > r4_6h[i] and vol_filter  # break above R4
+        short_breakout = close[i] < s4_6h[i] and vol_filter  # break below S4
         
-        # RSI momentum conditions
-        rsi_overbought = rsi[i] > 60
-        rsi_oversold = rsi[i] < 40
-        
-        # Entry logic: align RSI momentum with weekly trend
-        long_entry = rsi_overbought and weekly_uptrend and vol_filter
-        short_entry = rsi_oversold and weekly_downtrend and vol_filter
-        
-        # Exit on RSI mean reversion or volatility collapse
-        long_exit = rsi[i] < 50 or atr10[i] < atr_ema20[i] * 0.6
-        short_exit = rsi[i] > 50 or atr10[i] < atr_ema20[i] * 0.6
-        
-        if long_entry and position != 1:
+        if (long_setup or long_breakout) and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_entry and position != -1:
+        elif (short_setup or short_breakout) and position != -1:
             position = -1
             signals[i] = -0.25
-        elif position == 1 and long_exit:
+        elif position == 1 and (close[i] < pivot_6h[i] or (close[i] < s1_6h[i] and vol_filter)):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and short_exit:
+        elif position == -1 and (close[i] > pivot_6h[i] or (close[i] > r1_6h[i] and vol_filter)):
             position = 0
             signals[i] = 0.0
         else:
@@ -107,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_rsi_momentum_trend_v1"
-timeframe = "1d"
+name = "6h_12h_pivot_r3s3_r4s4_vol_filter_v1"
+timeframe = "6h"
 leverage = 1.0
