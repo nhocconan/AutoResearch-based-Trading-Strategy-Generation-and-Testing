@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,55 +13,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for RSI calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
-        return np.zeros(n)
-    
-    # Calculate weekly RSI(14)
-    close_1w = df_1w['close'].values
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
-    
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi_1w = 100 - (100 / (1 + rs))
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
-    
-    # Get daily data for price position
+    # Get daily data for pivot points
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 20-period high and low for Donchian channel
+    # Calculate daily pivot points using previous day's data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Donchian high (20-period high)
-    donchian_high = np.full(len(high_1d), np.nan)
-    for i in range(19, len(high_1d)):
-        donchian_high[i] = np.max(high_1d[i-19:i+1])
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Donchian low (20-period low)
-    donchian_low = np.full(len(low_1d), np.nan)
-    for i in range(19, len(low_1d)):
-        donchian_low[i] = np.min(low_1d[i-19:i+1])
+    # Key levels: S1, R1 (Camarilla) - tighter range for fewer trades
+    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
     
-    # Align Donchian levels to 4h timeframe
-    donchian_high_4h = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_4h = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Align levels to 12h timeframe
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
     
-    # Calculate 4h ATR for volatility filter
+    # Volume filter: 20-period EMA
+    vol_ema = np.full(n, np.nan)
+    vol_series = pd.Series(volume)
+    vol_ema_values = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ema[:] = vol_ema_values
+    
+    # ATR for volatility filter
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -71,39 +54,34 @@ def generate_signals(prices):
     for i in range(14, n):
         atr[i] = np.nanmean(tr[i-14:i+1])
     
-    # 20-period ATR average
-    atr_ma = np.full(n, np.nan)
-    for i in range(34, n):
-        atr_ma[i] = np.nanmean(atr[i-20:i])
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high_4h[i]) or np.isnan(donchian_low_4h[i]) or 
-            np.isnan(rsi_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(atr_ma[i])):
+        if (np.isnan(s1_12h[i]) or np.isnan(r1_12h[i]) or 
+            np.isnan(vol_ema[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
+        # Volume filter: current volume > 1.5x EMA
+        volume_filter = volume[i] > vol_ema[i] * 1.5
+        
         # Volatility filter: ATR > 0.5 * 20-period ATR mean
-        vol_filter = atr[i] > atr_ma[i] * 0.5
+        atr_ma = np.full(n, np.nan)
+        if i >= 34:
+            atr_ma[i] = np.nanmean(atr[i-20:i])
+        vol_filter = atr[i] > atr_ma[i] * 0.5 if not np.isnan(atr_ma[i]) else True
         
-        # Entry conditions: Breakout of Donchian channel with weekly RSI filter
-        long_breakout = close[i] > donchian_high_4h[i]
-        short_breakout = close[i] < donchian_low_4h[i]
+        # Entry conditions: Touch of S1/R1 with volume and volatility (mean reversion)
+        long_entry = (low[i] <= s1_12h[i]) and volume_filter and vol_filter
+        short_entry = (high[i] >= r1_12h[i]) and volume_filter and vol_filter
         
-        # RSI filter: Avoid overbought/oversold extremes
-        rsi_not_overbought = rsi_1w_aligned[i] < 70
-        rsi_not_oversold = rsi_1w_aligned[i] > 30
-        
-        long_entry = long_breakout and vol_filter and rsi_not_overbought
-        short_entry = short_breakout and vol_filter and rsi_not_oversold
-        
-        # Exit conditions: Return to midpoint of Donchian channel
-        donchian_mid = (donchian_high_4h[i] + donchian_low_4h[i]) / 2
-        long_exit = close[i] < donchian_mid
-        short_exit = close[i] > donchian_mid
+        # Exit conditions: Return to pivot
+        pivot = (prev_high + prev_low + prev_close) / 3
+        pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
+        long_exit = close[i] > pivot_12h[i] if not np.isnan(pivot_12h[i]) else False
+        short_exit = close[i] < pivot_12h[i] if not np.isnan(pivot_12h[i]) else False
         
         if long_entry and position != 1:
             position = 1
@@ -128,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1w_donchian_breakout_rsi_filter_v1"
-timeframe = "4h"
+name = "12h_1d_camarilla_s1r1_mean_reversion_vol_filter_v1"
+timeframe = "12h"
 leverage = 1.0
