@@ -13,49 +13,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend and volatility context
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend context (primary timeframe is 1d)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    volume_1w = df_1w['volume'].values
     
-    # Calculate daily EMA(50) for trend
-    close_1d_series = pd.Series(close_1d)
-    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate weekly EMA(21) for trend
+    close_1w_series = pd.Series(close_1w)
+    ema_21_1w = close_1w_series.ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Calculate daily ATR(14) for volatility
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # Calculate weekly ATR(14) for volatility
+    tr1 = np.abs(high_1w - low_1w)
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr1[0] = tr2[0] = tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = np.full(len(df_1d), np.nan)
-    for i in range(14, len(df_1d)):
-        atr_1d[i] = np.mean(tr[i-14:i+1])
+    atr_1w = np.full(len(df_1w), np.nan)
+    for i in range(14, len(df_1w)):
+        atr_1w[i] = np.mean(tr[i-14:i+1])
     
-    # Align daily indicators to 4h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Align weekly indicators to daily timeframe
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
     
-    # Calculate 4h ATR(14) for position sizing
-    tr1_h = np.abs(high - low)
-    tr2_h = np.abs(high - np.roll(close, 1))
-    tr3_h = np.abs(low - np.roll(close, 1))
-    tr1_h[0] = tr2_h[0] = tr3_h[0] = np.nan
-    tr_h = np.maximum(tr1_h, np.maximum(tr2_h, tr3_h))
-    atr_4h = np.full(n, np.nan)
+    # Calculate daily ATR(14) for position sizing and volatility
+    tr1_d = np.abs(high - low)
+    tr2_d = np.abs(high - np.roll(close, 1))
+    tr3_d = np.abs(low - np.roll(close, 1))
+    tr1_d[0] = tr2_d[0] = tr3_d[0] = np.nan
+    tr_d = np.maximum(tr1_d, np.maximum(tr2_d, tr3_d))
+    atr_1d = np.full(n, np.nan)
     for i in range(14, n):
-        atr_4h[i] = np.mean(tr_h[i-14:i+1])
+        atr_1d[i] = np.mean(tr_d[i-14:i+1])
     
-    # Calculate 4h EMA(21) for trend
-    close_s = pd.Series(close)
-    ema_21_4h = close_s.ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # Calculate 4h volume moving average
+    # Calculate daily volume moving average
     vol_s = pd.Series(volume)
     vol_ma_20 = vol_s.rolling(window=20, min_periods=20).mean().values
     
@@ -64,36 +60,32 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(ema_21_4h[i]) or np.isnan(atr_4h[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_21_1w_aligned[i]) or np.isnan(atr_1w_aligned[i]) or 
+            np.isnan(atr_1d[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Volatility filter: ATR > 0.5 * ATR MA(10) to avoid low volatility
         atr_ma_10 = np.full(n, np.nan)
         for j in range(23, n):  # 14 + 9 for 10-period MA
-            if not np.isnan(np.mean(atr_1d_aligned[j-9:j+1])):
-                atr_ma_10[j] = np.mean(atr_1d_aligned[j-9:j+1])
-        vol_filter = atr_1d_aligned[i] > 0.5 * atr_ma_10[i] if not np.isnan(atr_ma_10[i]) else False
+            if not np.isnan(np.mean(atr_1w_aligned[j-9:j+1])):
+                atr_ma_10[j] = np.mean(atr_1w_aligned[j-9:j+1])
+        vol_filter = atr_1w_aligned[i] > 0.5 * atr_ma_10[i] if not np.isnan(atr_ma_10[i]) else False
         
         # Volume filter: volume > 1.5 * 20-period MA
         vol_spike = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Trend filter: price relative to daily EMA50
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Trend filter: price relative to weekly EMA21
+        uptrend = close[i] > ema_21_1w_aligned[i]
+        downtrend = close[i] < ema_21_1w_aligned[i]
         
-        # Trend filter: 4h EMA21
-        price_above_ema = close[i] > ema_21_4h[i]
-        price_below_ema = close[i] < ema_21_4h[i]
+        # Entry conditions: price above/below weekly EMA with volatility and volume filters
+        long_entry = uptrend and vol_filter and vol_spike
+        short_entry = downtrend and vol_filter and vol_spike
         
-        # Entry conditions: price above/below both EMAs with volatility and volume filters
-        long_entry = price_above_ema and uptrend and vol_filter and vol_spike
-        short_entry = price_below_ema and downtrend and vol_filter and vol_spike
-        
-        # Exit conditions: price crosses back to EMA21
-        long_exit = close[i] < ema_21_4h[i]
-        short_exit = close[i] > ema_21_4h[i]
+        # Exit conditions: price crosses back to weekly EMA21
+        long_exit = close[i] < ema_21_1w_aligned[i]
+        short_exit = close[i] > ema_21_1w_aligned[i]
         
         if long_entry and position != 1:
             position = 1
@@ -118,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_ema_dual_trend_filter_vol_vol"
-timeframe = "4h"
+name = "1d_1w_ema21_trend_vol_vol_filter"
+timeframe = "1d"
 leverage = 1.0
