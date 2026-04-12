@@ -34,9 +34,9 @@ def generate_signals(prices):
     s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
     
-    # Align levels to daily timeframe (since we're using 1d timeframe)
-    s1_1d = align_htf_to_ltf(prices, df_1d, s1)
-    r1_1d = align_htf_to_ltf(prices, df_1d, r1)
+    # Align levels to 12h timeframe
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
     
     # Volume filter: 20-period EMA
     vol_ema = np.full(n, np.nan)
@@ -59,7 +59,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(s1_1d[i]) or np.isnan(r1_1d[i]) or 
+        if (np.isnan(s1_12h[i]) or np.isnan(r1_12h[i]) or 
             np.isnan(vol_ema[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -74,21 +74,21 @@ def generate_signals(prices):
         vol_filter = atr[i] > atr_ma[i] * 0.5 if not np.isnan(atr_ma[i]) else True
         
         # Entry conditions: Touch of S1/R1 with volume and volatility (mean reversion)
-        long_entry = (low[i] <= s1_1d[i]) and volume_filter and vol_filter
-        short_entry = (high[i] >= r1_1d[i]) and volume_filter and vol_filter
+        long_entry = (low[i] <= s1_12h[i]) and volume_filter and vol_filter
+        short_entry = (high[i] >= r1_12h[i]) and volume_filter and vol_filter
         
         # Exit conditions: Return to pivot
         pivot = (prev_high + prev_low + prev_close) / 3
-        pivot_1d = align_htf_to_ltf(prices, df_1d, pivot)
-        long_exit = close[i] > pivot_1d[i] if not np.isnan(pivot_1d[i]) else False
-        short_exit = close[i] < pivot_1d[i] if not np.isnan(pivot_1d[i]) else False
+        pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
+        long_exit = close[i] > pivot_12h[i] if not np.isnan(pivot_12h[i]) else False
+        short_exit = close[i] < pivot_12h[i] if not np.isnan(pivot_12h[i]) else False
         
         if long_entry and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.30
         elif short_entry and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.30
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -98,14 +98,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1d_1d_camarilla_s1r1_mean_reversion_vol_filter_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_s1r1_mean_reversion_vol_filter_v1"
+timeframe = "12h"
 leverage = 1.0
