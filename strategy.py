@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """
-12h_1d_KAMA_Trend_With_RSI_Filter_v1
-Hypothesis: On 12h timeframe, use KAMA (Kaufman Adaptive Moving Average) to capture the dominant trend direction,
-filtered by RSI(14) to avoid overextended entries, with volume confirmation and ADX(14) trend strength filter.
-Exit when price crosses KAMA in the opposite direction. Designed for low trade frequency (10-30/year) by requiring
-multiple confluence factors. Works in bull/bear via adaptive trend following and RSI filter to avoid chasing momentum.
+4h_1d_Camarilla_Breakout_Volume_Regime_v3
+Hypothesis: Refined version focusing on high-probability setups by tightening entry conditions:
+- Only trade when price breaks above H3 (long) or below L3 (short) with volume > 2x average
+- Require 1d trend filter (price above/below 50 EMA) for directional bias
+- Exit at opposite H3/L3 level for mean reversion
+- Use volatility regime filter (ADX < 25) to avoid choppy markets
+Target: 20-35 trades/year per symbol with focus on quality over quantity.
+Works in bull/bear via 1d EMA trend filter and volatility regime avoidance.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_KAMA_Trend_With_RSI_Filter_v1"
-timeframe = "12h"
+name = "4h_1d_Camarilla_Breakout_Volume_Regime_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,183 +28,151 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY KAMA (10-period ER, 2/30 smoothing) ===
+    # === DAILY DATA FOR INDICATORS ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Efficiency Ratio (ER) and Smoothing Constant (SC)
-    change = np.abs(np.diff(close_1d))
-    volatility = np.sum(np.abs(np.diff(close_1d)))
+    # === DAILY EMA50 FOR TREND FILTER ===
+    close_series = pd.Series(close_1d)
+    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Initialize arrays
-    er = np.full_like(close_1d, np.nan, dtype=np.float64)
-    sc = np.full_like(close_1d, np.nan, dtype=np.float64)
-    kama = np.full_like(close_1d, np.nan, dtype=np.float64)
+    # === DAILY CAMARILLA LEVELS (based on previous day) ===
+    # Use previous day's data to avoid look-ahead
+    high_prev = np.roll(high_1d, 1)
+    low_prev = np.roll(low_1d, 1)
+    close_prev = np.roll(close_1d, 1)
+    # Set first value to avoid NaN propagation
+    high_prev[0] = high_1d[0]
+    low_prev[0] = low_1d[0]
+    close_prev[0] = close_1d[0]
     
-    # Calculate ER and SC for 10-period window
-    for i in range(10, len(close_1d)):
-        if i >= 10:
-            change_val = np.abs(close_1d[i] - close_1d[i-10])
-            volatility_val = np.sum(np.abs(np.diff(close_1d[i-10:i+1])))
-            if volatility_val > 0:
-                er[i] = change_val / volatility_val
-            else:
-                er[i] = 1.0
-            sc[i] = (er[i] * (2/2 - 2/30) + 2/30) ** 2  # Fast=2, Slow=30
+    range_prev = high_prev - low_prev
     
-    # Initialize KAMA
-    kama[9] = close_1d[9]  # Start at period 9
-    for i in range(10, len(close_1d)):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    h3 = close_prev + (range_prev * 1.1 / 4)
+    l3 = close_prev - (range_prev * 1.1 / 4)
+    h4 = close_prev + (range_prev * 1.1)
+    l4 = close_prev - (range_prev * 1.1)
     
-    # === DAILY RSI(14) ===
-    delta = np.diff(close_1d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # === DAILY VOLATILITY REGIME: ADX < 25 (low trend strength = avoid chop) ===
+    # Calculate ADX components
+    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
     
-    avg_gain = np.full_like(close_1d, np.nan)
-    avg_loss = np.full_like(close_1d, np.nan)
-    rsi = np.full_like(close_1d, np.nan)
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Wilder's smoothing
-    for i in range(1, len(close_1d)):
+    # Wilder's smoothing for TR and DM
+    atr = np.full_like(tr, np.nan)
+    plus_dm_smooth = np.full_like(tr, np.nan)
+    minus_dm_smooth = np.full_like(tr, np.nan)
+    
+    for i in range(len(tr)):
+        if i < 1:
+            continue
         if i < 14:
             if i == 1:
-                avg_gain[i] = gain[i]
-                avg_loss[i] = loss[i]
+                atr[i] = np.nanmean(tr[1:i+1]) if not np.all(np.isnan(tr[1:i+1])) else np.nan
+                plus_dm_smooth[i] = np.nanmean(plus_dm[:i+1]) if i < len(plus_dm) else np.nan
+                minus_dm_smooth[i] = np.nanmean(minus_dm[:i+1]) if i < len(minus_dm) else np.nan
             else:
-                avg_gain[i] = (avg_gain[i-1] * (i-1) + gain[i]) / i
-                avg_loss[i] = (avg_loss[i-1] * (i-1) + loss[i]) / i
+                prev_atr = atr[i-1] if not np.isnan(atr[i-1]) else 0
+                prev_plus = plus_dm_smooth[i-1] if not np.isnan(plus_dm_smooth[i-1]) else 0
+                prev_minus = minus_dm_smooth[i-1] if not np.isnan(minus_dm_smooth[i-1]) else 0
+                atr[i] = (prev_atr * 13 + tr[i]) / 14 if not np.isnan(prev_atr) else np.nan
+                plus_dm_smooth[i] = (prev_plus * 13 + (plus_dm[i] if i < len(plus_dm) else 0)) / 14
+                minus_dm_smooth[i] = (prev_minus * 13 + (minus_dm[i] if i < len(minus_dm) else 0)) / 14
         else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    for i in range(14, len(close_1d)):
-        if avg_loss[i] != 0:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs))
-        else:
-            rsi[i] = 100
-    
-    # === DAILY ADX(14) ===
-    # Calculate True Range and Directional Movement
-    tr = np.full_like(close_1d, np.nan)
-    plus_dm = np.full_like(close_1d, np.nan)
-    minus_dm = np.full_like(close_1d, np.nan)
-    
-    for i in range(1, len(close_1d)):
-        high_diff = high_1d[i] - high_1d[i-1]
-        low_diff = low_1d[i-1] - low_1d[i]
-        
-        tr[i] = max(
-            high_1d[i] - low_1d[i],
-            abs(high_1d[i] - close_1d[i-1]),
-            abs(low_1d[i] - close_1d[i-1])
-        )
-        
-        if high_diff > low_diff and high_diff > 0:
-            plus_dm[i] = high_diff
-        else:
-            plus_dm[i] = 0
-            
-        if low_diff > high_diff and low_diff > 0:
-            minus_dm[i] = low_diff
-        else:
-            minus_dm[i] = 0
-    
-    # Smooth TR, +DM, -DM
-    atr = np.full_like(close_1d, np.nan)
-    smoothed_plus_dm = np.full_like(close_1d, np.nan)
-    smoothed_minus_dm = np.full_like(close_1d, np.nan)
-    
-    for i in range(1, len(close_1d)):
-        if i < 14:
-            if i == 1:
-                atr[i] = tr[i]
-                smoothed_plus_dm[i] = plus_dm[i]
-                smoothed_minus_dm[i] = minus_dm[i]
-            else:
-                atr[i] = (atr[i-1] * (i-1) + tr[i]) / i
-                smoothed_plus_dm[i] = (smoothed_plus_dm[i-1] * (i-1) + plus_dm[i]) / i
-                smoothed_minus_dm[i] = (smoothed_minus_dm[i-1] * (i-1) + minus_dm[i]) / i
-        else:
-            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-            smoothed_plus_dm[i] = (smoothed_plus_dm[i-1] * 13 + plus_dm[i]) / 14
-            smoothed_minus_dm[i] = (smoothed_minus_dm[i-1] * 13 + minus_dm[i]) / 14
+            prev_atr = atr[i-1]
+            prev_plus = plus_dm_smooth[i-1]
+            prev_minus = minus_dm_smooth[i-1]
+            atr[i] = (prev_atr * 13 + tr[i]) / 14
+            plus_dm_smooth[i] = (prev_plus * 13 + plus_dm[i]) / 14
+            minus_dm_smooth[i] = (prev_minus * 13 + minus_dm[i]) / 14
     
     # Calculate DI and DX
-    plus_di = np.full_like(close_1d, np.nan)
-    minus_di = np.full_like(close_1d, np.nan)
-    dx = np.full_like(close_1d, np.nan)
-    adx = np.full_like(close_1d, np.nan)
+    plus_di = np.full_like(atr, np.nan)
+    minus_di = np.full_like(atr, np.nan)
+    dx = np.full_like(atr, np.nan)
     
-    for i in range(14, len(close_1d)):
-        if atr[i] != 0:
-            plus_di[i] = 100 * (smoothed_plus_dm[i] / atr[i])
-            minus_di[i] = 100 * (smoothed_minus_dm[i] / atr[i])
-            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+    for i in range(len(atr)):
+        if i >= 14 and not np.isnan(atr[i]) and atr[i] != 0:
+            plus_di[i] = 100 * (plus_dm_smooth[i] / atr[i])
+            minus_di[i] = 100 * (minus_dm_smooth[i] / atr[i])
+            dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
     
-    # Smooth DX to get ADX
-    for i in range(28, len(close_1d)):  # 14 + 14
-        if i == 28:
-            adx[i] = np.nanmean(dx[14:i+1])
+    # ADX: smoothed DX
+    adx = np.full_like(dx, np.nan)
+    for i in range(len(dx)):
+        if i < 27:  # 14 + 13 for smoothing
+            continue
+        if i == 27:
+            adx[i] = np.nanmean(dx[14:i+1]) if not np.all(np.isnan(dx[14:i+1])) else np.nan
         else:
-            adx[i] = (adx[i-1] * 13 + dx[i]) / 14
+            prev_adx = adx[i-1]
+            if not np.isnan(prev_adx) and not np.isnan(dx[i]):
+                adx[i] = (prev_adx * 13 + dx[i]) / 14
     
-    # === DAILY VOLUME AVERAGE (20-period) ===
-    volume_1d = df_1d['volume'].values
-    vol_avg_1d = np.full_like(volume_1d, np.nan)
+    # Low ADX (<25) indicates ranging/choppy market - we avoid these
+    # High ADX (>25) indicates trending - we want this
+    adx_filter = adx > 25
+    
+    # === ALIGN ALL INDICATORS TO 4H TIMEFRAME ===
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    adx_filter_aligned = align_htf_to_ltf(prices, df_1d, adx_filter.astype(float))
+    
+    # Volume average (20-period for 4h) for confirmation
+    vol_avg = np.zeros(n)
     vol_sum = 0.0
     vol_count = 0
-    for i in range(len(volume_1d)):
-        vol_sum += volume_1d[i]
+    for i in range(n):
+        vol_sum += volume[i]
         vol_count += 1
         if i >= 20:
-            vol_sum -= volume_1d[i-20]
+            vol_sum -= volume[i-20]
             vol_count -= 1
         if vol_count > 0:
-            vol_avg_1d[i] = vol_sum / vol_count
-    
-    # Align all daily indicators to 12h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+            vol_avg[i] = vol_sum / vol_count
+        else:
+            vol_avg[i] = 0.0
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # start after warmup
         # Skip if indicators not available
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_avg_aligned[i]) or vol_avg_aligned[i] == 0.0):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
+            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(adx_filter_aligned[i]) or 
+            vol_avg[i] == 0.0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: at least 1.3x average
-        vol_confirm = volume[i] > 1.3 * vol_avg_aligned[i]
+        # Volume confirmation: at least 2x average (tighter than before)
+        vol_confirm = volume[i] > 2.0 * vol_avg[i]
         
-        # Trend strength filter: ADX > 20
-        trend_filter = adx_aligned[i] > 20
+        # Only trade when ADX indicates trending market (avoid chop)
+        in_trend = adx_filter_aligned[i] > 0.5
         
-        # RSI filter: avoid overextended (30 < RSI < 70)
-        rsi_filter = (rsi_aligned[i] > 30) and (rsi_aligned[i] < 70)
+        # Entry conditions with 1d EMA50 trend filter
+        long_setup = (close[i] > h3_aligned[i]) and vol_confirm and in_trend and (close[i] > ema_50_aligned[i])
+        short_setup = (close[i] < l3_aligned[i]) and vol_confirm and in_trend and (close[i] < ema_50_aligned[i])
         
-        # Entry conditions
-        long_setup = (close[i] > kama_aligned[i]) and vol_confirm and trend_filter and rsi_filter
-        short_setup = (close[i] < kama_aligned[i]) and vol_confirm and trend_filter and rsi_filter
-        
-        # Exit when price crosses KAMA in opposite direction
-        exit_long = close[i] < kama_aligned[i]
-        exit_short = close[i] > kama_aligned[i]
+        # Exit conditions: mean reversion to opposite H3/L3 level
+        exit_long = close[i] < l3_aligned[i]
+        exit_short = close[i] > h3_aligned[i]
         
         if long_setup and position != 1:
             position = 1
