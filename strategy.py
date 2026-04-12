@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
-"""
-1d_1w_keltner_breakout
-Hypothesis: Daily Keltner Channel breakout with weekly trend filter and volume confirmation.
-Works in bull/bear: In trending markets, ride breakouts; in ranging markets, filter out false signals via weekly trend.
-Uses volatility-based channels (ATR) to adapt to changing market conditions.
-Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag.
-"""
+# 4h_1d_camarilla_breakout_volume_v1
+# Hypothesis: 4-hour breakout at daily Camarilla levels with volume confirmation to capture strong directional moves while avoiding false breakouts. Works in bull/bear by using volatility-adjusted breakouts and volume confirmation. Target: 20-50 trades/year (80-200 total over 4 years).
 
-name = "1d_1w_keltner_breakout"
-timeframe = "1d"
+name = "4h_1d_camarilla_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,31 +20,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Weekly EMA20 for trend filter
-    close_1w = df_1w['close'].values
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Daily ATR(20) for Keltner Channels
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(np.subtract(high, np.roll(close, 1)))
-    tr3 = np.abs(np.subtract(low, np.roll(close, 1)))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Previous day's range
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
     
-    # Daily EMA20 for Keltner center
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Camarilla levels (based on previous day)
+    range_ = prev_high - prev_low
+    # Resistance levels
+    r3 = prev_close + range_ * 1.1 / 2
+    r4 = prev_close + range_ * 1.1
+    # Support levels
+    s3 = prev_close - range_ * 1.1 / 2
+    s4 = prev_close - range_ * 1.1
     
-    # Keltner Channels: 2.0 * ATR
-    upper = ema20 + 2.0 * atr
-    lower = ema20 - 2.0 * atr
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Volume confirmation: volume > 1.5x 20-day average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
@@ -58,26 +58,24 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema20_1w_aligned[i]) or np.isnan(upper[i]) or 
-            np.isnan(lower[i]) or np.isnan(ema20[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: close breaks above upper Keltner with weekly uptrend and volume
-        if (close[i] > upper[i] and close[i] > ema20_1w_aligned[i] and 
-            vol_confirm[i] and position != 1):
+        # Long entry: close breaks above R4 with volume confirmation
+        if (close[i] > r4_aligned[i] and vol_confirm[i] and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: close breaks below lower Keltner with weekly downtrend and volume
-        elif (close[i] < lower[i] and close[i] < ema20_1w_aligned[i] and 
-              vol_confirm[i] and position != -1):
+        # Short entry: close breaks below S4 with volume confirmation
+        elif (close[i] < s4_aligned[i] and vol_confirm[i] and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: reverse signal or close crosses back to EMA20
-        elif position == 1 and close[i] < ema20[i]:
+        # Exit: reverse signal or close crosses back to opposite S3/R3
+        elif position == 1 and close[i] < s3_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > ema20[i]:
+        elif position == -1 and close[i] > r3_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
