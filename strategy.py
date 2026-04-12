@@ -3,22 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_kama_rsi_volume_v1
-# Uses Kaufman Adaptive Moving Average (KAMA) on 1d for trend direction,
-# RSI(14) on 4h for momentum confirmation, and volume spike filter.
-# Long when 1d KAMA rising and RSI < 70 (avoiding overbought),
-# Short when 1d KAMA falling and RSI > 30 (avoiding oversold).
-# Volume > 1.5x 20-period average confirms momentum.
-# Designed for low trade frequency (<50/year) to minimize fee drag.
-# Works in bull trends (KAMA up) and bear trends (KAMA down).
+# Hypothesis: 1d_1w_rsi_momentum_v1
+# Uses weekly RSI to determine trend strength and daily RSI for mean-reversion entries.
+# Long when weekly RSI > 50 (bullish regime) and daily RSI < 30 (oversold pullback).
+# Short when weekly RSI < 50 (bearish regime) and daily RSI > 70 (overbought rally).
+# Includes volume confirmation to filter false signals and ATR-based volatility filter.
+# Designed for low trade frequency (target: 10-25 trades/year) to minimize fee drag.
+# Works in bull markets (buying dips in uptrend) and bear markets (selling rallies in downtrend).
 
-name = "4h_1d_kama_rsi_volume_v1"
-timeframe = "4h"
+name = "1d_1w_rsi_momentum_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,124 +25,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for KAMA calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    # Calculate KAMA on daily close
-    close_1d = df_1d['close'].values
-    # Efficiency Ratio (ER)
-    change = np.abs(np.diff(close_1d, n=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)  # needs fixing
-    # Correct ER calculation
-    er = np.zeros_like(close_1d)
-    for i in range(10, len(close_1d)):
-        if i >= 10:
-            ch = np.abs(close_1d[i] - close_1d[i-10])
-            vol = np.sum(np.abs(np.diff(close_1d[i-10:i+1])))
-            er[i] = ch / vol if vol != 0 else 0
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)
-    slow_sc = 2 / (30 + 1)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Calculate weekly RSI (14) for trend regime
+    close_1w = df_1w['close'].values
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_14 = 100 - (100 / (1 + rs))
+    rsi_1w = np.where(avg_loss == 0, 100, rsi_14)
     
-    # Alternative simpler approach: use EMA as trend proxy if KAMA complex
-    # But we'll implement proper KAMA
+    # Align weekly RSI to daily
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
-    # Recalculate ER properly
-    change = np.abs(np.diff(close_1d, n=10))
-    volatility = np.array([np.sum(np.abs(np.diff(close_1d[i-10:i+1]))) for i in range(10, len(close_1d))])
-    er = np.zeros(len(close_1d))
-    er[10:] = change / volatility
-    er[volatility == 0] = 0
+    # Calculate daily RSI (14) for entry signals
+    delta_d = np.diff(close, prepend=close[0])
+    gain_d = np.where(delta_d > 0, delta_d, 0)
+    loss_d = np.where(delta_d < 0, -delta_d, 0)
+    avg_gain_d = pd.Series(gain_d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss_d = pd.Series(loss_d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs_d = avg_gain_d / (avg_loss_d + 1e-10)
+    rsi_14_d = 100 - (100 / (1 + rs_d))
+    rsi_1d = np.where(avg_loss_d == 0, 100, rsi_14_d)
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)
-    slow_sc = 2 / (30 + 1)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Volume confirmation: volume > 1.3 * 20-day average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma * 1.3)
     
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    
-    # KAMA direction: rising if today > yesterday
-    kama_rising = kama > np.roll(kama, 1)
-    kama_falling = kama < np.roll(kama, 1)
-    kama_rising[0] = False
-    kama_falling[0] = False
-    
-    # Align KAMA to 4h
-    kama_rising_aligned = align_htf_to_ltf(prices, df_1d, kama_rising)
-    kama_falling_aligned = align_htf_to_ltf(prices, df_1d, kama_falling)
-    
-    # RSI on 4h
-    def rsi(close, period=14):
-        delta = np.diff(close)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.zeros_like(close)
-        avg_loss = np.zeros_like(close)
-        avg_gain[period] = np.mean(gain[:period])
-        avg_loss[period] = np.mean(loss[:period])
-        for i in range(period+1, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-        rs = avg_gain / (avg_loss + 1e-10)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
-    
-    rsi_4h = rsi(close, 14)
-    rsi_overbought = rsi_4h > 70
-    rsi_oversold = rsi_4h < 30
-    
-    # Volume confirmation: volume > 1.5 * 20-period average
-    vol_ma = np.zeros_like(volume)
-    for i in range(20, len(volume)):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    vol_confirm = volume > (vol_ma * 1.5)
+    # ATR-based volatility filter (avoid choppy markets)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_ratio = atr / (pd.Series(atr).rolling(window=50, min_periods=50).mean().values + 1e-10)
+    vol_filter = atr_ratio < 1.5  # Avoid excessively volatile periods
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if np.isnan(kama_rising_aligned[i]) or np.isnan(kama_falling_aligned[i]) or np.isnan(rsi_4h[i]):
+        if (np.isnan(rsi_1w_aligned[i]) or np.isnan(rsi_1d[i]) or 
+            np.isnan(vol_confirm[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
-        # Require volume confirmation
-        if not vol_confirm[i]:
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Long: KAMA rising AND RSI not overbought
-        if kama_rising_aligned[i] and not rsi_overbought[i] and position != 1:
+        # Long signal: weekly RSI > 50 (bullish regime) AND daily RSI < 30 (oversold)
+        if (rsi_1w_aligned[i] > 50 and rsi_1d[i] < 30 and 
+            vol_confirm[i] and vol_filter[i] and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short: KAMA falling AND RSI not oversold
-        elif kama_falling_aligned[i] and not rsi_oversold[i] and position != -1:
+        # Short signal: weekly RSI < 50 (bearish regime) AND daily RSI > 70 (overbought)
+        elif (rsi_1w_aligned[i] < 50 and rsi_1d[i] > 70 and 
+              vol_confirm[i] and vol_filter[i] and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: opposite KAMA direction
-        elif kama_falling_aligned[i] and position == 1:
-            position = 0
-            signals[i] = 0.0
-        elif kama_rising_aligned[i] and position == -1:
+        # Exit conditions: opposite weekly RSI regime or RSI mean reversion
+        elif ((rsi_1w_aligned[i] < 50 and position == 1) or  # regime change to bearish
+              (rsi_1w_aligned[i] > 50 and position == -1) or  # regime change to bullish
+              (rsi_1d[i] > 70 and position == 1) or          # overbought exit long
+              (rsi_1d[i] < 30 and position == -1)):          # oversold exit short
             position = 0
             signals[i] = 0.0
         else:
-            # Hold position
+            # Hold current position
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
