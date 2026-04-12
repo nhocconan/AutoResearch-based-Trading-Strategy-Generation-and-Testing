@@ -8,12 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Camarilla pivot breakout with 1d volume spike and chop regime filter
-    # Camarilla levels from 1d provide institutional support/resistance
-    # Volume spike confirms institutional participation
-    # Chop regime filter avoids whipsaws in ranging markets
-    # Works in bull/bear by fading extremes in range and following breakouts in trend
-    # Target: 20-50 trades/year per symbol.
+    # Hypothesis: 4h Camarilla H3/L3 mean reversion with 1d volume spike and chop regime filter
+    # In ranging markets (CHOP > 61.8), fade moves to H3/L3 levels with volume confirmation
+    # In trending markets (CHOP < 38.2), follow breakouts beyond H4/L4 with volume confirmation
+    # Uses discrete position sizing (0.0, ±0.25) to minimize fee churn
+    # Target: 20-40 trades/year per symbol to avoid overtrading
     
     # Session filter: 8:00-20:00 UTC (avoid low volume Asian session)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -78,16 +77,14 @@ def generate_signals(prices):
     l1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l1)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
     
-    # 1d volume spike filter (current volume > 1.5 * 20-day average)
+    # 1d volume spike filter (current volume > 2.0 * 20-day average for stricter entry)
     vol_ma_20_1d = np.full(len(df_1d), np.nan)
     for i in range(19, len(df_1d)):
         vol_ma_20_1d[i] = np.mean(volume_1d[i-19:i+1])
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    volume_spike = volume > 1.5 * vol_ma_20_1d_aligned
+    volume_spike = volume > 2.0 * vol_ma_20_1d_aligned  # Stricter threshold to reduce trades
     
     # Chop regime filter (using 1d data)
-    # Chop > 61.8 = ranging (mean revert at Camarilla H3/L3)
-    # Chop < 38.2 = trending (follow breakouts at H4/L4)
     atr_1d = np.full(len(df_1d), np.nan)
     for i in range(14, len(df_1d)):
         tr = np.max([
@@ -144,13 +141,13 @@ def generate_signals(prices):
         
         # Regime-based logic
         if chop_aligned[i] > 61.8:  # Ranging market - mean revert at H3/L3
-            # Long near L3, short near H3
-            long_entry = close[i] <= l3_aligned[i] and volume_spike[i]
-            short_entry = close[i] >= h3_aligned[i] and volume_spike[i]
-            long_exit = close[i] >= pivot_aligned[i]
-            short_exit = close[i] <= pivot_aligned[i]
+            # Long near L3, short near H3 (stricter: require close beyond level)
+            long_entry = close[i] < l3_aligned[i] and volume_spike[i]
+            short_entry = close[i] > h3_aligned[i] and volume_spike[i]
+            long_exit = close[i] > pivot_aligned[i]
+            short_exit = close[i] < pivot_aligned[i]
         else:  # Trending market - follow breakouts at H4/L4
-            # Breakout entries
+            # Breakout entries (stricter: require close beyond level)
             long_entry = close[i] > h4_aligned[i] and volume_spike[i]
             short_entry = close[i] < l4_aligned[i] and volume_spike[i]
             # Exit on opposite test of H4/L4 or volume dropout
@@ -180,6 +177,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_camarilla_breakout_vol_chop_v1"
+name = "4h_1d_camarilla_mean_reversion_vol_chop_v2"
 timeframe = "4h"
 leverage = 1.0
