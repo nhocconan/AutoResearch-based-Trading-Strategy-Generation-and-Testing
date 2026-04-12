@@ -8,12 +8,13 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Donchian(20) breakout with 1d weekly pivot direction and volume confirmation
-    # Weekly pivot from 1d provides institutional bias (long above weekly pivot, short below)
-    # Donchian breakout captures momentum in direction of weekly pivot
-    # Volume confirmation ensures institutional participation
-    # Works in bull/bear by aligning with weekly structure
-    # Target: 12-37 trades/year per symbol (50-150 over 4 years)
+    # Hypothesis: 12h Donchian(20) breakout with 1d volume confirmation and chop regime filter
+    # Donchian breakouts capture strong momentum moves
+    # Volume spike confirms institutional participation
+    # Chop regime filter avoids whipsaws in ranging markets (CHOP > 61.8) and
+    # follows breakouts in trending markets (CHOP < 38.2)
+    # Works in bull/bear by fading extremes in range and following breakouts in trend
+    # Target: 12-37 trades/year per symbol (50-150 total over 4 years)
     
     # Session filter: 8:00-20:00 UTC (avoid low volume Asian session)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -24,9 +25,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for weekly pivot and volume context
+    # Get 1d data for Donchian channels, volume context, and chop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
@@ -34,38 +35,17 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate weekly pivot (using prior week's OHLC)
-    # Approximate week as 5 trading days (skip weekends)
-    weekly_pivot = np.full(len(df_1d), np.nan)
-    weekly_high = np.full(len(df_1d), np.nan)
-    weekly_low = np.full(len(df_1d), np.nan)
-    weekly_close = np.full(len(df_1d), np.nan)
+    # Calculate 1d Donchian channels (20-period)
+    donchian_h = np.full(len(df_1d), np.nan)
+    donchian_l = np.full(len(df_1d), np.nan)
     
-    # Use 5-day lookback for weekly OHLC (approximation)
-    lookback = 5
-    for i in range(lookback, len(df_1d)):
-        # Prior week's OHLC (5 days ago)
-        week_high = np.max(high_1d[i-lookback:i])
-        week_low = np.min(low_1d[i-lookback:i])
-        week_close = close_1d[i-1]  # yesterday's close
-        
-        weekly_high[i] = week_high
-        weekly_low[i] = week_low
-        weekly_close[i] = week_close
-        # Weekly pivot = (H + L + C) / 3
-        weekly_pivot[i] = (week_high + week_low + week_close) / 3
+    for i in range(19, len(df_1d)):
+        donchian_h[i] = np.max(high_1d[i-19:i+1])
+        donchian_l[i] = np.min(low_1d[i-19:i+1])
     
-    # Align weekly pivot to 6h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
-    
-    # 6h Donchian channels (20-period)
-    lookback_period = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    
-    for i in range(lookback_period - 1, n):
-        highest_high[i] = np.max(h[i-lookback_period+1:i+1])
-        lowest_low[i] = np.min(l[i-lookback_period+1:i+1])
+    # Align 1d Donchian channels to 12h timeframe
+    donchian_h_aligned = align_htf_to_ltf(prices, df_1d, donchian_h)
+    donchian_l_aligned = align_htf_to_ltf(prices, df_1d, donchian_l)
     
     # 1d volume spike filter (current volume > 2.0 * 20-day average)
     vol_ma_20_1d = np.full(len(df_1d), np.nan)
@@ -73,6 +53,48 @@ def generate_signals(prices):
         vol_ma_20_1d[i] = np.mean(volume_1d[i-19:i+1])
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     volume_spike = volume > 2.0 * vol_ma_20_1d_aligned
+    
+    # Chop regime filter (using 1d data)
+    # Chop > 61.8 = ranging (mean revert at Donchian bands)
+    # Chop < 38.2 = trending (follow breakouts)
+    atr_1d = np.full(len(df_1d), np.nan)
+    for i in range(14, len(df_1d)):
+        tr = np.max([
+            high_1d[i] - low_1d[i],
+            np.abs(high_1d[i] - close_1d[i-1]),
+            np.abs(low_1d[i] - close_1d[i-1])
+        ])
+        if i == 14:
+            atr_1d[i] = np.mean([high_1d[j] - low_1d[j] for j in range(i-13, i+1)])
+        else:
+            atr_1d[i] = (atr_1d[i-1] * 13 + tr) / 14
+    
+    # Calculate Chop (14-period)
+    sum_tr_14 = np.full(len(df_1d), np.nan)
+    max_min_range_14 = np.full(len(df_1d), np.nan)
+    chop = np.full(len(df_1d), 50.0)  # default neutral
+    
+    for i in range(13, len(df_1d)):
+        # Sum of true range over 14 periods
+        tr_sum = 0
+        for j in range(i-13, i+1):
+            tr = np.max([
+                high_1d[j] - low_1d[j],
+                np.abs(high_1d[j] - close_1d[j-1]) if j > 0 else 0,
+                np.abs(low_1d[j] - close_1d[j-1]) if j > 0 else 0
+            ])
+            tr_sum += tr
+        sum_tr_14[i] = tr_sum
+        
+        # Max high - min low over 14 periods
+        max_high = np.max(high_1d[i-13:i+1])
+        min_low = np.min(low_1d[i-13:i+1])
+        max_min_range_14[i] = max_high - min_low
+        
+        if max_min_range_14[i] > 0:
+            chop[i] = 100 * np.log10(sum_tr_14[i] / max_min_range_14[i]) / np.log10(14)
+    
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -83,28 +105,30 @@ def generate_signals(prices):
             continue
         
         # Skip if data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(weekly_pivot_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(donchian_h_aligned[i]) or np.isnan(donchian_l_aligned[i]) or 
+            np.isnan(volume_spike[i]) or np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Determine bias from weekly pivot
-        bullish_bias = close[i] > weekly_pivot_aligned[i]
-        bearish_bias = close[i] < weekly_pivot_aligned[i]
+        # Regime-based logic
+        if chop_aligned[i] > 61.8:  # Ranging market - mean revert at Donchian bands
+            # Long near lower band, short near upper band
+            long_entry = close[i] <= donchian_l_aligned[i] and volume_spike[i]
+            short_entry = close[i] >= donchian_h_aligned[i] and volume_spike[i]
+            long_exit = close[i] >= (donchian_l_aligned[i] + donchian_h_aligned[i]) / 2  # midpoint
+            short_exit = close[i] <= (donchian_l_aligned[i] + donchian_h_aligned[i]) / 2  # midpoint
+        else:  # Trending market - follow breakouts
+            # Breakout entries
+            long_entry = close[i] > donchian_h_aligned[i] and volume_spike[i]
+            short_entry = close[i] < donchian_l_aligned[i] and volume_spike[i]
+            # Exit on opposite test of Donchian bands or volume dropout
+            long_exit = close[i] < donchian_l_aligned[i] or (not volume_spike[i])
+            short_exit = close[i] > donchian_h_aligned[i] or (not volume_spike[i])
         
-        # Breakout conditions with volume confirmation
-        long_breakout = close[i] > highest_high[i] and volume_spike[i]
-        short_breakout = close[i] < lowest_low[i] and volume_spike[i]
-        
-        # Exit conditions: reversal or volume dropout
-        long_exit = close[i] < lowest_low[i] or (not volume_spike[i])
-        short_exit = close[i] > highest_high[i] or (not volume_spike[i])
-        
-        # Execute trades aligned with weekly bias
-        if long_breakout and bullish_bias and position != 1:
+        if long_entry and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_breakout and bearish_bias and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
@@ -124,6 +148,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_weekly_pivot_donchian_breakout_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_breakout_vol_chop_v1"
+timeframe = "12h"
 leverage = 1.0
