@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_12h_kama_volume_filter
-# Uses KAMA (Kaufman Adaptive Moving Average) on 4h to capture trend with adaptive noise filtering.
-# Enters long when price > KAMA and volume > 1.5x 20-period average, short when price < KAMA with volume confirmation.
-# Uses 12h ADX > 20 to filter for trending markets, avoiding false signals in chop.
-# Designed for low trade frequency (target: 20-50 trades/year) with adaptive trend strength.
-# Works in bull markets (trend following) and bear markets (trend continuation after pullbacks).
+# Hypothesis: 1h_4h_1d_camarilla_breakout_v1
+# Uses daily Camarilla levels for directional bias, 4h for trend filter (ADX), and 1h for entry timing.
+# Buys when price breaks above daily H3 with 4h ADX > 25 and volume confirmation during active session (08-20 UTC).
+# Shorts when price breaks below daily L3 under same conditions.
+# Designed for low trade frequency (target: 15-37/year) to minimize fee drift.
+# Works in bull markets (continuation breakouts) and bear markets (continuation breakdowns).
 
-name = "4h_12h_kama_volume_filter"
-timeframe = "4h"
+name = "1h_4h_1d_camarilla_breakout_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,48 +24,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for ADX trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Pre-compute session filter (08-20 UTC)
+    hours = prices.index.hour  # already datetime64[ms], .hour works
+    session_mask = (hours >= 8) & (hours <= 20)
+    
+    # Get daily data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate KAMA on 4h close
-    def kama(close, length=10, fast=2, slow=30):
-        # Efficiency Ratio
-        change = np.abs(np.diff(close, prepend=close[0]))
-        volatility = np.sum(np.abs(np.diff(close)), axis=0)
-        er = np.where(volatility != 0, change / volatility, 0)
-        # Smoothing constant
-        sc = np.power(er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1), 2)
-        # KAMA calculation
-        kama_vals = np.zeros_like(close)
-        kama_vals[0] = close[0]
-        for i in range(1, len(close)):
-            kama_vals[i] = kama_vals[i-1] + sc[i] * (close[i] - kama_vals[i-1])
-        return kama_vals
+    # Calculate Camarilla levels from previous day
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
     
-    kama_vals = kama(close, length=10, fast=2, slow=30)
+    range_prev = high_prev - low_prev
+    camarilla_h3 = close_prev + range_prev * 1.1 / 4
+    camarilla_l3 = close_prev - range_prev * 1.1 / 4
     
-    # Volume confirmation: volume > 1.5 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    # Align daily levels to 1h timeframe
+    h3_level = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_level = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # 12h ADX trend filter
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Get 4h data for ADX trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
+        return np.zeros(n)
     
-    # True Range
-    tr1 = high_12h[1:] - low_12h[1:]
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # Calculate True Range for 4h
+    tr1 = high_4h[1:] - low_4h[1:]
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
     tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Directional Movement
-    plus_dm = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
-                       np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
-    minus_dm = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
-                        np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
+    # Plus and Minus Directional Movement
+    plus_dm = np.where((high_4h[1:] - high_4h[:-1]) > (low_4h[:-1] - low_4h[1:]), np.maximum(high_4h[1:] - high_4h[:-1], 0), 0)
+    minus_dm = np.where((low_4h[:-1] - low_4h[1:]) > (high_4h[1:] - high_4h[:-1]), np.maximum(low_4h[:-1] - low_4h[1:], 0), 0)
     
     # Wilder's smoothing
     def wilders_smooth(data, period):
@@ -77,60 +75,64 @@ def generate_signals(prices):
             result[i] = (result[i-1] * (period-1) + data[i]) / period
         return result
     
-    atr_12h = wilders_smooth(tr, 14)
+    atr_4h = wilders_smooth(tr, 14)
     plus_dm_smooth = wilders_smooth(plus_dm, 14)
     minus_dm_smooth = wilders_smooth(minus_dm, 14)
     
-    plus_di = np.where(atr_12h != 0, 100 * plus_dm_smooth / atr_12h, 0)
-    minus_di = np.where(atr_12h != 0, 100 * minus_dm_smooth / atr_12h, 0)
+    plus_di = np.where(atr_4h != 0, 100 * plus_dm_smooth / atr_4h, 0)
+    minus_di = np.where(atr_4h != 0, 100 * minus_dm_smooth / atr_4h, 0)
     dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx_12h = wilders_smooth(dx, 14)
+    adx_4h = wilders_smooth(dx, 14)
     
-    # Align 12h ADX to 4h timeframe
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
-    trend_filter = adx_12h_aligned > 20  # trending market
+    # Align 4h ADX to 1h timeframe
+    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
+    adx_filter = adx_4h_aligned > 25
+    
+    # Volume confirmation: volume > 2.0 * 20-period average (1h timeframe)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Skip if KAMA or trend filter not ready
-        if np.isnan(kama_vals[i]) or np.isnan(trend_filter[i]):
+    for i in range(100, n):  # start after warmup
+        # Skip if levels not ready
+        if np.isnan(h3_level[i]) or np.isnan(l3_level[i]) or np.isnan(adx_filter[i]):
             signals[i] = 0.0
             continue
         
-        # Require volume and trend filters
-        if not (vol_confirm[i] and trend_filter[i]):
+        # Require session, volume, and strong trend filters
+        if not (session_mask[i] and vol_confirm[i] and adx_filter[i]):
             # Hold current position if filters fail
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
             continue
         
-        # Long signal: price > KAMA with volume
-        if close[i] > kama_vals[i] and position != 1:
+        # Long signal: price breaks above daily H3 with volume
+        if close[i] > h3_level[i] and position != 1:
             position = 1
-            signals[i] = 0.25
-        # Short signal: price < KAMA with volume
-        elif close[i] < kama_vals[i] and position != -1:
+            signals[i] = 0.20
+        # Short signal: price breaks below daily L3 with volume
+        elif close[i] < l3_level[i] and position != -1:
             position = -1
-            signals[i] = -0.25
-        # Exit: opposite signal
-        elif close[i] < kama_vals[i] and position == 1:
+            signals[i] = -0.20
+        # Exit conditions: opposite breakout
+        elif close[i] < l3_level[i] and position == 1:
             position = 0
             signals[i] = 0.0
-        elif close[i] > kama_vals[i] and position == -1:
+        elif close[i] > h3_level[i] and position == -1:
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
