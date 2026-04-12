@@ -48,43 +48,6 @@ def generate_signals(prices):
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
-    # Get 1w data for regime filter (choppiness)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate 14-period ATR for choppiness
-    tr1w = np.abs(high_1w - low_1w)
-    tr2w = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3w = np.abs(low_1w - np.roll(close_1w, 1))
-    tr1w[0] = tr2w[0] = tr3w[0] = np.nan
-    trw = np.maximum(tr1w, np.maximum(tr2w, tr3w))
-    atr_1w = np.full(len(df_1w), np.nan)
-    for i in range(14, len(df_1w)):
-        atr_1w[i] = np.mean(trw[i-14:i+1])
-    
-    # Calculate 14-period high-low range for choppiness
-    max_high_14 = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
-    
-    # Chop = 100 * log10(sum(ATR14) / (max_high - min_low)) / log10(14)
-    sum_atr_14 = np.full(len(df_1w), np.nan)
-    range_hl_14 = np.full(len(df_1w), np.nan)
-    chop = np.full(len(df_1w), 50.0)  # Default to neutral
-    
-    for i in range(14, len(df_1w)):
-        sum_atr_14[i] = np.sum(trw[i-14:i+1])
-        range_hl_14[i] = max_high_14[i] - min_low_14[i]
-        if range_hl_14[i] > 0:
-            chop[i] = 100 * np.log10(sum_atr_14[i] / range_hl_14[i]) / np.log10(14)
-    
-    # Align chop to 4h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -95,36 +58,40 @@ def generate_signals(prices):
         
         # Skip if data not ready
         if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(volume_ma_20_1d_aligned[i]) or np.isnan(chop_aligned[i])):
+            np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: 1d ATR > 0.3 * its 20-period MA (avoid low volatility)
-        atr_ma_20_1d = np.full(len(df_1d), np.nan)
-        for j in range(34, len(df_1d)):
-            if not np.isnan(np.mean(atr_1d[j-19:j+1])):
-                atr_ma_20_1d[j] = np.mean(atr_1d[j-19:j+1])
-        atr_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_20_1d)
-        vol_filter = (not np.isnan(atr_ma_20_1d_aligned[i]) and 
-                     atr_1d_aligned[i] > 0.3 * atr_ma_20_1d_aligned[i])
+        # Volatility filter: 1d ATR > 0.2 * its 20-period MA (avoid low volatility)
+        # Precompute ATR 20-period MA
+        if i >= 200:  # Ensure we have enough data for ATR MA calculation
+            atr_window_start = max(14, i - 19)
+            atr_window_end = i + 1
+            atr_slice = atr_1d[atr_window_start:atr_window_end]
+            if len(atr_slice) >= 20:
+                atr_ma_20 = np.nanmean(atr_slice[-20:])
+            else:
+                atr_ma_20 = np.nan
+        else:
+            atr_ma_20 = np.nan
+            
+        vol_filter = (not np.isnan(atr_ma_20) and 
+                     atr_1d_aligned[i] > 0.2 * atr_ma_20)
         
-        # Volume filter: current volume > 1.5 * 20-period average
-        vol_spike = volume[i] > 1.5 * volume_ma_20_1d_aligned[i]
-        
-        # Regime filter: choppiness < 50 (trending market)
-        trending_regime = chop_aligned[i] < 50
+        # Volume filter: current volume > 1.3 * 20-period average
+        vol_spike = volume[i] > 1.3 * volume_ma_20_1d_aligned[i]
         
         # Trend filter: price above/below 1d EMA50
         uptrend = close[i] > ema_50_1d_aligned[i]
         downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Entry conditions: EMA50 trend + volatility + volume + regime
-        long_entry = uptrend and vol_filter and vol_spike and trending_regime
-        short_entry = downtrend and vol_filter and vol_spike and trending_regime
+        # Entry conditions: EMA50 trend + volatility + volume
+        long_entry = uptrend and vol_filter and vol_spike
+        short_entry = downtrend and vol_filter and vol_spike
         
-        # Exit conditions: opposite EMA50 cross or volatility drop or regime change
-        long_exit = (not uptrend) or (not vol_filter) or (not trending_regime)
-        short_exit = (not downtrend) or (not vol_filter) or (not trending_regime)
+        # Exit conditions: opposite EMA50 cross or volatility drop
+        long_exit = (not uptrend) or (not vol_filter)
+        short_exit = (not downtrend) or (not vol_filter)
         
         if long_entry and position != 1:
             position = 1
@@ -149,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_1w_ema50_vol_vol_chop"
+name = "4h_1d_ema50_vol_vol_simple"
 timeframe = "4h"
 leverage = 1.0
