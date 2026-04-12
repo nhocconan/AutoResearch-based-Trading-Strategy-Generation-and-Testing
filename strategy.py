@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-4h_1d_KAMA_Trend_v1
-Hypothesis: Use daily KAMA direction as primary trend filter on 4H timeframe.
-Enter long when 4H price crosses above KAMA and daily trend is up; short when price crosses below KAMA and daily trend is down.
-Use RSI(14) to avoid overbought/oversold extremes (RSI<70 for long, RSI>30 for short).
-Target 20-40 trades per year to minimize fee drag. Works in bull (follow trend) and bear (fade extremes in downtrend via RSI filter).
+4h_1d_Camarilla_Pivot_Breakout_v2
+Hypothesis: Use daily Camarilla pivot levels (support/resistance) with volume confirmation and trend filter.
+Long when price breaks above H3 with volume > 1.5x average and price > EMA50.
+Short when price breaks below L3 with volume > 1.5x average and price < EMA50.
+Uses 4h timeframe for entries, 1d for Camarilla levels and trend filter.
+Targets 20-40 trades per year to minimize fee drag. Works in bull (breakouts with trend) and bear (breakouts against trend).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_KAMA_Trend_v1"
+name = "4h_1d_Camarilla_Pivot_Breakout_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,76 +23,93 @@ def generate_signals(prices):
     
     # Price arrays
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Daily data for trend filter
+    # Daily data for Camarilla pivots and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate KAMA on daily close
-    def kama(close, length=10, fast=2, slow=30):
-        if len(close) < length:
-            return np.full(len(close), np.nan)
-        dir = np.abs(close - np.roll(close, length))
-        vol = np.sum(np.abs(np.diff(close, n=1)), axis=0) if len(close) > 1 else 0
-        er = np.where(vol != 0, dir / vol, 0)
-        sc = np.power(er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1), 2)
-        kama = np.full(len(close), np.nan)
-        kama[0] = close[0]
-        for i in range(1, len(close)):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        return kama
-    
+    # Calculate EMA50 on daily close for trend filter
     daily_close = df_1d['close'].values
-    kama_daily = kama(daily_close, 10, 2, 30)
-    kama_daily_aligned = align_htf_to_ltf(prices, df_1d, kama_daily)
+    ema50 = np.full(len(daily_close), np.nan)
+    if len(daily_close) >= 50:
+        alpha = 2 / (50 + 1)
+        ema50[0] = daily_close[0]
+        for i in range(1, len(daily_close)):
+            ema50[i] = alpha * daily_close[i] + (1 - alpha) * ema50[i-1]
     
-    # Calculate RSI(14) on 4H
-    def rsi(close, length=14):
-        if len(close) < length + 1:
-            return np.full(len(close), np.nan)
-        delta = np.diff(close)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.zeros_like(close)
-        avg_loss = np.zeros_like(close)
-        avg_gain[length] = np.mean(gain[:length])
-        avg_loss[length] = np.mean(loss[:length])
-        for i in range(length + 1, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (length-1) + gain[i-1]) / length
-            avg_loss[i] = (avg_loss[i-1] * (length-1) + loss[i-1]) / length
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-        rsi_vals = np.zeros_like(close)
-        rsi_vals[:] = 100 - (100 / (1 + rs))
-        rsi_vals[:length] = np.nan
-        return rsi_vals
+    # Align daily EMA50 to 4h
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50)
     
-    rsi_vals = rsi(close, 14)
+    # Calculate Camarilla levels from previous day
+    # Using standard Camarilla formulas based on previous day's range
+    prev_high = df_1d['high'].values
+    prev_low = df_1d['low'].values
+    prev_close = df_1d['close'].values
+    
+    # Calculate Camarilla levels for each day
+    H4 = np.full(len(prev_close), np.nan)
+    H3 = np.full(len(prev_close), np.nan)
+    H2 = np.full(len(prev_close), np.nan)
+    H1 = np.full(len(prev_close), np.nan)
+    L1 = np.full(len(prev_close), np.nan)
+    L2 = np.full(len(prev_close), np.nan)
+    L3 = np.full(len(prev_close), np.nan)
+    L4 = np.full(len(prev_close), np.nan)
+    
+    for i in range(1, len(prev_close)):
+        if not (np.isnan(prev_high[i-1]) or np.isnan(prev_low[i-1]) or np.isnan(prev_close[i-1])):
+            range_val = prev_high[i-1] - prev_low[i-1]
+            C = prev_close[i-1]
+            H4[i] = C + (range_val * 1.1 / 2)
+            H3[i] = C + (range_val * 1.1 / 4)
+            H2[i] = C + (range_val * 1.1 / 6)
+            H1[i] = C + (range_val * 1.1 / 12)
+            L1[i] = C - (range_val * 1.1 / 12)
+            L2[i] = C - (range_val * 1.1 / 6)
+            L3[i] = C - (range_val * 1.1 / 4)
+            L4[i] = C - (range_val * 1.1 / 2)
+    
+    # Align Camarilla levels to 4h (using previous day's levels)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    
+    # Calculate average volume (20-period)
+    vol_avg = np.full(n, np.nan)
+    if n >= 20:
+        for i in range(20, n):
+            vol_avg[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if any data invalid
-        if np.isnan(rsi_vals[i]) or np.isnan(kama_daily_aligned[i]):
+        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or 
+            np.isnan(ema50_aligned[i]) or np.isnan(vol_avg[i]) or vol_avg[i] == 0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Price relative to daily KAMA
-        price_above_kama = close[i] > kama_daily_aligned[i]
-        price_below_kama = close[i] < kama_daily_aligned[i]
+        # Volume confirmation: current volume > 1.5x average
+        vol_confirm = volume[i] > 1.5 * vol_avg[i]
         
-        # RSI filters to avoid extremes
-        rsi_not_overbought = rsi_vals[i] < 70
-        rsi_not_oversold = rsi_vals[i] > 30
+        # Breakout conditions
+        breakout_high = high[i] > H3_aligned[i]
+        breakout_low = low[i] < L3_aligned[i]
+        
+        # Trend filter
+        trend_up = close[i] > ema50_aligned[i]
         
         # Entry logic
-        long_entry = price_above_kama and rsi_not_overbought
-        short_entry = price_below_kama and rsi_not_oversold
+        long_entry = breakout_high and vol_confirm and trend_up
+        short_entry = breakout_low and vol_confirm and not trend_up
         
-        # Exit logic: reverse signal
-        long_exit = price_below_kama
-        short_exit = price_above_kama
+        # Exit logic: reverse signal or price returns to pivot
+        long_exit = not breakout_high or close[i] < H3_aligned[i]
+        short_exit = not breakout_low or close[i] > L3_aligned[i]
         
         # Signal logic
         if long_entry and position != 1:
