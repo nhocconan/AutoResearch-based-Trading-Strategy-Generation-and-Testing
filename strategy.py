@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-1h_4h_1d_Pivot_Reversal_v1
-Hypothesis: Combines 4h trend filter (price above/below 4h EMA20) with daily pivot reversals.
-Long when 4h uptrend AND price touches daily pivot support AND closes above it.
-Short when 4h downtrend AND price touches daily pivot resistance AND closes below it.
-Designed for low trade frequency by requiring 4h trend alignment and daily pivot rejection.
-Works in bull via buying dips in uptrend, in bear via selling rallies in downtrend.
+12h_1d_Volume_Weighted_Pullback
+Hypothesis: Combines 12h price pullback to dynamic support/resistance (20 EMA) with 1d volume-weighted momentum confirmation.
+Enters long when price pulls back to EMA20 during uptrend with rising volume, short when price rallies to EMA20 during downtrend with falling volume.
+Designed for low trade frequency by requiring alignment of price action, trend, and volume confirmation.
+Works in bull via buying dips in uptrend, in bear by selling rallies in downtrend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_Pivot_Reversal_v1"
-timeframe = "1h"
+name = "12h_1d_Volume_Weighted_Pullback"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,17 +25,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4H DATA ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    close_4hs = pd.Series(close_4h)
-    ema20_4h = close_4hs.ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
-    
-    # === DAILY DATA ===
+    # === DAILY DATA (HTF) ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -44,51 +33,56 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Daily Pivot Points (Standard)
-    pivot = (high_1d + low_1d + close_1d) / 3
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
+    # Daily EMA20 for trend
+    close_1d_series = pd.Series(close_1d)
+    ema20_1d = close_1d_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
-    # Align daily pivots
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Daily volume EMA20 for momentum
+    volume_1d_series = pd.Series(volume_1d)
+    vol_ema20_1d = volume_1d_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ema20_1d)
+    
+    # Daily volume ratio (current vs EMA20)
+    vol_ratio_1d = volume_1d / np.where(vol_ema20_1d == 0, 1, vol_ema20_1d)
+    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(30, n):
         # Skip if not ready
-        if (np.isnan(ema20_4h_aligned[i]) or np.isnan(pivot_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i])):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+        if (np.isnan(ema20_1d_aligned[i]) or np.isnan(vol_ratio_1d_aligned[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # 4H trend filter
-        trend_up = close[i] > ema20_4h_aligned[i]
-        trend_down = close[i] < ema20_4h_aligned[i]
+        # 12h price relative to daily EMA20
+        price_near_ema = abs(close[i] - ema20_1d_aligned[i]) / ema20_1d_aligned[i] < 0.015  # within 1.5%
         
-        # Daily pivot rejection with confirmation
-        near_support = low[i] <= s1_aligned[i] * 1.001  # Allow 0.1% slippage
-        near_resistance = high[i] >= r1_aligned[i] * 0.999
-        close_above_support = close[i] > s1_aligned[i]
-        close_below_resistance = close[i] < r1_aligned[i]
+        # Daily volume momentum
+        vol_expanding = vol_ratio_1d_aligned[i] > 1.1  # volume above average
+        vol_contracting = vol_ratio_1d_aligned[i] < 0.9  # volume below average
+        
+        # Price trend (using 12h close vs prior)
+        price_up = close[i] > close[i-1]
+        price_down = close[i] < close[i-1]
         
         # Entry conditions
-        long_setup = trend_up and near_support and close_above_support
-        short_setup = trend_down and near_resistance and close_below_resistance
+        long_setup = price_near_ema and price_up and vol_expanding
+        short_setup = price_near_ema and price_down and vol_contracting
         
-        # Exit when trend changes
-        exit_long = not trend_up
-        exit_short = not trend_down
+        # Exit when conditions reverse or stop conditions
+        exit_long = not (price_near_ema and price_up and vol_expanding)
+        exit_short = not (price_near_ema and price_down and vol_contracting)
         
         if long_setup and position != 1:
             position = 1
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif short_setup and position != -1:
             position = -1
-            signals[i] = -0.20
+            signals[i] = -0.25
         elif exit_long and position == 1:
             position = 0
             signals[i] = 0.0
@@ -97,6 +91,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Hold position
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
