@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_camarilla_breakout_volume_trend_v1"
+name = "4h_1w_donchian_volume_tight_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,117 +17,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get weekly data for Donchian channels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
-    close_12h = df_12h['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Calculate 50-period EMA on 12h data for trend
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 20-week Donchian channels
+    high_20w = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    low_20w = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Get daily data for Camarilla levels
+    # Align to 4h timeframe
+    donchian_high = align_htf_to_ltf(prices, df_1w, high_20w)
+    donchian_low = align_htf_to_ltf(prices, df_1w, low_20w)
+    
+    # Get daily data for volume filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 1-day ATR (14-period)
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate 20-day average volume
+    vol_ma_20d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_ok_1d = volume_1d > vol_ma_20d
     
-    # Calculate 20-period ATR mean for volatility ratio
-    atr_ma_20 = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values
-    atr_ratio = atr_14 / atr_ma_20
-    
-    # Align ATR ratio to 4h timeframe
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
-    
-    # Volatility-based position sizing (inverse volatility)
-    # Higher volatility = smaller position, capped between 0.20 and 0.30
-    vol_scaling = np.clip(1.0 / (atr_ratio_aligned + 0.001), 0.8, 1.5)
-    base_size = 0.25
-    position_size = base_size * vol_scaling
-    position_size = np.clip(position_size, 0.20, 0.30)
-    
-    # Calculate Camarilla levels (H3, L3) using previous day's data
-    camarilla_high = np.full(len(close_1d), np.nan)
-    camarilla_low = np.full(len(close_1d), np.nan)
-    
-    for i in range(1, len(close_1d)):
-        H = high_1d[i-1]
-        L = low_1d[i-1]
-        C = close_1d[i-1]
-        camarilla_high[i] = C + ((H - L) * 1.1 / 2)  # H3 level
-        camarilla_low[i] = C - ((H - L) * 1.1 / 2)   # L3 level
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
-    camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
-    
-    # Volume filter: current volume > 20-period average (on 4h data)
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > vol_ma
+    # Align volume filter to 4h timeframe
+    volume_ok = align_htf_to_ltf(prices, df_1d, volume_ok_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(200, n):
         # Skip if not ready
-        if (np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]) or 
-            np.isnan(volume_ok[i]) or np.isnan(position_size[i]) or np.isnan(ema_50_12h_aligned[i])):
-            signals[i] = 0.0 if position == 0 else (position_size[i] if position == 1 else -position_size[i])
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(volume_ok[i]):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine trend from 12h EMA
-        uptrend = close[i] > ema_50_12h_aligned[i]
-        downtrend = close[i] < ema_50_12h_aligned[i]
-        
-        # Breakout conditions with volume confirmation and trend filter
-        breakout_up = close[i] > camarilla_high_aligned[i]
-        breakout_down = close[i] < camarilla_low_aligned[i]
+        # Breakout conditions with weekly volume confirmation
+        breakout_up = close[i] > donchian_high[i]
+        breakout_down = close[i] < donchian_low[i]
         vol_ok = volume_ok[i]
         
-        # Entry signals - only trade in direction of 12h trend
-        long_signal = breakout_up and vol_ok and uptrend
-        short_signal = breakout_down and vol_ok and downtrend
-        
-        # Exit when price returns to previous day's close (mean reversion)
-        prev_close = np.full(len(close_1d), np.nan)
-        for j in range(1, len(close_1d)):
-            prev_close[j] = close_1d[j-1]
-        prev_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close)
-        
-        exit_long = close[i] < prev_close_aligned[i]
-        exit_short = close[i] > prev_close_aligned[i]
-        
-        # Execute trades
-        if long_signal and position != 1:
+        # Enter on breakout with volume confirmation
+        if breakout_up and vol_ok and position != 1:
             position = 1
-            signals[i] = position_size[i]
-        elif short_signal and position != -1:
+            signals[i] = 0.25
+        elif breakout_down and vol_ok and position != -1:
             position = -1
-            signals[i] = -position_size[i]
-        elif exit_long and position == 1:
+            signals[i] = -0.25
+        # Exit on opposite breakout
+        elif breakout_down and position == 1:
             position = 0
             signals[i] = 0.0
-        elif exit_short and position == -1:
+        elif breakout_up and position == -1:
             position = 0
             signals[i] = 0.0
         else:
-            # Hold position with dynamic sizing
+            # Hold position
             if position == 1:
-                signals[i] = position_size[i]
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -position_size[i]
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
