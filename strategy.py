@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_aw_oscillator_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,27 +17,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Awesome Oscillator calculation
+    # Get 1d data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    # Calculate median price for 1d data
-    median_price_1d = (df_1d['high'].values + df_1d['low'].values) / 2.0
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Awesome Oscillator: SMA(5) - SMA(34) of median price
-    sma5 = pd.Series(median_price_1d).rolling(window=5, min_periods=5).mean().values
-    sma34 = pd.Series(median_price_1d).rolling(window=34, min_periods=34).mean().values
-    ao_1d = sma5 - sma34
+    # Calculate Camarilla pivot levels from 1d data
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
     
-    # Awesome Oscillator signal line: SMA(5) of AO
-    ao_signal = pd.Series(ao_1d).rolling(window=5, min_periods=5).mean().values
+    # Camarilla levels (using standard multipliers)
+    h3 = pivot + (range_1d * 1.1 / 4)   # Resistance 3
+    l3 = pivot - (range_1d * 1.1 / 4)   # Support 3
     
-    # Align AO and signal line to 6h timeframe
-    ao_aligned = align_htf_to_ltf(prices, df_1d, ao_1d)
-    ao_signal_aligned = align_htf_to_ltf(prices, df_1d, ao_signal)
+    # Align Camarilla levels to 12h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     
-    # Volume filter on 6h: current volume > 20-period average
+    # Volume filter - 20-period average on 12h data
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
@@ -47,24 +48,20 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(ao_aligned[i]) or np.isnan(ao_signal_aligned[i]) or
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
             np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: AO crosses above signal line (bullish momentum) with volume
-        long_signal = (ao_aligned[i] > ao_signal_aligned[i] and 
-                      ao_aligned[i-1] <= ao_signal_aligned[i-1] and
-                      volume_ok[i])
+        # Long: price breaks above H3 with volume confirmation
+        long_signal = close[i] > h3_aligned[i] and volume_ok[i]
+        # Short: price breaks below L3 with volume confirmation
+        short_signal = close[i] < l3_aligned[i] and volume_ok[i]
         
-        # Short: AO crosses below signal line (bearish momentum) with volume
-        short_signal = (ao_aligned[i] < ao_signal_aligned[i] and 
-                       ao_aligned[i-1] >= ao_signal_aligned[i-1] and
-                       volume_ok[i])
-        
-        # Exit when AO crosses zero (momentum change)
-        exit_long = ao_aligned[i] < 0 and position == 1
-        exit_short = ao_aligned[i] > 0 and position == -1
+        # Exit when price returns to pivot
+        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+        exit_long = close[i] < pivot_aligned[i]
+        exit_short = close[i] > pivot_aligned[i]
         
         # Execute trades
         if long_signal and position != 1:
