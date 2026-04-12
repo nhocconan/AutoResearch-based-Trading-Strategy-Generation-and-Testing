@@ -1,26 +1,23 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 """
-6h_1d_Ichimoku_Kumo_Twist_v1
-Hypothesis: Trade Ichimoku Kumo (cloud) twists on 1d timeframe with 6h price confirmation.
-- Kumo twist occurs when Senkou Span A and Senkou Span B cross, indicating trend change.
-- Enter long when price is above cloud and TK line crosses above Kijun (bullish twist).
-- Enter short when price is below cloud and TK line crosses below Kijun (bearish twist).
-- Use volume confirmation (2x 20-period average) to filter false signals.
-- Works in bull markets (riding trends) and bear markets (catching reversals).
-- Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25.
+12h_1w_1d_Camarilla_Breakout_With_Volume_Filter_v1
+Hypothesis: Trade weekly/monthly Camarilla H4/L4 breakouts on 12h timeframe with volume > 1.8x 20-period average and price >0.8% beyond level.
+Use 1-week trend filter: long only when price > weekly 50 EMA, short only when price < weekly 50 EMA.
+Exit on trend reversal or opposite level touch. Designed for low trade frequency (~15-30/year) with high conviction.
+Works in bull markets (continuation breaks) and bear markets (mean reversion from extremes).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Ichimoku_Kumo_Twist_v1"
-timeframe = "6h"
+name = "12h_1w_1d_Camarilla_Breakout_With_Volume_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 52:  # Need at least 52 for Ichimoku calculations
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -28,91 +25,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY DATA FOR ICHIMOKU ===
+    # === WEEKLY DATA FOR TREND FILTER ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    close_series_1w = pd.Series(close_1w)
+    ema50_1w = close_series_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # === DAILY DATA FOR CAMARILLA PIVOTS ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Ichimoku components (standard periods: 9, 26, 52)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    high_9 = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan = (high_9 + low_9) / 2
+    # Calculate Camarilla levels from previous day
+    typical_price = (high_1d + low_1d + close_1d) / 3
+    pivot = typical_price
+    range_1d = high_1d - low_1d
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    high_26 = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun = (high_26 + low_26) / 2
+    h3 = pivot + (range_1d * 1.1 / 4)
+    l3 = pivot - (range_1d * 1.1 / 4)
+    h4 = pivot + (range_1d * 1.1 / 2)
+    l4 = pivot - (range_1d * 1.1 / 2)
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
+    # Align to 12h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    high_52 = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b = (high_52 + low_52) / 2
-    
-    # Chikou Span (Lagging Span): current close plotted 26 periods back
-    # Not used for signals but needed for alignment
-    
-    # Align Ichimoku components to 6h timeframe (wait for daily close)
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
-    
-    # === VOLUME FILTER ON 6H CHART ===
+    # === VOLUME FILTER ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(52, n):
+    for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
-            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(h4_aligned[i]) or 
+            np.isnan(l4_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Kumo twist: Senkou A and Senkou B cross
-        # Bullish twist: Senkou A crosses above Senkou B
-        # Bearish twist: Senkou A crosses below Senkou B
-        bullish_twist = (senkou_a_aligned[i] > senkou_b_aligned[i] and 
-                        senkou_a_aligned[i-1] <= senkou_b_aligned[i-1])
-        bearish_twist = (senkou_a_aligned[i] < senkou_b_aligned[i] and 
-                        senkou_a_aligned[i-1] >= senkou_b_aligned[i-1])
+        # Determine trend from weekly EMA
+        uptrend = close[i] > ema50_1w_aligned[i]
+        downtrend = close[i] < ema50_1w_aligned[i]
         
-        # Price position relative to cloud
-        above_cloud = (close[i] > senkou_a_aligned[i] and close[i] > senkou_b_aligned[i])
-        below_cloud = (close[i] < senkou_a_aligned[i] and close[i] < senkou_b_aligned[i])
+        # Volume strength (must be significantly above average)
+        strong_volume = volume[i] > (vol_ma[i] * 1.8)
         
-        # TK crossover (Tenkan/Kijun)
-        tk_bullish = (tenkan_aligned[i] > kijun_aligned[i] and 
-                     tenkan_aligned[i-1] <= kijun_aligned[i-1])
-        tk_bearish = (tenkan_aligned[i] < kijun_aligned[i] and 
-                     tenkan_aligned[i-1] >= kijun_aligned[i-1])
+        # Price must be beyond the level by at least 0.8% to avoid false breakouts
+        level_buffer = 0.008
         
-        # Volume confirmation
-        strong_volume = volume[i] > (vol_ma[i] * 2.0)
+        # Long: price breaks H4 with strong volume in uptrend
+        long_signal = (close[i] > h4_aligned[i] * (1 + level_buffer) and 
+                      uptrend and 
+                      strong_volume)
         
-        # Long: bullish twist + price above cloud + TK bullish + volume
-        long_signal = (bullish_twist and above_cloud and tk_bullish and strong_volume)
+        # Short: price breaks L4 with strong volume in downtrend
+        short_signal = (close[i] < l4_aligned[i] * (1 - level_buffer) and 
+                       downtrend and 
+                       strong_volume)
         
-        # Short: bearish twist + price below cloud + TK bearish + volume
-        short_signal = (bearish_twist and below_cloud and tk_bearish and strong_volume)
-        
-        # Exit: opposite TK crossover or price crosses opposite cloud edge
+        # Exit: opposite H4/L4 level or trend reversal
         exit_long = (position == 1 and 
-                    (tk_bearish or 
-                     close[i] < senkou_a_aligned[i] or close[i] < senkou_b_aligned[i]))
+                    (close[i] < l4_aligned[i] or not uptrend))
         exit_short = (position == -1 and 
-                     (tk_bullish or 
-                      close[i] > senkou_a_aligned[i] or close[i] > senkou_b_aligned[i]))
+                     (close[i] > h4_aligned[i] or not downtrend))
         
         # Execute trades
         if long_signal and position != 1:
