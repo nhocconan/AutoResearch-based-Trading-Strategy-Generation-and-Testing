@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-12h_1w_Camarilla_Breakout_Volume
-Hypothesis: Camarilla pivot levels from 1w chart act as strong support/resistance on 12h timeframe.
-Price tends to reverse or bounce from these levels with confirmation from volume spike.
-Uses 1w for structure (reduced noise) and 12h for timely entries. Works in both bull and bear markets.
-Target: 15-30 trades per year (60-120 total over 4 years).
+4h_12h_Market_Regime_Adaptive_Strategy_v1
+Hypothesis: In trending markets (ADX > 25), follow 12h EMA trend; in ranging markets (ADX < 20), 
+mean-revert at Bollinger Bands (20,2) on 4h. Uses volume confirmation to avoid false signals.
+Designed to work in both bull and bear markets by adapting to regime.
+Target: 20-40 trades per year (80-160 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_Camarilla_Breakout_Volume"
-timeframe = "12h"
+name = "4h_12h_Market_Regime_Adaptive_Strategy_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,87 +25,140 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1W data for Camarilla pivots
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 12h data for trend and ADX
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # Get 1d data for Bollinger Bands (more stable than 4h)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # === CAMARILLA PIVOT LEVELS (based on previous 1w bar) ===
-    # Calculate from previous 1w bar's OHLC
-    prev_high = np.roll(weekly_high, 1)
-    prev_low = np.roll(weekly_low, 1)
-    prev_close = np.roll(weekly_close, 1)
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # First bar will have invalid data, but we'll handle with valid check
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_val = prev_high - prev_low
+    # === 12h EMA (21) for trend direction ===
+    ema_21_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_21_12h)
     
-    # Camarilla levels
-    l3 = pivot + (range_val * 1.1 / 4)
-    l4 = pivot + (range_val * 1.1 / 2)
-    h3 = pivot - (range_val * 1.1 / 4)
-    h4 = pivot - (range_val * 1.1 / 2)
+    # === 12h ADX (14) for regime detection ===
+    # TR calculation
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Align to 12h timeframe (these levels are valid for the entire 1w bar)
-    l3_12h = align_htf_to_ltf(prices, df_1w, l3)
-    l4_12h = align_htf_to_ltf(prices, df_1w, l4)
-    h3_12h = align_htf_to_ltf(prices, df_1w, h3)
-    h4_12h = align_htf_to_ltf(prices, df_1w, h4)
+    # +DM and -DM
+    up_move = high_12h[1:] - high_12h[:-1]
+    down_move = low_12h[:-1] - low_12h[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # === VOLUME SPIKE (2x 20-period average on 12h) ===
-    vol_ma = np.full(n, np.nan)
-    if n >= 20:
-        vol_sum = np.sum(volume[:20])
-        vol_ma[19] = vol_sum / 20
-        for i in range(20, n):
-            vol_sum = vol_sum - volume[i-20] + volume[i]
-            vol_ma[i] = vol_sum / 20
-    vol_spike = volume > (vol_ma * 2.0)
+    # Smoothed values
+    def WilderSmooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nansum(data[1:period]) / period
+        # Rest is Wilder smoothing
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    tr_smoothed = WilderSmooth(tr, 14)
+    plus_dm_smoothed = WilderSmooth(plus_dm, 14)
+    minus_dm_smoothed = WilderSmooth(minus_dm, 14)
+    
+    # DI values
+    plus_di = 100 * plus_dm_smoothed / (tr_smoothed + 1e-10)
+    minus_di = 100 * minus_dm_smoothed / (tr_smoothed + 1e-10)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = WilderSmooth(dx, 14)
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    
+    # === 4h Bollinger Bands (20,2) for mean reversion ===
+    sma_20_4h = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20_4h = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20_4h + (2 * std_20_4h)
+    lower_bb = sma_20_4h - (2 * std_20_4h)
+    
+    # === Volume confirmation (1.5x 20-period average) ===
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
-        # Skip if any data invalid (first bar roll will have NaN)
-        if (np.isnan(l3_12h[i]) or np.isnan(l4_12h[i]) or 
-            np.isnan(h3_12h[i]) or np.isnan(h4_12h[i]) or
-            np.isnan(vol_ma[i])):
+    for i in range(50, n):
+        # Skip if any data invalid
+        if (np.isnan(ema_21_12h_aligned[i]) or np.isnan(adx_aligned[i]) or
+            np.isnan(sma_20_4h[i]) or np.isnan(std_20_4h[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Price near Camarilla levels (within 0.2% tolerance for 12h)
-        near_l3 = abs(low[i] - l3_12h[i]) / l3_12h[i] < 0.002
-        near_l4 = abs(low[i] - l4_12h[i]) / l4_12h[i] < 0.002
-        near_h3 = abs(high[i] - h3_12h[i]) / h3_12h[i] < 0.002
-        near_h4 = abs(high[i] - h4_12h[i]) / h4_12h[i] < 0.002
+        adx_val = adx_aligned[i]
+        price = close[i]
+        ema_trend = ema_21_12h_aligned[i]
+        upper = upper_bb[i]
+        lower = lower_bb[i]
+        vol_ok = vol_confirm[i]
         
-        # Entry conditions with volume confirmation
-        long_entry = (near_l3 or near_l4) and vol_spike[i]
-        short_entry = (near_h3 or near_h4) and vol_spike[i]
-        
-        # Exit conditions: price moves back toward pivot or opposite signal
-        pivot_12h = align_htf_to_ltf(prices, df_1w, pivot)
-        long_exit = close[i] >= pivot_12h[i]  # Exit long when price reaches pivot
-        short_exit = close[i] <= pivot_12h[i]  # Exit short when price reaches pivot
-        
-        # Signal logic
-        if long_entry and position != 1:
-            position = 1
-            signals[i] = 0.25
-        elif short_entry and position != -1:
-            position = -1
-            signals[i] = -0.25
-        elif position == 1 and long_exit:
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and short_exit:
-            position = 0
-            signals[i] = 0.0
-        else:
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+        # Regime-based logic
+        if adx_val > 25:  # Trending regime - follow 12h EMA
+            # Long when price above EMA, short when below
+            long_signal = price > ema_trend and vol_ok
+            short_signal = price < ema_trend and vol_ok
+            
+            # Exit when price crosses back
+            if position == 1 and price <= ema_trend:
+                position = 0
+                signals[i] = 0.0
+            elif position == -1 and price >= ema_trend:
+                position = 0
+                signals[i] = 0.0
+            elif long_signal and position != 1:
+                position = 1
+                signals[i] = 0.25
+            elif short_signal and position != -1:
+                position = -1
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+                
+        elif adx_val < 20:  # Ranging regime - mean reversion at BB
+            # Long at lower BB, short at upper BB
+            long_signal = price <= lower and vol_ok
+            short_signal = price >= upper and vol_ok
+            
+            # Exit when price returns to middle (SMA)
+            middle = sma_20_4h[i]
+            if position == 1 and price >= middle:
+                position = 0
+                signals[i] = 0.0
+            elif position == -1 and price <= middle:
+                position = 0
+                signals[i] = 0.0
+            elif long_signal and position != 1:
+                position = 1
+                signals[i] = 0.25
+            elif short_signal and position != -1:
+                position = -1
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+        else:  # Transition regime (20 <= ADX <= 25) - stay flat
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
     
     return signals
