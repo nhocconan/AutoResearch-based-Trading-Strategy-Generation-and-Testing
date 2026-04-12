@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_volume"
-timeframe = "12h"
+name = "4h_12h_donchian_breakout_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,34 +17,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    # Get 12h data for Donchian channels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 25:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Camarilla pivot levels from previous day
-    # PP = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # R2 = C + (H - L) * 1.1 / 6
-    # R3 = C + (H - L) * 1.1 / 4
-    # S1 = C - (H - L) * 1.1 / 12
-    # S2 = C - (H - L) * 1.1 / 6
-    # S3 = C - (H - L) * 1.1 / 4
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_hl = high_1d - low_1d
-    r3 = close_1d + range_hl * 1.1 / 4.0
-    s3 = close_1d - range_hl * 1.1 / 4.0
+    # Calculate 20-period Donchian channels on 12h data
+    donchian_high_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Align Camarilla levels to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Align Donchian levels to 4h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high_12h)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low_12h)
     
-    # Volume filter - 20-period average on 12h data
+    # Get 12h EMA for trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Volume filter on 4h data - 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
@@ -54,20 +48,25 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Breakout signals with volume confirmation
-        # Long: Price breaks above R3 (strong resistance)
-        long_signal = close[i] > r3_aligned[i] and volume_ok[i]
-        # Short: Price breaks below S3 (strong support)
-        short_signal = close[i] < s3_aligned[i] and volume_ok[i]
+        # Trend from 12h EMA
+        uptrend = close[i] > ema_50_12h_aligned[i]
+        downtrend = close[i] < ema_50_12h_aligned[i]
         
-        # Exit when price returns to pivot area (mean reversion)
-        exit_long = close[i] < pivot_aligned[i]
-        exit_short = close[i] > pivot_aligned[i]
+        # Donchian breakout signals with volume confirmation
+        # Long: price breaks above Donchian high in uptrend with volume
+        long_signal = close[i] > donchian_high_aligned[i] and uptrend and volume_ok[i]
+        # Short: price breaks below Donchian low in downtrend with volume
+        short_signal = close[i] < donchian_low_aligned[i] and downtrend and volume_ok[i]
+        
+        # Exit when price returns to middle of Donchian channel
+        donchian_mid = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2
+        exit_long = close[i] < donchian_mid
+        exit_short = close[i] > donchian_mid
         
         # Execute trades
         if long_signal and position != 1:
