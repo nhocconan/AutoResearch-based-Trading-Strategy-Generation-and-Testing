@@ -3,89 +3,99 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_rsi_mean_reversion_v1"
-timeframe = "1d"
+name = "6h_1d_elder_ray_trend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for RSI calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for Elder Ray calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 22:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
     
-    # Calculate 14-period RSI on weekly data
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[0:14] = np.nan  # Ensure proper warmup
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align RSI to daily timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1w, rsi)
+    # Calculate 13-period EMA on daily close (standard for Elder Ray)
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate daily ATR for position sizing
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate Bull Power and Bear Power
+    bull_power = high_1d - ema_13_1d
+    bear_power = low_1d - ema_13_1d
     
-    # Calculate 20-period ATR mean for volatility normalization
-    atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
-    atr_ratio = atr / (atr_ma + 1e-10)
+    # Align to 6h timeframe
+    ema_13_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
-    # Volatility-based position sizing (inverse volatility)
-    # Higher volatility = smaller position, capped between 0.20 and 0.30
-    vol_scaling = np.clip(1.0 / (atr_ratio + 0.001), 0.8, 1.5)
-    base_size = 0.25
-    position_size = base_size * vol_scaling
-    position_size = np.clip(position_size, 0.20, 0.30)
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Volume filter - 20-period average on 6h data
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_ok = volume > vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(100, n):
         # Skip if not ready
-        if np.isnan(rsi_aligned[i]) or np.isnan(position_size[i]):
-            signals[i] = 0.0 if position == 0 else (position_size[i] if position == 1 else -position_size[i])
+        if (np.isnan(ema_13_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i]) or np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(volume_ok[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Mean reversion signals based on weekly RSI extremes
-        oversold = rsi_aligned[i] < 30
-        overbought = rsi_aligned[i] > 70
+        # Trend from 12h EMA
+        uptrend = close[i] > ema_50_12h_aligned[i]
+        downtrend = close[i] < ema_50_12h_aligned[i]
         
-        # Exit when RSI returns to neutral zone
-        rsi_neutral = (rsi_aligned[i] >= 40) and (rsi_aligned[i] <= 60)
+        # Elder Ray signals with volume confirmation
+        # Long: Bull Power > 0 (buying pressure) in uptrend
+        long_signal = bull_power_aligned[i] > 0 and uptrend and volume_ok[i]
+        # Short: Bear Power < 0 (selling pressure) in downtrend
+        short_signal = bear_power_aligned[i] < 0 and downtrend and volume_ok[i]
+        
+        # Exit when power signals weaken
+        exit_long = bull_power_aligned[i] <= 0
+        exit_short = bear_power_aligned[i] >= 0
         
         # Execute trades
-        if oversold and position != 1:
+        if long_signal and position != 1:
             position = 1
-            signals[i] = position_size[i]
-        elif overbought and position != -1:
+            signals[i] = 0.25
+        elif short_signal and position != -1:
             position = -1
-            signals[i] = -position_size[i]
-        elif rsi_neutral and position != 0:
+            signals[i] = -0.25
+        elif exit_long and position == 1:
+            position = 0
+            signals[i] = 0.0
+        elif exit_short and position == -1:
             position = 0
             signals[i] = 0.0
         else:
-            # Hold position with dynamic sizing
+            # Hold position
             if position == 1:
-                signals[i] = position_size[i]
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -position_size[i]
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
