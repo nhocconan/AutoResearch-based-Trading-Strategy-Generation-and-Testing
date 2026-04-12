@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d_1w_camarilla_breakout_v2
-# Daily Camarilla breakout with weekly trend filter and volume confirmation.
-# In bull markets: buy breakouts above H4 when weekly trend is up.
-# In bear markets: sell breakdowns below L4 when weekly trend is down.
-# Weekly trend filter reduces whipsaw, volume confirmation ensures institutional participation.
-# Target: 15-25 trades/year per symbol for low friction and high win rate.
-name = "1d_1w_camarilla_breakout_v2"
-timeframe = "1d"
+# Hypothesis: 4h_1d_camarilla_breakout_v35
+# Combines Camarilla breakout with RSI momentum filter and volume confirmation.
+# Uses 1d Camarilla levels for structure, 4h RSI for momentum strength, and volume spike for institutional confirmation.
+# Works in bull markets by buying breakouts above H4 with bullish momentum, and in bear markets by selling breakdowns below L4 with bearish momentum.
+# Target: 20-40 trades/year per symbol for low friction and high edge.
+name = "4h_1d_camarilla_breakout_v35"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,20 +22,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Weekly EMA(21) for trend direction
-    close_1w = df_1w['close'].values
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    weekly_trend_up = align_htf_to_ltf(prices, df_1w, ema_21_1w) < close_1w[-1]  # Simplified: trend up if price above EMA
-    # Actually compute properly: compare current weekly close to its EMA
-    weekly_trend_up = close_1w > ema_21_1w
-    weekly_trend_up = align_htf_to_ltf(prices, df_1w, weekly_trend_up.astype(float)) > 0.5
-    
-    # Get daily data for Camarilla calculation
+    # Get 1d data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -51,26 +37,39 @@ def generate_signals(prices):
     camarilla_h4 = close_prev + range_prev * 1.1 / 2
     camarilla_l4 = close_prev - range_prev * 1.1 / 2
     
-    # Align to daily timeframe
+    # Align to 4h timeframe (already delayed by 1 day due to shift)
     h4_level = align_htf_to_ltf(prices, df_1d, camarilla_h4)
     l4_level = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
-    # Volume confirmation: volume > 1.5 * 20-day average
+    # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
+    
+    # RSI momentum filter: RSI > 50 for long, RSI < 50 for short
+    rsi_period = 14
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=rsi_period, min_periods=rsi_period).mean()
+    avg_loss = loss.rolling(window=rsi_period, min_periods=rsi_period).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
+    rsi_long_filter = rsi_values > 50
+    rsi_short_filter = rsi_values < 50
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):  # start after warmup
-        # Skip if levels not ready or trend not available
-        if np.isnan(h4_level[i]) or np.isnan(l4_level[i]) or np.isnan(weekly_trend_up[i]):
+        # Skip if levels not ready
+        if np.isnan(h4_level[i]) or np.isnan(l4_level[i]):
             signals[i] = 0.0
             continue
         
-        # Require volume confirmation
+        # Check volume filter
         if not vol_confirm[i]:
-            # Hold current position if no volume
+            # Hold current position if volume filter fails
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -79,12 +78,12 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above H4 AND weekly trend up
-        if close[i] > h4_level[i] and weekly_trend_up[i] and position != 1:
+        # Long signal: price breaks above H4 with volume and bullish RSI
+        if close[i] > h4_level[i] and rsi_long_filter[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below L4 AND weekly trend down
-        elif close[i] < l4_level[i] and not weekly_trend_up[i] and position != -1:
+        # Short signal: price breaks below L4 with volume and bearish RSI
+        elif close[i] < l4_level[i] and rsi_short_filter[i] and position != -1:
             position = -1
             signals[i] = -0.25
         # Exit conditions: opposite breakout
