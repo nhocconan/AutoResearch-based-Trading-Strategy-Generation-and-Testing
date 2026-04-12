@@ -8,7 +8,7 @@ def generate_signals(prices):
     if n < 200:
         return np.zeros(n)
     
-    # Precompute hour filter for 08-20 UTC
+    # 12h timeframe - avoid night hours (0-8 and 20-24 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend context
+    # Get 1d data for context (primary HTF)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -27,10 +27,24 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d EMA(200) for trend filter
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate 1d Donchian channels (20-period)
+    donch_high = np.full(len(df_1d), np.nan)
+    donch_low = np.full(len(df_1d), np.nan)
+    for i in range(20, len(df_1d)):
+        donch_high[i] = np.max(high_1d[i-20:i])
+        donch_low[i] = np.min(low_1d[i-20:i])
     
-    # Calculate 1d RSI(14) for mean reversion signals
+    # Calculate 1d ATR (14-period)
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = tr2[0] = tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = np.full(len(df_1d), np.nan)
+    for i in range(14, len(df_1d)):
+        atr_1d[i] = np.mean(tr[i-14:i+1])
+    
+    # Calculate 1d RSI (14-period)
     delta = np.diff(close_1d, prepend=np.nan)
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -46,8 +60,10 @@ def generate_signals(prices):
     rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
     rsi_1d = 100 - (100 / (1 + rs))
     
-    # Align 1d indicators to daily timeframe (1:1 mapping)
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Align 1d indicators to 12h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     signals = np.zeros(n)
@@ -59,27 +75,34 @@ def generate_signals(prices):
             continue
         
         # Skip if data not ready
-        if (np.isnan(ema_200_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(atr_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to 200 EMA
-        uptrend = close[i] > ema_200_1d_aligned[i]
-        downtrend = close[i] < ema_200_1d_aligned[i]
+        # Volatility filter: current ATR > 0.5 * its 20-period average
+        atr_ma_20_1d = np.full(len(df_1d), np.nan)
+        for j in range(34, len(df_1d)):
+            if not np.isnan(np.mean(atr_1d[j-19:j+1])):
+                atr_ma_20_1d[j] = np.mean(atr_1d[j-19:j+1])
+        atr_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_20_1d)
+        vol_filter = (not np.isnan(atr_ma_20_1d_aligned[i]) and 
+                     atr_1d_aligned[i] > 0.5 * atr_ma_20_1d_aligned[i])
         
-        # Mean reversion signals: RSI extremes
-        rsi_oversold = rsi_1d_aligned[i] < 30
-        rsi_overbought = rsi_1d_aligned[i] > 70
+        # Breakout conditions
+        breakout_long = close[i] > donch_high_aligned[i]
+        breakout_short = close[i] < donch_low_aligned[i]
         
-        # Entry conditions: 
-        # Long: uptrend + RSI oversold (buy dips in uptrend)
-        # Short: downtrend + RSI overbought (sell rallies in downtrend)
-        long_entry = uptrend and rsi_oversold
-        short_entry = downtrend and rsi_overbought
+        # RSI filter: avoid overbought/oversold extremes
+        rsi_middle = (rsi_1d_aligned[i] >= 30) & (rsi_1d_aligned[i] <= 70)
         
-        # Exit conditions: opposite trend or RSI mean reversion
-        long_exit = (not uptrend) or (rsi_1d_aligned[i] > 50)
-        short_exit = (not downtrend) or (rsi_1d_aligned[i] < 50)
+        # Entry conditions
+        long_entry = breakout_long and vol_filter and rsi_middle
+        short_entry = breakout_short and vol_filter and rsi_middle
+        
+        # Exit conditions: opposite breakout or volatility collapse
+        long_exit = (close[i] < donch_low_aligned[i]) or (not vol_filter)
+        short_exit = (close[i] > donch_high_aligned[i]) or (not vol_filter)
         
         if long_entry and position != 1:
             position = 1
@@ -104,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_ema200_rsi_mean_reversion_v1"
-timeframe = "1d"
+name = "12h_1d_donchian_breakout_rsi_filter_v1"
+timeframe = "12h"
 leverage = 1.0
