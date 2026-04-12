@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_regime_v1"
+name = "4h_1d_camarilla_breakout_volume_regime_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -34,35 +34,35 @@ def generate_signals(prices):
     S3 = prev_close - H_minus_L * 1.1 / 4
     S4 = prev_close - H_minus_L * 1.1 / 2
     
-    # Map 1d Camarilla levels to each 4h bar
+    # Map 1d Camarilla levels to each 4h bar using vectorized approach
+    prices_dt = pd.to_datetime(prices['open_time'])
+    df_1d_start = pd.to_datetime(df_1d['open_time'])
+    df_1d_end = df_1d_start + pd.Timedelta(days=1)
+    
     R4_mapped = np.full(n, np.nan)
     R3_mapped = np.full(n, np.nan)
     S3_mapped = np.full(n, np.nan)
     S4_mapped = np.full(n, np.nan)
     
     for i in range(n):
-        current_time = pd.Timestamp(prices.iloc[i]['open_time'])
-        # Find the 1d bar that ended before this 4h bar
-        for j in range(len(df_1d)):
-            bar_start = pd.Timestamp(df_1d.iloc[j]['open_time'])
-            bar_end = bar_start + pd.Timedelta(days=1)
-            if bar_start <= current_time < bar_end:
-                R4_mapped[i] = R4[j]
-                R3_mapped[i] = R3[j]
-                S3_mapped[i] = S3[j]
-                S4_mapped[i] = S4[j]
-                break
+        current_time = prices_dt.iloc[i]
+        mask = (df_1d_start <= current_time) & (current_time < df_1d_end)
+        if mask.any():
+            j = mask.argmax()
+            R4_mapped[i] = R4[j]
+            R3_mapped[i] = R3[j]
+            S3_mapped[i] = S3[j]
+            S4_mapped[i] = S4[j]
     
     # Volume confirmation: current 4h volume > 20-period average of 1d volume
     vol_1d_mapped = np.full(n, np.nan)
     for i in range(n):
-        current_time = pd.Timestamp(prices.iloc[i]['open_time'])
-        for j in range(len(df_1d)):
-            bar_start = pd.Timestamp(df_1d.iloc[j]['open_time'])
-            bar_end = bar_start + pd.Timedelta(days=1)
-            if bar_start <= current_time < bar_end:
-                vol_1d_mapped[i] = df_1d.iloc[j]['volume']
-                break
+        current_time = prices_dt.iloc[i]
+        mask = (df_1d_start <= current_time) & (current_time < df_1d_end)
+        if mask.any():
+            j = mask.argmax()
+            vol_1d_mapped[i] = df_1d.iloc[j]['volume']
+    
     vol_ma = pd.Series(vol_1d_mapped).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_filter = volume > vol_ma
     
