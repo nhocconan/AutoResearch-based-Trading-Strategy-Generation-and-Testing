@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_1d_Alligator_ElderRay
-Hypothesis: Combine Williams Alligator (trend detection) with Elder Ray (bull/bear power) on 1d timeframe.
-Enter long when price > Alligator's Jaw AND Bull Power > 0 with rising 1d momentum.
-Enter short when price < Alligator's Jaw AND Bear Power < 0 with falling 1d momentum.
-Use 6h timeframe for entries with 0.25 position sizing.
-Designed to catch sustained trends while avoiding sideways chop. Works in bull via trend following,
-in bear via short signals during distribution phases.
+6h_1w_1d_Weekly_Pivot_Range_Breakout
+Hypothesis: Use weekly pivot points (based on prior week's high/low/close) to define range boundaries.
+Enter long when price breaks above weekly R1 with 6h close above 1d EMA50 and volume > 1.5x average.
+Enter short when price breaks below weekly S1 with 6h close below 1d EMA50 and volume > 1.5x average.
+Exit when price returns to weekly pivot point or reverses trend.
+Designed to capture breakouts from weekly ranges in both trending and ranging markets.
 Target: 50-150 total trades over 4 years (12-37/year) on 6h timeframe.
 """
 
@@ -14,7 +13,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Alligator_ElderRay"
+name = "6h_1w_1d_Weekly_Pivot_Range_Breakout"
 timeframe = "6h"
 leverage = 1.0
 
@@ -26,80 +25,82 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # === 1D ALLIGATOR (JAW, TEETH, LIPS) ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    # === WEEKLY PIVOT POINTS ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    median_1d = (df_1d['high'].values + df_1d['low'].values) / 2
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Jaw (13-period SMMA, 8 bars ahead)
-    jaw = pd.Series(median_1d).rolling(window=13, min_periods=13).mean().values
-    jaw = np.roll(jaw, 8)  # shift forward 8 bars
-    jaw[:8] = np.nan
+    # Calculate weekly pivot points (P, R1, S1, R2, S2)
+    pivot = np.full(len(close_1w), np.nan)
+    r1 = np.full(len(close_1w), np.nan)
+    s1 = np.full(len(close_1w), np.nan)
+    r2 = np.full(len(close_1w), np.nan)
+    s2 = np.full(len(close_1w), np.nan)
     
-    # Teeth (8-period SMMA, 5 bars ahead)
-    teeth = pd.Series(median_1d).rolling(window=8, min_periods=8).mean().values
-    teeth = np.roll(teeth, 5)  # shift forward 5 bars
-    teeth[:5] = np.nan
+    for i in range(len(close_1w)):
+        if np.isnan(high_1w[i]) or np.isnan(low_1w[i]) or np.isnan(close_1w[i]):
+            continue
+        pivot[i] = (high_1w[i] + low_1w[i] + close_1w[i]) / 3
+        r1[i] = 2 * pivot[i] - low_1w[i]
+        s1[i] = 2 * pivot[i] - high_1w[i]
+        r2[i] = pivot[i] + (high_1w[i] - low_1w[i])
+        s2[i] = pivot[i] - (high_1w[i] - low_1w[i])
     
-    # Lips (5-period SMMA, 3 bars ahead)
-    lips = pd.Series(median_1d).rolling(window=5, min_periods=5).mean().values
-    lips = np.roll(lips, 3)  # shift forward 3 bars
-    lips[:3] = np.nan
+    # Align to 6h timeframe
+    pivot_6h = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_6h = align_htf_to_ltf(prices, df_1w, r1)
+    s1_6h = align_htf_to_ltf(prices, df_1w, s1)
+    r2_6h = align_htf_to_ltf(prices, df_1w, r2)
+    s2_6h = align_htf_to_ltf(prices, df_1w, s2)
     
-    # Align Alligator lines to 6h
-    jaw_6h = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_6h = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_6h = align_htf_to_ltf(prices, df_1d, lips)
+    # === DAILY EMA50 TREND FILTER ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # === 1D ELDER RAY (BULL/BEAR POWER) ===
-    # Bull Power = High - EMA13
-    # Bear Power = Low - EMA13
-    ema13_1d = pd.Series(df_1d['close'].values).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = df_1d['high'].values - ema13_1d
-    bear_power = df_1d['low'].values - ema13_1d
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_6h = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align Elder Ray to 6h
-    bull_power_6h = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_6h = align_htf_to_ltf(prices, df_1d, bear_power)
-    
-    # === 1D MOMENTUM (ROC 3-period) ===
-    roc3_1d = pd.Series(df_1d['close'].values).pct_change(periods=3).values * 100
-    roc3_6h = align_htf_to_ltf(prices, df_1d, roc3_1d)
+    # === VOLUME FILTER ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(jaw_6h[i]) or np.isnan(bull_power_6h[i]) or np.isnan(bear_power_6h[i]) or 
-            np.isnan(roc3_6h[i])):
+        if (np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or 
+            np.isnan(ema50_1d_6h[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long conditions:
-        # 1. Price above Alligator Jaw (uptrend)
-        # 2. Bull Power positive (bulls in control)
-        # 3. Rising 1d momentum (ROC3 > 0)
-        long_signal = (close[i] > jaw_6h[i] and 
-                      bull_power_6h[i] > 0 and 
-                      roc3_6h[i] > 0)
+        # Determine trend based on 1d EMA50
+        trend_up = close[i] > ema50_1d_6h[i]
+        trend_down = close[i] < ema50_1d_6h[i]
         
-        # Short conditions:
-        # 1. Price below Alligator Jaw (downtrend)
-        # 2. Bear Power negative (bears in control)
-        # 3. Falling 1d momentum (ROC3 < 0)
-        short_signal = (close[i] < jaw_6h[i] and 
-                       bear_power_6h[i] < 0 and 
-                       roc3_6h[i] < 0)
+        # Long: break above weekly R1 in uptrend with volume confirmation
+        long_signal = (trend_up and 
+                      close[i] > r1_6h[i] * 1.001 and  # Break above R1
+                      vol_ratio[i] > 1.5)
         
-        # Exit: price crosses Teeth (trend weakening) or Elder Ray diverges
+        # Short: break below weekly S1 in downtrend with volume confirmation
+        short_signal = (trend_down and 
+                       close[i] < s1_6h[i] * 0.999 and  # Break below S1
+                       vol_ratio[i] > 1.5)
+        
+        # Exit: return to weekly pivot or trend reversal
         exit_long = (position == 1 and 
-                    (close[i] < teeth_6h[i] or bull_power_6h[i] < 0))
+                    (close[i] <= pivot_6h[i] or not trend_up))
         exit_short = (position == -1 and 
-                     (close[i] > teeth_6h[i] or bear_power_6h[i] > 0))
+                     (close[i] >= pivot_6h[i] or not trend_down))
         
         # Execute trades
         if long_signal and position != 1:
