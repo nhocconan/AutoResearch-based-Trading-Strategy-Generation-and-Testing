@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-1h_4d_1d_RSI_Trend_Filter
-Hypothesis: On 1h timeframe, enter long when RSI(14) < 30 and 4h close > 1d EMA50, 
-enter short when RSI(14) > 70 and 4h close < 1d EMA50. Uses 4h for trend direction 
-and 1d EMA50 as stronger trend filter. RSI extremes provide mean-reversion entries 
-within the trend. Works in bull (buy dips in uptrend) and bear (sell rallies in downtrend). 
-Target: 10-25 trades per year per symbol (40-100 over 4 years).
+6h_1w_1d_Weekly_Pivot_Trend_Follow
+Hypothesis: On 6h timeframe, follow weekly trend using weekly pivot points (PP) and trade in direction 
+of weekly trend on breakouts of daily high/low with volume confirmation. Uses weekly pivot for 
+trend direction (price > PP = uptrend, price < PP = downtrend) and daily range breakout for entry 
+timing. Works in bull (buy breakouts above weekly PP) and bear (sell breakdowns below weekly PP). 
+Target: 15-30 trades per year per symbol (60-120 over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4d_1d_RSI_Trend_Filter"
-timeframe = "1h"
+name = "6h_1w_1d_Weekly_Pivot_Trend_Follow"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,70 +24,81 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # === 1H INDICATORS: RSI(14) ===
-    # RSI with proper handling
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])  # first average
-    avg_loss[13] = np.mean(loss[1:14])
-    
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # === 4H INDICATOR: Close for trend direction ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 1:
+    # === WEEKLY PIVOT: Calculate from previous week's OHLC ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    close_4h_aligned = align_htf_to_ltf(prices, df_4h, close_4h)
+    # Calculate weekly pivot points using previous week's data
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    weekly_open = df_1w['open'].values
     
-    # === 1D INDICATOR: EMA(50) for stronger trend filter ===
+    # Weekly Pivot Point (PP) = (High + Low + Close) / 3
+    weekly_pp = (weekly_high + weekly_low + weekly_close) / 3
+    # Weekly Support 1 (S1) = (2 * PP) - High
+    weekly_s1 = (2 * weekly_pp) - weekly_high
+    # Weekly Resistance 1 (R1) = (2 * PP) - Low
+    weekly_r1 = (2 * weekly_pp) - weekly_low
+    
+    # Align weekly levels to 6h timeframe (already shifted for completed week)
+    weekly_pp_aligned = align_htf_to_ltf(prices, df_1w, weekly_pp)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    
+    # === DAILY HIGH/LOW: For breakout entry ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    
+    # Align daily high/low to 6h timeframe
+    daily_high_aligned = align_htf_to_ltf(prices, df_1d, daily_high)
+    daily_low_aligned = align_htf_to_ltf(prices, df_1d, daily_low)
+    
+    # === VOLUME FILTER: Volume > 20-period average ===
+    volume_ma = np.zeros_like(volume)
+    for i in range(20, len(volume)):
+        volume_ma[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # start after warmup
         # Skip if indicators not available
-        if np.isnan(rsi[i]) or np.isnan(close_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+        if (np.isnan(weekly_pp_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or 
+            np.isnan(weekly_s1_aligned[i]) or np.isnan(daily_high_aligned[i]) or 
+            np.isnan(daily_low_aligned[i]) or np.isnan(volume_ma[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filters
-        uptrend_4h = close_4h_aligned[i] > ema_50_1d_aligned[i]
-        downtrend_4h = close_4h_aligned[i] < ema_50_1d_aligned[i]
+        # Trend filter: price relative to weekly pivot
+        uptrend = close[i] > weekly_pp_aligned[i]
+        downtrend = close[i] < weekly_pp_aligned[i]
         
-        # Entry signals: RSI extremes in trend direction
-        long_signal = uptrend_4h and rsi[i] < 30
-        short_signal = downtrend_4h and rsi[i] > 70
+        # Breakout conditions with volume confirmation
+        breakout_long = (close[i] > daily_high_aligned[i]) and (volume[i] > volume_ma[i])
+        breakdown_short = (close[i] < daily_low_aligned[i]) and (volume[i] > volume_ma[i])
         
-        # Exit conditions: trend reversal or RSI normalization
-        exit_long = not uptrend_4h or rsi[i] > 50
-        exit_short = not downtrend_4h or rsi[i] < 50
+        # Entry: breakout in direction of weekly trend
+        long_signal = uptrend and breakout_long
+        short_signal = downtrend and breakdown_short
+        
+        # Exit: trend reversal or opposite breakout
+        exit_long = not uptrend or breakdown_short
+        exit_short = not downtrend or breakout_long
         
         if long_signal and position != 1:
             position = 1
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif short_signal and position != -1:
             position = -1
-            signals[i] = -0.20
+            signals[i] = -0.25
         elif exit_long and position == 1:
             position = 0
             signals[i] = 0.0
@@ -96,6 +107,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
