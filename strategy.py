@@ -3,108 +3,88 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_rsi_divergence_volume
-# Uses daily RSI divergence with price action to identify reversals in both bull and bear markets.
-# Long when price makes lower low but RSI makes higher low (bullish divergence) with volume confirmation.
-# Short when price makes higher high but RSI makes lower high (bearish divergence) with volume confirmation.
-# Exits when RSI crosses opposite extreme (RSI > 70 for long exit, RSI < 30 for short exit).
-# Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drift.
-# Works in trending markets via continuation signals and ranging markets via mean reversion.
+# Hypothesis: 1d_1w_camarilla_pivot_reversal
+# Uses weekly Camarilla pivot levels on daily chart for mean reversion trades.
+# Long when price touches or crosses below L3 (75% of prior week range) with rejection (close > open).
+# Short when price touches or crosses above H3 (125% of prior week range) with rejection (close < open).
+# Exits when price reaches the opposite H3/L3 level or weekly pivot point.
+# Designed for low trade frequency (target: 10-30 trades/year) to minimize fee drag.
+# Works in ranging markets via mean reversion at extreme weekly levels.
+# Works in trending markets via rejection at weekly support/resistance.
 # Focus on BTC/ETH as primary targets.
 
-name = "4h_1d_rsi_divergence_volume"
-timeframe = "4h"
+name = "1d_1w_camarilla_pivot_reversal"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 10:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    open_price = prices['open'].values
     
-    # Get daily data for RSI calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Get weekly data for Camarilla pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # Calculate daily RSI (14-period)
-    close_1d = df_1d['close'].values
-    delta = pd.Series(close_1d).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Calculate weekly Camarilla pivot levels (based on prior week's OHLC)
+    # H4 = High + 1.5 * (High - Low)
+    # H3 = High + 1.0 * (High - Low)
+    # L3 = Low - 1.0 * (High - Low)
+    # L4 = Low - 1.5 * (High - Low)
+    # Pivot = (High + Low + Close) / 3
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Align daily RSI to 4h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_values)
+    # Weekly range
+    weekly_range = high_1w - low_1w
     
-    # Volume confirmation: volume > 1.3 * 20-period average (4h timeframe)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.3)
+    # Camarilla levels
+    h4 = high_1w + 1.5 * weekly_range
+    h3 = high_1w + 1.0 * weekly_range
+    l3 = low_1w - 1.0 * weekly_range
+    l4 = low_1w - 1.5 * weekly_range
+    pivot = (high_1w + low_1w + close_1w) / 3.0
+    
+    # Align weekly Camarilla levels to daily timeframe
+    h4_aligned = align_htf_to_ltf(prices, df_1w, h4)
+    h3_aligned = align_htf_to_ltf(prices, df_1w, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1w, l3)
+    l4_aligned = align_htf_to_ltf(prices, df_1w, l4)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # start after warmup
+    for i in range(1, n):  # start after first bar to have prior weekly data
         # Skip if data not ready
-        if np.isnan(rsi_aligned[i]):
+        if np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or np.isnan(pivot_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Require volume confirmation for new entries
-        if not vol_confirm[i]:
-            # Hold current position if volume filter fails
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Bullish divergence: price makes lower low, RSI makes higher low
-        if i >= 2:
-            price_lower_low = low[i] < low[i-1] and low[i-1] < low[i-2]
-            rsi_higher_low = rsi_aligned[i] > rsi_aligned[i-1] and rsi_aligned[i-1] > rsi_aligned[i-2]
-            bullish_div = price_lower_low and rsi_higher_low and rsi_aligned[i] < 40
-            
-            # Bearish divergence: price makes higher high, RSI makes lower high
-            price_higher_high = high[i] > high[i-1] and high[i-1] > high[i-2]
-            rsi_lower_high = rsi_aligned[i] < rsi_aligned[i-1] and rsi_aligned[i-1] < rsi_aligned[i-2]
-            bearish_div = price_higher_high and rsi_lower_high and rsi_aligned[i] > 60
-            
-            # Long signal: bullish divergence
-            if bullish_div and position != 1:
-                position = 1
-                signals[i] = 0.25
-            # Short signal: bearish divergence
-            elif bearish_div and position != -1:
-                position = -1
-                signals[i] = -0.25
-            # Exit conditions: RSI crosses opposite extreme
-            elif position == 1 and rsi_aligned[i] >= 70:
-                position = 0
-                signals[i] = 0.0
-            elif position == -1 and rsi_aligned[i] <= 30:
-                position = 0
-                signals[i] = 0.0
-            else:
-                # Hold current position
-                if position == 1:
-                    signals[i] = 0.25
-                elif position == -1:
-                    signals[i] = -0.25
-                else:
-                    signals[i] = 0.0
+        # Long signal: price touches/crosses below L3 with bullish rejection (close > open)
+        if low[i] <= l3_aligned[i] and close[i] > open_price[i] and position != 1:
+            position = 1
+            signals[i] = 0.25
+        # Short signal: price touches/crosses above H3 with bearish rejection (close < open)
+        elif high[i] >= h3_aligned[i] and close[i] < open_price[i] and position != -1:
+            position = -1
+            signals[i] = -0.25
+        # Exit conditions: price reaches opposite H3/L3 level or weekly pivot
+        elif position == 1 and (high[i] >= h3_aligned[i] or close[i] >= pivot_aligned[i]):
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and (low[i] <= l3_aligned[i] or close[i] <= pivot_aligned[i]):
+            position = 0
+            signals[i] = 0.0
         else:
-            # Hold current position for first few bars
+            # Hold current position
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
