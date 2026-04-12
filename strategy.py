@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_1d_1w_Camarilla_Breakout_Volume_Regime_v3
-Hypothesis: Reduce trade frequency by requiring stricter volume confirmation (2x average) and adding ADX(14) > 25 trend filter on 1d. Only trade breakouts of daily R3/S3 when aligned with weekly trend (price > weekly S3 for longs, < weekly R3 for shorts). Exit at daily pivot. Target: 20-30 trades/year.
+4h_1d_1w_Camarilla_Breakout_Volume_Regime_v4
+Hypothesis: Reduce trade frequency by requiring volume > 1.5x average AND ADX(14) > 30 on 1d. Only trade breakouts of daily R3/S3 when weekly price is between S3 and R3 (range-bound weekly context). Exit at daily pivot. Target: 15-25 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_1w_Camarilla_Breakout_Volume_Regime_v3"
+name = "4h_1d_1w_Camarilla_Breakout_Volume_Regime_v4"
 timeframe = "4h"
 leverage = 1.0
 
@@ -133,19 +133,18 @@ def generate_signals(prices):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: at least 2x average
-        vol_confirm = volume[i] > 2.0 * vol_avg[i]
+        # Volume confirmation: at least 1.5x average
+        vol_confirm = volume[i] > 1.5 * vol_avg[i]
         
-        # Trend filter: ADX > 25 indicates strong trend
-        strong_trend = adx_aligned[i] > 25
+        # Trend filter: ADX > 30 indicates strong trend
+        strong_trend = adx_aligned[i] > 30
         
-        # Weekly context for direction
-        long_allowed = close[i] > s3_1w_aligned[i]
-        short_allowed = close[i] < r3_1w_aligned[i]
+        # Weekly range-bound context: price between S3 and R3
+        weekly_range = (close[i] > s3_1w_aligned[i]) & (close[i] < r3_1w_aligned[i])
         
-        # Breakout entries at S3/R3 with volume, trend, and direction filters
-        long_setup = (close[i] > r3_1d_aligned[i]) and vol_confirm and strong_trend and long_allowed
-        short_setup = (close[i] < s3_1d_aligned[i]) and vol_confirm and strong_trend and short_allowed
+        # Breakout entries at S3/R3 with volume, trend, and weekly range filters
+        long_setup = (close[i] > r3_1d_aligned[i]) and vol_confirm and strong_trend and weekly_range
+        short_setup = (close[i] < s3_1d_aligned[i]) and vol_confirm and strong_trend and weekly_range
         
         # Exit when price returns to daily pivot (mean reversion)
         pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
