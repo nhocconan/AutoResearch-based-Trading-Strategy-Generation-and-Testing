@@ -45,7 +45,7 @@ def generate_signals(prices):
     for i in range(13, n):
         atr14[i] = np.nanmean(tr[i-13:i+1])
     
-    # Calculate 20-period volume moving average
+    # Calculate 20-period volume average
     vol_ma20 = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma20[i] = np.mean(volume[i-19:i+1])
