@@ -1,25 +1,20 @@
-#!/usr/bin/env python3
-"""
-6h_1d_weekly_pivot_reversion
-Hypothesis: Price tends to revert to weekly pivot points (PP) on 6h timeframe.
-- Weekly PP calculated from prior week's (H+L+C)/3
-- Buy when price touches S1 (PP - (R1-S1)) with RSI < 40 and volume > 1.5x avg
-- Sell when price touches R1 (PP + (R1-S1)) with RSI > 60 and volume > 1.5x avg
-- Uses weekly pivot for multi-day mean reversion edge in both bull/bear markets
-- Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag
-"""
+# 12h_1w_1d_camarilla_breakout_volume
+# Hypothesis: 12-hour trading using weekly and daily timeframe confluence. 
+# Uses weekly high/low for major trend bias and daily Camarilla levels for precise entries.
+# Volume confirmation filters false breakouts. Designed for lower frequency (12-37 trades/year)
+# to minimize fee drag while capturing major moves in both bull and bear markets.
+
+name = "12h_1w_1d_camarilla_breakout_volume"
+timeframe = "12h"
+leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_weekly_pivot_reversion"
-timeframe = "6h"
-leverage = 1.0
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,73 +22,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
+    # Get weekly data for trend bias
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Previous week's data for pivot (to avoid look-ahead)
-    prev_high = np.roll(high_1w, 1)
-    prev_low = np.roll(low_1w, 1)
-    prev_close = np.roll(close_1w, 1)
+    # Weekly trend bias: price above/below weekly midpoint
+    weekly_mid = (high_1w + low_1w) / 2
+    weekly_bias_above = close_1w > weekly_mid
+    weekly_bias_below = close_1w < weekly_mid
     
-    # Weekly pivot point and support/resistance levels
-    pp = (prev_high + prev_low + prev_close) / 3.0
+    # Get daily data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Previous day's range for Camarilla calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    
+    # Handle first value
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
+    
+    # Calculate Camarilla levels
     range_ = prev_high - prev_low
-    r1 = pp + range_
-    s1 = pp - range_
-    r2 = pp + 2 * range_
-    s2 = pp - 2 * range_
+    # Resistance levels
+    r3 = prev_close + range_ * 1.1 / 2
+    r4 = prev_close + range_ * 1.1
+    # Support levels
+    s3 = prev_close - range_ * 1.1 / 2
+    s4 = prev_close - range_ * 1.1
     
-    # Align weekly levels to 6h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    # Align weekly bias to 12h timeframe
+    weekly_bias_above_aligned = align_htf_to_ltf(prices, df_1w, weekly_bias_above.astype(float))
+    weekly_bias_below_aligned = align_htf_to_ltf(prices, df_1w, weekly_bias_below.astype(float))
     
-    # RSI(14) for overbought/oversold
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean()
-    vol_confirm = volume > (vol_ma * 1.5)
+    # Volume confirmation: volume > 1.3x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(weekly_bias_above_aligned[i]) or np.isnan(weekly_bias_below_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: price at S1 with oversold RSI and volume
-        if (abs(close[i] - s1_aligned[i]) < 0.001 * close[i] and  # within 0.1% of S1
-            rsi[i] < 40 and vol_confirm[i] and position != 1):
+        # Long entry: weekly bullish bias + price breaks above R4 with volume
+        if (weekly_bias_above_aligned[i] > 0.5 and 
+            close[i] > r4_aligned[i] and vol_confirm[i] and 
+            position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: price at R1 with overbought RSI and volume
-        elif (abs(close[i] - r1_aligned[i]) < 0.001 * close[i] and  # within 0.1% of R1
-              rsi[i] > 60 and vol_confirm[i] and position != -1):
+        # Short entry: weekly bearish bias + price breaks below S4 with volume
+        elif (weekly_bias_below_aligned[i] > 0.5 and 
+              close[i] < s4_aligned[i] and vol_confirm[i] and 
+              position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: price moves back to pivot or opposite S1/R1
-        elif position == 1 and (close[i] > pp_aligned[i] or close[i] < s1_aligned[i]):
+        # Exit: reverse signal or close crosses back to opposite S3/R3
+        elif position == 1 and close[i] < s3_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] < pp_aligned[i] or close[i] > r1_aligned[i]):
+        elif position == -1 and close[i] > r3_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
