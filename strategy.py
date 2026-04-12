@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-4h_12h_Camarilla_Triangle_Breakout
-Hypothesis: Combine 12h trend (EMA21) with 4h breakout from contracting triangle pattern.
-Go long when price breaks above triangle resistance in uptrend, short when breaks below support in downtrend.
-Triangle identified by higher lows and lower highs over 5 periods. Volume confirmation required.
-Designed to capture breakouts with momentum in trending markets, avoiding false breakouts in ranges.
-Target: 60-120 total trades over 4 years (15-30/year) on 4h timeframe.
-Works in bull (breakouts continuation) and bear (breakdowns continuation).
+1d_1w_RVOL_Momentum_Reversion
+Hypothesis: On daily timeframe, use weekly RVOL (relative volume) to detect institutional interest.
+Go long when price pulls back to VWAP during high RVOL uptrend, short when rallies to VWAP during high RVOL downtrend.
+Weekly trend filter avoids counter-trend trades. Designed for 1-3 trades per month per symbol.
+Works in bull (buy dips in uptrend) and bear (sell rallies in downtrend).
+Target: 12-36 total trades over 4 years (3-9/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_Camarilla_Triangle_Breakout"
-timeframe = "4h"
+name = "1d_1w_RVOL_Momentum_Reversion"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,64 +26,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12H DATA FOR TREND FILTER ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 21:
+    # === WEEKLY DATA FOR TREND AND RVOL ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema21_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema21_12h)
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    volume_1w = df_1w['volume'].values
     
-    # === VOLUME FILTER (20-period average) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma
+    # Weekly EMA20 for trend
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # === TRIANGLE DETECTION (5-period higher lows & lower highs) ===
-    # Higher lows: each low > previous low
-    hl_condition = np.ones(n, dtype=bool)
-    for i in range(1, 5):
-        hl_condition[i:] &= (low[i:] > low[:-i])
+    # Weekly VWAP (typical price * volume cumulative)
+    typical_1w = (high_1w + low_1w + close_1w) / 3.0
+    vwap_1w = (np.cumsum(typical_1w * volume_1w) / np.cumsum(volume_1w))
+    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
     
-    # Lower highs: each high < previous high
-    hh_condition = np.ones(n, dtype=bool)
-    for i in range(1, 5):
-        hh_condition[i:] &= (high[i:] < high[:-i])
+    # Weekly RVOL: current volume / 20-period average volume
+    vol_ma_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
+    rvol_1w = volume_1w / vol_ma_1w
+    rvol_1w_aligned = align_htf_to_ltf(prices, df_1w, rvol_1w)
     
-    triangle_condition = hl_condition & hh_condition
-    
-    # Triangle boundaries: recent high and low
-    resistance = pd.Series(high).rolling(window=5, min_periods=5).max().values
-    support = pd.Series(low).rolling(window=5, min_periods=5).min().values
+    # Daily VWAP for entry
+    typical = (high + low + close) / 3.0
+    vwap = np.cumsum(typical * volume) / np.cumsum(volume)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(ema21_12h_aligned[i]) or np.isnan(resistance[i]) or 
-            np.isnan(support[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(ema20_1w_aligned[i]) or np.isnan(vwap_1w_aligned[i]) or 
+            np.isnan(rvol_1w_aligned[i]) or np.isnan(vwap[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine trend from 12h EMA21
-        close_12h_arr = df_12h['close'].values
-        close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h_arr)
-        trend_up = close_12h_aligned[i] > ema21_12h_aligned[i]
-        trend_down = close_12h_aligned[i] < ema21_12h_aligned[i]
+        # Determine weekly trend
+        trend_up = close_1w_aligned[i] > ema20_1w_aligned[i]
+        trend_down = close_1w_aligned[i] < ema20_1w_aligned[i]
         
-        # Breakout conditions: price breaks triangle boundary + trend + volume
-        breakout_up = close[i] > resistance[i-1] and triangle_condition[i-1]
-        breakout_down = close[i] < support[i-1] and triangle_condition[i-1]
+        # Entry conditions: price touches daily VWAP during high RVOL + weekly trend
+        # Define touch as within 0.5% of VWAP
+        vwap_distance = abs(close[i] - vwap[i]) / vwap[i]
+        vwap_touch = vwap_distance < 0.005
+        high_rvol = rvol_1w_aligned[i] > 1.8  # 80% above average volume
         
-        long_signal = breakout_up and trend_up and vol_ratio[i] > 1.5
-        short_signal = breakout_down and trend_down and vol_ratio[i] > 1.5
+        long_signal = vwap_touch and trend_up and high_rvol and close[i] <= vwap[i]
+        short_signal = vwap_touch and trend_down and high_rvol and close[i] >= vwap[i]
         
-        # Exit conditions: opposite breakout or trend reversal
+        # Exit conditions: opposite VWAP touch or trend reversal
         exit_long = (position == 1 and 
-                    (breakout_down or not trend_up))
+                    (vwap_touch and close[i] >= vwap[i]) or not trend_up)
         exit_short = (position == -1 and 
-                     (breakout_up or not trend_down))
+                     (vwap_touch and close[i] <= vwap[i]) or not trend_down)
         
         # Execute trades
         if long_signal and position != 1:
