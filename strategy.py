@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h_1d_williams_vix_fix_v1
-# Williams VIX Fix (WVF) measures volatility spikes from 1d data to identify exhaustion points.
-# Low WVF indicates complacency (contrarian buy signal in downtrends).
-# High WVF indicates panic (contrarian sell signal in uptrends).
-# Combined with 6h price position relative to 20-period EMA for trend context.
-# Designed for low trade frequency (target: 15-30 trades/year) to avoid fee drag.
-# Works in bull markets by selling panic spikes and in bear markets by buying complacency dips.
+# Hypothesis: 12h_1d_donchian_breakout_volume
+# Uses daily Donchian channels (20-period high/low) as breakout levels on 12h chart.
+# Long when price breaks above 20-day high with volume confirmation (volume > 1.5x 20-period avg).
+# Short when price breaks below 20-day low with volume confirmation.
+# Exits when price crosses the 20-day midpoint (mean reversion).
+# Designed for low trade frequency (target: 12-37 trades/year) to minimize fee drag.
+# Works in trending markets via breakouts and ranging markets via mean reversion to midpoint.
 # Focus on BTC/ETH as primary targets.
 
-name = "6h_1d_williams_vix_fix_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_breakout_volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,54 +24,66 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get daily data for Williams VIX Fix calculation
+    # Get daily data for Donchian channel calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 22:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Williams VIX Fix (22-period)
+    # Calculate daily Donchian channels (20-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Highest high in lookback period
-    highest_high = pd.Series(high_1d).rolling(window=22, min_periods=22).max().values
-    # WVF formula: ((highest_high - low) / highest_high) * 100
-    wvf = ((highest_high - low_1d) / highest_high) * 100
+    # 20-period high and low
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Midpoint for exit
+    donchian_mid = (donchian_high + donchian_low) / 2.0
     
-    # Align daily WVF to 6h timeframe
-    wvf_aligned = align_htf_to_ltf(prices, df_1d, wvf)
+    # Align daily Donchian levels to 12h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid)
     
-    # 6h EMA(20) for trend context
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Volume confirmation: volume > 1.5 * 20-period average (12h timeframe)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):  # start after warmup
         # Skip if data not ready
-        if np.isnan(wvf_aligned[i]) or np.isnan(ema_20[i]):
+        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(donchian_mid_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Contrarian logic based on WVF extremes
-        # Low WVF (< 20) = complacency -> potential buy in downtrend
-        # High WVF (> 50) = panic -> potential sell in uptrend
+        # Require volume confirmation for new entries
+        if not vol_confirm[i]:
+            # Hold current position if volume filter fails
+            if position == 1:
+                signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.0
+            continue
         
-        if wvf_aligned[i] < 20 and close[i] < ema_20[i] and position != 1:
-            # Buy signal: complacency during downtrend
+        # Long signal: price breaks above 20-day high
+        if close[i] > donchian_high_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        elif wvf_aligned[i] > 50 and close[i] > ema_20[i] and position != -1:
-            # Sell signal: panic during uptrend
+        # Short signal: price breaks below 20-day low
+        elif close[i] < donchian_low_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit when WVF returns to neutral range (30-40) or opposite extreme
-        elif position == 1 and (wvf_aligned[i] > 40 or close[i] >= ema_20[i]):
+        # Exit conditions: price crosses 20-day midpoint (mean reversion)
+        elif position == 1 and close[i] <= donchian_mid_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (wvf_aligned[i] < 30 or close[i] <= ema_20[i]):
+        elif position == -1 and close[i] >= donchian_mid_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
