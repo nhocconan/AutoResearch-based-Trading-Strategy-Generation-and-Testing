@@ -1,103 +1,92 @@
 #!/usr/bin/env python3
 """
-6h_1d_1w_MultiTF_Trend_Momentum_v1
-Hypothesis: Combine 1d trend (EMA200), 6h momentum (RSI pullback), and 1w momentum (RSI>50) for high-probability entries.
-Works in bull by buying dips above EMA200, works in bear by shorting rallies below EMA200 when weekly momentum turns bearish.
-Targets 15-30 trades/year to minimize fee drag. Uses 6h timeframe for optimal balance of signal quality and frequency.
+6h_1d_Williams_Fractal_Trend_v1
+Hypothesis: Use daily Williams fractals (with 2-bar confirmation) to identify swing points,
+then trade in direction of 6h EMA(21) trend. Long when bullish fractal confirmed and price above EMA,
+short when bearish fractal confirmed and price below EMA. Uses volume confirmation to avoid false breaks.
+Williams fractals work well in trending markets (2021-2024) and provide clear swing points for trend continuation.
+Designed for low trade frequency (target: 50-150 total over 4 years) to minimize fee drag.
+Works in bull via buying pullbacks to EMA, in bear via selling rallies to EMA.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf, compute_williams_fractals
 
-name = "6h_1d_1w_MultiTF_Trend_Momentum_v1"
+name = "6h_1d_Williams_Fractal_Trend_v1"
 timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Daily data for EMA200 trend filter
+    # Daily data for Williams fractals
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    # Weekly data for momentum filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
-        return np.zeros(n)
+    # Calculate Williams fractals (requires 5-bar window: 2 left, 1 center, 2 right)
+    bearish_fractal, bullish_fractal = compute_williams_fractals(
+        df_1d['high'].values,
+        df_1d['low'].values,
+    )
     
-    # Calculate daily EMA200
-    close_1d = pd.Series(df_1d['close'])
-    ema200_1d = close_1d.ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Williams fractals need 2 extra bars for confirmation (right side of pattern)
+    bearish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bearish_fractal, additional_delay_bars=2
+    )
+    bullish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bullish_fractal, additional_delay_bars=2
+    )
     
-    # Calculate weekly RSI(14)
-    close_1w = pd.Series(df_1w['close'])
-    delta_1w = close_1w.diff()
-    gain_1w = delta_1w.where(delta_1w > 0, 0)
-    loss_1w = (-delta_1w).where(delta_1w < 0, 0)
-    avg_gain_1w = gain_1w.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss_1w = loss_1w.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs_1w = avg_gain_1w / avg_loss_1w.replace(0, np.nan)
-    rsi_1w = 100 - (100 / (1 + rs_1w))
-    rsi_1w = rsi_1w.fillna(50).values  # neutral when undefined
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
-    
-    # Calculate 6h RSI(14) for entry timing
+    # 6h EMA(21) for trend filter
     close_series = pd.Series(close)
-    delta = close_series.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = (-delta).where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
+    ema_21 = close_series.ewm(span=21, adjust=False, min_periods=21).mean().values
+    
+    # Volume filter: current volume > 1.5x 20-period average
+    volume_series = pd.Series(volume)
+    vol_ma = volume_series.rolling(window=20, min_periods=20).mean()
+    vol_ratio = volume_series / vol_ma
+    vol_ratio = vol_ratio.fillna(1.0).values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):
+    for i in range(100, n):
         # Skip if any data invalid
-        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(rsi_1w_aligned[i]) or 
-            np.isnan(rsi[i])):
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
+            np.isnan(ema_21[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine trend from daily EMA200
-        above_ema200 = close[i] > ema200_1d_aligned[i]
-        below_ema200 = close[i] < ema200_1d_aligned[i]
+        # Trend and fractal conditions
+        uptrend = close[i] > ema_21[i]
+        downtrend = close[i] < ema_21[i]
         
-        # Weekly momentum filter
-        weekly_bullish = rsi_1w_aligned[i] > 50
-        weekly_bearish = rsi_1w_aligned[i] < 50
+        bullish_fractal_signal = bullish_fractal_aligned[i] == 1
+        bearish_fractal_signal = bearish_fractal_aligned[i] == 1
         
-        # 6h RSI for entry timing (pullbacks in trend direction)
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
+        # Entry conditions with volume filter
+        long_entry = uptrend and bullish_fractal_signal and vol_ratio[i] > 1.5
+        short_entry = downtrend and bearish_fractal_signal and vol_ratio[i] > 1.5
         
-        # Long setup: price above daily EMA200, weekly bullish, and 6h RSI oversold
-        long_setup = above_ema200 and weekly_bullish and rsi_oversold
-        # Short setup: price below daily EMA200, weekly bearish, and 6h RSI overbought
-        short_setup = below_ema200 and weekly_bearish and rsi_overbought
-        
-        # Exit when RSI returns to neutral zone (40-60) or trend fails
-        long_exit = (rsi[i] >= 40) or (not above_ema200)
-        short_exit = (rsi[i] <= 60) or (not below_ema200)
+        # Exit conditions: trend reversal
+        long_exit = not uptrend  # price below EMA
+        short_exit = not downtrend  # price above EMA
         
         # Signal logic
-        if long_setup and position != 1:
+        if long_entry and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_setup and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
