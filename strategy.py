@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation_v3
-Hypothesis: On 4h timeframe, take long when price breaks above Camarilla R4 with volume expansion in trending markets (ADX>25), and short when price breaks below Camarilla S4 with volume expansion in trending markets. Uses ADX regime filter to avoid false breakouts in ranging conditions, reducing whipsaws. Designed for 25-40 trades/year by requiring ADX>25 and volume spike (2x average) for entry. Works in bull markets via R4 breakouts and bear markets via S4 breakdowns, while avoiding choppy markets where breakouts fail.
+6h_1d_RVI_Trend_Filtered_Breakout_v1
+Hypothesis: On 6h timeframe, use Relative Vigor Index (RVI) from daily timeframe to filter breakouts. Enter long when price breaks above 6h Donchian(20) with RVI > 0.5 and volume spike, enter short when price breaks below Donchian(20) with RVI < -0.5 and volume spike. RVI measures trend strength by comparing close-open to high-low range, providing cleaner trend detection than ADX in choppy markets. Volume confirmation ensures breakout validity. Designed for 15-30 trades/year by requiring multiple confirmations, reducing false breakouts in ranging markets while capturing strong trends in both bull and bear phases.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation_v3"
-timeframe = "4h"
+name = "6h_1d_RVI_Trend_Filtered_Breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,84 +22,67 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
     
     # Volume average (20 period) for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ADX calculation for trend strength (14 period)
-    # ADX uses +DI, -DI, and TR
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
+    # Donchian channels (20 period) on 6h
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Directional movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
-    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
-    
-    # DI values
-    plus_di = 100 * plus_dm_14 / tr_14
-    minus_di = 100 * minus_dm_14 / tr_14
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Load 1d data ONCE for Camarilla pivot levels
+    # Load 1d data ONCE for RVI calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from prior 1d OHLC
+    # Calculate RVI (Relative Vigor Index) on daily timeframe
+    # RVI = (Close - Open) / (High - Low) smoothed
+    open_1d = df_1d['open'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    camarilla_r4 = close_1d + 1.5 * (high_1d - low_1d)
-    camarilla_s4 = close_1d - 1.5 * (high_1d - low_1d)
+    numerator = close_1d - open_1d
+    denominator = high_1d - low_1d
+    # Avoid division by zero
+    denominator = np.where(denominator == 0, 1e-10, denominator)
+    raw_rvi = numerator / denominator
     
-    # Align to 4h timeframe
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    # Smooth RVI with 10-period SMA (standard setting)
+    rvi = pd.Series(raw_rvi).rolling(window=10, min_periods=10).mean().values
+    
+    # Align RVI to 6h timeframe
+    rvi_aligned = align_htf_to_ltf(prices, df_1d, rvi)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after ADX warmup
+    for i in range(30, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(adx[i])):
+        if (np.isnan(rvi_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Regime filter: only trade in trending markets (ADX > 25)
-        trending = adx[i] > 25
+        # Donchian breakout conditions
+        breakout_up = close[i] > highest_high[i]   # Break above upper band
+        breakout_down = close[i] < lowest_low[i]   # Break below lower band
         
-        # Camarilla breakout conditions
-        breakout_r4 = close[i] > camarilla_r4_aligned[i]  # Break above R4
-        breakout_s4 = close[i] < camarilla_s4_aligned[i]  # Break below S4
+        # Volume confirmation: current volume > 1.5x average
+        volume_spike = volume[i] > vol_ma[i] * 1.5
         
-        # Volume confirmation: current volume > 2x average (strong breakout)
-        volume_spike = volume[i] > vol_ma[i] * 2.0
+        # RVI trend filter: RVI > 0.5 for uptrend, RVI < -0.5 for downtrend
+        rvi_uptrend = rvi_aligned[i] > 0.5
+        rvi_downtrend = rvi_aligned[i] < -0.5
         
-        # Entry conditions: breakout + volume + trending
-        long_entry = breakout_r4 and volume_spike and trending
-        short_entry = breakout_s4 and volume_spike and trending
+        # Entry conditions: breakout + volume + RVI trend filter
+        long_entry = breakout_up and volume_spike and rvi_uptrend
+        short_entry = breakout_down and volume_spike and rvi_downtrend
         
-        # Exit conditions: price returns to Camarilla pivot point (midpoint)
-        pivot_point = (high_1d + low_1d + close_1d) / 3
-        pivot_point_aligned = align_htf_to_ltf(prices, df_1d, pivot_point)
-        
-        long_exit = close[i] < pivot_point_aligned[i]
-        short_exit = close[i] > pivot_point_aligned[i]
+        # Exit conditions: price returns to opposite Donchian level or RVI reverses
+        long_exit = (close[i] < lowest_low[i]) or (rvi_aligned[i] < 0)
+        short_exit = (close[i] > highest_high[i]) or (rvi_aligned[i] > 0)
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
