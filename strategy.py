@@ -1,9 +1,10 @@
-# 4h_1d_camarilla_breakout_volume_regime_v2
-# Hypothesis: 4-hour Camarilla breakout with volume confirmation and regime filter (ADX) to reduce false signals
-# Works in bull/bear by using volatility-adjusted breakouts (ATR) and volume to avoid false signals.
-# Target: 25-35 trades/year (100-140 total over 4 years) to minimize fee drag.
+#!/usr/bin/env python3
+# 4h_1d_camarilla_breakout_v1
+# Hypothesis: 4-hour Camarilla breakout with volume confirmation and ATR volatility filter
+# Works in bull/bear by using volatility-adjusted breakouts and volume confirmation to avoid false signals.
+# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
 
-name = "4h_1d_camarilla_breakout_volume_regime_v2"
+name = "4h_1d_camarilla_breakout_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -62,27 +63,6 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
-    # ADX for regime filter (trending vs ranging)
-    # Calculate ADX on 4h data
-    tr_l = np.abs(np.subtract(high, low))
-    tr_h = np.abs(np.subtract(high, np.roll(close, 1)))
-    tr_l2 = np.abs(np.subtract(low, np.roll(close, 1)))
-    tr_l = np.maximum(tr_l, np.maximum(tr_h, tr_l2))
-    
-    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    
-    tr14 = pd.Series(tr_l).rolling(window=14, min_periods=14).sum().values
-    plus_dm14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
-    minus_dm14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
-    
-    plus_di = np.where(tr14 > 0, 100 * plus_dm14 / tr14, 0)
-    minus_di = np.where(tr14 > 0, 100 * minus_dm14 / tr14, 0)
-    dx = np.where((plus_di + minus_di) > 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -90,18 +70,8 @@ def generate_signals(prices):
         # Skip if data not ready
         if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
             np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(atr_aligned[i]) or np.isnan(adx[i])):
+            np.isnan(atr_aligned[i])):
             signals[i] = 0.0
-            continue
-        
-        # Only trade in trending markets (ADX > 25)
-        if adx[i] <= 25:
-            # In ranging markets, stay flat
-            if position != 0:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.0
             continue
         
         # Long entry: close breaks above R4 with volume and volatility filter
