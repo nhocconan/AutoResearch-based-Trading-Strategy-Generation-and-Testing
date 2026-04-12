@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """
-6h_12h_1d_Donchian_Volume_Trend_v1
-Hypothesis: On 6h timeframe, buy Donchian(20) breakouts with 12h volume confirmation and 1d trend filter,
-sell breakdowns with opposite conditions. Exit at opposite Donchian level. Uses 1d ADX trend strength
-to filter choppy markets. Designed for low trade frequency (15-30/year) by requiring multiple confluence.
-Works in bull/bear via 1d trend filter (ADX>25) and volatility-adjusted position sizing.
+1d_1w_KAMA_Trend_With_RSI_Filter_v1
+Hypothesis: On daily timeframe, use KAMA to determine trend direction (bullish/bearish) and RSI for entry timing.
+In bullish trend (KAMA rising), go long when RSI crosses above 30 from below.
+In bearish trend (KAMA falling), go short when RSI crosses below 70 from above.
+Exit when RSI reaches opposite extreme (70 for long, 30 for short) or trend reverses.
+Uses weekly timeframe for trend confirmation: only trade when weekly KAMA agrees with daily trend.
+Designed for low trade frequency (10-20/year) by requiring multiple confluence factors.
+Works in bull/bear via trend filter and mean-reversion exit at RSI extremes.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_1d_Donchian_Volume_Trend_v1"
-timeframe = "6h"
+name = "1d_1w_KAMA_Trend_With_RSI_Filter_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,127 +24,114 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
     
-    # === 12H VOLUME AVERAGE (for confirmation) ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # === DAILY KAMA (TREND) ===
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, n=10))  # 10-period change
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period volatility
+    er = np.zeros(n)
+    for i in range(n):
+        if i < 10:
+            er[i] = 0.0
+        else:
+            er[i] = change[i-9] / volatility[i-9] if volatility[i-9] > 0 else 0.0
+    
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # KAMA calculation
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # === DAILY RSI (ENTRY TIMING) ===
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # RSI(14)
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    for i in range(n):
+        if i < 14:
+            avg_gain[i] = np.nan
+            avg_loss[i] = np.nan
+        elif i == 14:
+            avg_gain[i] = np.mean(gain[1:15])
+            avg_loss[i] = np.mean(loss[1:15])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # === WEEKLY KAMA (TREND CONFIRMATION) ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    vol_12h = df_12h['volume'].values
-    vol_avg_12h = np.zeros_like(vol_12h)
-    vol_sum = 0.0
-    vol_count = 0
-    for i in range(len(vol_12h)):
-        vol_sum += vol_12h[i]
-        vol_count += 1
-        if i >= 20:
-            vol_sum -= vol_12h[i-20]
-            vol_count -= 1
-        if vol_count > 0:
-            vol_avg_12h[i] = vol_sum / vol_count
+    close_1w = df_1w['close'].values
+    
+    # Weekly Efficiency Ratio
+    change_1w = np.abs(np.diff(close_1w, n=10))
+    volatility_1w = np.sum(np.abs(np.diff(close_1w)), axis=1)
+    er_1w = np.zeros(len(close_1w))
+    for i in range(len(close_1w)):
+        if i < 10:
+            er_1w[i] = 0.0
         else:
-            vol_avg_12h[i] = 0.0
-    vol_avg_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_avg_12h)
+            er_1w[i] = change_1w[i-9] / volatility_1w[i-9] if volatility_1w[i-9] > 0 else 0.0
     
-    # === 1D ADX TREND STRENGTH ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
+    # Weekly KAMA
+    fast_sc = 2 / (2 + 1)
+    slow_sc = 2 / (30 + 1)
+    sc_1w = (er_1w * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    kama_1w = np.zeros(len(close_1w))
+    kama_1w[0] = close_1w[0]
+    for i in range(1, len(close_1w)):
+        kama_1w[i] = kama_1w[i-1] + sc_1w[i] * (close_1w[i] - kama_1w[i-1])
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Align weekly KAMA to daily
+    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smoothed TR, DM+
-    def smooth_wilder(arr, period):
-        smoothed = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return smoothed
-        smoothed[period-1] = np.nanmean(arr[1:period+1])
-        for i in range(period, len(arr)):
-            smoothed[i] = (smoothed[i-1] * (period-1) + arr[i]) / period
-        return smoothed
-    
-    tr_smooth = smooth_wilder(tr, 14)
-    dm_plus_smooth = smooth_wilder(dm_plus, 14)
-    dm_minus_smooth = smooth_wilder(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.where(tr_smooth != 0, 100 * dm_plus_smooth / tr_smooth, 0)
-    di_minus = np.where(tr_smooth != 0, 100 * dm_minus_smooth / tr_smooth, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = np.full_like(dx, np.nan)
-    for i in range(14, len(dx)):
-        if i == 14:
-            adx[i] = np.nanmean(dx[1:15])
-        else:
-            adx[i] = (adx[i-1] * 13 + dx[i]) / 14
-    
-    # Trend strength: ADX > 25
-    trend_strong = adx > 25
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    trend_strong_aligned = align_htf_to_ltf(prices, df_1d, trend_strong.astype(float))
-    
-    # === 6H DONCHIAN CHANNELS (20-period) ===
-    donchian_len = 20
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    
-    for i in range(donchian_len-1, n):
-        upper[i] = np.max(high[i-donchian_len+1:i+1])
-        lower[i] = np.min(low[i-donchian_len+1:i+1])
-    
+    # Signals
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # start after warmup
+    for i in range(30, n):  # start after warmup
         # Skip if indicators not available
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(vol_avg_12h_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(trend_strong_aligned[i]) or vol_avg_12h_aligned[i] == 0.0):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
+            np.isnan(kama_1w_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: at least 1.3x average
-        vol_confirm = volume[i] > 1.3 * vol_avg_12h_aligned[i]
+        # Trend determination
+        daily_trend_up = kama[i] > kama[i-1]
+        daily_trend_down = kama[i] < kama[i-1]
+        weekly_trend_up = kama_1w_aligned[i] > kama_1w_aligned[i-1]
+        weekly_trend_down = kama_1w_aligned[i] < kama_1w_aligned[i-1]
         
-        # Only trade in strong trend regime (ADX > 25)
-        in_trend = trend_strong_aligned[i] > 0.5
+        # Agreement between daily and weekly trend
+        bullish_agreement = daily_trend_up and weekly_trend_up
+        bearish_agreement = daily_trend_down and weekly_trend_down
         
         # Entry conditions
-        long_breakout = close[i] > upper[i]
-        short_breakout = close[i] < lower[i]
+        long_entry = bullish_agreement and (rsi[i] > 30) and (rsi[i-1] <= 30)
+        short_entry = bearish_agreement and (rsi[i] < 70) and (rsi[i-1] >= 70)
         
-        long_setup = long_breakout and vol_confirm and in_trend
-        short_setup = short_breakout and vol_confirm and in_trend
+        # Exit conditions
+        exit_long = (rsi[i] >= 70) or not bullish_agreement
+        exit_short = (rsi[i] <= 30) or not bearish_agreement
         
-        # Exit conditions: opposite Donchian level
-        exit_long = close[i] < lower[i]
-        exit_short = close[i] > upper[i]
-        
-        if long_setup and position != 1:
+        if long_entry and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_setup and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
