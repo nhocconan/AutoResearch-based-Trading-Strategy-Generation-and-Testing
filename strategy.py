@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_1d_1w_Altitude_Gradient_v1
-Hypothesis: Capture momentum persistence by measuring the slope (gradient) of multi-timeframe moving averages. In both bull and bear markets, strong trends exhibit aligned upward/downward slopes across 6h, 1d, and 1w timeframes. Uses normalized slope comparison to avoid scale issues and reduce false signals. Target: 80-120 total trades over 4 years.
+12h_1w_Camarilla_Breakout_Trend_v1
+Hypothesis: Weekly Cambria pivot breakouts with 1w EMA trend filter and volume confirmation on 12h timeframe. Designed for low trade frequency (12-37/year) to avoid drag. Works in bull/bear via trend filter and mean-reversion exits.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_1w_Altitude_Gradient_v1"
-timeframe = "6h"
+name = "12h_1w_Camarilla_Breakout_Trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,111 +22,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 6H EMA(21) FOR GRADIENT ===
-    if len(close) >= 21:
-        alpha_6h = 2.0 / (21 + 1)
-        ema_6h = np.zeros_like(close)
-        ema_6h[0] = close[0]
-        for i in range(1, len(close)):
-            ema_6h[i] = alpha_6h * close[i] + (1 - alpha_6h) * ema_6h[i-1]
-    else:
-        ema_6h = np.full_like(close, np.nan)
-    
-    # === DAILY DATA ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 21:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Daily EMA(21)
-    alpha_1d = 2.0 / (21 + 1)
-    ema_1d = np.zeros_like(close_1d)
-    ema_1d[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        ema_1d[i] = alpha_1d * close_1d[i] + (1 - alpha_1d) * ema_1d[i-1]
-    
     # === WEEKLY DATA ===
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Weekly EMA(21)
-    alpha_1w = 2.0 / (21 + 1)
-    ema_1w = np.zeros_like(close_1w)
-    ema_1w[0] = close_1w[0]
-    for i in range(1, len(close_1w)):
-        ema_1w[i] = alpha_1w * close_1w[i] + (1 - alpha_1w) * ema_1w[i-1]
+    # Weekly pivot calculation
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
     
-    # === GRADIENT CALCULATION (3-period slope) ===
-    def calculate_gradient(series, window=3):
-        """Calculate normalized slope over window periods"""
-        if len(series) < window:
-            return np.full_like(series, np.nan)
-        grad = np.full_like(series, np.nan)
-        for i in range(window-1, len(series)):
-            if i >= window:
-                slope = (series[i] - series[i-window]) / window
-                # Normalize by price level to make comparable across timeframes
-                grad[i] = slope / series[i-window] if series[i-window] != 0 else 0
-        return grad
+    # Weekly Camarilla levels
+    r3_1w = close_1w + range_1w * 1.1
+    s3_1w = close_1w - range_1w * 1.1
     
-    grad_6h = calculate_gradient(ema_6h, 3)
-    grad_1d = calculate_gradient(ema_1d, 3)
-    grad_1w = calculate_gradient(ema_1w, 3)
+    # === WEEKLY EMA(21) FOR TREND FILTER ===
+    if len(close_1w) >= 21:
+        ema_21_1w = np.zeros_like(close_1w)
+        ema_21_1w[0] = close_1w[0]
+        alpha = 2.0 / (21 + 1)
+        for i in range(1, len(close_1w)):
+            ema_21_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_21_1w[i-1]
+    else:
+        ema_21_1w = np.full_like(close_1w, np.nan)
     
-    # Align HTF gradients to 6h timeframe
-    grad_1d_aligned = align_htf_to_ltf(prices, df_1d, grad_1d)
-    grad_1w_aligned = align_htf_to_ltf(prices, df_1w, grad_1w)
+    # Align weekly data to 12h timeframe
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
-    # Volume confirmation (20-period average)
+    # Volume average (10-period for 12h = 5 days) for confirmation
     vol_avg = np.zeros(n)
     vol_sum = 0.0
     vol_count = 0
     for i in range(n):
         vol_sum += volume[i]
         vol_count += 1
-        if i >= 20:
-            vol_sum -= volume[i-20]
+        if i >= 10:
+            vol_sum -= volume[i-10]
             vol_count -= 1
-        vol_avg[i] = vol_sum / vol_count if vol_count > 0 else 0.0
+        if vol_count > 0:
+            vol_avg[i] = vol_sum / vol_count
+        else:
+            vol_avg[i] = 0.0
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # start after warmup
-        # Skip if gradients not available
-        if (np.isnan(grad_6h[i]) or np.isnan(grad_1d_aligned[i]) or 
-            np.isnan(grad_1w_aligned[i]) or vol_avg[i] == 0.0):
+        # Skip if indicators not available
+        if (np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or 
+            np.isnan(ema_21_1w_aligned[i]) or vol_avg[i] == 0.0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: at least 1.5x average
-        vol_confirm = volume[i] > 1.5 * vol_avg[i]
+        # Volume confirmation: at least 2.5x average
+        vol_confirm = volume[i] > 2.5 * vol_avg[i]
         
-        # Gradient alignment conditions
-        # Strong uptrend: all gradients positive and increasing
-        strong_uptrend = (grad_6h[i] > 0) and (grad_1d_aligned[i] > 0) and (grad_1w_aligned[i] > 0) and \
-                         (grad_6h[i] > grad_1d_aligned[i] * 0.5) and (grad_1d_aligned[i] > grad_1w_aligned[i] * 0.5)
+        # Trend filter: price above/below weekly EMA(21)
+        price_above_ema = close[i] > ema_21_1w_aligned[i]
+        price_below_ema = close[i] < ema_21_1w_aligned[i]
         
-        # Strong downtrend: all gradients negative and decreasing
-        strong_downtrend = (grad_6h[i] < 0) and (grad_1d_aligned[i] < 0) and (grad_1w_aligned[i] < 0) and \
-                           (abs(grad_6h[i]) > abs(grad_1d_aligned[i]) * 0.5) and (abs(grad_1d_aligned[i]) > abs(grad_1w_aligned[i]) * 0.5)
+        # Breakout entries at weekly S3/R3 with volume and trend filters
+        long_setup = (close[i] > r3_1w_aligned[i]) and vol_confirm and price_above_ema
+        short_setup = (close[i] < s3_1w_aligned[i]) and vol_confirm and price_below_ema
         
-        # Exit conditions: gradient divergence or loss of momentum
-        exit_long = (grad_6h[i] <= 0) or (grad_1d_aligned[i] <= 0) or not vol_confirm
-        exit_short = (grad_6h[i] >= 0) or (grad_1d_aligned[i] >= 0) or not vol_confirm
+        # Exit when price returns to weekly pivot (mean reversion)
+        exit_long = close[i] < pivot_1w_aligned[i] if 'pivot_1w_aligned' in locals() else False
+        exit_short = close[i] > pivot_1w_aligned[i] if 'pivot_1w_aligned' in locals() else False
         
-        if strong_uptrend and vol_confirm and position != 1:
+        # Align weekly pivot for exit condition
+        pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+        exit_long = close[i] < pivot_1w_aligned[i]
+        exit_short = close[i] > pivot_1w_aligned[i]
+        
+        if long_setup and position != 1:
             position = 1
             signals[i] = 0.25
-        elif strong_downtrend and vol_confirm and position != -1:
+        elif short_setup and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
