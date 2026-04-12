@@ -8,10 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Camarilla H3/L3 breakout with volume confirmation
-    # Uses 1d Camarilla levels from previous day as institutional support/resistance
-    # Volume > 1.5x 20-period MA confirms institutional participation
-    # Discrete sizing 0.25 to minimize fee churn. Target: 12-25 trades/year on 12h.
+    # Hypothesis: 4h Camarilla H3/L3 breakout with volume confirmation in chop regimes
+    # Uses 1d Camarilla levels as institutional support/resistance
+    # Volume > 1.8x 20-period MA confirms institutional participation
+    # Chop > 61.8 ensures ranging markets where mean reversion works
+    # Discrete sizing 0.25 to minimize fee churn. Target: 25-40 trades/year.
     
     close = prices['close'].values
     high = prices['high'].values
@@ -32,11 +33,11 @@ def generate_signals(prices):
     camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 4
     camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 4
     
-    # Align to 12h timeframe (use previous day's levels)
+    # Align to 4h timeframe (use previous day's levels)
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Volume confirmation: current volume > 1.5x 20-period MA
+    # Volume confirmation: current volume > 1.8x 20-period MA
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
@@ -48,23 +49,52 @@ def generate_signals(prices):
         else:
             vol_ratio[i] = 1.0
     
+    # Chop regime filter: CHOP > 61.8 = ranging market (good for mean reversion)
+    # Calculate ATR(14)
+    atr = np.full(n, np.nan)
+    tr = np.full(n, np.nan)
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    for i in range(14, n):
+        atr[i] = np.mean(tr[i-14:i])
+    
+    # Calculate highest high and lowest low over 14 periods
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    for i in range(14, n):
+        highest_high[i] = np.max(high[i-14:i])
+        lowest_low[i] = np.min(low[i-14:i])
+    
+    # Chop = log10(sum(atr(14))/abs(highest_high - lowest_low)) * log10(14) * 100
+    chop = np.full(n, np.nan)
+    for i in range(14, n):
+        if highest_high[i] != lowest_low[i] and atr[i] > 0:
+            sum_atr = np.sum(atr[i-14:i])
+            chop[i] = np.log10(sum_atr / abs(highest_high[i] - lowest_low[i])) * np.log10(14) * 100
+        else:
+            chop[i] = 50.0
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
         if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
+            np.isnan(vol_ratio[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
+        
+        # Determine market regime: Chop > 61.8 = ranging (good for mean reversion)
+        ranging_market = chop[i] > 61.8
         
         # Breakout conditions with volume confirmation
         breakout_up = close[i] > camarilla_h3_aligned[i]
         breakout_down = close[i] < camarilla_l3_aligned[i]
         
-        # Entry conditions: breakout with volume confirmation
-        long_entry = breakout_up and (vol_ratio[i] > 1.5)
-        short_entry = breakout_down and (vol_ratio[i] > 1.5)
+        # Entry conditions: breakout with volume confirmation in ranging market
+        long_entry = breakout_up and (vol_ratio[i] > 1.8) and ranging_market
+        short_entry = breakout_down and (vol_ratio[i] > 1.8) and ranging_market
         
         # Exit conditions: price returns to midpoint between H3 and L3
         midpoint = (camarilla_h3_aligned[i] + camarilla_l3_aligned[i]) / 2
@@ -94,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_camarilla_breakout_volume_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_vol_chop_v5"
+timeframe = "4h"
 leverage = 1.0
