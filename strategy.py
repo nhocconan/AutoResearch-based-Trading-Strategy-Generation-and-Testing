@@ -21,6 +21,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
     # Calculate daily ATR for volatility measurement
     tr1 = np.abs(high_1d - low_1d)
@@ -39,10 +40,16 @@ def generate_signals(prices):
         high_20[i] = np.max(high_1d[i-19:i+1])
         low_20[i] = np.min(low_1d[i-19:i+1])
     
+    # Calculate daily volume moving average
+    vol_ma_20 = np.full(len(df_1d), np.nan)
+    for i in range(19, len(df_1d)):
+        vol_ma_20[i] = np.mean(volume_1d[i-19:i+1])
+    
     # Align daily indicators to 12h timeframe
     high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
     low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     # Calculate 12-period RSI for momentum filter
     delta = np.diff(close, prepend=close[0])
@@ -68,15 +75,12 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if data not ready
         if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
-            np.isnan(atr_1d_aligned[i]) or np.isnan(rsi[i])):
+            np.isnan(atr_1d_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
         # Volatility filter: ATR > 0.5 * ATR MA (avoid low volatility choppy periods)
-        atr_ma = np.full(n, np.nan)
-        for j in range(29, n):
-            atr_ma[j] = np.nanmean(atr_1d_aligned[j-29:j+1])
-        vol_filter = atr_1d_aligned[i] > 0.5 * atr_ma[i] if not np.isnan(atr_ma[i]) else False
+        vol_filter = volume[i] > vol_ma_20_aligned[i]
         
         # Momentum filter: RSI between 30 and 70 (avoid extremes)
         mom_filter = (rsi[i] >= 30) and (rsi[i] <= 70)
@@ -112,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_donchian_rsi_filter_v1"
+name = "12h_1d_donchian_volume_rsi_filter_v1"
 timeframe = "12h"
 leverage = 1.0
