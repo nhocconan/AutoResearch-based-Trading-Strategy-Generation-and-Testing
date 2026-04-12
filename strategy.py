@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """
-6h_1d_RSI_Reversal_v1
-Hypothesis: Mean reversion on 6b using daily RSI extremes (overbought/oversold) with volume confirmation.
-Enter long when daily RSI < 30 and 6h price closes above 6h VWAP with volume > 1.5x average.
-Enter short when daily RSI > 70 and 6h price closes below 6h VWAP with volume > 1.5x average.
-Exit when daily RSI returns to neutral (40-60 range) or opposite extreme is reached.
-Designed to capture reversals in both bull and bear markets, avoiding trend-following whipsaws.
-Target: 60-120 total trades over 4 years (15-30/year).
+1h_4h_1d_Camarilla_Breakout_v1
+Hypothesis: Use daily Camarilla H3/L3 breakouts with 4h EMA trend filter and volume spike confirmation.
+Enter long when price breaks above H3 in uptrend (4h close > EMA20) with volume > 2x average.
+Enter short when price breaks below L3 in downtrend (4h close < EMA20) with volume > 2x average.
+Exit on trend reversal or price retracement to H4/L4 levels. Uses 0.20 position sizing to limit drawdown.
+Designed to capture strong directional moves in both bull and bear markets while avoiding whipsaws.
+Target: 60-150 total trades over 4 years (15-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_RSI_Reversal_v1"
-timeframe = "6h"
+name = "1h_4h_1d_Camarilla_Breakout_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,65 +27,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY RSI CALCULATION ===
+    # === DAILY CAMARILLA LEVELS ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
+    # Calculate Camarilla levels (H3, L3, H4, L4)
+    camarilla_h3 = np.full(len(close_1d), np.nan)
+    camarilla_l3 = np.full(len(close_1d), np.nan)
+    camarilla_h4 = np.full(len(close_1d), np.nan)
+    camarilla_l4 = np.full(len(close_1d), np.nan)
     
-    # Align RSI to 6h timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    for i in range(len(close_1d)):
+        if np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(close_1d[i]):
+            continue
+        range_val = high_1d[i] - low_1d[i]
+        camarilla_h3[i] = close_1d[i] + range_val * 1.1 / 6
+        camarilla_l3[i] = close_1d[i] - range_val * 1.1 / 6
+        camarilla_h4[i] = close_1d[i] + range_val * 1.1 / 4
+        camarilla_l4[i] = close_1d[i] - range_val * 1.1 / 4
     
-    # === 6H VWAP CALCULATION ===
-    typical_price = (high + low + close) / 3
-    vwap_num = np.cumsum(typical_price * volume)
-    vwap_den = np.cumsum(volume)
-    vwap = vwap_num / (vwap_den + 1e-10)
+    # Align to 1h timeframe
+    h3_1h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_1h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    h4_1h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_1h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
-    # === VOLUME FILTER ===
+    # === 4-HOUR TREND FILTER ===
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    close_4h = df_4h['close'].values
+    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_4h_1h = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    
+    # === VOLUME SURGE FILTER ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(vwap[i]) or np.isnan(vol_ratio[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+        if (np.isnan(h3_1h[i]) or np.isnan(l3_1h[i]) or np.isnan(ema20_4h_1h[i]) or 
+            np.isnan(vol_ratio[i])):
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
-        # Entry conditions
-        long_signal = (rsi_1d_aligned[i] < 30 and 
-                      close[i] > vwap[i] and 
-                      vol_ratio[i] > 1.5)
+        # Get current 4h close 
+        close_4h_arr = df_4h['close'].values
+        close_4h_aligned = align_htf_to_ltf(prices, df_4h, close_4h_arr)
+        trend_up = close_4h_aligned[i] > ema20_4h_1h[i]
+        trend_down = close_4h_aligned[i] < ema20_4h_1h[i]
         
-        short_signal = (rsi_1d_aligned[i] > 70 and 
-                       close[i] < vwap[i] and 
-                       vol_ratio[i] > 1.5)
+        # Long: break above H3 in uptrend with volume surge
+        long_signal = (trend_up and 
+                      close[i] > h3_1h[i] * 1.001 and  # Break above H3
+                      vol_ratio[i] > 2.0)
         
-        # Exit conditions: RSI returns to neutral or opposite extreme
+        # Short: break below L3 in downtrend with volume surge
+        short_signal = (trend_down and 
+                       close[i] < l3_1h[i] * 0.999 and  # Break below L3
+                       vol_ratio[i] > 2.0)
+        
+        # Exit: trend reversal or retracement to H4/L4
         exit_long = (position == 1 and 
-                    (rsi_1d_aligned[i] > 40 or rsi_1d_aligned[i] > 70))
+                    (not trend_up or close[i] <= h4_1h[i]))
         exit_short = (position == -1 and 
-                     (rsi_1d_aligned[i] < 60 or rsi_1d_aligned[i] < 30))
+                     (not trend_down or close[i] >= l4_1h[i]))
         
         # Execute trades
         if long_signal and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif short_signal and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.20
         elif exit_long and position == 1:
             position = 0
             signals[i] = 0.0
@@ -94,6 +117,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Hold position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
