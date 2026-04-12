@@ -1,15 +1,15 @@
-#!/usr/bin/env python3
+# #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_camarilla_breakout_v1"
-timeframe = "1h"
+name = "6h_1w_1d_keltner_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,78 +17,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Precompute session hours (UTC 8-20) using datetime index
-    hours = prices.index.hour
+    # Get weekly data for ATR and weekly high/low context
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # Get 1d data for Camarilla pivots (primary trend filter)
+    # Calculate weekly ATR (14-period) for volatility context
+    tr_w = np.maximum(df_1w['high'].values - df_1w['low'].values,
+                      np.maximum(np.abs(df_1w['high'].values - np.concatenate([[np.nan], df_1w['close'].values[:-1]])),
+                                 np.abs(df_1w['low'].values - np.concatenate([[np.nan], df_1w['close'].values[:-1]]))))
+    atr_14_w = pd.Series(tr_w).rolling(window=14, min_periods=14).mean().values
+    
+    # Get daily data for Keltner channels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Use previous 1d bar's data to avoid look-ahead
-    high_1d_prev = df_1d['high'].shift(1).values
-    low_1d_prev = df_1d['low'].shift(1).values
-    close_1d_prev = df_1d['close'].shift(1).values
+    # Calculate daily ATR (10-period) for Keltner channels
+    tr_d = np.maximum(df_1d['high'].values - df_1d['low'].values,
+                      np.maximum(np.abs(df_1d['high'].values - np.concatenate([[np.nan], df_1d['close'].values[:-1]])),
+                                 np.abs(df_1d['low'].values - np.concatenate([[np.nan], df_1d['close'].values[:-1]]))))
+    atr_10_d = pd.Series(tr_d).rolling(window=10, min_periods=10).mean().values
     
-    # Calculate Camarilla pivot levels from previous 1d data
-    pivot_prev = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-    range_1d_prev = high_1d_prev - low_1d_prev
+    # Calculate EMA(20) of daily close for Keltner middle
+    ema_20_d = pd.Series(df_1d['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Camarilla levels (H4 and L4 - breakout levels)
-    h4_prev = pivot_prev + (range_1d_prev * 1.1 / 2)
-    l4_prev = pivot_prev - (range_1d_prev * 1.1 / 2)
+    # Calculate Keltner bands: EMA(20) ± 2 * ATR(10)
+    upper_keltner = ema_20_d + 2 * atr_10_d
+    lower_keltner = ema_20_d - 2 * atr_10_d
     
-    # Align levels to 1h timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4_prev)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4_prev)
+    # Align all weekly and daily indicators to 6h timeframe
+    atr_14_w_aligned = align_htf_to_ltf(prices, df_1w, atr_14_w)
+    upper_keltner_aligned = align_htf_to_ltf(prices, df_1d, upper_keltner)
+    lower_keltner_aligned = align_htf_to_ltf(prices, df_1d, lower_keltner)
     
-    # Get 4h data for volume confirmation (secondary filter)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
-        return np.zeros(n)
-    
-    # Use previous 4h bar's volume for confirmation
-    volume_4h_prev = df_4h['volume'].shift(1).values
-    volume_4h_ma = pd.Series(volume_4h_prev).rolling(window=20, min_periods=20).mean().values
-    volume_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_4h_ma)
-    
-    # Current volume vs 4h volume MA
-    volume_ratio = volume / volume_4h_aligned
-    volume_ok = volume_ratio > 1.5  # 50% above average
+    # Volume filter: 20-period average on 6h data
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_ok = volume > vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(20, n):
         # Skip if not ready
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(volume_ok[i])):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+        if (np.isnan(atr_14_w_aligned[i]) or np.isnan(upper_keltner_aligned[i]) or
+            np.isnan(lower_keltner_aligned[i]) or np.isnan(volume_ok[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Session filter: only trade during active hours (08-20 UTC)
-        if not (8 <= hours[i] <= 20):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
-            continue
+        # Long: price breaks above upper Keltner with volume confirmation and low weekly volatility
+        # Only trade when weekly ATR is below median (low volatility environment)
+        weekly_vol_ok = atr_14_w_aligned[i] < np.nanmedian(atr_14_w_aligned[:i+1])
+        long_signal = close[i] > upper_keltner_aligned[i] and volume_ok[i] and weekly_vol_ok
         
-        # Long: price breaks above H4 with volume confirmation
-        long_signal = close[i] > h4_aligned[i] and volume_ok[i]
-        # Short: price breaks below L4 with volume confirmation
-        short_signal = close[i] < l4_aligned[i] and volume_ok[i]
+        # Short: price breaks below lower Keltner with volume confirmation and low weekly volatility
+        short_signal = close[i] < lower_keltner_aligned[i] and volume_ok[i] and weekly_vol_ok
         
-        # Exit when price returns to pivot (mean reversion)
-        pivot_prev_val = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_prev_val)
-        exit_long = close[i] < pivot_aligned[i]
-        exit_short = close[i] > pivot_aligned[i]
+        # Exit when price returns to Keltner middle (mean reversion)
+        exit_long = close[i] < ema_20_d[np.searchsorted(df_1d.index, prices.index[i], side='right') - 1] if i >= 20 else False
+        exit_short = close[i] > ema_20_d[np.searchsorted(df_1d.index, prices.index[i], side='right') - 1] if i >= 20 else False
         
         # Execute trades
         if long_signal and position != 1:
             position = 1
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif short_signal and position != -1:
             position = -1
-            signals[i] = -0.20
+            signals[i] = -0.25
         elif exit_long and position == 1:
             position = 0
             signals[i] = 0.0
@@ -98,9 +94,9 @@ def generate_signals(prices):
         else:
             # Hold position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
