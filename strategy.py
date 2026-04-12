@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
-# 12h_1w_camarilla_breakout_volume
-# Hypothesis: 12-hour strategy using weekly Camarilla pivot levels for breakout signals,
-# with volume confirmation and 12h EMA50 for trend direction.
-# Weekly pivots provide strong support/resistance levels that work across market regimes.
-# Volume confirmation reduces false breakouts. EMA50 filter ensures alignment with higher timeframe trend.
-# Target: 12-37 trades per year (50-150 total over 4 years) to minimize fee drag.
-
-name = "12h_1w_camarilla_breakout_volume"
-timeframe = "12h"
-leverage = 1.0
+"""
+4h_12h_camarilla_ema50_volume_v1
+Hypothesis: 4-hour strategy using 12-hour EMA50 for trend direction and 12-hour Camarilla pivot levels for entries, with volume confirmation.
+Works in bull/bear by requiring alignment with the 12h trend (EMA50) and confirming with volume to avoid false breakouts.
+Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
+"""
 
 import numpy as np
 import pandas as pd
@@ -24,39 +20,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h data for trend and Camarilla
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
     # 12h EMA50 for trend direction
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
     ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Previous weekly bar's range for Camarilla calculation
-    prev_high_1w = np.roll(high_1w, 1)
-    prev_low_1w = np.roll(low_1w, 1)
-    prev_close_1w = np.roll(close_1w, 1)
+    # Previous 12h bar's range for Camarilla
+    prev_high_12h = np.roll(high_12h, 1)
+    prev_low_12h = np.roll(low_12h, 1)
+    prev_close_12h = np.roll(close_12h, 1)
     
-    range_1w = prev_high_1w - prev_low_1w
+    range_12h = prev_high_12h - prev_low_12h
     # Resistance levels
-    r3 = prev_close_1w + range_1w * 1.1 / 2
-    r4 = prev_close_1w + range_1w * 1.1
+    r3 = prev_close_12h + range_12h * 1.1 / 2
+    r4 = prev_close_12h + range_12h * 1.1
     # Support levels
-    s3 = prev_close_1w - range_1w * 1.1 / 2
-    s4 = prev_close_1w - range_1w * 1.1
+    s3 = prev_close_12h - range_12h * 1.1 / 2
+    s4 = prev_close_12h - range_12h * 1.1
     
-    # Align Camarilla levels to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_12h, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_12h, s4)
     
     # Volume confirmation: volume > 1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -98,3 +92,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
     
     return signals
+
+name = "4h_12h_camarilla_ema50_volume_v1"
+timeframe = "4h"
+leverage = 1.0
