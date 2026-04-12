@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-4h_12h_Camarilla_Breakout_Volume
-Hypothesis: Trade Camarilla pivot breakouts (H4/L4) on 4h with volume confirmation and 12h trend filter (EMA25 > EMA50). 
-Uses 12h EMA cross for trend direction to avoid whipsaws in ranging markets. Designed for 20-40 trades/year with clear breakout logic.
-Works in bull (breakouts continue trend) and bear (failed reversals at pivot levels) markets.
+1h_4d_VWAP_Reversion_v1
+Hypothesis: Mean reversion from VWAP bands on 1h with 4h trend filter. 
+In uptrend (4h price > VWAP), buy dips to VWAP; in downtrend (4h price < VWAP), sell rallies to VWAP.
+Uses volume-weighted price to capture institutional interest. Designed for 20-40 trades/year with clear mean-reversion logic that works in both bull (buy dips) and bear (sell rallies) markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_Camarilla_Breakout_Volume"
-timeframe = "4h"
+name = "1h_4d_VWAP_Reversion_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,81 +24,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12H DATA FOR TREND FILTER ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # === 4H VWAP FOR TREND FILTER ===
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
     
-    # EMA25 and EMA50 for trend
-    ema25_12h = pd.Series(close_12h).ewm(span=25, adjust=False, min_periods=25).mean().values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Typical price
+    typical_price_4h = (high_4h + low_4h + close_4h) / 3
+    # VWAP calculation
+    vwap_4h = np.cumsum(typical_price_4h * volume_4h) / np.cumsum(volume_4h)
+    # Handle division by zero at start
+    vwap_4h = np.where(np.cumsum(volume_4h) != 0, vwap_4h, typical_price_4h)
     
-    # Trend: EMA25 > EMA50 = uptrend, EMA25 < EMA50 = downtrend
-    trend_12h = ema25_12h - ema50_12h
-    trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h)
+    # Align VWAP to 1h timeframe
+    vwap_4h_aligned = align_htf_to_ltf(prices, df_4h, vwap_4h)
     
-    # === 4H INDICATORS: CAMARILLA PIVOTS FROM PREVIOUS DAY ===
-    # Need daily high/low/close from previous day
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # === 1H VWAP FOR ENTRY SIGNALS ===
+    typical_price = (high + low + close) / 3
+    vwap = np.cumsum(typical_price * volume) / np.cumsum(volume)
+    vwap = np.where(np.cumsum(volume) != 0, vwap, typical_price)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Standard deviation of price-VWAP for bands
+    price_dev = typical_price - vwap
+    # Use rolling std with min_periods
+    price_dev_series = pd.Series(price_dev)
+    vwap_std = price_dev_series.rolling(window=20, min_periods=20).std().values
     
-    # Calculate Camarilla levels for each day
-    # H4 = Close + 1.1*(High-Low)*1.1/2
-    # L4 = Close - 1.1*(High-Low)*1.1/2
-    camarilla_width = 1.1 * (high_1d - low_1d) * 1.1 / 2
-    h4 = close_1d + camarilla_width
-    l4 = close_1d - camarilla_width
-    
-    # Align daily Camarilla levels to 4h (constant throughout the day)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    
-    # === 4H VOLUME FILTER ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # VWAP bands (1.5 standard deviations)
+    vwap_upper = vwap + 1.5 * vwap_std
+    vwap_lower = vwap - 1.5 * vwap_std
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(trend_12h_aligned[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+        if (np.isnan(vwap[i]) or np.isnan(vwap_upper[i]) or np.isnan(vwap_lower[i]) or 
+            np.isnan(vwap_4h_aligned[i])):
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
-        # Volume strength
-        strong_volume = volume[i] > (vol_ma[i] * 1.5)
+        # Trend filter: 4h price relative to VWAP
+        uptrend_4h = close_4h[i // 4] > vwap_4h[i // 4] if i // 4 < len(close_4h) else False
+        downtrend_4h = close_4h[i // 4] < vwap_4h[i // 4] if i // 4 < len(close_4h) else False
         
-        # Long: price breaks above H4 with volume and uptrend
-        long_signal = (close[i] > h4_aligned[i] and 
-                      strong_volume and 
-                      trend_12h_aligned[i] > 0)
+        # Long: price touches VWAP lower band in uptrend
+        long_signal = (close[i] <= vwap_lower[i] and 
+                      uptrend_4h and 
+                      volume[i] > 0)  # Ensure valid volume
         
-        # Short: price breaks below L4 with volume and downtrend
-        short_signal = (close[i] < l4_aligned[i] and 
-                       strong_volume and 
-                       trend_12h_aligned[i] < 0)
+        # Short: price touches VWAP upper band in downtrend
+        short_signal = (close[i] >= vwap_upper[i] and 
+                       downtrend_4h and 
+                       volume[i] > 0)
         
-        # Exit: price returns to opposite level or trend reverses
-        exit_long = (position == 1 and 
-                    (close[i] < l4_aligned[i] or trend_12h_aligned[i] < 0))
-        exit_short = (position == -1 and 
-                     (close[i] > h4_aligned[i] or trend_12h_aligned[i] > 0))
+        # Exit: price returns to VWAP
+        exit_long = (position == 1 and close[i] >= vwap[i])
+        exit_short = (position == -1 and close[i] <= vwap[i])
         
         # Execute trades
         if long_signal and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif short_signal and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.20
         elif exit_long and position == 1:
             position = 0
             signals[i] = 0.0
@@ -107,6 +102,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Hold position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
