@@ -1,18 +1,18 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 """
-12h_1w_1d_Camarilla_Breakout_With_Volume_Filter_v1
-Hypothesis: Trade weekly/monthly Camarilla H4/L4 breakouts on 12h timeframe with volume > 1.8x 20-period average and price >0.8% beyond level.
-Use 1-week trend filter: long only when price > weekly 50 EMA, short only when price < weekly 50 EMA.
-Exit on trend reversal or opposite level touch. Designed for low trade frequency (~15-30/year) with high conviction.
-Works in bull markets (continuation breaks) and bear markets (mean reversion from extremes).
+4h_1d_KAMA_RSI_TrendFilter
+Hypothesis: Use 1d KAMA direction (trend filter) and 4h RSI overbought/oversold levels for mean-reversion entries.
+KAMA adapts to market noise, reducing whipsaw in ranging markets. RSI extremes provide entry points.
+Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
+Low trade frequency expected due to dual-condition requirement.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_1d_Camarilla_Breakout_With_Volume_Filter_v1"
-timeframe = "12h"
+name = "4h_1d_KAMA_RSI_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,79 +25,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === WEEKLY DATA FOR TREND FILTER ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    close_series_1w = pd.Series(close_1w)
-    ema50_1w = close_series_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # === DAILY DATA FOR CAMARILLA PIVOTS ===
+    # === 1D KAMA FOR TREND FILTER ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels from previous day
-    typical_price = (high_1d + low_1d + close_1d) / 3
-    pivot = typical_price
-    range_1d = high_1d - low_1d
+    # Calculate KAMA parameters
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close_1d, n=10))
+    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)
+    # Handle edge cases for volatility calculation
+    volatility_padded = np.concatenate([np.full(9, np.nan), volatility])
+    er = np.where(volatility_padded != 0, change / volatility_padded, 0)
     
-    h3 = pivot + (range_1d * 1.1 / 4)
-    l3 = pivot - (range_1d * 1.1 / 4)
-    h4 = pivot + (range_1d * 1.1 / 2)
-    l4 = pivot - (range_1d * 1.1 / 2)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
     
-    # Align to 12h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    # Calculate KAMA
+    kama = np.full_like(close_1d, np.nan)
+    kama[29] = close_1d[29]  # Start after enough data
+    for i in range(30, len(close_1d)):
+        if not np.isnan(kama[i-1]) and not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # === VOLUME FILTER ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align KAMA to 4h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    
+    # === 4H RSI FOR ENTRY SIGNALS ===
+    # RSI(14)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Initial average gain/loss
+    avg_gain = np.full_like(close, np.nan)
+    avg_loss = np.full_like(close, np.nan)
+    avg_gain[13] = np.mean(gain[1:14]) if not np.any(np.isnan(gain[1:14])) else np.nan
+    avg_loss[13] = np.mean(loss[1:14]) if not np.any(np.isnan(loss[1:14])) else np.nan
+    
+    # Wilder smoothing
+    for i in range(14, len(close)):
+        if not np.isnan(avg_gain[i-1]) and not np.isnan(avg_loss[i-1]):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if not ready
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(h4_aligned[i]) or 
-            np.isnan(l4_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(close[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine trend from weekly EMA
-        uptrend = close[i] > ema50_1w_aligned[i]
-        downtrend = close[i] < ema50_1w_aligned[i]
+        # Determine trend from KAMA
+        uptrend = close[i] > kama_aligned[i]
+        downtrend = close[i] < kama_aligned[i]
         
-        # Volume strength (must be significantly above average)
-        strong_volume = volume[i] > (vol_ma[i] * 1.8)
+        # RSI conditions
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
         
-        # Price must be beyond the level by at least 0.8% to avoid false breakouts
-        level_buffer = 0.008
+        # Entry signals
+        long_signal = uptrend and rsi_oversold
+        short_signal = downtrend and rsi_overbought
         
-        # Long: price breaks H4 with strong volume in uptrend
-        long_signal = (close[i] > h4_aligned[i] * (1 + level_buffer) and 
-                      uptrend and 
-                      strong_volume)
-        
-        # Short: price breaks L4 with strong volume in downtrend
-        short_signal = (close[i] < l4_aligned[i] * (1 - level_buffer) and 
-                       downtrend and 
-                       strong_volume)
-        
-        # Exit: opposite H4/L4 level or trend reversal
+        # Exit on opposite RSI extreme or trend change
         exit_long = (position == 1 and 
-                    (close[i] < l4_aligned[i] or not uptrend))
+                    (rsi[i] > 70 or not uptrend))
         exit_short = (position == -1 and 
-                     (close[i] > h4_aligned[i] or not downtrend))
+                     (rsi[i] < 30 or not downtrend))
         
         # Execute trades
         if long_signal and position != 1:
