@@ -40,50 +40,9 @@ def generate_signals(prices):
     for i in range(14, len(df_1d)):
         atr_1d[i] = np.mean(tr[i-14:i+1])
     
-    # Calculate 1d volume moving average (20)
-    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
     # Align 1d indicators to 4h timeframe
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
-    
-    # Get 1w data for regime filter (choppiness)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate 14-period ATR for choppiness
-    tr1w = np.abs(high_1w - low_1w)
-    tr2w = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3w = np.abs(low_1w - np.roll(close_1w, 1))
-    tr1w[0] = tr2w[0] = tr3w[0] = np.nan
-    trw = np.maximum(tr1w, np.maximum(tr2w, tr3w))
-    atr_1w = np.full(len(df_1w), np.nan)
-    for i in range(14, len(df_1w)):
-        atr_1w[i] = np.mean(trw[i-14:i+1])
-    
-    # Calculate 14-period high-low range for choppiness
-    max_high_14 = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
-    
-    # Chop = 100 * log10(sum(ATR14) / (max_high - min_low)) / log10(14)
-    sum_atr_14 = np.full(len(df_1w), np.nan)
-    range_hl_14 = np.full(len(df_1w), np.nan)
-    chop = np.full(len(df_1w), 50.0)  # Default to neutral
-    
-    for i in range(14, len(df_1w)):
-        sum_atr_14[i] = np.sum(trw[i-14:i+1])
-        range_hl_14[i] = max_high_14[i] - min_low_14[i]
-        if range_hl_14[i] > 0:
-            chop[i] = 100 * np.log10(sum_atr_14[i] / range_hl_14[i]) / np.log10(14)
-    
-    # Align chop to 4h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -94,8 +53,7 @@ def generate_signals(prices):
             continue
         
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(volume_ma_20_1d_aligned[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -108,23 +66,17 @@ def generate_signals(prices):
         vol_filter = (not np.isnan(atr_ma_20_1d_aligned[i]) and 
                      atr_1d_aligned[i] > 0.3 * atr_ma_20_1d_aligned[i])
         
-        # Volume filter: current volume > 1.5 * 20-period average
-        vol_spike = volume[i] > 1.5 * volume_ma_20_1d_aligned[i]
-        
-        # Regime filter: choppiness < 50 (trending market)
-        trending_regime = chop_aligned[i] < 50
-        
         # Trend filter: price above/below 1d EMA50
         uptrend = close[i] > ema_50_1d_aligned[i]
         downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Entry conditions: EMA50 trend + volatility + volume + regime
-        long_entry = uptrend and vol_filter and vol_spike and trending_regime
-        short_entry = downtrend and vol_filter and vol_spike and trending_regime
+        # Entry conditions: EMA50 trend + volatility filter
+        long_entry = uptrend and vol_filter
+        short_entry = downtrend and vol_filter
         
-        # Exit conditions: opposite EMA50 cross or volatility drop or regime change
-        long_exit = (not uptrend) or (not vol_filter) or (not trending_regime)
-        short_exit = (not downtrend) or (not vol_filter) or (not trending_regime)
+        # Exit conditions: opposite EMA50 cross or volatility drop
+        long_exit = (not uptrend) or (not vol_filter)
+        short_exit = (not downtrend) or (not vol_filter)
         
         if long_entry and position != 1:
             position = 1
@@ -149,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_1w_ema50_vol_vol_chop"
+name = "4h_1d_ema50_vol_filter_v1"
 timeframe = "4h"
 leverage = 1.0
