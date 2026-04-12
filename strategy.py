@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     # Precompute hour filter for 08-20 UTC
@@ -19,7 +19,7 @@ def generate_signals(prices):
     
     # Get 1d data for trend context and signal generation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
@@ -43,10 +43,10 @@ def generate_signals(prices):
     # Calculate 1d volume moving average (20)
     volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align 1d indicators to 12h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
+    # Align 1d indicators to 1d timeframe (no alignment needed)
+    ema_50_1d_aligned = ema_50_1d
+    atr_1d_aligned = atr_1d
+    volume_ma_20_1d_aligned = volume_ma_20_1d
     
     # Get 1w data for regime filter (choppiness)
     df_1w = get_htf_data(prices, '1w')
@@ -82,13 +82,13 @@ def generate_signals(prices):
         if range_hl_14[i] > 0:
             chop[i] = 100 * np.log10(sum_atr_14[i] / range_hl_14[i]) / np.log10(14)
     
-    # Align chop to 12h timeframe
+    # Align chop to 1d timeframe
     chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):
+    for i in range(50, n):
         if not in_session[i]:
             signals[i] = 0.0
             continue
@@ -104,7 +104,7 @@ def generate_signals(prices):
         for j in range(34, len(df_1d)):
             if not np.isnan(np.mean(atr_1d[j-19:j+1])):
                 atr_ma_20_1d[j] = np.mean(atr_1d[j-19:j+1])
-        atr_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_20_1d)
+        atr_ma_20_1d_aligned = atr_ma_20_1d
         vol_filter = (not np.isnan(atr_ma_20_1d_aligned[i]) and 
                      atr_1d_aligned[i] > 0.3 * atr_ma_20_1d_aligned[i])
         
@@ -149,6 +149,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_1w_ema50_vol_vol_chop"
-timeframe = "12h"
+name = "1d_1w_ema50_vol_vol_chop"
+timeframe = "1d"
 leverage = 1.0
