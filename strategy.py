@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v39"
+name = "12h_1d_camarilla_breakout_v40"
 timezone = "UTC"
 timeframe = "12h"
 leverage = 1.0
@@ -38,9 +38,9 @@ def generate_signals(prices):
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3_prev)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3_prev)
     
-    # Volume confirmation: volume > 1.5x 30-period average (stricter to reduce trades)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    # Volume confirmation: volume > 2.0x 50-period average (stricter to reduce trades)
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    vol_confirm = volume > (vol_ma * 2.0)
     
     # ATR filter: avoid low volatility periods
     atr_period = 14
