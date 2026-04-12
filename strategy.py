@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-4h_1d_Enhanced_Camarilla_Breakout_V1
-Hypothesis: Trade daily Camarilla H4/L4 breakouts only with volume > 2.5x 20-period average, price >1.5% beyond level, and ADX > 25 for trend strength.
-Exit on ADX < 20 or opposite H3/L3 touch. Designed for very low trade frequency (<20/year) with high conviction to avoid fee drag.
-Works in bull markets (continuation breaks) and bear markets (mean reversion from extremes).
+12h_1d_RSI_Overbought_Oversold_v1
+Hypothesis: Trade daily RSI extremes (overbought >70, oversold <30) with volume > 1.5x 20-period average on 12h timeframe.
+Use 12h EMA50 for trend filter: long only in uptrend, short only in downtrend.
+Exit on RSI returning to neutral zone (40-60) or trend reversal.
+Designed for low trade frequency (~15-30/year) with high conviction.
+Works in bull markets (oversold bounces in uptrend) and bear markets (overbought reversals in downtrend).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Enhanced_Camarilla_Breakout_V1"
-timeframe = "4h"
+name = "12h_1d_RSI_Overbought_Oversold_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,59 +26,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY DATA FOR CAMARILLA PIVOTS ===
+    # === DAILY DATA FOR RSI CALCULATION ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels from previous day
-    typical_price = (high_1d + low_1d + close_1d) / 3
-    pivot = typical_price
-    range_1d = high_1d - low_1d
+    # Calculate RSI(14) on daily closes
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    h3 = pivot + (range_1d * 1.1 / 4)
-    l3 = pivot - (range_1d * 1.1 / 4)
-    h4 = pivot + (range_1d * 1.1 / 2)
-    l4 = pivot - (range_1d * 1.1 / 2)
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
     
-    # Align to 4h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # === TREND STRENGTH: ADX(14) ON 4H CHART ===
-    # Calculate True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0  # First element has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi_1d = 100 - (100 / (1 + rs))
     
-    # Calculate Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Align RSI to 12h timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Smooth TR and DM
-    tr_smooth = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate DI and DX
-    di_plus = 100 * dm_plus_smooth / tr_smooth
-    di_minus = 100 * dm_minus_smooth / tr_smooth
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # === TREND FILTER: 12h EMA50 ===
+    close_series = pd.Series(close)
+    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # === VOLUME FILTER ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -86,34 +66,33 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(adx[i]) or np.isnan(h3_aligned[i]) or 
-            np.isnan(l3_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend strength filter
-        strong_trend = adx[i] > 25
-        weak_trend = adx[i] < 20
+        # Determine trend
+        uptrend = close[i] > ema50[i]
+        downtrend = close[i] < ema50[i]
         
-        # Volume strength (must be significantly above average)
-        strong_volume = volume[i] > (vol_ma[i] * 2.5)
+        # Volume strength
+        strong_volume = volume[i] > (vol_ma[i] * 1.5)
         
-        # Price must be beyond the level by at least 1.5% to avoid false breakouts
-        level_buffer = 0.015
+        # RSI levels
+        rsi = rsi_1d_aligned[i]
+        rsi_overbought = rsi > 70
+        rsi_oversold = rsi < 30
+        rsi_neutral = (rsi >= 40) & (rsi <= 60)
         
-        # Long: price breaks H4 with strong volume and strong trend
-        long_signal = (close[i] > h4_aligned[i] * (1 + level_buffer) and 
-                      strong_volume and 
-                      strong_trend)
+        # Long: RSI oversold with strong volume in uptrend
+        long_signal = rsi_oversold and uptrend and strong_volume
         
-        # Short: price breaks L4 with strong volume and strong trend
-        short_signal = (close[i] < l4_aligned[i] * (1 - level_buffer) and 
-                       strong_volume and 
-                       strong_trend)
+        # Short: RSI overbought with strong volume in downtrend
+        short_signal = rsi_overbought and downtrend and strong_volume
         
-        # Exit: weak trend or opposite H3/L3 touch
-        exit_long = (position == 1 and (weak_trend or close[i] < h3_aligned[i]))
-        exit_short = (position == -1 and (weak_trend or close[i] > l3_aligned[i]))
+        # Exit: RSI returns to neutral or trend reversal
+        exit_long = position == 1 and (rsi_neutral or not uptrend)
+        exit_short = position == -1 and (rsi_neutral or not downtrend)
         
         # Execute trades
         if long_signal and position != 1:
