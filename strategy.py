@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
 """
-6h_12h_ElderRay_Power_Reversal
-Hypothesis: Uses 12h Elder Ray (bull/bear power) with 6m zero-cross signals and volume confirmation.
-Elder Ray > 0 indicates bull power > 0, < 0 indicates bear power > 0. Zero-cross signals trend changes.
-Works in both bull/bear markets by capturing momentum shifts with volume filter to avoid false signals.
-Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag.
+4h_1d_Camarilla_Breakout_Trend
+Hypothesis: 4h breakout of daily Camarilla H4/L4 levels with volume confirmation and ADX trend filter.
+Designed for low-frequency, high-probability trades in both bull and bear markets.
+Target: 20-35 trades/year to minimize fee drag while capturing significant moves.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_ElderRay_Power_Reversal"
-timeframe = "6h"
+name = "4h_1d_Camarilla_Breakout_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,35 +24,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12H ELDER RAY (BULL/BEAR POWER) ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # === DAILY CAMARILLA PIVOT CALCULATION ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 13-period EMA of close for Elder Ray
-    def ema(arr, period):
-        result = np.full_like(arr, np.nan, dtype=np.float64)
+    # Calculate Camarilla H4/L4 levels for each day
+    H4 = np.zeros(len(df_1d))
+    L4 = np.zeros(len(df_1d))
+    
+    for i in range(len(df_1d)):
+        range_ = high_1d[i] - low_1d[i]
+        if range_ <= 0:
+            H4[i] = L4[i] = close_1d[i]
+        else:
+            H4[i] = close_1d[i] + range_ * 1.1 / 2
+            L4[i] = close_1d[i] - range_ * 1.1 / 2
+    
+    # Align Camarilla levels to 4h timeframe
+    H4_4h = align_htf_to_ltf(prices, df_1d, H4)
+    L4_4h = align_htf_to_ltf(prices, df_1d, L4)
+    
+    # === 4h TREND FILTER (ADX) ===
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    tr = np.zeros(n)
+    
+    for i in range(1, n):
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
+        
+        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
+        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
+        
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    # Wilder smoothing
+    def smooth_wilder(arr, period):
+        result = np.full_like(arr, np.nan)
         if len(arr) < period:
             return result
-        multiplier = 2 / (period + 1)
-        result[period-1] = np.mean(arr[:period])
+        result[period-1] = np.nansum(arr[1:period+1])
         for i in range(period, len(arr)):
-            result[i] = (arr[i] - result[i-1]) * multiplier + result[i-1]
+            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
         return result
     
-    ema_13 = ema(close_12h, 13)
-    
-    # Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
-    bull_power = high_12h - ema_13
-    bear_power = ema_13 - low_12h
-    
-    # Align to 6h timeframe
-    bull_power_6h = align_htf_to_ltf(prices, df_12h, bull_power)
-    bear_power_6h = align_htf_to_ltf(prices, df_12h, bear_power)
+    period = 14
+    tr_smooth = smooth_wilder(tr, period)
+    plus_di = 100 * smooth_wilder(plus_dm, period) / tr_smooth
+    minus_di = 100 * smooth_wilder(minus_dm, period) / tr_smooth
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = smooth_wilder(dx, period)
     
     # === VOLUME CONFIRMATION ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -62,32 +87,44 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(bull_power_6h[i]) or np.isnan(bear_power_6h[i]) or 
-            np.isnan(vol_ratio[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+        if (np.isnan(H4_4h[i]) or np.isnan(L4_4h[i]) or 
+            np.isnan(adx[i]) or np.isnan(vol_ratio[i])):
+            signals[i] = 0.0 if position == 0 else (0.30 if position == 1 else -0.30)
             continue
         
-        # Entry conditions
-        # Long: Bull Power crosses above zero with volume confirmation
-        long_signal = (bull_power_6h[i] > 0 and bull_power_6h[i-1] <= 0 and vol_ratio[i] > 1.5)
-        # Short: Bear Power crosses above zero with volume confirmation
-        short_signal = (bear_power_6h[i] > 0 and bear_power_6h[i-1] <= 0 and vol_ratio[i] > 1.5)
+        # Breakout conditions
+        # Long: Price breaks above H4 with volume + strong trend (ADX > 25)
+        long_breakout = (close[i] > H4_4h[i]) and (vol_ratio[i] > 2.0) and (adx[i] > 25)
         
-        # Exit conditions
-        # Exit long when Bear Power crosses above zero (bearish momentum takes over)
-        exit_long = (position == 1) and (bear_power_6h[i] > 0 and bear_power_6h[i-1] <= 0)
-        # Exit short when Bull Power crosses above zero (bullish momentum takes over)
-        exit_short = (position == -1) and (bull_power_6h[i] > 0 and bull_power_6h[i-1] <= 0)
+        # Short: Price breaks below L4 with volume + strong trend (ADX > 25)
+        short_breakout = (close[i] < L4_4h[i]) and (vol_ratio[i] > 2.0) and (adx[i] > 25)
+        
+        # Exit: Price returns to opposite H3/L3 level or trend weakens
+        # Calculate H3/L3 for exit
+        H3 = np.zeros(len(df_1d))
+        L3 = np.zeros(len(df_1d))
+        for i_1d in range(len(df_1d)):
+            range_ = high_1d[i_1d] - low_1d[i_1d]
+            if range_ <= 0:
+                H3[i_1d] = L3[i_1d] = close_1d[i_1d]
+            else:
+                H3[i_1d] = close_1d[i_1d] + range_ * 1.1 / 4
+                L3[i_1d] = close_1d[i_1d] - range_ * 1.1 / 4
+        H3_4h = align_htf_to_ltf(prices, df_1d, H3)
+        L3_4h = align_htf_to_ltf(prices, df_1d, L3)
+        
+        exit_long = (position == 1) and ((close[i] < L3_4h[i]) or (adx[i] < 20))
+        exit_short = (position == -1) and ((close[i] > H3_4h[i]) or (adx[i] < 20))
         
         # Execute trades
-        if long_signal and position != 1:
+        if long_breakout and position != 1:
             position = 1
-            signals[i] = 0.25
-        elif short_signal and position != -1:
+            signals[i] = 0.30
+        elif short_breakout and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.30
         elif exit_long and position == 1:
             position = 0
             signals[i] = 0.0
@@ -96,6 +133,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Hold position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
     
     return signals
