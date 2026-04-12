@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 """
-6h_12h_WilR_Regime_Adaptive_v1
-Hypothesis: Use Williams %R on 12h with regime detection (trending vs ranging) to adapt strategy.
-- In trending regimes (ADX > 25): trade breakouts of WilR oversold/overbought levels
-- In ranging regimes (ADX <= 25): mean-revert at WilR extremes
-- Uses volume confirmation to avoid false signals
-Designed for low trade frequency (target: 50-150 total over 4 years) to minimize fee drift.
-Works in bull via trend-following breakouts, in bear via mean-reversion from extremes.
+12h_1d_KAMA_Direction_RSI_MeanReversion_v1
+Hypothesis: Use daily KAMA to detect long-term trend, RSI for mean-reversion entries on 12h.
+Long when KAMA rising and RSI < 40 (oversold), short when KAMA falling and RSI > 60 (overbought).
+Exits when RSI returns to 50 or trend reverses. Works in bull via trend-following entries,
+in bear via mean-reversion from extremes. Low trade frequency expected (~15-30/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_WilR_Regime_Adaptive_v1"
-timeframe = "6h"
+name = "12h_1d_KAMA_Direction_RSI_MeanReversion_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,76 +26,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h data for Williams %R and ADX
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 14:
+    # Daily data for KAMA and RSI
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Williams %R (14-period)
-    highest_high = pd.Series(df_12h['high']).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(df_12h['low']).rolling(window=14, min_periods=14).min().values
-    close_12h = df_12h['close'].values
-    willr = -100 * (highest_high - close_12h) / (highest_high - lowest_low)
-    willr = np.where((highest_high - lowest_low) == 0, -50, willr)  # avoid division by zero
+    # KAMA calculation (ER=10, slow=2, fast=30)
+    close_1d = df_1d['close'].values
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    er = np.zeros_like(close_1d)
+    for i in range(10, len(close_1d)):
+        direction = np.abs(close_1d[i] - close_1d[i-10])
+        volatility_sum = np.sum(volatility[i-9:i+1])
+        er[i] = direction / volatility_sum if volatility_sum > 0 else 0
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama = np.full_like(close_1d, np.nan)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # ADX (14-period) for regime detection
-    plus_dm = pd.Series(df_12h['high']).diff()
-    minus_dm = pd.Series(df_12h['low']).diff()
-    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0)
-    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0)
+    # RSI (14-period) on daily
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.zeros_like(close_1d)
+    avg_loss = np.zeros_like(close_1d)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
+    for i in range(14, len(close_1d)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi_1d = 100 - (100 / (1 + rs))
     
-    tr1 = pd.Series(df_12h['high']) - pd.Series(df_12h['low'])
-    tr2 = abs(pd.Series(df_12h['high']) - pd.Series(df_12h['close']).shift())
-    tr3 = abs(pd.Series(df_12h['low']) - pd.Series(df_12h['close']).shift())
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    # Align to 12h
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    atr = tr.rolling(window=14, min_periods=14).mean()
-    plus_di = 100 * (plus_dm.rolling(window=14, min_periods=14).mean() / atr)
-    minus_di = 100 * (minus_dm.rolling(window=14, min_periods=14).mean() / atr)
-    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
-    adx = dx.rolling(window=14, min_periods=14).mean()
-    
-    # Align indicators to 6h timeframe
-    willr_aligned = align_htf_to_ltf(prices, df_12h, willr)
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx.values)
-    
-    # Volume average (20-period) on 6s
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 12h RSI for entry timing
+    close_series = pd.Series(close)
+    delta = close_series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_12h = 100 - (100 / (1 + rs))
+    rsi_12h_values = rsi_12h.fillna(50).values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any data invalid
-        if (np.isnan(willr_aligned[i]) or np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or
+            np.isnan(rsi_12h_values[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation
-        vol_spike = volume[i] > 1.5 * vol_ma[i]
+        # KAMA direction (rising/falling)
+        kama_rising = kama_aligned[i] > kama_aligned[i-1]
+        kama_falling = kama_aligned[i] < kama_aligned[i-1]
         
-        # Regime detection
-        trending = adx_aligned[i] > 25
-        ranging = adx_aligned[i] <= 25
+        # Entry conditions
+        long_entry = kama_rising and rsi_12h_values[i] < 40
+        short_entry = kama_falling and rsi_12h_values[i] > 60
         
-        # Williams %R levels
-        oversold = willr_aligned[i] < -80
-        overbought = willr_aligned[i] > -20
-        
-        if trending:
-            # Trend-following: buy oversold, sell overbought
-            long_entry = oversold and vol_spike
-            short_entry = overbought and vol_spike
-            # Exit when Williams %R returns to neutral zone
-            long_exit = willr_aligned[i] > -50
-            short_exit = willr_aligned[i] < -50
-        else:
-            # Mean-reversion: fade extremes
-            long_entry = oversold and vol_spike
-            short_entry = overbought and vol_spike
-            # Exit when Williams %R returns to midpoint
-            long_exit = willr_aligned[i] > -50
-            short_exit = willr_aligned[i] < -50
+        # Exit conditions
+        long_exit = not kama_rising or rsi_12h_values[i] > 50
+        short_exit = not kama_falling or rsi_12h_values[i] < 50
         
         # Signal logic
         if long_entry and position != 1:
