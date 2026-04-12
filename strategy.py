@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_camarilla_volume"
+name = "4h_12h_camarilla_volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla pivots
+    # Get 12h data for Camarilla pivots - ONCE before loop
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) < 2:
         return np.zeros(n)
@@ -33,7 +33,7 @@ def generate_signals(prices):
     h4_prev = pivot_prev + (range_12h_prev * 1.1 / 2)
     l4_prev = pivot_prev - (range_12h_prev * 1.1 / 2)
     
-    # Align to 4h
+    # Align to 4h - use completed bars only
     h4_aligned = align_htf_to_ltf(prices, df_12h, h4_prev)
     l4_aligned = align_htf_to_ltf(prices, df_12h, l4_prev)
     
@@ -48,13 +48,18 @@ def generate_signals(prices):
     trend_up = close > sma_50
     trend_down = close < sma_50
     
+    # Pivot line for mean reversion exit
+    pivot_prev_val = (high_12h_prev + low_12h_prev + close_12h_prev) / 3.0
+    pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot_prev_val)
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any values not ready
         if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(volume_ok[i]) or np.isnan(trend_up[i]) or np.isnan(trend_down[i])):
+            np.isnan(pivot_aligned[i]) or np.isnan(volume_ok[i]) or
+            np.isnan(trend_up[i]) or np.isnan(trend_down[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -63,9 +68,7 @@ def generate_signals(prices):
         # Short: break below L4 with volume and downtrend
         short_signal = close[i] < l4_aligned[i] and volume_ok[i] and trend_down[i]
         
-        # Exit on opposite breakout (mean reversion to pivot)
-        pivot_prev_val = (high_12h_prev + low_12h_prev + close_12h_prev) / 3.0
-        pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot_prev_val)
+        # Exit on reversion to pivot line (mean reversion)
         exit_long = close[i] < pivot_aligned[i]
         exit_short = close[i] > pivot_aligned[i]
         
