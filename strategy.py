@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Breakout_SignalStrength_v1
-Hypothesis: Use daily Camarilla pivot levels with volume-weighted signal strength and trend filter.
-Only trade when price breaks H3/L3 with strong volume confirmation (volume > 2x average) and price is beyond 1% of the level.
-Long in uptrend (price > 50 EMA), short in downtrend (price < 50 EMA).
-Designed for low trade frequency (<40/year) with high conviction signals.
+4h_1d_Camarilla_Breakout_With_Volume_Filter_v2
+Hypothesis: Trade daily Camarilla H3/L3 breakouts only with volume > 2x 20-period average and price >1% beyond level.
+Use 50 EMA for trend filter: long only in uptrend, short only in downtrend.
+Exit on trend reversal or opposite level touch. Designed for low trade frequency (~20-40/year) with high conviction.
 Works in bull markets (continuation breaks) and bear markets (mean reversion from extremes).
 """
 
@@ -12,7 +11,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_Breakout_SignalStrength_v1"
+name = "4h_1d_Camarilla_Breakout_With_Volume_Filter_v2"
 timeframe = "4h"
 leverage = 1.0
 
