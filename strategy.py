@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_volume_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_pivot_range_reversion_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,69 +17,104 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data once
+    # Get daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 5:  # Need at least 5 days for pivot calculation
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's values for Camarilla calculation
-    phigh = np.roll(high_1d, 1)
-    plow = np.roll(low_1d, 1)
-    pclose = np.roll(close_1d, 1)
-    phigh[0] = high_1d[0]  # fill first value
-    plow[0] = low_1d[0]
-    pclose[0] = close_1d[0]
+    # Calculate Camarilla pivot levels from previous day
+    # P = (H + L + C) / 3
+    # R4 = C + ((H-L) * 1.1/2)
+    # R3 = C + ((H-L) * 1.1/4)
+    # R2 = C + ((H-L) * 1.1/6)
+    # R1 = C + ((H-L) * 1.1/12)
+    # S1 = C - ((H-L) * 1.1/12)
+    # S2 = C - ((H-L) * 1.1/6)
+    # S3 = C - ((H-L) * 1.1/4)
+    # S4 = C - ((H-L) * 1.1/2)
     
-    # Camarilla levels
-    range_1d = phigh - plow
-    camarilla_h4 = pclose + 1.1 * range_1d / 2  # H4 (resistance)
-    camarilla_l4 = pclose - 1.1 * range_1d / 2  # L4 (support)
-    camarilla_h3 = pclose + 1.1 * range_1d / 4  # H3
-    camarilla_l3 = pclose - 1.1 * range_1d / 4  # L3
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_hl = high_1d - low_1d
     
-    # Align to 12h
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    r4 = close_1d + (range_hl * 1.1 / 2)
+    r3 = close_1d + (range_hl * 1.1 / 4)
+    r2 = close_1d + (range_hl * 1.1 / 6)
+    r1 = close_1d + (range_hl * 1.1 / 12)
+    s1 = close_1d - (range_hl * 1.1 / 12)
+    s2 = close_1d - (range_hl * 1.1 / 6)
+    s3 = close_1d - (range_hl * 1.1 / 4)
+    s4 = close_1d - (range_hl * 1.1 / 2)
     
-    # Volume filter: current volume > 20-period average
+    # Align pivot levels to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Volume filter: current volume > 20-period average (to avoid low-volume false signals)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
+    
+    # Choppiness regime filter: use 4h data to avoid ranging markets
+    # Calculate ATR(14) and ADX-like trend strength
+    tr = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1]))
+    tr = np.concatenate([[np.nan], tr])
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate directional movement for ADX
+    up_move = high[1:] - high[:-1]
+    down_move = low[:-1] - low[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    plus_di_14 = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / tr_14
+    minus_di_14 = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / tr_14
+    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
+    adx_14 = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Choppiness filter: avoid strong trends (ADX > 25) - we want range-bound markets
+    trend_filter = adx_14 < 25
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # warmup
+    for i in range(50, n):  # Warmup for indicators
         # Skip if not ready
-        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
-            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(atr_14[i]) or np.isnan(adx_14[i]) or np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Breakout conditions
-        breakout_up = close[i] > camarilla_h4_aligned[i]
-        breakout_down = close[i] < camarilla_l4_aligned[i]
+        # Range reversion logic: buy near support, sell near resistance
+        # Long when price touches or goes below S1 and shows rejection
+        # Short when price touches or goes above R1 and shows rejection
         
-        # Mean reversion at H3/L3
-        revert_up = close[i] < camarilla_l3_aligned[i]  # Oversold bounce
-        revert_down = close[i] > camarilla_h3_aligned[i]  # Overbought reversal
+        # Check for rejection signals (price moves away from level after touching)
+        touched_s1 = low[i] <= s1_aligned[i]
+        touched_r1 = high[i] >= r1_aligned[i]
         
-        # Volume confirmation
-        vol_ok = volume_ok[i]
+        # Rejection: price moves back toward pivot after touching level
+        rejected_s1 = touched_s1 and close[i] > s1_aligned[i] * 1.005  # 0.5% bounce from S1
+        rejected_r1 = touched_r1 and close[i] < r1_aligned[i] * 0.995  # 0.5% pullback from R1
         
-        # Entry signals
-        long_signal = breakout_up and vol_ok
-        short_signal = breakout_down and vol_ok
+        long_signal = rejected_s1 and volume_ok[i] and trend_filter[i]
+        short_signal = rejected_r1 and volume_ok[i] and trend_filter[i]
         
-        # Exit signals
-        exit_long = revert_down and vol_ok  # Exit long on overbought reversal
-        exit_short = revert_up and vol_ok   # Exit short on oversold bounce
+        # Exit when price reaches opposite side or midpoint
+        exit_long = close[i] >= pivot_aligned[i] or close[i] >= r1_aligned[i]
+        exit_short = close[i] <= pivot_aligned[i] or close[i] <= s1_aligned[i]
         
         # Execute trades
         if long_signal and position != 1:
