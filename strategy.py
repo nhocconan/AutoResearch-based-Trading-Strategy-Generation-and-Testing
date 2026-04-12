@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-12h_1d_1w_Donchian_Breakout_v1
-Hypothesis: Use weekly trend (price above/below weekly SMA10) as bias, daily Donchian(10) breakout for entry,
-and 12h price action with volume confirmation. Only trade in direction of weekly trend.
-Volume filter avoids false breakouts. Targets 15-25 trades/year to stay under fee drag.
-Works in bull (follow weekly trend) and bear (fade counter-trend moves at daily levels) by requiring weekly alignment.
+4h_1d_Keltner_Channel_Breakout_v1
+Hypothesis: Use 1d Keltner Channel (20, 1.5) with 4h price breakouts and volume confirmation.
+Trade long when price breaks above upper KC with volume > 1.5x average, short when breaks below lower KC.
+Only trade in direction of 1d EMA50 trend to avoid counter-trend whipsaws.
+Targets 20-40 trades/year to minimize fee drag. Works in bull (follow trend breakouts) and bear (fade reversals at KC bands).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_1w_Donchian_Breakout_v1"
-timeframe = "12h"
+name = "4h_1d_Keltner_Channel_Breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,38 +26,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # Daily data for Donchian channels
+    # Daily data for Keltner Channel and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === WEEKLY TREND FILTER ===
-    weekly_close = df_1w['close'].values
-    weekly_sma10 = np.full(len(weekly_close), np.nan)
-    if len(weekly_close) >= 10:
-        for i in range(10, len(weekly_close)):
-            weekly_sma10[i] = np.mean(weekly_close[i-10:i])
-    weekly_sma10_12h = align_htf_to_ltf(prices, df_1w, weekly_sma10)
-    
-    # === DAILY DONCHIAN CHANNELS (10-period) ===
+    # === DAILY KELTNER CHANNEL ===
     daily_high = df_1d['high'].values
     daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    upper_channel = np.full(len(daily_high), np.nan)
-    lower_channel = np.full(len(daily_low), np.nan)
+    # EMA20 for middle line
+    ema20 = pd.Series(daily_close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # ATR10 for bands
+    tr1 = np.maximum(daily_high[1:] - daily_low[1:], np.abs(daily_high[1:] - daily_close[:-1]))
+    tr2 = np.maximum(tr1, np.abs(daily_low[1:] - daily_close[:-1]))
+    tr = np.concatenate([[np.nan], tr2])  # First element NaN
+    atr10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    if len(daily_high) >= 10:
-        for i in range(10, len(daily_high)):
-            upper_channel[i] = np.max(daily_high[i-10:i])
-            lower_channel[i] = np.min(daily_low[i-10:i])
+    # Upper and lower bands (multiplier 1.5)
+    upper_kc = ema20 + 1.5 * atr10
+    lower_kc = ema20 - 1.5 * atr10
     
-    upper_channel_12h = align_htf_to_ltf(prices, df_1d, upper_channel)
-    lower_channel_12h = align_htf_to_ltf(prices, df_1d, lower_channel)
+    upper_kc_4h = align_htf_to_ltf(prices, df_1d, upper_kc)
+    lower_kc_4h = align_htf_to_ltf(prices, df_1d, lower_kc)
+    
+    # === DAILY EMA50 TREND FILTER ===
+    ema50 = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h = align_htf_to_ltf(prices, df_1d, ema50)
     
     # === VOLUME FILTER (20-period average) ===
     vol_ma = np.full(n, np.nan)
@@ -73,28 +69,29 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any data invalid
-        if (np.isnan(upper_channel_12h[i]) or np.isnan(lower_channel_12h[i]) or 
-            np.isnan(weekly_sma10_12h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(upper_kc_4h[i]) or np.isnan(lower_kc_4h[i]) or 
+            np.isnan(ema50_4h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Volume confirmation: current volume > 1.5x average
         vol_confirm = volume[i] > vol_ma[i] * 1.5
         
-        # Weekly trend: price above/below weekly SMA10
-        weekly_trend_up = close[i] > weekly_sma10_12h[i]
+        # Trend filter: price above/below EMA50
+        trend_up = close[i] > ema50_4h[i]
         
-        # Daily breakout conditions
-        breakout_up = high[i] > upper_channel_12h[i] and vol_confirm
-        breakout_down = low[i] < lower_channel_12h[i] and vol_confirm
+        # Breakout conditions
+        breakout_up = high[i] > upper_kc_4h[i] and vol_confirm
+        breakout_down = low[i] < lower_kc_4h[i] and vol_confirm
         
-        # Entry logic: only trade in direction of weekly trend
-        long_entry = breakout_up and weekly_trend_up
-        short_entry = breakout_down and not weekly_trend_up
+        # Entry logic: only trade in direction of daily trend
+        long_entry = breakout_up and trend_up
+        short_entry = breakout_down and not trend_up
         
-        # Exit logic: reverse signal or price returns to opposite channel
-        long_exit = not breakout_up or low[i] < lower_channel_12h[i]
-        short_exit = not breakout_down or high[i] > upper_channel_12h[i]
+        # Exit logic: reverse signal or price returns to EMA20 (middle KC)
+        ema20_4h = align_htf_to_ltf(prices, df_1d, ema20)
+        long_exit = not breakout_up or close[i] < ema20_4h[i]
+        short_exit = not breakout_down or close[i] > ema20_4h[i]
         
         # Signal logic
         if long_entry and position != 1:
