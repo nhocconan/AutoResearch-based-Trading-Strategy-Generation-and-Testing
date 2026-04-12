@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 6h_1d_adaptive_cci_volume_momentum
-# Hypothesis: 6-hour CCI (20) with 1d volume momentum filter
-# Uses CCI for overbought/oversold detection with volume confirmation to filter false signals
-# Works in bull/bear by adapting to volatility and using volume as confirmation of conviction
-# Target: 50-150 total trades over 4 years (12-37/year)
+# 1d_1w_camarilla_breakout_with_volume_and_atr
+# Hypothesis: Daily Camarilla breakout with weekly trend filter and volume confirmation
+# Uses weekly trend to filter direction (long only in weekly uptrend, short only in downtrend)
+# Volume confirmation and ATR volatility filter to avoid false breakouts
+# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag
 
-name = "6h_1d_adaptive_cci_volume_momentum"
-timeframe = "6h"
+name = "1d_1w_camarilla_breakout_with_volume_and_atr"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,49 +23,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for volume momentum calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    volume_1d = df_1d['volume'].values
+    # Weekly EMA for trend (21-period)
+    weekly_close = df_1w['close'].values
+    weekly_ema = pd.Series(weekly_close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
     
-    # CCI calculation (20-period)
-    tp = (high + low + close) / 3.0
-    ma_tp = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
-    mad = pd.Series(np.abs(tp - ma_tp)).rolling(window=20, min_periods=20).mean().values
-    # Avoid division by zero
-    cci = np.where(mad != 0, (tp - ma_tp) / (0.015 * mad), 0.0)
+    # Get daily data for Camarilla and ATR calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # Volume momentum: 1d volume ratio (current vs 20-day average)
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_momentum = np.where(vol_ma_1d != 0, volume_1d / vol_ma_1d, 1.0)
-    vol_momentum_aligned = align_htf_to_ltf(prices, df_1d, vol_momentum)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Previous day's range
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    
+    # Camarilla levels (based on previous day)
+    range_ = prev_high - prev_low
+    # Resistance levels
+    r3 = prev_close + range_ * 1.1 / 2
+    r4 = prev_close + range_ * 1.1
+    # Support levels
+    s3 = prev_close - range_ * 1.1 / 2
+    s4 = prev_close - range_ * 1.1
+    
+    # ATR for volatility filter (14-day ATR)
+    tr1 = np.abs(np.subtract(high_1d, low_1d))
+    tr2 = np.abs(np.subtract(high_1d, np.roll(close_1d, 1)))
+    tr3 = np.abs(np.subtract(low_1d, np.roll(close_1d, 1)))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Align Camarilla levels and ATR to daily timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if np.isnan(cci[i]) or np.isnan(vol_momentum_aligned[i]):
+        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(atr_aligned[i]) or np.isnan(weekly_ema_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: CCI crosses above -100 (oversold recovery) with volume confirmation
-        if (cci[i] > -100 and cci[i-1] <= -100 and 
-            vol_momentum_aligned[i] > 1.2 and position != 1):
+        # Determine trend direction from weekly EMA
+        weekly_uptrend = close[i] > weekly_ema_aligned[i]
+        weekly_downtrend = close[i] < weekly_ema_aligned[i]
+        
+        # Long entry: close breaks above R4 with volume, volatility filter, and weekly uptrend
+        if (close[i] > r4_aligned[i] and vol_confirm[i] and 
+            atr_aligned[i] > 0 and weekly_uptrend and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: CCI crosses below 100 (overbought rejection) with volume confirmation
-        elif (cci[i] < 100 and cci[i-1] >= 100 and 
-              vol_momentum_aligned[i] > 1.2 and position != -1):
+        # Short entry: close breaks below S4 with volume, volatility filter, and weekly downtrend
+        elif (close[i] < s4_aligned[i] and vol_confirm[i] and 
+              atr_aligned[i] > 0 and weekly_downtrend and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: CCI crosses zero line (mean reversion)
-        elif position == 1 and cci[i] < 0:
+        # Exit: reverse signal or close crosses back to opposite S3/R3
+        elif position == 1 and close[i] < s3_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and cci[i] > 0:
+        elif position == -1 and close[i] > r3_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
