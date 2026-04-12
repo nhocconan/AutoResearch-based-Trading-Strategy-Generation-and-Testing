@@ -1,10 +1,16 @@
+# 12h_1d_camarilla_breakout_volume_v1
+# Hypothesis: Breakout above/below daily Camarilla H4/L4 levels with volume confirmation on 12h timeframe
+# Works in bull (breakouts up) and bear (breakouts down) by capturing institutional breakout levels
+# Uses volume filter to reduce false breakouts and improve win rate
+# Target: 15-35 trades/year to avoid fee drag
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_cci_volume_breakout_v1"
-timeframe = "4h"
+name = "12h_1d_camarilla_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,39 +23,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for CCI trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Calculate CCI(20) on 12h: (TP - SMA(TP,20)) / (0.015 * MeanDeviation)
-    tp_12h = (high_12h + low_12h + close_12h) / 3
-    tp_series = pd.Series(tp_12h)
-    sma_tp = tp_series.rolling(window=20, min_periods=20).mean()
-    mean_dev = tp_series.rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
-    cci_12h = (tp_series - sma_tp) / (0.015 * mean_dev)
-    cci_12h_values = cci_12h.values
-    cci_12h_aligned = align_htf_to_ltf(prices, df_12h, cci_12h_values)
-    
-    # Get 1d data for Donchian channel breakout
+    # Get 1d data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 5:
         return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Donchian(20) on 1d: upper = max(high,20), lower = min(low,20)
-    high_series = pd.Series(high_1d)
-    low_series = pd.Series(low_1d)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
+    # Calculate Camarilla levels for previous day (H4/L4)
+    camarilla_high = np.full(len(close_1d), np.nan)
+    camarilla_low = np.full(len(close_1d), np.nan)
     
-    # Volume filter: current volume > 20-period average (on 4h data)
+    for i in range(1, len(close_1d)):
+        H = high_1d[i-1]
+        L = low_1d[i-1]
+        C = close_1d[i-1]
+        camarilla_high[i] = C + ((H - L) * 1.1 / 2)
+        camarilla_low[i] = C - ((H - L) * 1.1 / 2)
+    
+    # Align to 12h timeframe
+    camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
+    camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
+    
+    # Volume filter: current volume > 20-period average (on 12h data)
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
@@ -57,32 +54,33 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # warmup for indicators
+    for i in range(30, n):  # warmup for volume filter
         # Skip if not ready
-        if (np.isnan(cci_12h_aligned[i]) or np.isnan(donchian_upper_aligned[i]) or 
-            np.isnan(donchian_lower_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]) or 
+            np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Breakout conditions with volume confirmation and CCI trend filter
-        breakout_up = close[i] > donchian_upper_aligned[i]
-        breakout_down = close[i] < donchian_lower_aligned[i]
-        
-        # Volume confirmation
+        # Breakout conditions with volume confirmation
+        breakout_up = close[i] > camarilla_high_aligned[i]
+        breakout_down = close[i] < camarilla_low_aligned[i]
         vol_ok = volume_ok[i]
         
-        # CCI trend filter: CCI > 100 for uptrend, CCI < -100 for downtrend
-        uptrend = cci_12h_aligned[i] > 100
-        downtrend = cci_12h_aligned[i] < -100
-        
         # Entry signals
-        long_signal = breakout_up and vol_ok and uptrend
-        short_signal = breakout_down and vol_ok and downtrend
+        long_signal = breakout_up and vol_ok
+        short_signal = breakout_down and vol_ok
         
-        # Exit when price returns to the middle of the Donchian channel
-        donchian_middle = (donchian_upper_aligned[i] + donchian_lower_aligned[i]) / 2
-        exit_long = close[i] < donchian_middle
-        exit_short = close[i] > donchian_middle
+        # Exit when price returns to the Camarilla pivot (close of previous day)
+        pivot_point = np.full(len(close_1d), np.nan)
+        for j in range(1, len(close_1d)):
+            H = high_1d[j-1]
+            L = low_1d[j-1]
+            C = close_1d[j-1]
+            pivot_point[j] = (H + L + C) / 3
+        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_point)
+        
+        exit_long = close[i] < pivot_aligned[i]
+        exit_short = close[i] > pivot_aligned[i]
         
         # Execute trades
         if long_signal and position != 1:
