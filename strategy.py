@@ -13,9 +13,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR and price levels
+    # Get daily data for pivot points and ATR
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
     # Calculate 14-day ATR on daily data
@@ -33,6 +38,17 @@ def generate_signals(prices):
     
     # Align ATR to 4h timeframe
     atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # Calculate weekly trend using SMA crossover
+    close_1w = df_1w['close'].values
+    sma_20 = np.full(len(close_1w), np.nan)
+    sma_50 = np.full(len(close_1w), np.nan)
+    for i in range(20, len(close_1w)):
+        sma_20[i] = np.mean(close_1w[i-20:i])
+    for i in range(50, len(close_1w)):
+        sma_50[i] = np.mean(close_1w[i-50:i])
+    weekly_trend = np.where(sma_20 > sma_50, 1, np.where(sma_20 < sma_50, -1, 0))
+    weekly_trend_4h = align_htf_to_ltf(prices, df_1w, weekly_trend)
     
     # Calculate daily pivot points using previous day's data
     prev_high = np.roll(high_1d, 1)
@@ -67,28 +83,32 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(atr_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
-            np.isnan(r2_4h[i]) or np.isnan(s2_4h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(weekly_trend_4h[i]) or np.isnan(atr_4h[i]) or 
+            np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > vol_ma[i] * 1.5
+        # Volume filter: current volume > 2.0x 20-period average
+        volume_filter = volume[i] > vol_ma[i] * 2.0
         
-        # Entry conditions: R2 breakout for long, S2 breakdown for short with volume confirmation
-        long_breakout = (close[i] > r2_4h[i]) and volume_filter
-        short_breakout = (close[i] < s2_4h[i]) and volume_filter
+        # Only take trades in direction of weekly trend
+        weekly_bullish = weekly_trend_4h[i] == 1
+        weekly_bearish = weekly_trend_4h[i] == -1
         
-        # Exit conditions: touch opposite S1/R1 level or ATR stop
-        long_exit = (close[i] < s1_4h[i]) or (close[i] < r2_4h[i] - 2.0 * atr_4h[i])
-        short_exit = (close[i] > r1_4h[i]) or (close[i] > s2_4h[i] + 2.0 * atr_4h[i])
+        # Entry conditions: S1/R1 breakout with volume confirmation and weekly trend alignment
+        long_breakout = (close[i] > r1_4h[i]) and volume_filter and weekly_bullish
+        short_breakout = (close[i] < s1_4h[i]) and volume_filter and weekly_bearish
+        
+        # Exit conditions: touch opposite S1/R1 level or weekly trend reversal or ATR stop
+        long_exit = (close[i] < s1_4h[i]) or (weekly_trend_4h[i] == -1) or (close[i] < r1_4h[i] - 1.5 * atr_4h[i])
+        short_exit = (close[i] > r1_4h[i]) or (weekly_trend_4h[i] == 1) or (close[i] > s1_4h[i] + 1.5 * atr_4h[i])
         
         if long_breakout and position != 1:
             position = 1
-            signals[i] = 0.30
+            signals[i] = 0.25
         elif short_breakout and position != -1:
             position = -1
-            signals[i] = -0.30
+            signals[i] = -0.25
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -98,14 +118,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_1d_r2_s2_breakout_volume_filter_v1"
+name = "4h_1w_1d_pivot_breakout_weekly_trend_v1"
 timeframe = "4h"
 leverage = 1.0
