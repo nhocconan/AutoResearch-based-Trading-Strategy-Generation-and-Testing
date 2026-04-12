@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-12h_1w_Camarilla_Breakout_Trend_Filter
-Hypothesis: 12h close above/below weekly Camarilla R3/S3 levels with 1w ADX(14) trend filter and volume confirmation. Designed for low trade frequency (15-30/year) by requiring strong weekly breakouts, trend alignment (ADX>25), and volume surge (2x avg). Works in bull/bear via ADX trend filter and mean-reversion exit at weekly pivot. Targets 12h timeframe to reduce overtrading while capturing multi-day trends.
+4h_1d_Weekly_Pivot_Breakout_v1
+Hypothesis: 4h breakouts above/below weekly pivot R2/S2 levels with 1d EMA(20) trend filter and volume confirmation.
+Targets weekly pivot levels (stronger than daily) to reduce trades while maintaining edge in bull/bear via trend filter.
+Designed for low trade frequency (20-50/year) by requiring significant breakouts above weekly resistance/support.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_Camarilla_Breakout_Trend_Filter"
-timeframe = "12h"
+name = "4h_1d_Weekly_Pivot_Breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,61 +33,36 @@ def generate_signals(prices):
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Weekly pivot calculation
+    # Weekly pivot calculation (using prior week's data)
     pivot_1w = (high_1w + low_1w + close_1w) / 3
     range_1w = high_1w - low_1w
     
-    # Weekly Camarilla levels (R3/S3 for breakouts)
-    r3_1w = close_1w + range_1w * 1.25
-    s3_1w = close_1w - range_1w * 1.25
+    # Weekly pivot levels - R2/S2 for stronger breakouts
+    r2_1w = pivot_1w + (high_1w - low_1w)
+    s2_1w = pivot_1w - (high_1w - low_1w)
     
-    # Weekly ADX(14) for trend filter
-    def calculate_adx(high, low, close, period=14):
-        if len(high) < period + 1:
-            return np.full_like(high, np.nan)
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        for i in range(1, len(high)):
-            plus_dm[i] = max(high[i] - high[i-1], 0)
-            minus_dm[i] = max(low[i-1] - low[i], 0)
-            if plus_dm[i] < minus_dm[i]:
-                plus_dm[i] = 0
-            if minus_dm[i] < plus_dm[i]:
-                minus_dm[i] = 0
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        # Smooth TR, +DM, -DM
-        atr = np.zeros_like(high)
-        plus_dm_smooth = np.zeros_like(high)
-        minus_dm_smooth = np.zeros_like(high)
-        if len(high) >= period:
-            atr[period-1] = np.mean(tr[1:period])
-            plus_dm_smooth[period-1] = np.mean(plus_dm[1:period])
-            minus_dm_smooth[period-1] = np.mean(minus_dm[1:period])
-            for i in range(period, len(high)):
-                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-                plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
-                minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
-        # Avoid division by zero
-        plus_di = np.where(atr != 0, plus_dm_smooth / atr * 100, 0)
-        minus_di = np.where(atr != 0, minus_dm_smooth / atr * 100, 0)
-        dx = np.where((plus_di + minus_di) != 0, abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
-        adx = np.full_like(high, np.nan)
-        if len(high) >= 2 * period - 1:
-            adx[2*period-2] = np.mean(dx[period-1:2*period-1])
-            for i in range(2*period-1, len(high)):
-                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        return adx
+    # === DAILY EMA(20) FOR TREND FILTER ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
+    close_1d = df_1d['close'].values
+    if len(close_1d) >= 20:
+        ema_20_1d = np.zeros_like(close_1d)
+        ema_20_1d[0] = close_1d[0]
+        alpha = 2.0 / (20 + 1)
+        for i in range(1, len(close_1d)):
+            ema_20_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_20_1d[i-1]
+    else:
+        ema_20_1d = np.full_like(close_1d, np.nan)
     
-    # Align weekly data to 12h timeframe
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    # Align weekly and daily data to 4h timeframe
+    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
+    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
     pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # Volume average (20-period for 12h = ~10 days) for confirmation
+    # Volume average (20-period for 4h = ~1.3 days) for confirmation
     vol_avg = np.zeros(n)
     vol_sum = 0.0
     vol_count = 0
@@ -105,20 +82,21 @@ def generate_signals(prices):
     
     for i in range(50, n):  # start after warmup
         # Skip if indicators not available
-        if (np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or 
-            np.isnan(pivot_1w_aligned[i]) or np.isnan(adx_1w_aligned[i]) or vol_avg[i] == 0.0):
+        if (np.isnan(r2_1w_aligned[i]) or np.isnan(s2_1w_aligned[i]) or 
+            np.isnan(pivot_1w_aligned[i]) or np.isnan(ema_20_1d_aligned[i]) or vol_avg[i] == 0.0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter: ADX > 25 indicates strong trend
-        trending = adx_1w_aligned[i] > 25
-        
-        # Volume confirmation: at least 2.0x average
+        # Volume confirmation: at least 2.0x average (adjusted for 4h)
         vol_confirm = volume[i] > 2.0 * vol_avg[i]
         
-        # Breakout entries at weekly S3/R3 with trend and volume filters
-        long_setup = (close[i] > r3_1w_aligned[i]) and trending and vol_confirm
-        short_setup = (close[i] < s3_1w_aligned[i]) and trending and vol_confirm
+        # Trend filter: price above/below 1d EMA(20)
+        price_above_ema = close[i] > ema_20_1d_aligned[i]
+        price_below_ema = close[i] < ema_20_1d_aligned[i]
+        
+        # Breakout entries at weekly S2/R2 with volume and trend filters
+        long_setup = (close[i] > r2_1w_aligned[i]) and vol_confirm and price_above_ema
+        short_setup = (close[i] < s2_1w_aligned[i]) and vol_confirm and price_below_ema
         
         # Exit when price returns to weekly pivot (mean reversion)
         exit_long = close[i] < pivot_1w_aligned[i]
