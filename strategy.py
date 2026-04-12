@@ -1,10 +1,16 @@
+# 1d_1w_sma_trend_v1
+# 1d trend filter with 1w SMA confirmation and volume filter
+# Hypothesis: Trend following on daily with weekly trend filter reduces whipsaw in bear markets
+# Works in bull by riding trends, works in bear by avoiding counter-trend trades via weekly filter
+# Target: 20-50 trades/year, low turnover to minimize fee drag
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_donchian_breakout_volume_v2"
-timeframe = "12h"
+name = "1d_1w_sma_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,23 +23,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels
+    # Get 1d data for SMA calculation (already daily, but use for consistency)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    sma_50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
     
-    # Calculate Donchian channels (20-day high/low)
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Align Donchian channels to 12h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    close_1w = df_1w['close'].values
+    sma_50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
     
-    # Volume filter - 20-period average on 12h data
+    # Align weekly SMA to daily timeframe
+    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
+    
+    # Volume filter - 20-period average on daily data
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
@@ -41,23 +50,28 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+        if (np.isnan(sma_50_1d[i]) or np.isnan(sma_50_1w_aligned[i]) or 
             np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Breakout signals with volume confirmation
-        # Long: price breaks above 20-day high with volume
-        long_signal = close[i] > donchian_high_aligned[i] and volume_ok[i]
-        # Short: price breaks below 20-day low with volume
-        short_signal = close[i] < donchian_low_aligned[i] and volume_ok[i]
+        # Trend conditions
+        price_above_daily_sma = close[i] > sma_50_1d[i]
+        price_below_daily_sma = close[i] < sma_50_1d[i]
+        weekly_uptrend = close[i] > sma_50_1w_aligned[i]
+        weekly_downtrend = close[i] < sma_50_1w_aligned[i]
         
-        # Exit when price returns to the middle of the channel
-        mid = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2.0
-        exit_long = close[i] < mid
-        exit_short = close[i] > mid
+        # Entry signals with volume confirmation
+        # Long: price above daily SMA AND weekly uptrend AND volume
+        long_signal = price_above_daily_sma and weekly_uptrend and volume_ok[i]
+        # Short: price below daily SMA AND weekly downtrend AND volume
+        short_signal = price_below_daily_sma and weekly_downtrend and volume_ok[i]
+        
+        # Exit when trend changes
+        exit_long = price_below_daily_sma or not weekly_uptrend
+        exit_short = price_above_daily_sma or not weekly_downtrend
         
         # Execute trades
         if long_signal and position != 1:
