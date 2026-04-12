@@ -1,10 +1,14 @@
-#!/usr/bin/env python3
-"""
-4h_1d_rsi_pullback_v1
-Hypothesis: In strong trends identified by 1-day EMA50, enter on RSI(14) pullbacks to EMA21 on 4h chart with volume confirmation. Works in bull/bear by following the daily trend. Target: 20-40 trades/year (80-160 total) to minimize fee drag.
-"""
-name = "4h_1d_rsi_pullback_v1"
-timeframe = "4h"
+# 12h_1d_williams_alligator_v1
+# Hypothesis: Use Williams Alligator (13,8,5 SMAs) on 1d timeframe to determine trend direction and phase (sleeping/awakening/feeding).
+# Enter long when price is above Alligator's lips (13 SMA) and jaws-teeth-lips are properly aligned (bullish alignment: jaws < teeth < lips).
+# Enter short when price is below lips and bearish alignment (jaws > teeth > lips).
+# Add volume confirmation (volume > 1.5x 20-period average) to avoid false signals.
+# Exit on opposite alignment or price crossing the teeth (8 SMA).
+# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drift.
+# Williams Alligator works in both bull and bear markets by identifying trending vs ranging phases.
+
+name = "12h_1d_williams_alligator_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -21,28 +25,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for Williams Alligator
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # 1d EMA50 for trend direction
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Williams Alligator: SMAs of median price (typical price = (H+L+C)/3)
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
     
-    # 4h RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Jaws: 13-period SMMA, teeth: 8-period, lips: 5-period
+    # Using SMA as approximation (SMMA would require Wilder's smoothing)
+    jaws_1d = pd.Series(typical_price_1d).rolling(window=13, min_periods=13).mean().values
+    teeth_1d = pd.Series(typical_price_1d).rolling(window=8, min_periods=8).mean().values
+    lips_1d = pd.Series(typical_price_1d).rolling(window=5, min_periods=5).mean().values
     
-    # 4h EMA21 for dynamic support/resistance
-    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Align Alligator lines to 12h timeframe
+    jaws_aligned = align_htf_to_ltf(prices, df_1d, jaws_1d)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,25 +55,31 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(rsi[i]) or np.isnan(ema21[i]):
+        if (np.isnan(jaws_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: uptrend (price > 1d EMA50) AND RSI < 40 (pullback) AND price > EMA21 with volume
-        if (close[i] > ema50_1d_aligned[i] and rsi[i] < 40 and close[i] > ema21[i] and vol_confirm[i] and position != 1):
+        # Bullish alignment: jaws < teeth < lips (Alligator waking up to eat)
+        bullish_align = jaws_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < lips_aligned[i]
+        # Bearish alignment: jaws > teeth > lips (Alligator waking up to hunt)
+        bearish_align = jaws_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > lips_aligned[i]
+        
+        # Long entry: price above lips, bullish alignment, volume confirmation
+        if (close[i] > lips_aligned[i] and bullish_align and vol_confirm[i] and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: downtrend (price < 1d EMA50) AND RSI > 60 (pullback) AND price < EMA21 with volume
-        elif (close[i] < ema50_1d_aligned[i] and rsi[i] > 60 and close[i] < ema21[i] and vol_confirm[i] and position != -1):
+        # Short entry: price below lips, bearish alignment, volume confirmation
+        elif (close[i] < lips_aligned[i] and bearish_align and vol_confirm[i] and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: reverse signal or RSI crosses back to neutral zone (40-60)
-        elif position == 1 and (rsi[i] > 60 or close[i] < ema21[i]):
+        # Exit: opposite alignment or price crosses teeth
+        elif position == 1 and (not bullish_align or close[i] < teeth_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (rsi[i] < 40 or close[i] > ema21[i]):
+        elif position == -1 and (not bearish_align or close[i] > teeth_aligned[i]):
             position = 0
             signals[i] = 0.0
         else:
