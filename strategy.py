@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-4h_1D_Donchian_Volume_Chop_Strategy
-Hypothesis: Donchian channel breakouts on 4h timeframe, filtered by daily trend (EMA50) and 
-choppiness regime, with volume confirmation, captures strong momentum moves while avoiding 
-whipsaw in choppy markets. Works in both bull (breakouts above) and bear (breakdowns below) 
-markets by using the daily trend filter. Low trade frequency (~25/year) minimizes fee drag.
+12h_1w_1d_Camarilla_Breakout_Volume_Strategy
+Hypothesis: Camarilla pivot levels (resistance/support) from daily timeframe identify key institutional levels.
+Breakout above R4 or below S4 with volume confirmation and weekly trend filter captures institutional flow.
+Works in both bull (breakouts above R4) and bear (breakdowns below S4) markets.
+Low trade frequency (~20-30/year) minimizes fee drag while capturing significant moves.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1D_Donchian_Volume_Chop_Strategy"
-timeframe = "4h"
+name = "12h_1w_1d_Camarilla_Breakout_Volume_Strategy"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,76 +25,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY DATA FOR TREND FILTER ===
+    # === DAILY DATA FOR CAMARILLA PIVOTS ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Daily EMA50 for trend filter
-    close_series_1d = pd.Series(close_1d)
-    ema50_1d = close_series_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Camarilla levels for each day
+    # Pivot = (High + Low + Close) / 3
+    # Range = High - Low
+    # R4 = Close + Range * 1.1/2
+    # S4 = Close - Range * 1.1/2
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    rang = high_1d - low_1d
+    r4 = close_1d + rang * 1.1 / 2.0
+    s4 = close_1d - rang * 1.1 / 2.0
     
-    # Align daily EMA50 to 4h timeframe (wait for daily bar to close)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align Camarilla levels to 12h timeframe (wait for daily bar to close)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # === 4H INDICATORS ===
-    # Donchian Channel (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === WEEKLY TREND FILTER ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Choppiness Index (14-period) - ranging market filter
-    # CHOP = 100 * log10(sum(ATR) / (max(high) - min(low))) / log10(n)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    close_1w = df_1w['close'].values
+    # 50-period EMA for weekly trend
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    # Avoid division by zero
-    hl_range = highest_high - lowest_low
-    hl_range = np.where(hl_range == 0, 1e-10, hl_range)
-    
-    chop = 100 * np.log10(pd.Series(atr).rolling(window=14, min_periods=14).sum().values / hl_range) / np.log10(14)
-    
-    # Volume confirmation (4h)
+    # === VOLUME CONFIRMATION (12h) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(high_max[i]) or 
-            np.isnan(low_min[i]) or np.isnan(chop[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long setup: Price breaks above Donchian high AND above daily EMA50 (uptrend) 
-        # AND market is not too choppy (trending) AND volume confirmation
-        long_setup = (close[i] > high_max[i]) and (close[i] > ema50_1d_aligned[i]) and (chop[i] < 61.8) and (vol_ratio[i] > 1.3)
+        # Breakout above R4 with volume confirmation and weekly uptrend
+        long_breakout = (close[i] > r4_aligned[i]) and (vol_ratio[i] > 1.5) and (close[i] > ema50_1w_aligned[i])
         
-        # Short setup: Price breaks below Donchian low AND below daily EMA50 (downtrend) 
-        # AND market is not too choppy (trending) AND volume confirmation
-        short_setup = (close[i] < low_min[i]) and (close[i] < ema50_1d_aligned[i]) and (chop[i] < 61.8) and (vol_ratio[i] > 1.3)
+        # Breakdown below S4 with volume confirmation and weekly downtrend
+        short_breakdown = (close[i] < s4_aligned[i]) and (vol_ratio[i] > 1.5) and (close[i] < ema50_1w_aligned[i])
         
-        # Exit when price returns to middle of Donchian channel or trend changes
-        donchian_mid = (high_max[i] + low_min[i]) / 2
-        exit_long = close[i] < donchian_mid
-        exit_short = close[i] > donchian_mid
+        # Exit when price returns to pivot area (mean reversion)
+        pivot_align = align_htf_to_ltf(prices, df_1d, pivot)
+        exit_long = close[i] < pivot_align[i] and position == 1
+        exit_short = close[i] > pivot_align[i] and position == -1
         
         # Execute trades
-        if long_setup and position != 1:
+        if long_breakout and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_setup and position != -1:
+        elif short_breakdown and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
