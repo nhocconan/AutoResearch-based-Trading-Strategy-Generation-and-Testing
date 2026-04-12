@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_1w_donchian_breakout_volume - Trend following with weekly trend filter
-Hypothesis: Daily Donchian breakout with weekly trend filter and volume confirmation.
-Works in bull markets (trend following) and bear markets (avoids counter-trend trades).
-Targets 15-25 trades/year (60-100 total over 4 years) to minimize fee drag.
+12h_1d_camarilla_volume_breakout_v1 - 12-hour strategy using daily Camarilla pivot levels
+with volume confirmation and trend filter.
+Hypothesis: Enter long when price breaks above daily H3 with volume spike and price above EMA50.
+Enter short when price breaks below daily L3 with volume spike and price below EMA50.
+Uses fixed position sizing (0.25) to minimize churn. Exit on opposite L3/H3 touch.
+Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drift.
+Focus on high-probability breakouts in trending markets with volume confirmation.
 """
 
 import numpy as np
@@ -20,55 +23,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian channels
+    # Get daily data for Camarilla pivot levels and EMA
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 21:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate daily Donchian channels (20-period) using previous day's data
+    # Calculate daily EMA50 (using previous day's close to avoid look-ahead)
+    close_1d = df_1d['close'].values
+    ema50_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 50:
+        # Calculate EMA with proper initialization
+        alpha = 2.0 / (50 + 1)
+        ema50_1d[0] = close_1d[0]
+        for i in range(1, len(close_1d)):
+            ema50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema50_1d[i-1]
+    
+    # Calculate daily Camarilla pivot levels using PREVIOUS day's data (no look-ahead)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 20-period high/low of previous day's data
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
+    # Previous day's values for pivot calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    # Set first day's previous values to NaN (no data yet)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    for i in range(20, len(high_1d)):
-        donchian_high[i] = np.max(high_1d[i-20:i])
-        donchian_low[i] = np.min(low_1d[i-20:i])
+    # Camarilla calculations using previous day's data
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_val = prev_high - prev_low
     
-    # Shift by 1 to use previous day's channels (no look-ahead)
-    donchian_high = np.roll(donchian_high, 1)
-    donchian_low = np.roll(donchian_low, 1)
-    donchian_high[0] = np.nan
-    donchian_low[0] = np.nan
+    # Camarilla levels
+    h3 = pivot + 1.1 * range_val / 2
+    l3 = pivot - 1.1 * range_val / 2
+    h4 = pivot + 1.1 * range_val
+    l4 = pivot - 1.1 * range_val
     
-    # Align Donchian levels to daily timeframe (already aligned, just copy)
-    donchian_high_d = donchian_high
-    donchian_low_d = donchian_low
+    # Align daily indicators to 12h timeframe
+    h3_12h = align_htf_to_ltf(prices, df_1d, h3)
+    l3_12h = align_htf_to_ltf(prices, df_1d, l3)
+    h4_12h = align_htf_to_ltf(prices, df_1d, h4)
+    l4_12h = align_htf_to_ltf(prices, df_1d, l4)
+    ema50_12h = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Get weekly data for trend filter (EMA 21)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_21 = np.full(len(close_1w), np.nan)
-    
-    # Calculate EMA 21
-    alpha = 2.0 / (21 + 1)
-    for i in range(len(close_1w)):
-        if i == 0:
-            ema_21[i] = close_1w[i]
-        elif np.isnan(close_1w[i]):
-            ema_21[i] = ema_21[i-1]
-        else:
-            ema_21[i] = alpha * close_1w[i] + (1 - alpha) * ema_21[i-1]
-    
-    # Align weekly EMA to daily timeframe
-    ema_21_aligned = align_htf_to_ltf(prices, df_1w, ema_21)
-    
-    # Volume filter (20-period average)
+    # Calculate volume moving average (20-period)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -78,25 +79,25 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high_d[i]) or np.isnan(donchian_low_d[i]) or 
-            np.isnan(ema_21_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(h3_12h[i]) or np.isnan(l3_12h[i]) or 
+            np.isnan(ema50_12h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > vol_ma[i] * 1.5
+        # Volume filter: current volume > 1.8x 20-period average
+        volume_filter = volume[i] > vol_ma[i] * 1.8
         
-        # Weekly trend filter: price above/below EMA 21
-        uptrend = close[i] > ema_21_aligned[i]
-        downtrend = close[i] < ema_21_aligned[i]
+        # Trend filter: price above/below EMA50
+        uptrend = close[i] > ema50_12h[i]
+        downtrend = close[i] < ema50_12h[i]
         
-        # Entry conditions: Donchian breakout with volume and trend filter
-        long_breakout = close[i] > donchian_high_d[i] and volume_filter and uptrend
-        short_breakout = close[i] < donchian_low_d[i] and volume_filter and downtrend
+        # Entry conditions: Camarilla H3/L3 breakout with volume and trend confirmation
+        long_breakout = close[i] > h3_12h[i] and volume_filter and uptrend
+        short_breakout = close[i] < l3_12h[i] and volume_filter and downtrend
         
-        # Exit conditions: opposite Donchian level touch
-        long_exit = close[i] < donchian_low_d[i]
-        short_exit = close[i] > donchian_high_d[i]
+        # Exit conditions: touch opposite L3/H3 level
+        long_exit = close[i] < l3_12h[i]
+        short_exit = close[i] > h3_12h[i]
         
         if long_breakout and position != 1:
             position = 1
@@ -121,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_donchian_breakout_volume"
-timeframe = "1d"
+name = "12h_1d_camarilla_volume_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
