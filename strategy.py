@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Pullback_Trend_v1
-Hypothesis: On 4h timeframe, buy pullbacks to L3 in uptrend and sell pullbacks to H3 in downtrend.
-Uses daily trend filter (price vs SMA50) and volume confirmation for entry. Exits at opposite
-H3/L3 levels. Designed for low trade frequency by requiring trend alignment and pullback to
-specific levels. Works in bull via long pullbacks, in bear via short pullbacks.
+12h_1d_Camarilla_Trend_V2
+Hypothesis: On 12h timeframe, buy when price touches L3 in daily uptrend, sell when price touches H3 in daily downtrend.
+Uses daily SMA100 for trend filter and volume spike (2x average) for confirmation. Exits at opposite H3/L3 levels.
+Designed for low trade frequency by requiring trend alignment and specific price levels. Works in bull via long at L3,
+in bear via short at H3. Targets 12-37 trades/year on 12h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_Pullback_Trend_v1"
-timeframe = "4h"
+name = "12h_1d_Camarilla_Trend_V2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,9 +34,9 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Daily SMA50 for trend filter
+    # Daily SMA100 for trend filter
     close_s = pd.Series(close_1d)
-    sma50 = close_s.rolling(window=50, min_periods=50).mean().values
+    sma100 = close_s.rolling(window=100, min_periods=100).mean().values
     
     # Previous day's close for Camarilla calculation
     prev_close = np.roll(close_1d, 1)
@@ -51,46 +51,44 @@ def generate_signals(prices):
     h4 = prev_close + (range_1d * 1.1)
     l4 = prev_close - (range_1d * 1.1)
     
-    # Align to 4h
+    # Align to 12h
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
     l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    sma50_aligned = align_htf_to_ltf(prices, df_1d, sma50)
+    sma100_aligned = align_htf_to_ltf(prices, df_1d, sma100)
     
-    # Volume average (20-period for confirmation)
+    # Volume average (30-period for confirmation)
     vol_avg = np.zeros(n)
     vol_sum = 0.0
     vol_count = 0
     for i in range(n):
         vol_sum += volume[i]
         vol_count += 1
-        if i >= 20:
-            vol_sum -= volume[i-20]
+        if i >= 30:
+            vol_sum -= volume[i-30]
             vol_count -= 1
         vol_avg[i] = vol_sum / vol_count if vol_count > 0 else 0.0
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if not ready
         if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(sma50_aligned[i]) or vol_avg[i] == 0.0):
+            np.isnan(sma100_aligned[i]) or vol_avg[i] == 0.0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: at least 1.3x average
-        vol_confirm = volume[i] > 1.3 * vol_avg[i]
+        # Volume confirmation: at least 2x average
+        vol_confirm = volume[i] > 2.0 * vol_avg[i]
         
-        # Trend filter: price above/below SMA50
-        uptrend = close_1d[-1] > sma50[-1] if len(close_1d) > 0 else False  # approximate for alignment
-        # Use aligned values for current bar
-        price_vs_sma = close[i] > sma50_aligned[i]
+        # Trend filter: price above/below SMA100
+        price_vs_sma = close[i] > sma100_aligned[i]
         
-        # Pullback entries: long pullback to L3 in uptrend, short pullback to H3 in downtrend
-        long_setup = (close[i] <= l3_aligned[i] * 1.005) and price_vs_sma and vol_confirm  # slight buffer
-        short_setup = (close[i] >= h3_aligned[i] * 0.995) and not price_vs_sma and vol_confirm
+        # Entry conditions: price at L3 in uptrend, or at H3 in downtrend
+        long_setup = (close[i] <= l3_aligned[i] * 1.002) and price_vs_sma and vol_confirm  # 0.2% buffer
+        short_setup = (close[i] >= h3_aligned[i] * 0.998) and not price_vs_sma and vol_confirm
         
         # Exit at opposite level
         exit_long = close[i] >= h3_aligned[i]
