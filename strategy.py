@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_camarilla_breakout_v32
-# Enhanced Camarilla with volume confirmation and ADX trend filter.
-# Uses ADX > 25 to ensure trending conditions (avoids whipsaws in ranges).
-# Long: Close > H4 + Volume > 1.5x MA + ADX > 25
-# Short: Close < L4 + Volume > 1.5x MA + ADX > 25
-# Exit: Opposite breakout or ADX < 20 (trend weakening)
-# Position size: 0.25 for clear trend, 0.125 for weakening trend
-# Target: 20-30 trades/year per symbol to minimize fee drag.
-name = "4h_1d_camarilla_breakout_v32"
-timeframe = "4h"
+# Hypothesis: 1d_1w_camarilla_breakout_v2
+# Daily chart Camarilla breakout with weekly trend filter and volume confirmation.
+# Weekly trend (price above/below weekly EMA200) determines bias: only long in weekly uptrend, short in downtrend.
+# Daily Camarilla H4/L4 breakouts with volume spike (>2x 20-day average) trigger entries.
+# Avoids choppy markets using daily Choppiness Index < 61.8.
+# Target: 15-25 trades/year per symbol for low friction and high edge.
+name = "1d_1w_camarilla_breakout_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,7 +23,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    # Weekly EMA200 for trend bias
+    close_1w = df_1w['close'].values
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    weekly_trend_up = align_htf_to_ltf(prices, df_1w, ema200_1w)  # aligned to daily
+    
+    # Get daily data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -35,61 +43,43 @@ def generate_signals(prices):
     low_prev = df_1d['low'].shift(1).values
     close_prev = df_1d['close'].shift(1).values
     
-    # Camarilla formulas
     range_prev = high_prev - low_prev
-    camarilla_h4 = close_prev + range_prev * 1.1 / 2
-    camarilla_l4 = close_prev - range_prev * 1.1 / 2
+    camarilla_h4 = close_prev + range_prev * 1.1 / 2  # H4 resistance
+    camarilla_l4 = close_prev - range_prev * 1.1 / 2  # L4 support
     
-    # Align to 4h timeframe (already delayed by 1 day due to shift)
+    # Align Camarilla levels to daily timeframe (already delayed by 1 day due to shift)
     h4_level = align_htf_to_ltf(prices, df_1d, camarilla_h4)
     l4_level = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # Volume confirmation: volume > 2.0 * 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    vol_confirm = volume > (vol_ma * 2.0)
     
-    # ADX trend filter: ADX > 25 = trending, ADX < 20 = weakening trend
-    # Calculate True Range
+    # Chop regime filter: avoid choppy markets (CHOP < 61.8 = trending)
+    atr_period = 14
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
     
-    # Directional Movement
-    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smoothed values
-    tr_m14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
-    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
-    
-    # DI+ and DI-
-    di_plus = np.where(tr_m14 != 0, 100 * dm_plus_14 / tr_m14, 0)
-    di_minus = np.where(tr_m14 != 0, 100 * dm_minus_14 / tr_m14, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Trend filters
-    strong_trend = adx > 25
-    weakening_trend = adx < 20
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10((highest_high - lowest_low) / (atr * np.sqrt(14))) / np.log10(14)
+    chop_filter = chop < 61.8  # trending market
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # start after warmup
+    for i in range(50, n):  # start after warmup
         # Skip if levels not ready
-        if np.isnan(h4_level[i]) or np.isnan(l4_level[i]):
+        if np.isnan(h4_level[i]) or np.isnan(l4_level[i]) or np.isnan(weekly_trend_up[i]):
             signals[i] = 0.0
             continue
         
-        # Check volume filter
-        if not vol_confirm[i]:
-            # Hold current position if volume filter fails
+        # Check filters
+        if not (vol_confirm[i] and chop_filter[i]):
+            # Hold current position if filters fail
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -98,27 +88,21 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above H4 with volume and strong trend
-        if close[i] > h4_level[i] and position != 1 and strong_trend[i]:
+        # Long signal: price breaks above H4 with volume AND weekly uptrend
+        if close[i] > h4_level[i] and weekly_trend_up[i] < close[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below L4 with volume and strong trend
-        elif close[i] < l4_level[i] and position != -1 and strong_trend[i]:
+        # Short signal: price breaks below L4 with volume AND weekly downtrend
+        elif close[i] < l4_level[i] and weekly_trend_up[i] > close[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions
+        # Exit conditions: opposite breakout
         elif close[i] < l4_level[i] and position == 1:
             position = 0
             signals[i] = 0.0
         elif close[i] > h4_level[i] and position == -1:
             position = 0
             signals[i] = 0.0
-        elif weakening_trend[i] and position != 0:
-            # Reduce position on weakening trend
-            if position == 1:
-                signals[i] = 0.125
-            elif position == -1:
-                signals[i] = -0.125
         else:
             # Hold current position
             if position == 1:
