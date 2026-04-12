@@ -33,48 +33,62 @@ def generate_signals(prices):
     pivot = (prev_high + prev_low + prev_close) / 3
     range_val = prev_high - prev_low
     
-    # Key levels: R3, S3, R4, S4 (Camarilla)
-    r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
-    r4 = close_1d + (high_1d - low_1d) * 1.1 / 2
-    s4 = close_1d - (high_1d - low_1d) * 1.1 / 2
+    # Key levels: S1, R1 (Camarilla) - tighter range for fewer trades
+    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
     
-    # Align levels to 6h timeframe
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
-    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
-    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
+    # Align levels to 4h timeframe
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
     
-    # Calculate volume moving average (20-period on 6h)
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
+    # Volume filter: 20-period EMA
+    vol_ema = np.full(n, np.nan)
+    vol_series = pd.Series(volume)
+    vol_ema_values = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ema[:] = vol_ema_values
+    
+    # ATR for volatility filter
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = tr2[0] = tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = np.full(n, np.nan)
+    for i in range(14, n):
+        atr[i] = np.nanmean(tr[i-14:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or 
-            np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(s1_4h[i]) or np.isnan(r1_4h[i]) or 
+            np.isnan(vol_ema[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period average (less strict than 2.0)
-        volume_filter = volume[i] > vol_ma[i] * 1.5
+        # Volume filter: current volume > 1.5x EMA
+        volume_filter = volume[i] > vol_ema[i] * 1.5
         
-        # Entry conditions: Break of R4/S4 with volume (continuation)
-        long_breakout = (close[i] > r4_6h[i]) and volume_filter
-        short_breakout = (close[i] < s4_6h[i]) and volume_filter
+        # Volatility filter: ATR > 0.5 * 20-period ATR mean
+        atr_ma = np.full(n, np.nan)
+        if i >= 34:
+            atr_ma[i] = np.nanmean(atr[i-20:i])
+        vol_filter = atr[i] > atr_ma[i] * 0.5 if not np.isnan(atr_ma[i]) else True
         
-        # Exit conditions: Return to R3/S3 (mean reversion)
-        long_exit = close[i] < r3_6h[i]
-        short_exit = close[i] > s3_6h[i]
+        # Entry conditions: Touch of S1/R1 with volume and volatility (mean reversion)
+        long_entry = (low[i] <= s1_4h[i]) and volume_filter and vol_filter
+        short_entry = (high[i] >= r1_4h[i]) and volume_filter and vol_filter
         
-        if long_breakout and position != 1:
+        # Exit conditions: Return to pivot
+        pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
+        long_exit = close[i] > pivot_4h[i] if not np.isnan(pivot_4h[i]) else False
+        short_exit = close[i] < pivot_4h[i] if not np.isnan(pivot_4h[i]) else False
+        
+        if long_entry and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_breakout and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
@@ -94,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_camarilla_r4s4_breakout_r3s3_reversion_v2"
-timeframe = "6h"
+name = "4h_1d_camarilla_s1r1_mean_reversion_vol_filter_v1"
+timeframe = "4h"
 leverage = 1.0
