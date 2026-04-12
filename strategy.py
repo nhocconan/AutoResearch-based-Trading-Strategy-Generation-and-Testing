@@ -1,9 +1,9 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 """
-4h_12h_Camarilla_Trend_Breakout_v1
-Hypothesis: Trade 12h Camarilla H3/L3 breakouts with volume confirmation and 12h trend filter.
-Long when price breaks above H3 in uptrend (price > 12h EMA200), short when breaks below L3 in downtrend.
-Exit on trend reversal or opposite level touch. Designed for low trade frequency (<30/year) with high conviction.
+12h_1d_Camarilla_Breakout_With_Volume_Filter_v1
+Hypothesis: Trade daily Camarilla H3/L3 breakouts only on 12h timeframe with volume > 2x 20-period average and price >1% beyond level.
+Use 50 EMA for trend filter: long only in uptrend, short only in downtrend.
+Exit on trend reversal or opposite level touch. Designed for low trade frequency (~12-37/year) with high conviction.
 Works in bull markets (continuation breaks) and bear markets (mean reversion from extremes).
 """
 
@@ -11,13 +11,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_Camarilla_Trend_Breakout_v1"
-timeframe = "4h"
+name = "12h_1d_Camarilla_Breakout_With_Volume_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,53 +25,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12H DATA FOR TREND AND CAMARILLA ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 200:
+    # === DAILY DATA FOR CAMARILLA PIVOTS ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h EMA200 for trend
-    close_12h_series = pd.Series(close_12h)
-    ema200_12h = close_12h_series.ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate Camarilla levels from previous day
+    typical_price = (high_1d + low_1d + close_1d) / 3
+    pivot = typical_price
+    range_1d = high_1d - low_1d
     
-    # Calculate 12h Camarilla levels from previous 12h bar
-    typical_price_12h = (high_12h + low_12h + close_12h) / 3
-    pivot_12h = typical_price_12h
-    range_12h = high_12h - low_12h
+    h3 = pivot + (range_1d * 1.1 / 4)
+    l3 = pivot - (range_1d * 1.1 / 4)
+    h4 = pivot + (range_1d * 1.1 / 2)
+    l4 = pivot - (range_1d * 1.1 / 2)
     
-    h3_12h = pivot_12h + (range_12h * 1.1 / 4)
-    l3_12h = pivot_12h - (range_12h * 1.1 / 4)
-    h4_12h = pivot_12h + (range_12h * 1.1 / 2)
-    l4_12h = pivot_12h - (range_12h * 1.1 / 2)
+    # Align to 12h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
     
-    # Align 12h indicators to 4h timeframe
-    ema200_12h_aligned = align_htf_to_ltf(prices, df_12h, ema200_12h)
-    h3_12h_aligned = align_htf_to_ltf(prices, df_12h, h3_12h)
-    l3_12h_aligned = align_htf_to_ltf(prices, df_12h, l3_12h)
-    h4_12h_aligned = align_htf_to_ltf(prices, df_12h, h4_12h)
-    l4_12h_aligned = align_htf_to_ltf(prices, df_12h, l4_12h)
+    # === TREND FILTER: 50 EMA ON 12H CHART ===
+    close_series = pd.Series(close)
+    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # === VOLUME CONFIRMATION (4H) ===
+    # === VOLUME FILTER ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):
+    for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(ema200_12h_aligned[i]) or np.isnan(h3_12h_aligned[i]) or 
-            np.isnan(l3_12h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50[i]) or np.isnan(h3_aligned[i]) or 
+            np.isnan(l3_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine 12h trend
-        uptrend = close[i] > ema200_12h_aligned[i]
-        downtrend = close[i] < ema200_12h_aligned[i]
+        # Determine trend
+        uptrend = close[i] > ema50[i]
+        downtrend = close[i] < ema50[i]
         
         # Volume strength (must be significantly above average)
         strong_volume = volume[i] > (vol_ma[i] * 2.0)
@@ -79,21 +77,21 @@ def generate_signals(prices):
         # Price must be beyond the level by at least 1% to avoid false breakouts
         level_buffer = 0.01
         
-        # Long: price breaks above H3_12h in uptrend with strong volume
-        long_signal = (close[i] > h3_12h_aligned[i] * (1 + level_buffer) and 
+        # Long: price breaks H3 with strong volume in uptrend
+        long_signal = (close[i] > h3_aligned[i] * (1 + level_buffer) and 
                       uptrend and 
                       strong_volume)
         
-        # Short: price breaks below L3_12h in downtrend with strong volume
-        short_signal = (close[i] < l3_12h_aligned[i] * (1 - level_buffer) and 
+        # Short: price breaks L3 with strong volume in downtrend
+        short_signal = (close[i] < l3_aligned[i] * (1 - level_buffer) and 
                        downtrend and 
                        strong_volume)
         
         # Exit: opposite H3/L3 level or trend reversal
         exit_long = (position == 1 and 
-                    (close[i] < l3_12h_aligned[i] or not uptrend))
+                    (close[i] < l3_aligned[i] or not uptrend))
         exit_short = (position == -1 and 
-                     (close[i] > h3_12h_aligned[i] or not downtrend))
+                     (close[i] > h3_aligned[i] or not downtrend))
         
         # Execute trades
         if long_signal and position != 1:
