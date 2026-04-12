@@ -1,101 +1,116 @@
 #!/usr/bin/env python3
-# 6h_1d_Ichimoku_Cloud_Breakout_v1
-# Hypothesis: Use Ichimoku cloud from daily timeframe with 6h breakouts for trend following.
-# Long when price breaks above Kumo (cloud) with Tenkan > Kijun, short when breaks below with Tenkan < Kijun.
-# Ichimoku provides dynamic support/resistance and trend direction; works in bull (cloud acts as support) and bear (cloud as resistance).
-# Low trade frequency due to dual confirmation (cloud break + TK cross) targeting 50-150 total trades over 4 years.
-
+"""
+1h_4h_1d_Camarilla_Pivot_Breakout_v1
+Hypothesis: Use Camarilla pivot levels on 4h and 1d for institutional support/resistance,
+with volume confirmation on 1h for breakout confirmation. Long when price breaks above
+4h R3 or 1d R3 with volume > 1.5x 20-period average, short when breaks below S3 levels.
+Camarilla levels provide tight, statistically significant levels that work in both
+trending and ranging markets. Volume filter reduces false breakouts. Designed for
+low trade frequency (target: 60-150 total over 4 years) to minimize fee drag.
+"""
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Ichimoku_Cloud_Breakout_v1"
-timeframe = "6h"
+name = "1h_4h_1d_Camarilla_Pivot_Breakout_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Daily data for Ichimoku
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:  # Need at least 52 periods for Senkou B
+    # 4h data for Camarilla levels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    # Calculate Ichimoku components on daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 1d data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
+    # Previous period's OHLC for Camarilla calculation (4h)
+    prev_high_4h = df_4h['high'].iloc[-2] if len(df_4h) >= 2 else df_4h['high'].iloc[-1]
+    prev_low_4h = df_4h['low'].iloc[-2] if len(df_4h) >= 2 else df_4h['low'].iloc[-1]
+    prev_close_4h = df_4h['close'].iloc[-2] if len(df_4h) >= 2 else df_4h['close'].iloc[-1]
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
+    # Previous period's OHLC for Camarilla calculation (1d)
+    prev_high_1d = df_1d['high'].iloc[-2] if len(df_1d) >= 2 else df_1d['high'].iloc[-1]
+    prev_low_1d = df_1d['low'].iloc[-2] if len(df_1d) >= 2 else df_1d['low'].iloc[-1]
+    prev_close_1d = df_1d['close'].iloc[-2] if len(df_1d) >= 2 else df_1d['close'].iloc[-1]
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
+    # Calculate Camarilla levels (4h)
+    range_4h = prev_high_4h - prev_low_4h
+    if range_4h <= 0:
+        camarilla_r3_4h = camarilla_s3_4h = 0
+    else:
+        camarilla_r3_4h = prev_close_4h + range_4h * 1.1 / 4  # R3 = Close + (Range * 1.1/4)
+        camarilla_s3_4h = prev_close_4h - range_4h * 1.1 / 4  # S3 = Close - (Range * 1.1/4)
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b = (period52_high + period52_low) / 2
+    # Calculate Camarilla levels (1d)
+    range_1d = prev_high_1d - prev_low_1d
+    if range_1d <= 0:
+        camarilla_r3_1d = camarilla_s3_1d = 0
+    else:
+        camarilla_r3_1d = prev_close_1d + range_1d * 1.1 / 4  # R3 = Close + (Range * 1.1/4)
+        camarilla_s3_1d = prev_close_1d - range_1d * 1.1 / 4  # S3 = Close - (Range * 1.1/4)
     
-    # Chikou Span (Lagging Span): current close plotted 26 periods back
-    # Not used for signals but calculated for completeness
+    # Align Camarilla levels to 1h timeframe
+    camarilla_r3_4h_array = np.full(len(df_4h), camarilla_r3_4h)
+    camarilla_s3_4h_array = np.full(len(df_4h), camarilla_s3_4h)
+    camarilla_r3_4h_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3_4h_array)
+    camarilla_s3_4h_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3_4h_array)
     
-    # Align Ichimoku components to 6h timeframe
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
+    camarilla_r3_1d_array = np.full(len(df_1d), camarilla_r3_1d)
+    camarilla_s3_1d_array = np.full(len(df_1d), camarilla_s3_1d)
+    camarilla_r3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d_array)
+    camarilla_s3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d_array)
     
-    # Cloud top and bottom
-    cloud_top = np.maximum(senkou_a_aligned, senkou_b_aligned)
-    cloud_bottom = np.minimum(senkou_a_aligned, senkou_b_aligned)
+    # Volume confirmation: current volume > 1.5x 20-period average
+    volume_series = pd.Series(volume)
+    vol_ma = volume_series.rolling(window=20, min_periods=20).mean()
+    vol_ratio = volume_series / vol_ma
+    vol_ratio = vol_ratio.fillna(1.0).values  # default to 1.0 if no MA
+    
+    # Session filter: 08-20 UTC (active trading hours)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(52, n):
-        # Skip if any data invalid
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or
-            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+    for i in range(50, n):
+        # Skip if outside session or any data invalid
+        if not in_session[i] or \
+           (np.isnan(camarilla_r3_4h_aligned[i]) or np.isnan(camarilla_s3_4h_aligned[i]) or
+            np.isnan(camarilla_r3_1d_aligned[i]) or np.isnan(camarilla_s3_1d_aligned[i]) or
+            np.isnan(vol_ratio[i])):
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
-        # Ichimoku signals
-        price_above_cloud = close[i] > cloud_top[i]
-        price_below_cloud = close[i] < cloud_bottom[i]
-        tenkan_above_kijun = tenkan_aligned[i] > kijun_aligned[i]
-        tenkan_below_kijun = tenkan_aligned[i] < kijun_aligned[i]
+        # Breakout conditions with volume filter and session
+        long_breakout = (close[i] > camarilla_r3_4h_aligned[i] or close[i] > camarilla_r3_1d_aligned[i]) and vol_ratio[i] > 1.5
+        short_breakout = (close[i] < camarilla_s3_4h_aligned[i] or close[i] < camarilla_s3_1d_aligned[i]) and vol_ratio[i] > 1.5
         
-        # Long: price above cloud + TK cross bullish
-        long_signal = price_above_cloud and tenkan_above_kijun
-        # Short: price below cloud + TK cross bearish
-        short_signal = price_below_cloud and tenkan_below_kijun
-        
-        # Exit: price returns to cloud or TK cross reverses
-        long_exit = not price_above_cloud or tenkan_below_kijun
-        short_exit = not price_below_cloud or tenkan_above_kijun
+        # Exit conditions: return to opposite Camarilla level (S3 for long, R3 for short)
+        long_exit = close[i] < camarilla_s3_4h_aligned[i] or close[i] < camarilla_s3_1d_aligned[i]
+        short_exit = close[i] > camarilla_r3_4h_aligned[i] or close[i] > camarilla_r3_1d_aligned[i]
         
         # Signal logic
-        if long_signal and position != 1:
+        if long_breakout and position != 1:
             position = 1
-            signals[i] = 0.25
-        elif short_signal and position != -1:
+            signals[i] = 0.20
+        elif short_breakout and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.20
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -103,6 +118,6 @@ def generate_signals(prices):
             position = 0
             signals[i] = 0.0
         else:
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
