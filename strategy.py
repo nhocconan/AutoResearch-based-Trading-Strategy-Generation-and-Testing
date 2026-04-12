@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Reversal_V1
-Hypothesis: Combines daily Camarilla pivot levels with 4h RSI reversal signals.
-Long when price touches Camarilla L3/S1 level and RSI<30 on 4h; short when price touches H3/S2 level and RSI>70.
-Uses Camarilla levels as institutional support/resistance and RSI for exhaustion.
-Designed for low trade frequency by requiring price at specific pivot levels + momentum confirmation.
-Works in bull via buying dips at support, in bear via selling rallies at resistance.
+4h_1d_Alligator_Trend_Filter_V1
+Hypothesis: Uses Williams Alligator (three SMAs) on 1d timeframe as a trend filter on 4h chart.
+Enter long when price > Alligator Jaw (13-period SMA) and Alligator is bullish (Teeth > Lips).
+Enter short when price < Alligator Jaw and Alligator is bearish (Teeth < Lips).
+Requires 4h volume above 20-period average to confirm momentum.
+Designed for low trade frequency by requiring trend alignment and volume confirmation.
+Works in bull via buying uptrend pullbacks, in bear via selling rallies in downtrend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_Reversal_V1"
+name = "4h_1d_Alligator_Trend_Filter_V1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,75 +25,56 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # === DAILY DATA FOR CAMARILLA PIVOTS ===
+    # === DAILY DATA FOR ALLIGATOR ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for previous day
-    # Camarilla: H4 = close + 1.5*(high-low), H3 = close + 1.1*(high-low), etc.
-    daily_range = high_1d - low_1d
-    camarilla_h4 = close_1d + 1.5 * daily_range
-    camarilla_h3 = close_1d + 1.1 * daily_range
-    camarilla_h2 = close_1d + 0.6 * daily_range
-    camarilla_h1 = close_1d + 0.3 * daily_range
-    camarilla_l1 = close_1d - 0.3 * daily_range
-    camarilla_l2 = close_1d - 0.6 * daily_range
-    camarilla_l3 = close_1d - 1.1 * daily_range
-    camarilla_l4 = close_1d - 1.5 * daily_range
+    # Williams Alligator: Jaw (13), Teeth (8), Lips (5) SMAs
+    close_1d_series = pd.Series(close_1d)
+    jaw = close_1d_series.rolling(window=13, min_periods=13).mean().values
+    teeth = close_1d_series.rolling(window=8, min_periods=8).mean().values
+    lips = close_1d_series.rolling(window=5, min_periods=5).mean().values
     
-    # Align Camarilla levels to 4h timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Align Alligator components
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
     
-    # === 4H DATA FOR RSI ===
-    # Calculate RSI on 4h close prices
-    close_series = pd.Series(close)
-    delta = close_series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    # Use Wilder's smoothing (alpha = 1/period)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # === 4H VOLUME FILTER ===
+    volume_series = pd.Series(volume)
+    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(rsi_values[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Price proximity to Camarilla levels (within 0.5% tolerance)
-        price = close[i]
-        h3_level = h3_aligned[i]
-        l3_level = l3_aligned[i]
+        # Alligator trend conditions
+        alligator_bullish = teeth_aligned[i] > lips_aligned[i]
+        alligator_bearish = teeth_aligned[i] < lips_aligned[i]
+        price_above_jaw = close[i] > jaw_aligned[i]
+        price_below_jaw = close[i] < jaw_aligned[i]
         
-        near_h3 = abs(price - h3_level) / h3_level < 0.005  # 0.5% tolerance
-        near_l3 = abs(price - l3_level) / l3_level < 0.005  # 0.5% tolerance
-        
-        # RSI conditions
-        rsi_oversold = rsi_values[i] < 30
-        rsi_overbought = rsi_values[i] > 70
+        # Volume confirmation
+        volume_ok = volume[i] > vol_ma[i]
         
         # Entry conditions
-        long_setup = near_l3 and rsi_oversold
-        short_setup = near_h3 and rsi_overbought
+        long_setup = alligator_bullish and price_above_jaw and volume_ok
+        short_setup = alligator_bearish and price_below_jaw and volume_ok
         
-        # Exit when price moves away from level or RSI normalizes
-        exit_long = not (near_l3 and rsi_oversold)
-        exit_short = not (near_h3 and rsi_overbought)
+        # Exit when trend changes or volume fails
+        exit_long = not (alligator_bullish and price_above_jaw and volume_ok)
+        exit_short = not (alligator_bearish and price_below_jaw and volume_ok)
         
         if long_setup and position != 1:
             position = 1
