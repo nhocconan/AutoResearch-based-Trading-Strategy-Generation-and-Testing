@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_volume_regime_v1"
+name = "4h_12h_donchian_volume_regime_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,44 +17,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla levels and volume
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # 12h data for Donchian channel and volume
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    vol_1d = df_1d['volume'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    vol_12h = df_12h['volume'].values
     
-    # Map each 4h bar to previous day's OHLC
-    pivots_high = np.full(n, np.nan)
-    pivots_low = np.full(n, np.nan)
-    pivots_close = np.full(n, np.nan)
-    pivots_volume = np.full(n, np.nan)
+    # Donchian channel (20-period) on 12h
+    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    for i in range(n):
-        current_time = pd.Timestamp(prices.iloc[i]['open_time'])
-        prev_date = current_time.date() - pd.Timedelta(days=1)
-        
-        # Find previous day in daily data
-        for j in range(len(df_1d)):
-            if pd.Timestamp(df_1d.iloc[j]['open_time']).date() == prev_date:
-                pivots_high[i] = high_1d[j]
-                pivots_low[i] = low_1d[j]
-                pivots_close[i] = close_1d[j]
-                pivots_volume[i] = vol_1d[j]
-                break
+    # 12h volume confirmation
+    vol_ma_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
+    strong_volume_12h = vol_12h > vol_ma_12h
     
-    # Calculate Camarilla H3 and L3 levels (entry levels)
-    H3 = pivots_close + (pivots_high - pivots_low) * 1.1 / 4
-    L3 = pivots_close - (pivots_high - pivots_low) * 1.1 / 4
+    # Align 12h indicators to 4h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_12h, donchian_mid)
+    strong_volume_12h_aligned = align_htf_to_ltf(prices, df_12h, strong_volume_12h.astype(float))
     
-    # Daily volume confirmation
-    vol_ma_1d = pd.Series(pivots_volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    strong_volume = volume > vol_ma_1d
-    
-    # Chop index on 4h for regime filter
+    # Chop index on 4h for regime filter (14-period)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -68,25 +56,30 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if not ready
-        if (np.isnan(H3[i]) or np.isnan(L3[i]) or np.isnan(pivots_close[i]) or
-            np.isnan(chop[i]) or np.isnan(strong_volume[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(donchian_mid_aligned[i]) or np.isnan(strong_volume_12h_aligned[i]) or
+            np.isnan(chop[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Chop regime: Chop < 40 = trending (favor breakouts), Chop > 60 = ranging (avoid)
         trending_regime = chop[i] < 40
         
-        # Long: price breaks above H3 in trending market with volume
-        long_signal = (close[i] > H3[i] and trending_regime and strong_volume[i])
+        # Long: price breaks above Donchian high in trending market with volume
+        long_signal = (close[i] > donchian_high_aligned[i] and 
+                      trending_regime and 
+                      strong_volume_12h_aligned[i] > 0.5)
         
-        # Short: price breaks below L3 in trending market with volume
-        short_signal = (close[i] < L3[i] and trending_regime and strong_volume[i])
+        # Short: price breaks below Donchian low in trending market with volume
+        short_signal = (close[i] < donchian_low_aligned[i] and 
+                       trending_regime and 
+                       strong_volume_12h_aligned[i] > 0.5)
         
-        # Exit: chop increases (range) or price returns to pivot
-        exit_long = (position == 1 and (chop[i] > 60 or close[i] < pivots_close[i]))
-        exit_short = (position == -1 and (chop[i] > 60 or close[i] > pivots_close[i]))
+        # Exit: chop increases (range) or price returns to Donchian mid
+        exit_long = (position == 1 and (chop[i] > 60 or close[i] < donchian_mid_aligned[i]))
+        exit_short = (position == -1 and (chop[i] > 60 or close[i] > donchian_mid_aligned[i]))
         
         # Execute trades
         if long_signal and position != 1:
