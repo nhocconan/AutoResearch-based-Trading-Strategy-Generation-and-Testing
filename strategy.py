@@ -8,23 +8,38 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1h Camarilla pivot breakout with 4h trend filter and session filter
-    # Camarilla levels (R3/S3, R4/S4) act as institutional support/resistance on 1d
-    # 4h EMA(21) trend filter ensures we only trade in direction of higher timeframe trend
-    # Session filter (08-20 UTC) avoids low volume Asian session
-    # Breakout above R4 or below S4 with volume confirmation = continuation signal
-    # Target: 15-37 trades/year per symbol.
-    
-    # Session filter: 8:00-20:00 UTC (avoid low volume Asian session)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Hypothesis: 12h Williams %R extreme + 1d volume spike + choppiness regime filter
+    # Williams %R < -80 = oversold (long), > -20 = overbought (short) on 12h
+    # 1d volume > 2.0x 20-period MA confirms institutional participation
+    # 1d choppiness > 61.8 = ranging market (mean reversion), < 38.2 = trending (avoid)
+    # Only trade mean reversion in ranging regimes to avoid whipsaws in trends
+    # Target: 12-37 trades/year per symbol (50-150 total over 4 years)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots
+    # Session filter: 8:00-20:00 UTC (avoid low volume Asian session)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Get 12h data for Williams %R
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 14:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    
+    # Calculate 12h Williams %R(14)
+    highest_high_12h = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    lowest_low_12h = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    williams_r_12h = -100 * (highest_high_12h - close_12h) / (highest_high_12h - lowest_low_12h + 1e-10)
+    williams_r_12h_aligned = align_htf_to_ltf(prices, df_12h, williams_r_12h)
+    
+    # Get 1d data for volume and choppiness
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -34,37 +49,29 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Camarilla pivot levels
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # R4 = C + (Range * 1.1/2)
-    # R3 = C + (Range * 1.1/4)
-    # S3 = C - (Range * 1.1/4)
-    # S4 = C - (Range * 1.1/2)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    r4_1d = close_1d + (range_1d * 1.1 / 2.0)
-    r3_1d = close_1d + (range_1d * 1.1 / 4.0)
-    s3_1d = close_1d - (range_1d * 1.1 / 4.0)
-    s4_1d = close_1d - (range_1d * 1.1 / 2.0)
+    # 1d volume spike: current volume > 2.0x 20-period MA
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1d = volume_1d > (2.0 * vol_ma_1d)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
     
-    # Align 1d Camarilla levels to 1h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 21:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    # Calculate 4h EMA(21) for trend
-    close_4h_series = pd.Series(close_4h)
-    ema_4h = close_4h_series.ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # 1d choppiness index: CHOP(14) = 100 * log10(SUM(TR(14)) / (ATR(14) * 14)) / log10(14)
+    # CHOP > 61.8 = ranging (good for mean reversion), CHOP < 38.2 = trending (avoid)
+    tr_1d = np.maximum(
+        high_1d - low_1d,
+        np.maximum(
+            np.abs(high_1d - np.roll(close_1d, 1)),
+            np.abs(low_1d - np.roll(close_1d, 1))
+        )
+    )
+    tr_1d[0] = high_1d[0] - low_1d[0]  # first TR
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    sum_tr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
+    chop_denominator = atr_1d * 14
+    chop_denominator = np.where(chop_denominator == 0, 1e-10, chop_denominator)
+    chop_1d = 100 * np.log10(sum_tr_14 / chop_denominator) / np.log10(14)
+    chop_1d = np.where(np.isnan(chop_1d), 50.0, chop_1d)  # neutral if undefined
+    chop_regime_1d = chop_1d > 61.8  # True = ranging (good for mean reversion)
+    chop_regime_aligned = align_htf_to_ltf(prices, df_1d, chop_regime_1d.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -75,37 +82,35 @@ def generate_signals(prices):
             continue
         
         # Skip if data not ready
-        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(ema_4h_aligned[i])):
+        if (np.isnan(williams_r_12h_aligned[i]) or 
+            np.isnan(volume_spike_aligned[i]) or 
+            np.isnan(chop_regime_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend from 4h EMA
-        uptrend = close[i] > ema_4h_aligned[i]
-        downtrend = close[i] < ema_4h_aligned[i]
+        # Williams %R extremes: < -80 oversold (long), > -20 overbought (short)
+        williams_r = williams_r_12h_aligned[i]
+        oversold = williams_r < -80
+        overbought = williams_r > -20
         
-        # Volume confirmation: current 1h volume > 1.5x 20-period rolling average
-        if i >= 20:
-            vol_ma = np.mean(volume[max(0, i-20):i])
-            vol_ratio = volume[i] / vol_ma if vol_ma > 0 else 1.0
-        else:
-            vol_ratio = 1.0
+        # Only trade in ranging markets (chop > 61.8) with volume confirmation
+        in_ranging = chop_regime_aligned[i] > 0.5
+        vol_spike = volume_spike_aligned[i] > 0.5
         
-        # Breakout signals: price breaks R4/S4 with volume expansion AND trend alignment
-        breakout_long = (close[i] > r4_aligned[i]) and (vol_ratio > 1.5) and uptrend
-        breakout_short = (close[i] < s4_aligned[i]) and (vol_ratio > 1.5) and downtrend
+        # Mean reversion entry: fade extremes in ranging markets with volume
+        long_entry = oversold and in_ranging and vol_spike
+        short_entry = overbought and in_ranging and vol_spike
         
-        # Exit conditions: return to pivot or opposite extreme
-        long_exit = close[i] < pivot_aligned[i]
-        short_exit = close[i] > pivot_aligned[i]
+        # Exit when Williams %R returns to neutral range (-80 to -20)
+        long_exit = williams_r > -50  # exit on recovery from oversold
+        short_exit = williams_r < -50  # exit on decline from overbought
         
-        if breakout_long and position != 1:
+        if long_entry and position != 1:
             position = 1
-            signals[i] = 0.20
-        elif breakout_short and position != -1:
+            signals[i] = 0.25
+        elif short_entry and position != -1:
             position = -1
-            signals[i] = -0.20
+            signals[i] = -0.25
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -115,14 +120,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1h_1d_4h_camarilla_breakout_trend_v1"
-timeframe = "1h"
+name = "12h_1d_williamsr_vol_chop_v2"
+timeframe = "12h"
 leverage = 1.0
