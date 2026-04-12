@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-12h_1w_1d_Momentum_Trap_V1
-Hypothesis: Combines weekly trend filter (price above/below weekly EMA20) with daily momentum exhaustion signals.
-Long when weekly uptrend AND daily RSI<30 AND price>daily VWAP; short when weekly downtrend AND daily RSI>70 AND price<daily VWAP.
-Designed for low trade frequency by requiring alignment of weekly trend and daily oversold/overbought conditions.
-Works in bull via buying dips in uptrend, in bear via selling rallies in downtrend.
+12h_1w_1d_Camarilla_Breakout_Trend_v2
+Hypothesis: Uses daily Camarilla pivot levels with weekly trend filter and volume confirmation.
+Long when weekly uptrend AND price breaks above daily H3 with volume spike.
+Short when weekly downtrend AND price breaks below daily L3 with volume spike.
+Designed for low trade frequency by requiring weekly trend alignment and volume confirmation.
+Works in bull via buying breakouts in uptrend, in bear via selling breakdowns in downtrend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_1d_Momentum_Trap_V1"
+name = "12h_1w_1d_Camarilla_Breakout_Trend_v2"
 timeframe = "12h"
 leverage = 1.0
 
@@ -27,7 +28,7 @@ def generate_signals(prices):
     
     # === WEEKLY DATA ===
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
@@ -37,7 +38,7 @@ def generate_signals(prices):
     
     # === DAILY DATA ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -45,36 +46,42 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Daily RSI(14)
-    close_ds = pd.Series(close_1d)
-    delta = close_ds.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Daily Camarilla pivot levels (based on previous day)
+    # Calculate for each day, then shift by 1 to avoid look-ahead
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    # Set first day values to NaN (no previous day)
+    prev_close[0] = np.nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
     
-    # Daily VWAP (typical price * volume)
-    typical_price = (high_1d + low_1d + close_1d) / 3
-    vp = typical_price * volume_1d
-    cum_vp = np.nancumsum(vp)
-    cum_vol = np.nancumsum(volume_1d)
-    vwap = cum_vp / cum_vol
-    vwap_values = vwap
+    # Camarilla calculations
+    range_val = prev_high - prev_low
+    # Avoid division by zero
+    range_val = np.where(range_val == 0, np.nan, range_val)
     
-    # Align daily indicators
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_values)
-    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_values)
+    H3 = prev_close + range_val * 1.1 / 4
+    L3 = prev_close - range_val * 1.1 / 4
+    
+    # Align weekly and daily indicators
+    ema20_w_aligned = align_htf_to_ltf(prices, df_1w, ema20_w)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    
+    # Volume spike detection (volume > 1.5x 20-period average)
+    volume_series = pd.Series(volume_1d)
+    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)
+    volume_spike = volume > (1.5 * vol_ma_aligned)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if not ready
-        if (np.isnan(ema20_w_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(vwap_aligned[i])):
+        if (np.isnan(ema20_w_aligned[i]) or np.isnan(H3_aligned[i]) or 
+            np.isnan(L3_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -82,24 +89,18 @@ def generate_signals(prices):
         weekly_uptrend = close[i] > ema20_w_aligned[i]
         weekly_downtrend = close[i] < ema20_w_aligned[i]
         
-        # Daily momentum exhaustion
-        rsi_oversold = rsi_aligned[i] < 30
-        rsi_overbought = rsi_aligned[i] > 70
-        price_above_vwap = close[i] > vwap_aligned[i]
-        price_below_vwap = close[i] < vwap_aligned[i]
+        # Camarilla breakout with volume confirmation
+        long_breakout = (close[i] > H3_aligned[i]) and volume_spike[i]
+        short_breakout = (close[i] < L3_aligned[i]) and volume_spike[i]
         
-        # Entry conditions
-        long_setup = weekly_uptrend and rsi_oversold and price_above_vwap
-        short_setup = weekly_downtrend and rsi_overbought and price_below_vwap
+        # Exit conditions: reverse of entry or trend change
+        exit_long = not weekly_uptrend or (close[i] < H3_aligned[i])
+        exit_short = not weekly_downtrend or (close[i] > L3_aligned[i])
         
-        # Exit when conditions reverse
-        exit_long = not (weekly_uptrend and rsi_oversold and price_above_vwap)
-        exit_short = not (weekly_downtrend and rsi_overbought and price_below_vwap)
-        
-        if long_setup and position != 1:
+        if long_breakout and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_setup and position != -1:
+        elif short_breakout and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
