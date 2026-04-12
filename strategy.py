@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Breakout_Volume_Momentum_v1
-Hypothesis: Use daily Camarilla pivot levels with volume and momentum confirmation on 12h.
-Long when price breaks above H4 (daily) with volume > 1.5x average and RSI < 70,
-short when breaks below L4 (daily) with volume > 1.5x average and RSI > 30.
-Avoids overtrading by requiring volume spike and momentum filter.
-Designed for low trade frequency (target: 50-150 total over 4 years) to minimize fee drag.
-Works in bull via breakouts, in bear via mean-reversion from extreme levels.
+6h_12h_WilR_Regime_Adaptive_v1
+Hypothesis: Use Williams %R on 12h with regime detection (trending vs ranging) to adapt strategy.
+- In trending regimes (ADX > 25): trade breakouts of WilR oversold/overbought levels
+- In ranging regimes (ADX <= 25): mean-revert at WilR extremes
+- Uses volume confirmation to avoid false signals
+Designed for low trade frequency (target: 50-150 total over 4 years) to minimize fee drift.
+Works in bull via trend-following breakouts, in bear via mean-reversion from extremes.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_Breakout_Volume_Momentum_v1"
-timeframe = "12h"
+name = "6h_12h_WilR_Regime_Adaptive_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,41 +28,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # 12h data for Williams %R and ADX
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 14:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = df_1d['high'].iloc[-2] if len(df_1d) >= 2 else df_1d['high'].iloc[-1]
-    prev_low = df_1d['low'].iloc[-2] if len(df_1d) >= 2 else df_1d['low'].iloc[-1]
-    prev_close = df_1d['close'].iloc[-2] if len(df_1d) >= 2 else df_1d['close'].iloc[-1]
+    # Williams %R (14-period)
+    highest_high = pd.Series(df_12h['high']).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(df_12h['low']).rolling(window=14, min_periods=14).min().values
+    close_12h = df_12h['close'].values
+    willr = -100 * (highest_high - close_12h) / (highest_high - lowest_low)
+    willr = np.where((highest_high - lowest_low) == 0, -50, willr)  # avoid division by zero
     
-    # Calculate daily Camarilla levels
-    range_val = prev_high - prev_low
-    if range_val <= 0:
-        return np.zeros(n)
-    daily_h4 = prev_close + 1.1 * range_val * 1.1 / 2
-    daily_l4 = prev_close - 1.1 * range_val * 1.1 / 2
+    # ADX (14-period) for regime detection
+    plus_dm = pd.Series(df_12h['high']).diff()
+    minus_dm = pd.Series(df_12h['low']).diff()
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0)
     
-    # Align daily levels to 12h timeframe
-    daily_h4_array = np.full(len(df_1d), daily_h4)
-    daily_l4_array = np.full(len(df_1d), daily_l4)
-    daily_h4_aligned = align_htf_to_ltf(prices, df_1d, daily_h4_array)
-    daily_l4_aligned = align_htf_to_ltf(prices, df_1d, daily_l4_array)
+    tr1 = pd.Series(df_12h['high']) - pd.Series(df_12h['low'])
+    tr2 = abs(pd.Series(df_12h['high']) - pd.Series(df_12h['close']).shift())
+    tr3 = abs(pd.Series(df_12h['low']) - pd.Series(df_12h['close']).shift())
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     
-    # RSI (14-period) for momentum filter
-    close_series = pd.Series(close)
-    delta = close_series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.fillna(50).values
+    atr = tr.rolling(window=14, min_periods=14).mean()
+    plus_di = 100 * (plus_dm.rolling(window=14, min_periods=14).mean() / atr)
+    minus_di = 100 * (minus_dm.rolling(window=14, min_periods=14).mean() / atr)
+    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+    adx = dx.rolling(window=14, min_periods=14).mean()
     
-    # Volume average (20-period)
+    # Align indicators to 6h timeframe
+    willr_aligned = align_htf_to_ltf(prices, df_12h, willr)
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx.values)
+    
+    # Volume average (20-period) on 6s
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -70,31 +69,41 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any data invalid
-        if (np.isnan(daily_h4_aligned[i]) or np.isnan(daily_l4_aligned[i]) or
-            np.isnan(rsi_values[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(willr_aligned[i]) or np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Volume confirmation
         vol_spike = volume[i] > 1.5 * vol_ma[i]
         
-        # Breakout conditions with filters
-        long_breakout = close[i] > daily_h4_aligned[i] and vol_spike and rsi_values[i] < 70
-        short_breakout = close[i] < daily_l4_aligned[i] and vol_spike and rsi_values[i] > 30
+        # Regime detection
+        trending = adx_aligned[i] > 25
+        ranging = adx_aligned[i] <= 25
         
-        # Exit conditions: return to midpoint
-        daily_pivot = (prev_high + prev_low + prev_close) / 3
-        daily_pivot_array = np.full(len(df_1d), daily_pivot)
-        daily_pivot_aligned = align_htf_to_ltf(prices, df_1d, daily_pivot_array)
+        # Williams %R levels
+        oversold = willr_aligned[i] < -80
+        overbought = willr_aligned[i] > -20
         
-        long_exit = close[i] < daily_pivot_aligned[i]
-        short_exit = close[i] > daily_pivot_aligned[i]
+        if trending:
+            # Trend-following: buy oversold, sell overbought
+            long_entry = oversold and vol_spike
+            short_entry = overbought and vol_spike
+            # Exit when Williams %R returns to neutral zone
+            long_exit = willr_aligned[i] > -50
+            short_exit = willr_aligned[i] < -50
+        else:
+            # Mean-reversion: fade extremes
+            long_entry = oversold and vol_spike
+            short_entry = overbought and vol_spike
+            # Exit when Williams %R returns to midpoint
+            long_exit = willr_aligned[i] > -50
+            short_exit = willr_aligned[i] < -50
         
         # Signal logic
-        if long_breakout and position != 1:
+        if long_entry and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_breakout and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
