@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Volume_Momentum
-Hypothesis: Use daily Camarilla H3/L3 levels with 12h momentum and volume confirmation to capture mean-reversion bounces in uptrends and breakdowns in downtrends. Works in bull markets (buying dips) and bear markets (selling rallies) by aligning with 12h trend.
+6h_1d_WeeklyPivot_RangeBreakout_v1
+Hypothesis: Breakout from weekly pivot-based ranges on 6h timeframe with volume confirmation.
+In ranging markets (identified by weekly pivot range width), price tends to break out of
+weekly S1/R1 or S2/R2 levels with momentum. Uses weekly pivot levels as dynamic support/resistance.
+Volume surge confirms breakout strength. Designed to work in both bull and bear markets by
+focusing on breakouts rather than directional bias.
 Target: 50-150 total trades over 4 years (12-37/year).
 """
 
@@ -9,8 +13,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_Volume_Momentum"
-timeframe = "12h"
+name = "6h_1d_WeeklyPivot_RangeBreakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,78 +27,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY CAMARILLA LEVELS ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # === WEEKLY PIVOT LEVELS ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_w = df_1w['high'].values
+    low_w = df_1w['low'].values
+    close_w = df_1w['close'].values
     
-    camarilla_h3 = np.full(len(close_1d), np.nan)
-    camarilla_l3 = np.full(len(close_1d), np.nan)
-    camarilla_h4 = np.full(len(close_1d), np.nan)
-    camarilla_l4 = np.full(len(close_1d), np.nan)
+    # Calculate weekly pivot points and support/resistance levels
+    pivot_w = np.full(len(close_w), np.nan)
+    r1_w = np.full(len(close_w), np.nan)
+    s1_w = np.full(len(close_w), np.nan)
+    r2_w = np.full(len(close_w), np.nan)
+    s2_w = np.full(len(close_w), np.nan)
+    r3_w = np.full(len(close_w), np.nan)
+    s3_w = np.full(len(close_w), np.nan)
     
-    for i in range(len(close_1d)):
-        if np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(close_1d[i]):
+    for i in range(len(close_w)):
+        if np.isnan(high_w[i]) or np.isnan(low_w[i]) or np.isnan(close_w[i]):
             continue
-        range_val = high_1d[i] - low_1d[i]
-        camarilla_h3[i] = close_1d[i] + range_val * 1.1 / 6
-        camarilla_l3[i] = close_1d[i] - range_val * 1.1 / 6
-        camarilla_h4[i] = close_1d[i] + range_val * 1.1 / 4
-        camarilla_l4[i] = close_1d[i] - range_val * 1.1 / 4
+        pivot_w[i] = (high_w[i] + low_w[i] + close_w[i]) / 3.0
+        r1_w[i] = 2.0 * pivot_w[i] - low_w[i]
+        s1_w[i] = 2.0 * pivot_w[i] - high_w[i]
+        r2_w[i] = pivot_w[i] + (high_w[i] - low_w[i])
+        s2_w[i] = pivot_w[i] - (high_w[i] - low_w[i])
+        r3_w[i] = high_w[i] + 2.0 * (pivot_w[i] - low_w[i])
+        s3_w[i] = low_w[i] - 2.0 * (high_w[i] - pivot_w[i])
     
-    # Align to 12h timeframe
-    h3_12h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_12h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    h4_12h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_12h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # Align weekly pivot levels to 6h timeframe
+    pivot_6h = align_htf_to_ltf(prices, df_1w, pivot_w)
+    r1_6h = align_htf_to_ltf(prices, df_1w, r1_w)
+    s1_6h = align_htf_to_ltf(prices, df_1w, s1_w)
+    r2_6h = align_htf_to_ltf(prices, df_1w, r2_w)
+    s2_6h = align_htf_to_ltf(prices, df_1w, s2_w)
+    r3_6h = align_htf_to_ltf(prices, df_1w, r3_w)
+    s3_6h = align_htf_to_ltf(prices, df_1w, s3_w)
     
-    # === 12H MOMENTUM (Price > Open) ===
-    open_12h = df_1d['open'].values  # Use daily open as proxy for 12h session open
-    open_12h_aligned = align_htf_to_ltf(prices, df_1d, open_12h)
-    bullish_momentum = close > open_12h_aligned
-    bearish_momentum = close < open_12h_aligned
-    
-    # === VOLUME SURGE ===
+    # === VOLUME SURGE FILTER ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma
+    vol_ratio = np.divide(volume, vol_ma, out=np.zeros_like(volume), where=vol_ma!=0)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(h3_12h[i]) or np.isnan(l3_12h[i]) or 
-            np.isnan(vol_ratio[i]) or np.isnan(open_12h_aligned[i])):
+        if (np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or 
+            np.isnan(r2_6h[i]) or np.isnan(s2_6h[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: price touches L3 with bullish momentum and volume surge
-        long_signal = (bullish_momentum[i] and 
-                      close[i] <= l3_12h[i] * 1.005 and  # Slight tolerance for wicks
-                      close[i] >= l4_12h[i] * 0.995 and  # Above L4
-                      vol_ratio[i] > 1.8)
+        # Calculate weekly range width for regime filter
+        week_range = r2_6h[i] - s2_6h[i]
+        if week_range <= 0:
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+            continue
         
-        # Short: price touches H3 with bearish momentum and volume surge
-        short_signal = (bearish_momentum[i] and 
-                       close[i] >= h3_12h[i] * 0.995 and  # Slight tolerance for wicks
-                       close[i] <= h4_12h[i] * 1.005 and  # Below H4
-                       vol_ratio[i] > 1.8)
+        # Breakout conditions
+        # Long breakout: price breaks above R1 or R2 with volume surge
+        long_breakout_r1 = close[i] > r1_6h[i] and vol_ratio[i] > 1.8
+        long_breakout_r2 = close[i] > r2_6h[i] and vol_ratio[i] > 1.5
+        long_breakout = long_breakout_r1 or long_breakout_r2
         
-        # Exit: momentum reversal or touch of opposite level
+        # Short breakdown: price breaks below S1 or S2 with volume surge
+        short_breakdown_s1 = close[i] < s1_6h[i] and vol_ratio[i] > 1.8
+        short_breakdown_s2 = close[i] < s2_6h[i] and vol_ratio[i] > 1.5
+        short_breakdown = short_breakdown_s1 or short_breakdown_s2
+        
+        # Exit conditions: return to pivot or opposite level
         exit_long = (position == 1 and 
-                    (not bullish_momentum[i] or close[i] >= h3_12h[i]))
+                    (close[i] < pivot_6h[i] or close[i] > r2_6h[i]))
         exit_short = (position == -1 and 
-                     (not bearish_momentum[i] or close[i] <= l3_12h[i]))
+                     (close[i] > pivot_6h[i] or close[i] < s2_6h[i]))
         
         # Execute trades
-        if long_signal and position != 1:
+        if long_breakout and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_signal and position != -1:
+        elif short_breakdown and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
