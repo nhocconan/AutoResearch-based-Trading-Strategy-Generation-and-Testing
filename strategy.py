@@ -1,9 +1,10 @@
+# %%
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v38"
+name = "4h_12h_camarilla_breakout_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -16,6 +17,16 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    
+    # Get 12h data for trend direction
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
+    
+    # 12h EMA50 trend
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     # Get 1d data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
@@ -37,35 +48,21 @@ def generate_signals(prices):
     h4_aligned = align_htf_to_ltf(prices, df_1d, h4_prev)
     l4_aligned = align_htf_to_ltf(prices, df_1d, l4_prev)
     
-    # Volatility filter: ATR ratio (ATR(10)/ATR(30)) < 0.7 = low volatility regime
-    high_low = high - low
-    high_close = np.abs(high - np.roll(close, 1))
-    low_close = np.abs(low - np.roll(close, 1))
-    tr1 = high_low
-    tr2 = high_close
-    tr3 = low_close
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    atr10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
-    atr30 = pd.Series(tr).rolling(window=30, min_periods=30).mean().values
-    atr_ratio = atr10 / atr30
-    low_vol = atr_ratio < 0.7
-    
-    # Volume confirmation: volume > 2.0x 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    vol_confirm = volume > (vol_ma * 2.0)
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0
     
     for i in range(200, n):
         if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(low_vol[i]) or np.isnan(vol_confirm[i])):
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_confirm[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        long_signal = close[i] > h4_aligned[i] and low_vol[i] and vol_confirm[i]
-        short_signal = close[i] < l4_aligned[i] and low_vol[i] and vol_confirm[i]
+        long_signal = close[i] > h4_aligned[i] and ema50_12h_aligned[i] > close[i] * 0.98 and vol_confirm[i]
+        short_signal = close[i] < l4_aligned[i] and ema50_12h_aligned[i] < close[i] * 1.02 and vol_confirm[i]
         
         pivot_prev_val = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
         pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_prev_val)
