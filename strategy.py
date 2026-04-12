@@ -5,30 +5,29 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout + 12h ADX regime filter + volume confirmation
-    # In bull regime (12h ADX>25 + price>EMA50): long on upper Donchian breakout
-    # In bear regime (12h ADX>25 + price<EMA50): short on lower Donchian breakout
-    # In range regime (12h ADX<20): fade at Donchian bands with volume confirmation
-    # Uses discrete sizing 0.25 to minimize fee churn. Target: 20-40 trades/year.
+    # Hypothesis: 12h Donchian(20) breakout + 1d ADX regime filter + volume confirmation
+    # In strong trend (1d ADX>25): trade breakouts in direction of 1d EMA50
+    # In ranging market (1d ADX<20): fade at Donchian bands with volume confirmation
+    # Uses discrete sizing 0.25 to minimize fee churn. Target: 12-37 trades/year.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for regime filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 12h ADX(14)
+    # Calculate 1d ADX(14)
     def calculate_adx(high, low, close, period=14):
         n = len(high)
         tr = np.zeros(n)
@@ -64,14 +63,14 @@ def generate_signals(prices):
         
         return adx
     
-    adx_12h = calculate_adx(high_12h, low_12h, close_12h, 14)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Calculate 12h EMA50
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Calculate 1d EMA50
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate 4h Donchian channels (20-period)
+    # Calculate 12h Donchian channels (20-period)
     lookback = 20
     upper = np.full(n, np.nan)
     lower = np.full(n, np.nan)
@@ -89,18 +88,18 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(adx_12h_aligned[i]) or np.isnan(ema50_12h_aligned[i]) or 
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
             np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Determine 12h regime
-        strong_trend = adx_12h_aligned[i] > 25
-        ranging = adx_12h_aligned[i] < 20
-        bullish_trend = strong_trend and (close[i] > ema50_12h_aligned[i])
-        bearish_trend = strong_trend and (close[i] < ema50_12h_aligned[i])
+        # Determine 1d regime
+        strong_trend = adx_1d_aligned[i] > 25
+        ranging = adx_1d_aligned[i] < 20
+        bullish_trend = strong_trend and (close[i] > ema50_1d_aligned[i])
+        bearish_trend = strong_trend and (close[i] < ema50_1d_aligned[i])
         
         # Entry logic
         long_entry = False
@@ -118,8 +117,8 @@ def generate_signals(prices):
             short_entry = (close[i] > upper[i]) and volume_spike[i]  # Overbought rejection
         
         # Exit logic: reverse signal or volatility expansion
-        long_exit = (bearish_trend and close[i] < lower[i]) or (adx_12h_aligned[i] < 15)
-        short_exit = (bullish_trend and close[i] > upper[i]) or (adx_12h_aligned[i] < 15)
+        long_exit = (bearish_trend and close[i] < lower[i]) or (adx_1d_aligned[i] < 15)
+        short_exit = (bullish_trend and close[i] > upper[i]) or (adx_1d_aligned[i] < 15)
         
         if long_entry and position != 1:
             position = 1
@@ -144,6 +143,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_donchian_adx_volume_v1"
-timeframe = "4h"
+name = "12h_1d_donchian_adx_volume_v1"
+timeframe = "12h"
 leverage = 1.0
