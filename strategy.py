@@ -1,136 +1,144 @@
 #!/usr/bin/env python3
 """
-6h_1d_Percentile_Band_MeanReversion
-Hypothesis: On 6h timeframe, mean-revert from extreme deviations of price from 1-day median price.
-Uses 1-day rolling median and 84th/16th percentiles (equivalent to ±1 sigma in normal dist) as bands.
-Enter long when price touches lower band with bullish divergence on RSI(6), short when price touches upper band with bearish RSI divergence.
-Works in both bull and bear markets by fading extremes while respecting the 1-day trend via price vs 200-period EMA filter.
-Designed for low trade frequency (~20-40/year) to minimize fee drag.
+4h_1d_2ndDeriv_RSI_Rebound_v1
+Hypothesis: On 4h timeframe, enter long when RSI(2) crosses above 30 from below with a positive second derivative (momentum building) and price above 200 EMA for trend filter, enter short when RSI(2) crosses below 70 from above with negative second derivative and price below 200 EMA. Uses daily volatility regime filter (low volatility = mean reversion favorable) to avoid whipsaws in high volatility. Designed for fewer trades (<25/year) and works in both bull and bear markets by capturing short-term mean reversion within the trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Percentile_Band_MeanReversion"
-timeframe = "6h"
+name = "4h_1d_2ndDeriv_RSI_Rebound_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # === DAILY INDICATORS: Median and percentile bands ===
+    # === DAILY INDICATORS: Volatility regime filter ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 20-period rolling median of daily close
-    def rolling_median(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i >= window - 1:
-                result[i] = np.median(arr[i - window + 1:i + 1])
-        return result
+    # Calculate daily ATR(14) for volatility
+    tr = np.maximum(high_1d - low_1d, np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), np.abs(low_1d - np.roll(close_1d, 1))))
+    tr[0] = high_1d[0] - low_1d[0]
     
-    median_20 = rolling_median(close_1d, 20)
+    atr14 = np.full_like(tr, np.nan)
+    if len(tr) >= 14:
+        atr14[13] = np.mean(tr[0:14])
+        for i in range(14, len(tr)):
+            atr14[i] = (atr14[i-1] * 13 + tr[i]) / 14
     
-    # Calculate 84th and 16th percentiles (~1 sigma) over 20 days
-    def rolling_percentile(arr, window, percentile):
-        result = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i >= window - 1:
-                result[i] = np.percentile(arr[i - window + 1:i + 1], percentile)
-        return result
+    # Calculate ATR ratio: current ATR / 50-period SMA of ATR (volatility regime)
+    atr_ma50 = np.full_like(atr14, np.nan)
+    if len(atr14) >= 50:
+        valid_atr = atr14[~np.isnan(atr14)]
+        if len(valid_atr) >= 50:
+            for i in range(49, len(valid_atr)):
+                idx = np.where(~np.isnan(atr14))[0][i]
+                atr_ma50[idx] = np.mean(valid_atr[i-49:i+1])
     
-    upper_band = rolling_percentile(close_1d, 20, 84)
-    lower_band = rolling_percentile(close_1d, 20, 16)
+    vol_ratio = np.full_like(atr14, np.nan)
+    mask = (~np.isnan(atr14)) & (~np.isnan(atr_ma50)) & (atr_ma50 > 0)
+    vol_ratio[mask] = atr14[mask] / atr_ma50[mask]
     
-    # Align to 6h timeframe
-    median_aligned = align_htf_to_ltf(prices, df_1d, median_20)
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
+    # Low volatility regime (mean reversion favorable): vol_ratio < 0.8
+    vol_regime = np.full_like(atr14, np.nan)
+    vol_regime[~np.isnan(vol_ratio)] = vol_ratio[~np.isnan(vol_ratio)] < 0.8
     
-    # === 6H INDICATORS: RSI(6) for divergence ===
-    def rsi(arr, period):
-        delta = np.diff(arr, prepend=arr[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.zeros_like(arr)
-        avg_loss = np.zeros_like(arr)
-        
-        if len(arr) >= period:
-            avg_gain[period-1] = np.mean(gain[:period])
-            avg_loss[period-1] = np.mean(loss[:period])
-            for i in range(period, len(arr)):
-                avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-                avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        
-        rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
-        rsi_val = 100 - (100 / (1 + rs))
-        return rsi_val
+    vol_regime_aligned = align_htf_to_ltf(prices, df_1d, vol_regime)
     
-    rsi_6 = rsi(close, 6)
+    # === 4H INDICATORS: RSI(2) with second derivative ===
+    # Calculate RSI(2)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # === 1D EMA200 FOR TREND FILTER ===
-    ema_200 = np.zeros_like(close_1d)
-    if len(close_1d) >= 200:
-        ema_200[199] = np.mean(close_1d[:200])
-        for i in range(200, len(close_1d)):
-            ema_200[i] = (close_1d[i] * 2 + ema_200[i-1] * 198) / 200
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
+    avg_gain = np.full_like(gain, np.nan)
+    avg_loss = np.full_like(loss, np.nan)
+    
+    if len(gain) >= 2:
+        avg_gain[1] = np.mean(gain[0:2])
+        avg_loss[1] = np.mean(loss[0:2])
+        for i in range(2, len(gain)):
+            avg_gain[i] = (avg_gain[i-1] * 1 + gain[i]) / 2
+            avg_loss[i] = (avg_loss[i-1] * 1 + loss[i]) / 2
+    
+    rs = np.full_like(avg_gain, np.nan)
+    mask = avg_loss > 0
+    rs[mask] = avg_gain[mask] / avg_loss[mask]
+    
+    rsi = np.full_like(rs, 100.0)
+    rsi[mask] = 100 - (100 / (1 + rs[mask]))
+    rsi[~mask & (avg_gain == 0)] = 0.0
+    
+    # Calculate first derivative (rate of change)
+    rsi_diff = np.diff(rsi, prepend=rsi[0])
+    
+    # Calculate second derivative (acceleration)
+    rsi_diff2 = np.diff(rsi_diff, prepend=rsi_diff[0])
+    
+    # EMA(200) for trend filter
+    ema200 = np.full_like(close, np.nan)
+    if len(close) >= 200:
+        ema200[199] = np.mean(close[0:200])
+        for i in range(200, len(close)):
+            ema200[i] = (close[i] * 2 + ema200[i-1] * 198) / 200
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):
+    for i in range(50, n):  # start after warmup
         # Skip if indicators not available
-        if (np.isnan(median_aligned[i]) or np.isnan(upper_aligned[i]) or 
-            np.isnan(lower_aligned[i]) or np.isnan(rsi_6[i]) or 
-            np.isnan(ema_200_aligned[i])):
+        if (np.isnan(rsi[i]) or np.isnan(rsi_diff2[i]) or 
+            np.isnan(ema200[i]) or np.isnan(vol_regime_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Mean reversion signals with trend filter
-        near_lower = close[i] <= lower_aligned[i] * 1.001  # slight buffer
-        near_upper = close[i] >= upper_aligned[i] * 0.999
+        # Long conditions: RSI(2) crosses above 30 from below + positive second derivative + price above EMA200 + low vol regime
+        rsi_cross_up = (rsi[i] > 30) and (rsi[i-1] <= 30)
+        rsi_momentum_up = rsi_diff2[i] > 0
+        price_above_ema = close[i] > ema200[i]
+        low_vol = vol_regime_aligned[i]
         
-        # RSI divergence: bullish when RSI rising from oversold, bearish when falling from overbought
-        rsi_rising = rsi_6[i] > rsi_6[i-1]
-        rsi_falling = rsi_6[i] < rsi_6[i-1]
+        # Short conditions: RSI(2) crosses below 70 from above + negative second derivative + price below EMA200 + low vol regime
+        rsi_cross_down = (rsi[i] < 70) and (rsi[i-1] >= 70)
+        rsi_momentum_down = rsi_diff2[i] < 0
+        price_below_ema = close[i] < ema200[i]
         
-        # Trend filter: only long above EMA200, only short below EMA200
-        trend_filter_long = close[i] > ema_200_aligned[i]
-        trend_filter_short = close[i] < ema_200_aligned[i]
+        long_entry = rsi_cross_up and rsi_momentum_up and price_above_ema and low_vol
+        short_entry = rsi_cross_down and rsi_momentum_down and price_below_ema and low_vol
         
-        long_signal = near_lower and rsi_rising and trend_filter_long
-        short_signal = near_upper and rsi_falling and trend_filter_short
+        # Exit conditions: RSI returns to neutral zone (40-60) or volatility regime changes
+        long_exit = (rsi[i] >= 60) or (not vol_regime_aligned[i])
+        short_exit = (rsi[i] <= 40) or (not vol_regime_aligned[i])
         
-        # Exit when price returns to median or RSI reaches opposite extreme
-        exit_long = close[i] >= median_aligned[i] or rsi_6[i] >= 60
-        exit_short = close[i] <= median_aligned[i] or rsi_6[i] <= 40
-        
-        if long_signal and position != 1:
+        if long_entry and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_signal and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
-        elif exit_long and position == 1:
+        elif long_exit and position == 1:
             position = 0
             signals[i] = 0.0
-        elif exit_short and position == -1:
+        elif short_exit and position == -1:
             position = 0
             signals[i] = 0.0
         else:
+            # Hold current position
             signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
