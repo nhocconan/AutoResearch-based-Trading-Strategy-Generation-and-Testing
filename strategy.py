@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_camarilla_breakout_v31
-# Camarilla pivot levels from 1-day chart with volume confirmation and chop regime filter.
-# Works in bull markets by capturing breakouts above H4 resistance, and in bear markets
-# by shorting breakdowns below L4 support. Uses volume spike to confirm institutional
-# participation and chop filter to avoid false signals in ranging markets.
-# Target: 20-40 trades/year per symbol for low friction.
-name = "4h_1d_camarilla_breakout_v31"
-timeframe = "4h"
+# Hypothesis: 12h_1d_camarilla_breakout_v1
+# Uses Camarilla pivot levels from daily chart to trade breakouts on 12h timeframe.
+# Long when price breaks above H4 resistance with volume confirmation.
+# Short when price breaks below L4 support with volume confirmation.
+# Includes chop regime filter (Choppiness Index < 61.8) to avoid false signals in ranging markets.
+# Designed to work in both bull and bear markets by capturing institutional breakouts.
+# Target: 15-30 trades/year per symbol for low friction and high win rate.
+name = "12h_1d_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,7 +39,7 @@ def generate_signals(prices):
     camarilla_h4 = close_prev + range_prev * 1.1 / 2
     camarilla_l4 = close_prev - range_prev * 1.1 / 2
     
-    # Align to 4h timeframe (already delayed by 1 day due to shift)
+    # Align to 12h timeframe (already delayed by 1 day due to shift)
     h4_level = align_htf_to_ltf(prices, df_1d, camarilla_h4)
     l4_level = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
@@ -47,7 +48,7 @@ def generate_signals(prices):
     vol_confirm = volume > (vol_ma * 1.5)
     
     # Chop regime filter: avoid choppy markets (CHOP > 61.8)
-    # Calculate CHOP using 14-period ATR and highest/lowest
+    # Calculate Choppiness Index
     atr_period = 14
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
