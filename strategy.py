@@ -1,115 +1,109 @@
 #!/usr/bin/env python3
 """
-1h_4d_Trend_Momentum_v1
-Hypothesis: Use 4h trend (price above/below 4h EMA50) and 1h momentum (RSI(14) > 60 for long, < 40 for short) with volume confirmation (volume > 1.5x 20-period average). Enter on momentum pullbacks in trending direction. Exit on opposite momentum extreme. Designed for 15-30 trades/year on 1h timeframe by requiring trend alignment and momentum extremes. Works in bull via long bias in uptrend, works in bear via short capability in downtrend.
+6h_1w_1d_TwoStageTrend_v1
+Hypothesis: Weekly trend (price > weekly SMA50) filters direction; 6h Donchian(20) breakouts enter only when aligned with weekly trend. Daily ATR(14) filters for sufficient volatility. Designed for low trade frequency (15-30/year) by requiring strong breakouts in the direction of the higher timeframe trend. Works in bull/bear via weekly trend filter and volatility-adjusted position sizing.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4d_Trend_Momentum_v1"
-timeframe = "1h"
+name = "6h_1w_1d_TwoStageTrend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # === 4H EMA(50) FOR TREND FILTER ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # === WEEKLY TREND FILTER ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    if len(close_4h) >= 50:
-        ema_50_4h = np.zeros_like(close_4h)
-        ema_50_4h[0] = close_4h[0]
-        alpha = 2.0 / (50 + 1)
-        for i in range(1, len(close_4h)):
-            ema_50_4h[i] = alpha * close_4h[i] + (1 - alpha) * ema_50_4h[i-1]
-    else:
-        ema_50_4h = np.full_like(close_4h, np.nan)
+    close_1w = df_1w['close'].values
+    # Weekly SMA50 for trend
+    sma_50_1w = np.full_like(close_1w, np.nan)
+    if len(close_1w) >= 50:
+        for i in range(50, len(close_1w)):
+            sma_50_1w[i] = np.mean(close_1w[i-50:i])
     
-    # Align 4h EMA to 1h timeframe
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Align weekly trend to 6h
+    weekly_uptrend = align_htf_to_ltf(prices, df_1w, close_1w > sma_50_1w)
     
-    # === 1H RSI(14) FOR MOMENTUM ===
-    if len(close) >= 14:
-        delta = np.diff(close, prepend=close[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.zeros_like(close)
-        avg_loss = np.zeros_like(close)
-        avg_gain[0] = gain[0]
-        avg_loss[0] = loss[0]
-        
-        for i in range(1, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-        
-        rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-        rsi = 100 - (100 / (1 + rs))
-    else:
-        rsi = np.full_like(close, 50.0)
+    # === DAILY VOLATILITY FILTER ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
     
-    # === VOLUME AVERAGE (20-period) ===
-    vol_avg = np.zeros(n)
-    vol_sum = 0.0
-    vol_count = 0
-    for i in range(n):
-        vol_sum += volume[i]
-        vol_count += 1
-        if i >= 20:
-            vol_sum -= volume[i-20]
-            vol_count -= 1
-        if vol_count > 0:
-            vol_avg[i] = vol_sum / vol_count
-        else:
-            vol_avg[i] = 0.0
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Daily ATR(14) for volatility filter
+    tr_1d = np.maximum(
+        high_1d[1:] - low_1d[1:],
+        np.maximum(
+            np.abs(high_1d[1:] - close_1d[:-1]),
+            np.abs(low_1d[1:] - close_1d[:-1])
+        )
+    )
+    tr_1d = np.concatenate([[np.nan], tr_1d])  # align with index 0
+    
+    atr_14_1d = np.full_like(tr_1d, np.nan)
+    if len(tr_1d) >= 15:  # need 14 + 1 for calculation
+        for i in range(14, len(tr_1d)):
+            atr_14_1d[i] = np.nanmean(tr_1d[i-13:i+1])  # Wilder's smoothing: simple average of last 14 TR
+    
+    # Align daily ATR to 6h
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    
+    # === 6H DONCHIAN BREAKOUT ===
+    # Donchian(20) on 6h
+    highest_20 = np.full_like(high, np.nan)
+    lowest_20 = np.full_like(low, np.nan)
+    
+    if len(high) >= 20:
+        for i in range(20, len(high)):
+            highest_20[i] = np.max(high[i-20:i])
+            lowest_20[i] = np.min(low[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # start after warmup
+    for i in range(100, n):  # start after warmup
         # Skip if indicators not available
-        if (np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(rsi[i]) or vol_avg[i] == 0.0):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+        if (np.isnan(weekly_uptrend[i]) or np.isnan(atr_14_1d_aligned[i]) or 
+            np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or atr_14_1d_aligned[i] <= 0):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter: price above/below 4h EMA50
-        price_above_ema = close[i] > ema_50_4h_aligned[i]
-        price_below_ema = close[i] < ema_50_4h_aligned[i]
+        # Volatility filter: ATR > 0.5% of price (ensures sufficient movement)
+        vol_filter = atr_14_1d_aligned[i] > 0.005 * close[i]
         
-        # Momentum conditions
-        rsi_overbought = rsi[i] > 60
-        rsi_oversold = rsi[i] < 40
+        # Donchian breakout conditions
+        breakout_up = close[i] > highest_20[i]
+        breakout_down = close[i] < lowest_20[i]
         
-        # Volume confirmation: at least 1.5x average
-        vol_confirm = volume[i] > 1.5 * vol_avg[i]
+        # Entry conditions: breakout in direction of weekly trend with volatility
+        long_entry = breakout_up and weekly_uptrend[i] and vol_filter
+        short_entry = breakout_down and (not weekly_uptrend[i]) and vol_filter
         
-        # Entry conditions: momentum pullback in trend direction
-        long_setup = price_above_ema and rsi_oversold and vol_confirm
-        short_setup = price_below_ema and rsi_overbought and vol_confirm
+        # Exit conditions: opposite Donchian breakout (trailing stop via structure)
+        exit_long = breakout_down
+        exit_short = breakout_up
         
-        # Exit conditions: opposite momentum extreme
-        exit_long = rsi[i] > 70  # overbought exit for long
-        exit_short = rsi[i] < 30  # oversold exit for short
-        
-        if long_setup and position != 1:
+        if long_entry and position != 1:
             position = 1
-            signals[i] = 0.20
-        elif short_setup and position != -1:
+            signals[i] = 0.25
+        elif short_entry and position != -1:
             position = -1
-            signals[i] = -0.20
+            signals[i] = -0.25
         elif exit_long and position == 1:
             position = 0
             signals[i] = 0.0
@@ -118,6 +112,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
