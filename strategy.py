@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 """
-4h_1d_Weekly_Pivot_Breakout_v1
-Hypothesis: Use weekly pivot levels with volume confirmation on 4h timeframe.
-Long when price breaks above weekly R4 with volume > 1.5x 20-period average,
-short when breaks below weekly S4 with volume > 1.5x 20-period average.
-Weekly pivots provide strong institutional levels; volume confirms breakout strength.
-Designed for low trade frequency (target: 50-150 total over 4 years) to minimize fee drag.
-Works in bull via breakouts above resistance, in bear via breakdowns below support.
+12h_1d_Pivot_Bounce_v1
+Hypothesis: Use daily pivot levels with volume confirmation on 12h timeframe.
+Long when price bounces off S1/S2 with volume > 1.3x average, short when rejected at R1/R2.
+Works in bull via bounces from support, in bear via rejections at resistance.
+Low trade frequency target: 50-150 total over 4 years to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Weekly_Pivot_Breakout_v1"
-timeframe = "4h"
+name = "12h_1d_Pivot_Bounce_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,33 +26,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Daily data for pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Previous week's OHLC for pivot calculation
-    prev_high = df_1w['high'].iloc[-2] if len(df_1w) >= 2 else df_1w['high'].iloc[-1]
-    prev_low = df_1w['low'].iloc[-2] if len(df_1w) >= 2 else df_1w['low'].iloc[-1]
-    prev_close = df_1w['close'].iloc[-2] if len(df_1w) >= 2 else df_1w['close'].iloc[-1]
+    # Previous day's OHLC for pivot calculation
+    prev_high = df_1d['high'].iloc[-2] if len(df_1d) >= 2 else df_1d['high'].iloc[-1]
+    prev_low = df_1d['low'].iloc[-2] if len(df_1d) >= 2 else df_1d['low'].iloc[-1]
+    prev_close = df_1d['close'].iloc[-2] if len(df_1d) >= 2 else df_1d['close'].iloc[-1]
     
-    # Calculate weekly pivot levels (standard floor trader pivots)
+    # Calculate daily pivot levels (standard floor trader pivots)
     pivot = (prev_high + prev_low + prev_close) / 3
     range_val = prev_high - prev_low
     if range_val <= 0:
         return np.zeros(n)
     
-    # Weekly R4 and S4 levels
-    weekly_r4 = prev_close + range_val * 1.1 * 2  # R4 = Close + 2.2 * Range
-    weekly_s4 = prev_close - range_val * 1.1 * 2  # S4 = Close - 2.2 * Range
+    # Daily pivot levels
+    r1 = pivot + range_val
+    s1 = pivot - range_val
+    r2 = pivot + 2 * range_val
+    s2 = pivot - 2 * range_val
     
-    # Align weekly levels to 4h timeframe
-    weekly_r4_array = np.full(len(df_1w), weekly_r4)
-    weekly_s4_array = np.full(len(df_1w), weekly_s4)
-    weekly_r4_aligned = align_htf_to_ltf(prices, df_1w, weekly_r4_array)
-    weekly_s4_aligned = align_htf_to_ltf(prices, df_1w, weekly_s4_array)
+    # Align daily pivot levels to 12h timeframe
+    r1_array = np.full(len(df_1d), r1)
+    r2_array = np.full(len(df_1d), r2)
+    s1_array = np.full(len(df_1d), s1)
+    s2_array = np.full(len(df_1d), s2)
+    pivot_array = np.full(len(df_1d), pivot)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_array)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_array)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_array)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_array)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_array)
+    
+    # Volume confirmation: current volume > 1.3x 20-period average
     volume_series = pd.Series(volume)
     vol_ma = volume_series.rolling(window=20, min_periods=20).mean()
     vol_ratio = volume_series / vol_ma
@@ -65,27 +72,27 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any data invalid
-        if (np.isnan(weekly_r4_aligned[i]) or np.isnan(weekly_s4_aligned[i]) or
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or
+            np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or
+            np.isnan(pivot_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Breakout conditions with volume filter
-        long_breakout = close[i] > weekly_r4_aligned[i] and vol_ratio[i] > 1.5
-        short_breakout = close[i] < weekly_s4_aligned[i] and vol_ratio[i] > 1.5
+        # Bounce conditions with volume filter
+        long_bounce = ((low[i] <= s1_aligned[i] and close[i] > s1_aligned[i]) or
+                       (low[i] <= s2_aligned[i] and close[i] > s2_aligned[i])) and vol_ratio[i] > 1.3
+        short_reject = ((high[i] >= r1_aligned[i] and close[i] < r1_aligned[i]) or
+                        (high[i] >= r2_aligned[i] and close[i] < r2_aligned[i])) and vol_ratio[i] > 1.3
         
-        # Exit conditions: return to weekly pivot
-        weekly_pivot_array = np.full(len(df_1w), pivot)
-        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot_array)
-        
-        long_exit = close[i] < weekly_pivot_aligned[i]
-        short_exit = close[i] > weekly_pivot_aligned[i]
+        # Exit conditions: price crosses pivot
+        long_exit = close[i] < pivot_aligned[i]
+        short_exit = close[i] > pivot_aligned[i]
         
         # Signal logic
-        if long_breakout and position != 1:
+        if long_bounce and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_breakout and position != -1:
+        elif short_reject and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
