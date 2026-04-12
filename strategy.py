@@ -13,79 +13,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for 34-period EMA trend filter (weekly trend)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
-    
-    # Calculate weekly 34-period EMA
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    
-    # Get daily data for Donchian(20) channels (structure)
+    # Get daily data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate daily Donchian channels
+    # Calculate Camarilla pivot levels from previous day
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    donch_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donch_high_20_aligned = align_htf_to_ltf(prices, df_1d, donch_high_20)
-    donch_low_20_aligned = align_htf_to_ltf(prices, df_1d, donch_low_20)
+    close_1d = df_1d['close'].values
     
-    # Calculate 12-period ATR for volatility filter
+    # Calculate pivot and levels
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    
+    # Camarilla levels (S3, S4 for support; R3, R4 for resistance)
+    # S3 = close - (high - low) * 1.1/2
+    # S4 = close - (high - low) * 1.1
+    # R3 = close + (high - low) * 1.1/2
+    # R4 = close + (high - low) * 1.1
+    s3 = close_1d - range_1d * 1.1 / 2
+    s4 = close_1d - range_1d * 1.1
+    r3 = close_1d + range_1d * 1.1 / 2
+    r4 = close_1d + range_1d * 1.1
+    
+    # Align to lower timeframe (4h)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    
+    # Calculate 15-period ATR for volatility filter
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr1[0] = tr2[0] = tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr12 = np.full(n, np.nan)
-    for i in range(11, n):
-        atr12[i] = np.nanmean(tr[i-11:i+1])
+    atr15 = np.full(n, np.nan)
+    for i in range(14, n):
+        atr15[i] = np.nanmean(tr[i-14:i+1])
     
-    # Calculate 24-period ATR EMA for volatility regime
-    atr_ema24 = np.full(n, np.nan)
-    atr_series = pd.Series(atr12)
-    atr_ema24_values = atr_series.ewm(span=24, adjust=False, min_periods=24).mean().values
-    atr_ema24[:] = atr_ema24_values
+    # Calculate 30-period ATR EMA for volatility regime
+    atr_ema30 = np.full(n, np.nan)
+    atr_series = pd.Series(atr15)
+    atr_ema30_values = atr_series.ewm(span=30, adjust=False, min_periods=30).mean().values
+    atr_ema30[:] = atr_ema30_values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(donch_high_20_aligned[i]) or 
-            np.isnan(donch_low_20_aligned[i]) or np.isnan(atr12[i]) or np.isnan(atr_ema24[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(atr15[i]) or 
+            np.isnan(atr_ema30[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: current ATR12 > 1.1x 24-period ATR EMA (elevated volatility)
-        vol_filter = atr12[i] > atr_ema24[i] * 1.1
+        # Volatility filter: current ATR15 > 1.2x 30-period ATR EMA (elevated volatility)
+        vol_filter = atr15[i] > atr_ema30[i] * 1.2
         
-        # Trend filter: price above/below weekly 34 EMA
-        price_above_ema34 = close[i] > ema34_1w_aligned[i]
-        price_below_ema34 = close[i] < ema34_1w_aligned[i]
+        # Entry conditions: 
+        # Long when price touches S3/S4 with volume confirmation
+        # Short when price touches R3/R4 with volume confirmation
+        long_entry = ((close[i] <= s3_aligned[i] * 1.002) or (close[i] <= s4_aligned[i] * 1.002)) and vol_filter
+        short_entry = ((close[i] >= r3_aligned[i] * 0.998) or (close[i] >= r4_aligned[i] * 0.998)) and vol_filter
         
-        # Entry conditions: Donchian breakout in direction of trend with volatility expansion
-        long_breakout = close[i] > donch_high_20_aligned[i-1]  # break above previous Donchian high
-        short_breakout = close[i] < donch_low_20_aligned[i-1]  # break below previous Donchian low
-        
-        long_entry = long_breakout and price_above_ema34 and vol_filter
-        short_entry = short_breakout and price_below_ema34 and vol_filter
-        
-        # Exit conditions: reversal signal or volatility contraction
-        long_exit = (close[i] < ema34_1w_aligned[i]) or (atr12[i] < atr_ema24[i] * 0.9)
-        short_exit = (close[i] > ema34_1w_aligned[i]) or (atr12[i] < atr_ema24[i] * 0.9)
+        # Exit conditions: price returns to pivot or volatility drops
+        long_exit = (close[i] >= pivot_aligned[i] * 0.998) or (atr15[i] < atr_ema30[i] * 0.8)
+        short_exit = (close[i] <= pivot_aligned[i] * 1.002) or (atr15[i] < atr_ema30[i] * 0.8)
         
         if long_entry and position != 1:
             position = 1
-            signals[i] = 0.28
+            signals[i] = 0.25
         elif short_entry and position != -1:
             position = -1
-            signals[i] = -0.28
+            signals[i] = -0.25
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -95,14 +99,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.28
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.28
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_1w_1d_donchian_breakout_vol_filter_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_pivot_touch_vol_filter_v1"
+timeframe = "4h"
 leverage = 1.0
