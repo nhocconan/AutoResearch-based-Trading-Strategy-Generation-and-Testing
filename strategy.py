@@ -1,16 +1,38 @@
 #!/usr/bin/env python3
 """
-1d_1w_KAMA_Trend_RSI_Momentum_v1
-Hypothesis: On 1d timeframe, use Kaufman Adaptive Moving Average (KAMA) for trend direction and RSI for momentum confirmation. Enter long when KAMA turns up and RSI > 50, enter short when KAMA turns down and RSI < 50. Use 1w timeframe to filter trades: only take long when price > 1w KAMA, short when price < 1w KAMA. Designed for low trade frequency (<25/year) with trend-following logic that works in both bull and bear markets by adapting to volatility.
+1d_1w_KAMA_Trend_RSI_Momentum_v2
+Hypothesis: On daily timeframe, use KAMA for trend direction, RSI for momentum, and weekly trend filter for regime alignment.
+KAMA adapts to market noise, reducing false signals in choppy markets. RSI confirms momentum strength.
+Weekly trend filter ensures we only trade in the direction of the higher timeframe trend.
+This combination should work in both bull (KAMA up, RSI>50) and bear (KAMA down, RSI<50) markets.
+Target: 15-25 trades/year by requiring alignment of daily KAMA, RSI momentum, and weekly trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_KAMA_Trend_RSI_Momentum_v1"
+name = "1d_1w_KAMA_Trend_RSI_Momentum_v2"
 timeframe = "1d"
 leverage = 1.0
+
+def calculate_kama(close, er_period=10, fast_sc=2, slow_sc=30):
+    """Calculate Kaufman Adaptive Moving Average"""
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)
+    # Handle first element
+    volatility = np.concatenate([[np.sum(np.abs(np.diff(close[:2])))] if len(close) > 1 else [0], volatility[1:]])
+    
+    # Efficiency ratio
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constant
+    sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
+    # KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    return kama
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,77 +42,55 @@ def generate_signals(prices):
     # Price arrays
     close = prices['close'].values
     
-    # KAMA calculation function
-    def kama(close, er_len=10, fast=2, slow=30):
-        change = np.abs(np.diff(close, prepend=close[0]))
-        volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(change.shape) > 0 else np.sum(np.abs(np.diff(close)))
-        # For simplicity, we'll compute volatility as rolling sum of absolute changes
-        volatility = pd.Series(change).rolling(window=er_len, min_periods=1).sum().values
-        # Avoid division by zero
-        er = np.where(volatility != 0, np.abs(np.diff(close, prepend=close[0])) / volatility, 0)
-        # Handle first element
-        er[0] = 0
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        kama = np.zeros_like(close)
-        kama[0] = close[0]
-        for i in range(1, len(close)):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        return kama
+    # KAMA for trend (daily)
+    kama = calculate_kama(close, er_period=10, fast_sc=2, slow_sc=30)
     
-    # Calculate KAMA on 1d
-    kama_1d = kama(close, er_len=10, fast=2, slow=30)
+    # RSI for momentum (daily)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate KAMA on 1w for trend filter
+    # Load weekly data ONCE for trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 2:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
-    kama_1w = kama(close_1w, er_len=10, fast=2, slow=30)
-    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
     
-    # RSI calculation
-    def rsi(close, period=14):
-        delta = np.diff(close, prepend=close[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = pd.Series(gain).rolling(window=period, min_periods=period).mean().values
-        avg_loss = pd.Series(loss).rolling(window=period, min_periods=period).mean().values
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        # Handle first period values
-        rsi[:period] = 50
-        return rsi
-    
-    rsi_14 = rsi(close, period=14)
-    
-    # KAMA direction: 1 if rising, -1 if falling, 0 if flat
-    kama_dir = np.zeros_like(kama_1d)
-    kama_dir[1:] = np.where(kama_1d[1:] > kama_1d[:-1], 1, np.where(kama_1d[1:] < kama_1d[:-1], -1, 0))
+    # Weekly EMA for trend filter
+    weekly_close = df_1w['close'].values
+    ema_1w = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(30, n):  # Warmup for KAMA and RSI
         # Skip if any required data is invalid
-        if (np.isnan(kama_1d[i]) or np.isnan(kama_1w_aligned[i]) or 
-            np.isnan(rsi_14[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
+            np.isnan(ema_1w_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Entry conditions
-        kama_up = kama_dir[i] == 1
-        kama_down = kama_dir[i] == -1
-        rsi_bull = rsi_14[i] > 50
-        rsi_bear = rsi_14[i] < 50
-        price_above_1wkama = close[i] > kama_1w_aligned[i]
-        price_below_1wkama = close[i] < kama_1w_aligned[i]
+        # Daily conditions
+        price_above_kama = close[i] > kama[i]
+        price_below_kama = close[i] < kama[i]
+        rsi_bullish = rsi[i] > 50
+        rsi_bearish = rsi[i] < 50
         
-        long_entry = kama_up and rsi_bull and price_above_1wkama
-        short_entry = kama_down and rsi_bear and price_below_1wkama
+        # Weekly trend filter
+        weekly_uptrend = close[i] > ema_1w_aligned[i]
+        weekly_downtrend = close[i] < ema_1w_aligned[i]
         
-        # Exit conditions: opposite KAMA turn
-        long_exit = kama_down
-        short_exit = kama_up
+        # Entry conditions: KAMA + RSI + weekly trend alignment
+        long_entry = price_above_kama and rsi_bullish and weekly_uptrend
+        short_entry = price_below_kama and rsi_bearish and weekly_downtrend
+        
+        # Exit conditions: opposite signal
+        long_exit = price_below_kama or rsi_bearish
+        short_exit = price_above_kama or rsi_bullish
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
