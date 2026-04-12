@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Pivot_Breakout_Volume_Trend_v1
-Hypothesis: Uses 1-day Camarilla pivot levels (R4/S4) for breakout entries with volume confirmation and daily EMA trend filter.
-Trades on 12h timeframe with strict entry conditions to limit trades to 12-37/year. Designed to work in both bull and bear markets by trading breakouts in direction of daily trend.
+4h_1D_KAMA_RSI_CHOP_V1
+Hypothesis: Uses Kaufman's Adaptive Moving Average (KAMA) for trend direction, RSI for momentum filtering, and Choppiness Index as a regime filter to avoid whipsaws. Designed for low-frequency, high-probability entries in both bull and bear markets by requiring alignment of trend, momentum, and market regime. Targets 15-30 trades/year per symbol.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_Pivot_Breakout_Volume_Trend_v1"
-timeframe = "12h"
+name = "4h_1D_KAMA_RSI_CHOP_V1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -24,59 +23,80 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla pivots and trend
+    # Load 1d data ONCE before loop for Choppiness Index
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # KAMA (4h) - trend direction
+    close_s = pd.Series(close)
+    change = abs(close_s.diff(10))
+    volatility = close_s.diff().abs().rolling(10).sum()
+    er = change / volatility.replace(0, np.nan)
+    sc = (er * 0.59 + 0.01) ** 2
+    kama = [np.nan] * len(close)
+    kama[9] = close[9]
+    for i in range(10, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    kama = np.array(kama)
     
-    # Volume filter: 20-period average on 12h
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # RSI (4h) - momentum filter
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
     
-    # Calculate Camarilla levels from daily data
-    close_1d = df_1d['close'].values
+    # Choppiness Index (1d) - regime filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    atr_1d = np.maximum(high_1d - low_1d,
+                        np.maximum(abs(high_1d - np.roll(close_1d, 1)),
+                                   abs(low_1d - np.roll(close_1d, 1))))
+    atr_1d[0] = high_1d[0] - low_1d[0]
+    sum_atr14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum()
+    highest_high14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max()
+    lowest_low14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min()
+    chop = 100 * np.log10(sum_atr14 / (highest_high14 - lowest_low14)) / np.log10(14)
+    chop = chop.replace([np.inf, -np.inf], np.nan).fillna(50).values
     
-    # Camarilla levels: R4 = close + 1.5*(high-low), S4 = close - 1.5*(high-low)
-    camarilla_r4 = close_1d + 1.5 * (high_1d - low_1d)
-    camarilla_s4 = close_1d - 1.5 * (high_1d - low_1d)
-    
-    # Align Camarilla levels and EMA to 12h timeframe (wait for daily close)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align 1d Choppiness to 4h (wait for daily close)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
+            np.isnan(chop_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average (stricter)
-        volume_filter = volume[i] > 1.5 * vol_ma_20[i]
+        # Trend: price relative to KAMA
+        above_kama = close[i] > kama[i]
+        below_kama = close[i] < kama[i]
         
-        # Trend filter: price above/below 1d EMA50
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Momentum: RSI levels
+        rsi_overbought = rsi[i] > 60
+        rsi_oversold = rsi[i] < 40
         
-        # Breakout conditions using Camarilla levels (R4/S4)
-        breakout_up = close[i] > camarilla_r4_aligned[i]  # Break above R4
-        breakdown_down = close[i] < camarilla_s4_aligned[i]  # Break below S4
+        # Regime: Choppiness Index
+        # Chop > 61.8 = ranging (mean revert), Chop < 38.2 = trending (trend follow)
+        chopping = chop_aligned[i] > 61.8
+        trending = chop_aligned[i] < 38.2
         
-        # Entry conditions: only trade in direction of 1d trend
-        long_entry = breakout_up and volume_filter and uptrend
-        short_entry = breakdown_down and volume_filter and downtrend
+        # Entry conditions
+        long_entry = above_kama and rsi_oversold and chopping  # Buy dip in range
+        short_entry = below_kama and rsi_overbought and chopping  # Sell rally in range
         
-        # Exit conditions: return to opposite Camarilla level or trend reversal
-        long_exit = (close[i] < camarilla_s4_aligned[i]) or (not uptrend)  # Break below S4 or trend change
-        short_exit = (close[i] > camarilla_r4_aligned[i]) or (not downtrend)  # Break above R4 or trend change
+        # Exit conditions: reverse signal or regime change to trending
+        long_exit = (below_kama or rsi_overbought or trending)
+        short_exit = (above_kama or rsi_oversold or trending)
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
