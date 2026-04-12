@@ -1,10 +1,17 @@
+# 1h_4h_1d_cam_rsi_hybrid_v1
+# Hybrid: 4h trend (EMA21), 1d RSI for mean reversion in range, 1h Candlestick for entry timing
+# Target: 15-37 trades/year (60-150 total) with 0.20 position sizing
+# Rationale: Combines trend-following and mean-reversion to work in both bull/bear markets.
+# Uses 1d RSI <30/ >70 for reversals, 4h EMA21 for trend filter, 1h hammer/shooting star for entry.
+# Session filter 08-20 UTC to avoid low-liquidity hours.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_ichimoku_cloud_trend_v1"
-timeframe = "6h"
+name = "1h_4h_1d_cam_rsi_hybrid_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -15,87 +22,81 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    open_price = prices['open'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Ichimoku cloud and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:  # Need at least 52 periods for Ichimoku
+    # Get 4h data for EMA21 trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 21:
         return np.zeros(n)
+    close_4h = df_4h['close'].values
+    ema21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
     
-    # Ichimoku components on daily
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Get 1d data for RSI(14)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
     close_1d = df_1d['close'].values
+    # Calculate RSI
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_span_b = (period52_high + period52_low) / 2
-    
-    # Align Ichimoku components to 6h
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
-    
-    # Volume confirmation: volume > 1.3x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.3)
+    # Precompute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(52, n):  # Start after Ichimoku calculation period
-        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or
-            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or
-            np.isnan(vol_confirm[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+    for i in range(100, n):
+        if not in_session[i]:
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
-        # Determine cloud top and bottom
-        cloud_top = max(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        cloud_bottom = min(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        if np.isnan(ema21_4h_aligned[i]) or np.isnan(rsi_1d_aligned[i]):
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+            continue
         
-        # Bullish: price above cloud AND Tenkan > Kijun
-        bullish = (close[i] > cloud_top) and (tenkan_sen_aligned[i] > kijun_sen_aligned[i])
+        # Candlestick patterns for 1h entry
+        body = abs(close[i] - open_price[i])
+        lower_wick = min(open_price[i], close[i]) - low[i]
+        upper_wick = high[i] - max(open_price[i], close[i])
+        is_hammer = (lower_wick > 2 * body) and (upper_wick < 0.1 * body)
+        is_shooting_star = (upper_wick > 2 * body) and (lower_wick < 0.1 * body)
         
-        # Bearish: price below cloud AND Tenkan < Kijun
-        bearish = (close[i] < cloud_bottom) and (tenkan_sen_aligned[i] < kijun_sen_aligned[i])
+        # Long conditions: oversold RSI + hammer + above 4h EMA21
+        long_signal = (rsi_1d_aligned[i] < 30) and is_hammer and (close[i] > ema21_4h_aligned[i])
+        # Short conditions: overbought RSI + shooting star + below 4h EMA21
+        short_signal = (rsi_1d_aligned[i] > 70) and is_shooting_star and (close[i] < ema21_4h_aligned[i])
         
-        # Exit conditions: price crosses back into cloud or Tenkan/Kijun cross reverses
-        exit_bullish = close[i] < cloud_top or tenkan_sen_aligned[i] < kijun_sen_aligned[i]
-        exit_bearish = close[i] > cloud_bottom or tenkan_sen_aligned[i] > kijun_sen_aligned[i]
+        # Exit conditions: RSI reverts to 50 or opposite candle
+        exit_long = (rsi_1d_aligned[i] > 50) or is_shooting_star
+        exit_short = (rsi_1d_aligned[i] < 50) or is_hammer
         
-        if bullish and vol_confirm[i] and position != 1:
+        if long_signal and position != 1:
             position = 1
-            signals[i] = 0.25
-        elif bearish and vol_confirm[i] and position != -1:
+            signals[i] = 0.20
+        elif short_signal and position != -1:
             position = -1
-            signals[i] = -0.25
-        elif exit_bullish and position == 1:
+            signals[i] = -0.20
+        elif exit_long and position == 1:
             position = 0
             signals[i] = 0.0
-        elif exit_bearish and position == -1:
+        elif exit_short and position == -1:
             position = 0
             signals[i] = 0.0
         else:
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
