@@ -13,54 +13,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points (1d timeframe)
+    # Get weekly data for trend direction (1w timeframe)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Get daily data for Donchian channels (1d timeframe)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily pivot points using previous day's data
+    # Weekly EMA200 for trend filter
+    close_1w = df_1w['close'].values
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    
+    # Daily Donchian channels (20-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    
+    # Daily ATR for volatility filter (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = tr2[0] = tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = np.full(len(tr), np.nan)
+    for i in range(14, len(tr)):
+        atr_1d[i] = np.nanmean(tr[i-14:i+1])
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
-    
-    # Key levels: S1, R1 (Camarilla) - tighter range for fewer trades
-    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
-    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    
-    # Align levels to 1h timeframe
-    s1_1h = align_htf_to_ltf(prices, df_1d, s1)
-    r1_1h = align_htf_to_ltf(prices, df_1d, r1)
-    
-    # Volume filter: 20-period EMA
+    # Volume filter: 20-period EMA on 6h volume
     vol_ema = np.full(n, np.nan)
     vol_series = pd.Series(volume)
     vol_ema_values = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     vol_ema[:] = vol_ema_values
-    
-    # ATR for volatility filter
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = tr2[0] = tr3[0] = np.nan
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = np.full(n, np.nan)
-    for i in range(14, n):
-        atr[i] = np.nanmean(tr[i-14:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(s1_1h[i]) or np.isnan(r1_1h[i]) or 
-            np.isnan(vol_ema[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema200_1w_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
+            np.isnan(donch_low_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(vol_ema[i])):
             signals[i] = 0.0
             continue
         
@@ -70,25 +73,27 @@ def generate_signals(prices):
         # Volatility filter: ATR > 0.5 * 20-period ATR mean
         atr_ma = np.full(n, np.nan)
         if i >= 34:
-            atr_ma[i] = np.nanmean(atr[i-20:i])
-        vol_filter = atr[i] > atr_ma[i] * 0.5 if not np.isnan(atr_ma[i]) else True
+            atr_ma[i] = np.nanmean(atr_1d_aligned[i-20:i])
+        vol_filter = atr_1d_aligned[i] > atr_ma[i] * 0.5 if not np.isnan(atr_ma[i]) else True
         
-        # Entry conditions: Touch of S1/R1 with volume and volatility (mean reversion)
-        long_entry = (low[i] <= s1_1h[i]) and volume_filter and vol_filter
-        short_entry = (high[i] >= r1_1h[i]) and volume_filter and vol_filter
+        # Trend filter: price above/below weekly EMA200
+        uptrend = close[i] > ema200_1w_aligned[i]
+        downtrend = close[i] < ema200_1w_aligned[i]
         
-        # Exit conditions: Return to pivot
-        pivot = (prev_high + prev_low + prev_close) / 3
-        pivot_1h = align_htf_to_ltf(prices, df_1d, pivot)
-        long_exit = close[i] > pivot_1h[i] if not np.isnan(pivot_1h[i]) else False
-        short_exit = close[i] < pivot_1h[i] if not np.isnan(pivot_1h[i]) else False
+        # Breakout conditions: Donchian breakout with trend, volume, and volatility
+        long_breakout = (high[i] > donch_high_aligned[i]) and uptrend and volume_filter and vol_filter
+        short_breakout = (low[i] < donch_low_aligned[i]) and downtrend and volume_filter and vol_filter
         
-        if long_entry and position != 1:
+        # Exit conditions: Opposite Donchian band touch
+        long_exit = low[i] < donch_low_aligned[i]
+        short_exit = high[i] > donch_high_aligned[i]
+        
+        if long_breakout and position != 1:
             position = 1
-            signals[i] = 0.20
-        elif short_entry and position != -1:
+            signals[i] = 0.25
+        elif short_breakout and position != -1:
             position = -1
-            signals[i] = -0.20
+            signals[i] = -0.25
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -98,14 +103,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1h_1d_camarilla_s1r1_mean_reversion_vol_filter_v1"
-timeframe = "1h"
+name = "6h_1w_1d_donchian_breakout_trend_vol_filter_v1"
+timeframe = "6h"
 leverage = 1.0
