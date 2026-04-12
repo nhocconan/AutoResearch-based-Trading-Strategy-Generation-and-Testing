@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_trix_volume_chop_v1
-# TRIX (12) with volume confirmation and chop regime filter to capture momentum in trending markets.
-# TRIX > 0 indicates bullish momentum, TRIX < 0 bearish. Volume confirms institutional participation.
-# Chop filter avoids false signals in ranging markets. Works in bull by riding momentum, in bear by
-# catching momentum shifts during relief rallies or breakdowns. Target: 20-30 trades/year.
-name = "4h_1d_trix_volume_chop_v1"
-timeframe = "4h"
+# Hypothesis: 6h_1d_weekly_pivot_breakout_v1
+# Uses weekly pivot points (from 1d data aggregated to weekly) to identify key support/resistance.
+# In bull markets: buy breakouts above weekly R1 with volume confirmation.
+# In bear markets: sell breakdowns below weekly S1 with volume confirmation.
+# Uses 6h timeframe for entries, weekly pivot for direction, volume filter to avoid false breakouts.
+# Target: 20-35 trades/year per symbol (80-140 total over 4 years).
+name = "6h_1d_weekly_pivot_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,55 +23,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for TRIX calculation
+    # Get daily data to calculate weekly pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    # Calculate TRIX (12) on daily close
-    close_1d = df_1d['close'].values
-    # EMA1
-    ema1 = pd.Series(close_1d).ewm(span=12, adjust=False, min_periods=12).mean().values
-    # EMA2 of EMA1
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    # EMA3 of EMA2
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    # TRIX = (EMA3 - prev EMA3) / prev EMA3 * 100
-    trix_raw = np.zeros_like(close_1d)
-    trix_raw[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100
+    # Calculate weekly OHLC from daily data (simplified: use Friday's close as weekly close)
+    # For pivot calculation, we need weekly high, low, close
+    # Approximate weekly high as max of last 5 days, weekly low as min of last 5 days
+    # Weekly close as Friday's close (assuming 5-day week)
+    weekly_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().values
+    weekly_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().values
+    weekly_close = pd.Series(df_1d['close']).shift(4).values  # Friday's close (4 days ago from current day)
     
-    # Align TRIX to 4h timeframe
-    trix_1d_aligned = align_htf_to_ltf(prices, df_1d, trix_raw)
+    # Weekly pivot points
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
+    
+    # Align weekly pivots to 6h timeframe
+    r1_level = align_htf_to_ltf(prices, df_1d, weekly_r1)
+    s1_level = align_htf_to_ltf(prices, df_1d, weekly_s1)
+    pivot_level = align_htf_to_ltf(prices, df_1d, weekly_pivot)
     
     # Volume confirmation: volume > 1.3 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.3)
     
-    # Chop regime filter: avoid choppy markets (CHOP > 61.8)
-    atr_period = 14
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
-    
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10((highest_high - lowest_low) / (atr * np.sqrt(14))) / np.log10(14)
-    chop_filter = chop < 61.8  # trending market
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # start after warmup
-        # Skip if TRIX not ready
-        if np.isnan(trix_1d_aligned[i]):
+    for i in range(20, n):  # start after warmup
+        # Skip if levels not ready
+        if np.isnan(r1_level[i]) or np.isnan(s1_level[i]) or np.isnan(pivot_level[i]):
             signals[i] = 0.0
             continue
         
-        # Check volume and chop filters
-        if not (vol_confirm[i] and chop_filter[i]):
-            # Hold current position if filters fail
+        # Skip if volume confirmation fails
+        if not vol_confirm[i]:
+            # Hold current position if volume fails
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -79,19 +70,19 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: TRIX turns positive with volume
-        if trix_1d_aligned[i] > 0 and trix_1d_aligned[i-1] <= 0 and position != 1:
+        # Long signal: price breaks above weekly R1
+        if close[i] > r1_level[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: TRIX turns negative with volume
-        elif trix_1d_aligned[i] < 0 and trix_1d_aligned[i-1] >= 0 and position != -1:
+        # Short signal: price breaks below weekly S1
+        elif close[i] < s1_level[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: opposite TRIX crossover
-        elif trix_1d_aligned[i] < 0 and trix_1d_aligned[i-1] >= 0 and position == 1:
+        # Exit conditions: price returns to weekly pivot
+        elif position == 1 and close[i] < pivot_level[i]:
             position = 0
             signals[i] = 0.0
-        elif trix_1d_aligned[i] > 0 and trix_1d_aligned[i-1] <= 0 and position == -1:
+        elif position == -1 and close[i] > pivot_level[i]:
             position = 0
             signals[i] = 0.0
         else:
