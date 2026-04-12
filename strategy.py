@@ -1,10 +1,3 @@
-# 2025-06-08: 12h_1d_camarilla_breakout_adx_v1
-# Hypothesis: 12h Camarilla breakout with 1d volume spike and ADX trend filter
-# Works in bull/bear: breakouts capture trends, volume confirms institutional interest,
-# ADX filter avoids whipsaws in ranging markets. Target: 12-37 trades/year.
-# Timeframe: 12h (primary), 1d (HTF)
-# Expected trades: 50-150 total over 4 years.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
