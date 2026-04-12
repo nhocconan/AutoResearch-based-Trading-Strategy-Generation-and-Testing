@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h_1d_camarilla_breakout_v3
-# Uses daily Camarilla pivot levels (H4/L4) on 12h chart with volume confirmation.
-# Long when price breaks above H4 with volume > 1.3x 20-period average.
-# Short when price breaks below L4 with volume > 1.3x 20-period average.
-# Exits when price returns to daily pivot point (PP).
-# Designed for low trade frequency (target: 12-37/year) to minimize fee drag.
+# Hypothesis: 4h_1d_camarilla_breakout_v1
+# Uses daily Camarilla pivot levels (H4/L4) on 4h chart for breakout entries and mean-reversion exits.
+# Long when 4h close breaks above H4 with volume confirmation (volume > 1.5x 20-bar avg).
+# Short when 4h close breaks below L4 with volume confirmation.
+# Exit when price returns to daily pivot point (PP).
+# Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drag.
 # Works in trending markets via breakouts and in ranging markets via mean reversion to pivot.
-# Includes maximum position size of 0.30 to control drawdown.
 
-name = "12h_1d_camarilla_breakout_v3"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,13 +30,12 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate daily Camarilla levels
-    # Based on previous day's OHLC
+    # Calculate daily Camarilla levels based on previous day's OHLC
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot point and Camarilla levels for each day
+    # Calculate pivot point and Camarilla levels
     pp = (high_1d + low_1d + close_1d) / 3.0
     range_1d = high_1d - low_1d
     
@@ -45,14 +43,14 @@ def generate_signals(prices):
     h4 = pp + (1.1 / 2) * range_1d
     l4 = pp - (1.1 / 2) * range_1d
     
-    # Align daily levels to 12h timeframe (daily values update after daily bar closes)
+    # Align daily levels to 4h timeframe (daily values update after daily bar closes)
     h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
     l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
     
-    # Volume confirmation: volume > 1.3 * 20-period average (12h timeframe)
+    # Volume confirmation: volume > 1.5 * 20-period average (4h timeframe)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.3)
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -67,9 +65,9 @@ def generate_signals(prices):
         if not vol_confirm[i]:
             # Hold current position if volume filter fails
             if position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
             continue
@@ -77,11 +75,11 @@ def generate_signals(prices):
         # Long signal: price breaks above H4
         if close[i] > h4_aligned[i] and position != 1:
             position = 1
-            signals[i] = 0.30
+            signals[i] = 0.25
         # Short signal: price breaks below L4
         elif close[i] < l4_aligned[i] and position != -1:
             position = -1
-            signals[i] = -0.30
+            signals[i] = -0.25
         # Exit conditions: price returns to daily pivot point (mean reversion)
         elif position == 1 and close[i] <= pp_aligned[i]:
             position = 0
@@ -92,9 +90,9 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
