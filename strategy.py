@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-6h_1d_Weekly_Pivot_Breakout_v1
-Hypothesis: Use weekly pivot levels with volume confirmation on 6h. 
-Long when price breaks above weekly R4 with volume > 1.5x 20-period average, 
-short when breaks below weekly S4 with volume > 1.5x 20-period average.
-Weekly pivots provide strong institutional levels; volume confirms breakout strength.
-Designed for low trade frequency (target: 50-150 total over 4 years) to minimize fee drag.
-Works in bull via breakouts above resistance, in bear via breakdowns below support.
+12h_1d_Camarilla_Pivot_Bounce_v1
+Hypothesis: Use daily Camarilla pivot levels with volume confirmation on 12h.
+Long when price bounces off daily S3/S4 with volume > 1.5x 20-period average,
+short when price reverses from daily R3/R4 with volume > 1.5x 20-period average.
+Camarilla levels provide strong intraday support/resistance; volume confirms
+the bounce/reversal strength. Designed for low trade frequency (target: 50-150 total over 4 years)
+to minimize fee drift. Works in bull via bounces from support, in bear via reversals from resistance.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Weekly_Pivot_Breakout_v1"
-timeframe = "6h"
+name = "12h_1d_Camarilla_Pivot_Bounce_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,31 +28,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Daily data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Previous week's OHLC for pivot calculation
-    prev_high = df_1w['high'].iloc[-2] if len(df_1w) >= 2 else df_1w['high'].iloc[-1]
-    prev_low = df_1w['low'].iloc[-2] if len(df_1w) >= 2 else df_1w['low'].iloc[-1]
-    prev_close = df_1w['close'].iloc[-2] if len(df_1w) >= 2 else df_1w['close'].iloc[-1]
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = df_1d['high'].iloc[-2] if len(df_1d) >= 2 else df_1d['high'].iloc[-1]
+    prev_low = df_1d['low'].iloc[-2] if len(df_1d) >= 2 else df_1d['low'].iloc[-1]
+    prev_close = df_1d['close'].iloc[-2] if len(df_1d) >= 2 else df_1d['close'].iloc[-1]
     
-    # Calculate weekly pivot levels (standard floor trader pivots)
-    pivot = (prev_high + prev_low + prev_close) / 3
+    # Calculate daily Camarilla pivot levels
     range_val = prev_high - prev_low
     if range_val <= 0:
         return np.zeros(n)
     
-    # Weekly R4 and S4 levels
-    weekly_r4 = prev_close + range_val * 1.1 * 2  # R4 = Close + 2.2 * Range
-    weekly_s4 = prev_close - range_val * 1.1 * 2  # S4 = Close - 2.2 * Range
+    # Camarilla levels: H5/L5, H4/L4, H3/L3, H1/L1
+    # H4 = Close + Range * 1.1/2, L4 = Close - Range * 1.1/2
+    # H3 = Close + Range * 1.1/4, L3 = Close - Range * 1.1/4
+    camarilla_h4 = prev_close + range_val * 1.1 / 2
+    camarilla_l4 = prev_close - range_val * 1.1 / 2
+    camarilla_h3 = prev_close + range_val * 1.1 / 4
+    camarilla_l3 = prev_close - range_val * 1.1 / 4
     
-    # Align weekly levels to 6h timeframe
-    weekly_r4_array = np.full(len(df_1w), weekly_r4)
-    weekly_s4_array = np.full(len(df_1w), weekly_s4)
-    weekly_r4_aligned = align_htf_to_ltf(prices, df_1w, weekly_r4_array)
-    weekly_s4_aligned = align_htf_to_ltf(prices, df_1w, weekly_s4_array)
+    # Align daily Camarilla levels to 12h timeframe
+    camarilla_h4_array = np.full(len(df_1d), camarilla_h4)
+    camarilla_l4_array = np.full(len(df_1d), camarilla_l4)
+    camarilla_h3_array = np.full(len(df_1d), camarilla_h3)
+    camarilla_l3_array = np.full(len(df_1d), camarilla_l3)
+    
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4_array)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4_array)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3_array)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3_array)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     volume_series = pd.Series(volume)
@@ -65,27 +73,26 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any data invalid
-        if (np.isnan(weekly_r4_aligned[i]) or np.isnan(weekly_s4_aligned[i]) or
+        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or
+            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
             np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Breakout conditions with volume filter
-        long_breakout = close[i] > weekly_r4_aligned[i] and vol_ratio[i] > 1.5
-        short_breakout = close[i] < weekly_s4_aligned[i] and vol_ratio[i] > 1.5
+        # Bounce/reversal conditions with volume filter
+        long_bounce = (low[i] <= camarilla_l3_aligned[i] or low[i] <= camarilla_l4_aligned[i]) and vol_ratio[i] > 1.5
+        short_reversal = (high[i] >= camarilla_h3_aligned[i] or high[i] >= camarilla_h4_aligned[i]) and vol_ratio[i] > 1.5
         
-        # Exit conditions: return to weekly pivot
-        weekly_pivot_array = np.full(len(df_1w), pivot)
-        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot_array)
-        
-        long_exit = close[i] < weekly_pivot_aligned[i]
-        short_exit = close[i] > weekly_pivot_aligned[i]
+        # Exit conditions: price moves back toward the pivot (midpoint between H3 and L3)
+        camarilla_pivot = (camarilla_h3_aligned[i] + camarilla_l3_aligned[i]) / 2
+        long_exit = close[i] >= camarilla_pivot
+        short_exit = close[i] <= camarilla_pivot
         
         # Signal logic
-        if long_breakout and position != 1:
+        if long_bounce and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_breakout and position != -1:
+        elif short_reversal and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
