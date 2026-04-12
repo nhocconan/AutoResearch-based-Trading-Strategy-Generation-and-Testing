@@ -3,22 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h_1d_camarilla_breakout_v1
-# Uses daily Camarilla pivot levels (H4/L4) as key support/resistance on 12h chart.
-# Long when price breaks above H4 with volume confirmation (volume > 1.5x 30-period avg).
+# Hypothesis: 4h_1d_camarilla_breakout_v1
+# Uses daily Camarilla pivot levels (H4/L4) on 4h chart.
+# Long when price breaks above H4 with volume confirmation (volume > 1.5x 20-period avg).
 # Short when price breaks below L4 with volume confirmation.
 # Exits when price returns to daily pivot point (PP).
-# Designed for low trade frequency (target: 15-30 trades/year) to minimize fee drag.
+# Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drag.
 # Works in trending markets via breakouts and in ranging markets via mean reversion to pivot.
-# Uses 12h timeframe to reduce noise and transaction costs.
 
-name = "12h_1d_camarilla_breakout_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -45,19 +44,19 @@ def generate_signals(prices):
     h4 = pp + (1.1 / 2) * range_1d
     l4 = pp - (1.1 / 2) * range_1d
     
-    # Align daily levels to 12h timeframe (daily values update after daily bar closes)
+    # Align daily levels to 4h timeframe (daily values update after daily bar closes)
     h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
     l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
     
-    # Volume confirmation: volume > 1.5 * 30-period average (12h timeframe)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume confirmation: volume > 1.5 * 20-period average (4h timeframe)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # start after warmup
+    for i in range(30, n):  # start after warmup
         # Skip if data not ready
         if np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(pp_aligned[i]):
             signals[i] = 0.0
