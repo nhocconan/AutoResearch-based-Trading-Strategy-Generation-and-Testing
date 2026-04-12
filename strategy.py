@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h_1w_fractal_breakout_v1
-# William's fractals on weekly chart to identify key reversal points.
-# Breakouts above weekly bearish fractal (resistance) or below weekly bullish fractal (support)
-# with volume confirmation. Works in both bull and bear markets by trading breakouts
-# from significant weekly levels. Target: 15-30 trades/year per symbol.
-name = "6h_1w_fractal_breakout_v1"
-timeframe = "6h"
+# Hypothesis: 12h_1d_camarilla_breakout_v1
+# Uses 12h price action with 1-day Camarilla levels, volume confirmation, and chop regime filter.
+# Designed to capture institutional breakouts in trending markets while avoiding false signals in chop.
+# Target: 12-30 trades/year per symbol for low friction and high edge.
+name = "12h_1d_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,54 +21,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for fractal calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    # Get 1d data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Williams fractals (5-bar pattern)
-    high_vals = df_1w['high'].values
-    low_vals = df_1w['low'].values
+    # Calculate Camarilla levels from previous day
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
     
-    bearish_fractal = np.full(len(high_vals), np.nan)
-    bullish_fractal = np.full(len(low_vals), np.nan)
+    # Camarilla formulas
+    range_prev = high_prev - low_prev
+    camarilla_h4 = close_prev + range_prev * 1.1 / 2
+    camarilla_l4 = close_prev - range_prev * 1.1 / 2
     
-    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n-3] < high[n-2] and high[n+1] < high[n]
-    for i in range(2, len(high_vals) - 2):
-        if (high_vals[i-2] < high_vals[i-1] and 
-            high_vals[i] < high_vals[i-1] and
-            high_vals[i-3] < high_vals[i-1] and
-            high_vals[i+1] < high_vals[i-1]):
-            bearish_fractal[i-1] = high_vals[i-1]
+    # Align to 12h timeframe
+    h4_level = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_level = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
-    # Bullish fractal: low[n-2] > low[n-1] < low[n] and low[n-3] > low[n-2] and low[n+1] > low[n]
-    for i in range(2, len(low_vals) - 2):
-        if (low_vals[i-2] > low_vals[i-1] and 
-            low_vals[i] > low_vals[i-1] and
-            low_vals[i-3] > low_vals[i-1] and
-            low_vals[i+1] > low_vals[i-1]):
-            bullish_fractal[i-1] = low_vals[i-1]
+    # Volume confirmation: volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma * 1.5)
     
-    # Align fractals to 6h timeframe with 2-bar delay for confirmation
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bullish_fractal, additional_delay_bars=2)
+    # Chop regime filter: avoid choppy markets (CHOP > 61.8)
+    # Calculate CHOP using 14-period ATR and highest/lowest
+    atr_period = 14
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
     
-    # Volume confirmation: volume > 1.3 * 50-period average
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    vol_confirm = volume > (vol_ma * 1.3)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10((highest_high - lowest_low) / (atr * np.sqrt(14))) / np.log10(14)
+    chop_filter = chop < 61.8  # trending market
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # start after warmup
-        # Skip if fractal levels not ready
-        if np.isnan(bearish_fractal_aligned[i]) and np.isnan(bullish_fractal_aligned[i]):
+    for i in range(20, n):  # start after warmup
+        # Skip if levels not ready
+        if np.isnan(h4_level[i]) or np.isnan(l4_level[i]):
             signals[i] = 0.0
             continue
         
-        # Check volume filter
-        if not vol_confirm[i]:
-            # Hold current position if volume filter fails
+        # Check volume and chop filters
+        if not (vol_confirm[i] and chop_filter[i]):
+            # Hold current position if filters fail
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -78,19 +78,19 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above weekly bearish fractal (resistance)
-        if not np.isnan(bearish_fractal_aligned[i]) and close[i] > bearish_fractal_aligned[i] and position != 1:
+        # Long signal: price breaks above H4 with volume
+        if close[i] > h4_level[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below weekly bullish fractal (support)
-        elif not np.isnan(bullish_fractal_aligned[i]) and close[i] < bullish_fractal_aligned[i] and position != -1:
+        # Short signal: price breaks below L4 with volume
+        elif close[i] < l4_level[i] and position != -1:
             position = -1
             signals[i] = -0.25
         # Exit conditions: opposite breakout
-        elif not np.isnan(bullish_fractal_aligned[i]) and close[i] > bullish_fractal_aligned[i] and position == 1:
+        elif close[i] < l4_level[i] and position == 1:
             position = 0
             signals[i] = 0.0
-        elif not np.isnan(bearish_fractal_aligned[i]) and close[i] < bearish_fractal_aligned[i] and position == -1:
+        elif close[i] > h4_level[i] and position == -1:
             position = 0
             signals[i] = 0.0
         else:
