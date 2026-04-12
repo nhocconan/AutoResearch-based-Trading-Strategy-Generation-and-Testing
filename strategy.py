@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d_1w_weekly_vwap_breakout
-# Uses weekly VWAP as dynamic support/resistance. Long when price closes above weekly VWAP with volume > 2x average.
-# Short when price closes below weekly VWAP with volume > 2x average.
-# Exits when price crosses back across weekly VWAP.
-# Weekly VWAP adapts to market conditions, providing dynamic levels that work in both trending and ranging markets.
-# Volume filter ensures only significant breaks are traded, reducing false signals and trade frequency.
-# Target: 10-20 trades/year to minimize fee drag.
+# Hypothesis: 4h_1d_camarilla_breakout_v1
+# Uses daily Camarilla pivot levels (H4/L4) as key support/resistance on 4h chart.
+# Long when price breaks above H4 with volume confirmation (volume > 1.5x 30-period avg).
+# Short when price breaks below L4 with volume confirmation.
+# Exits when price returns to daily pivot point (PP).
+# Designed for low trade frequency (target: 20-40 trades/year) to minimize fee drag.
+# Works in trending markets via breakouts and in ranging markets via mean reversion to pivot.
 
-name = "1d_1w_weekly_vwap_breakout"
-timeframe = "1d"
+name = "4h_1d_camarilla_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,31 +25,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for VWAP calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get daily data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly VWAP
-    # VWAP = sum(price * volume) / sum(volume) for the week
-    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3.0
-    pv = typical_price * df_1w['volume']
-    vwap = pv.cumsum() / df_1w['volume'].cumsum()
-    vwap_values = vwap.values
+    # Calculate daily Camarilla levels
+    # Based on previous day's OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align weekly VWAP to daily timeframe
-    vwap_aligned = align_htf_to_ltf(prices, df_1w, vwap_values)
+    # Calculate pivot point and Camarilla levels for each day
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
     
-    # Volume confirmation: volume > 2 * 20-period average (daily timeframe)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 2.0)
+    # Camarilla levels: H4 = PP + 1.1/2 * range, L4 = PP - 1.1/2 * range
+    h4 = pp + (1.1 / 2) * range_1d
+    l4 = pp - (1.1 / 2) * range_1d
+    
+    # Align daily levels to 4h timeframe (daily values update after daily bar closes)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    
+    # Volume confirmation: volume > 1.5 * 30-period average (4h timeframe)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):  # start after warmup
         # Skip if data not ready
-        if np.isnan(vwap_aligned[i]):
+        if np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(pp_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -64,19 +73,19 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price closes above weekly VWAP
-        if close[i] > vwap_aligned[i] and position != 1:
+        # Long signal: price breaks above H4
+        if close[i] > h4_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price closes below weekly VWAP
-        elif close[i] < vwap_aligned[i] and position != -1:
+        # Short signal: price breaks below L4
+        elif close[i] < l4_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: price crosses back across weekly VWAP
-        elif position == 1 and close[i] <= vwap_aligned[i]:
+        # Exit conditions: price returns to daily pivot point (mean reversion)
+        elif position == 1 and close[i] <= pp_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] >= vwap_aligned[i]:
+        elif position == -1 and close[i] >= pp_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
