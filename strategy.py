@@ -1,13 +1,17 @@
-# 12h_1d_camarilla_breakout_v2
-# Uses daily high/low to calculate daily Camarilla levels for the next day.
-# Buys when price breaks above daily H4 with volume confirmation.
-# Shorts when price breaks below daily L4 with volume confirmation.
-# Uses ADX > 20 to filter for strong trends, avoiding false signals in weak trends or ranges.
-# Designed for low trade frequency (target: 12-37 trades/year) to minimize fee drag.
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 4h_1d_camarilla_breakout_v1 - Daily Camarilla levels with volume and ADX filter
+# Uses previous day's high/low to calculate Camarilla H3/L3 levels.
+# Long when price breaks above H3 with volume confirmation and ADX > 25.
+# Short when price breaks below L3 with volume confirmation and ADX > 25.
+# Designed for low trade frequency (target: 19-50 trades/year) to minimize fee drag.
 # Works in bull markets (breakouts continuation) and bear markets (breakdowns continuation).
 
-name = "12h_1d_camarilla_breakout_v2"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,18 +36,18 @@ def generate_signals(prices):
     
     # Camarilla formulas
     range_prev = high_prev - low_prev
-    camarilla_h4 = close_prev + range_prev * 1.1 / 2  # H4 level
-    camarilla_l4 = close_prev - range_prev * 1.1 / 2  # L4 level
+    camarilla_h3 = close_prev + range_prev * 1.1 / 4
+    camarilla_l3 = close_prev - range_prev * 1.1 / 4
     
-    # Align to 12h timeframe (daily levels update only after daily bar closes)
-    h4_level = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_level = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # Align to 4h timeframe (daily levels update only after daily bar closes)
+    h3_level = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_level = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Volume confirmation: volume > 2.0 * 20-period average (12h timeframe)
+    # Volume confirmation: volume > 2.0 * 20-period average (4h timeframe)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 2.0)
     
-    # ADX trend filter: only trade when ADX > 20 (strong trend)
+    # ADX trend filter: only trade when ADX > 25 (strong trend)
     # Calculate True Range
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
@@ -75,14 +79,14 @@ def generate_signals(prices):
     minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
     dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
     adx = wilders_smooth(dx, 14)
-    adx_filter = adx > 20  # strong trend only
+    adx_filter = adx > 25  # strong trend only
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):  # start after warmup
         # Skip if levels not ready
-        if np.isnan(h4_level[i]) or np.isnan(l4_level[i]) or np.isnan(adx_filter[i]):
+        if np.isnan(h3_level[i]) or np.isnan(l3_level[i]) or np.isnan(adx_filter[i]):
             signals[i] = 0.0
             continue
         
@@ -97,19 +101,19 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above daily H4 with volume
-        if close[i] > h4_level[i] and position != 1:
+        # Long signal: price breaks above daily H3 with volume
+        if close[i] > h3_level[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below daily L4 with volume
-        elif close[i] < l4_level[i] and position != -1:
+        # Short signal: price breaks below daily L3 with volume
+        elif close[i] < l3_level[i] and position != -1:
             position = -1
             signals[i] = -0.25
         # Exit conditions: opposite breakout
-        elif close[i] < l4_level[i] and position == 1:
+        elif close[i] < l3_level[i] and position == 1:
             position = 0
             signals[i] = 0.0
-        elif close[i] > h4_level[i] and position == -1:
+        elif close[i] > h3_level[i] and position == -1:
             position = 0
             signals[i] = 0.0
         else:
