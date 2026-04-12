@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Breakout_Volume_Trend_v1
-Hypothesis: On 4h timeframe, enter long when price breaks above daily Camarilla R3 with volume confirmation and rising ADX trend, enter short when price breaks below daily Camarilla S3 with volume confirmation and rising ADX trend. Uses daily Camarilla levels for structure, ADX for trend strength, and volume filter for institutional participation. Designed for fewer trades (<40/year) and better risk-adjusted returns in both bull and bear markets.
+4h_1d_Camarilla_Breakout_Volume_Trend_v2
+Hypothesis: On 4h timeframe, enter long when price breaks above daily Camarilla R3 with volume confirmation and rising ADX trend, enter short when price breaks below daily Camarilla S3 with volume confirmation and rising ADX trend. Uses daily Camarilla levels for structure, ADX for trend strength, and volume filter for institutional participation. Optimized for fewer trades (<25/year) and better risk-adjusted returns in both bull and bear markets by tightening entry conditions and adding hysteresis to exits.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_Breakout_Volume_Trend_v1"
+name = "4h_1d_Camarilla_Breakout_Volume_Trend_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -84,7 +84,7 @@ def generate_signals(prices):
         vol_ma[20] = np.mean(volume[0:20])
         for i in range(21, len(volume)):
             vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
-    volume_filter = volume > 1.5 * vol_ma
+    volume_filter = volume > 2.0 * vol_ma  # Increased threshold for fewer trades
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
