@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v37"
+name = "4h_1d_camarilla_breakout_v38"
 timeframe = "4h"
 leverage = 1.0
 
@@ -27,7 +27,7 @@ def generate_signals(prices):
     low_1d_prev = df_1d['low'].shift(1).values
     close_1d_prev = df_1d['close'].shift(1).values
     
-    # Calculate 1d Camarilla H3/L3 levels (tighter than H4/L4 for fewer trades)
+    # Calculate 1d Camarilla H3/L3 levels
     pivot_prev = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
     range_1d_prev = high_1d_prev - low_1d_prev
     h3_prev = pivot_prev + (range_1d_prev * 1.1 / 4)
