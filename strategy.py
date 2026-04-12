@@ -1,74 +1,111 @@
 #!/usr/bin/env python3
 """
-4h_1d_donchian_breakout_volume
-Uses Donchian channel breakout on 4h with 1d volume confirmation.
-Long when price breaks above 20-period upper band and 1d volume > 1.5x average.
-Short when price breaks below 20-period lower band and 1d volume > 1.5x average.
-Exit when price returns to the middle of the Donchian channel.
-Designed for low trade frequency (target: 20-40 trades/year) to minimize fee drag.
-Works in trending markets by capturing breakouts and avoiding whipsaws via volume filter.
+12h_1d_kama_rsi_chop
+Uses KAMA direction on 12h with RSI and chop regime filter.
+- KAMA: Adaptive trend detection (ER=10)
+- RSI(14): Overbought/Oversold signals
+- Chop: Choppiness Index (14) to detect ranging vs trending
+Logic:
+  Long: KAMA rising + RSI < 30 (oversold) + Chop > 61.8 (ranging)
+  Short: KAMA falling + RSI > 70 (overbought) + Chop > 61.8 (ranging)
+Exit: Opposite signal or Chop < 38.2 (trending)
+Designed for low trade frequency (<30/year) to minimize fee drag.
+Works in both bull/bear by fading extremes in ranging markets.
 """
 
-name = "4h_1d_donchian_breakout_volume"
-timeframe = "4h"
+name = "12h_1d_kama_rsi_chop"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def kama(close, er_length=10, fast=2, slow=30):
+    """Kaufman Adaptive Moving Average"""
+    change = np.abs(np.diff(close, n=er_length))
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    return kama
+
+def rsi(close, length=14):
+    """Relative Strength Index"""
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=length, min_periods=length).mean().values
+    avg_loss = pd.Series(loss).rolling(window=length, min_periods=length).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    # Pad beginning with NaN
+    rsi = np.concatenate([np.full(length, np.nan), rsi])
+    return rsi
+
+def choppiness_index(high, low, close, length=14):
+    """Choppiness Index: 0 = trending, 100 = ranging"""
+    atr = []
+    for i in range(len(high)):
+        tr = max(
+            high[i] - low[i],
+            np.abs(high[i] - close[i-1]) if i > 0 else 0,
+            np.abs(low[i] - close[i-1]) if i > 0 else 0
+        )
+        atr.append(tr)
+    atr = np.array(atr)
+    sum_atr = pd.Series(atr).rolling(window=length, min_periods=length).sum().values
+    hh = pd.Series(high).rolling(window=length, min_periods=length).max().values
+    ll = pd.Series(low).rolling(window=length, min_periods=length).min().values
+    chop = 100 * np.log10(sum_atr / (hh - ll)) / np.log10(length)
+    # Handle division by zero
+    chop = np.where((hh - ll) == 0, 50, chop)
+    return chop
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Donchian channel on 4h: 20-period high/low
-    lookback = 20
-    highest = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    middle = (highest + lowest) / 2
+    # KAMA on 12h
+    kama_val = kama(close, er_length=10, fast=2, slow=30)
+    kama_dir = np.diff(kama_val, prepend=kama_val[0])  # 1 if rising, -1 if falling
     
-    # Get daily volume for confirmation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
+    # RSI on 12h
+    rsi_val = rsi(close, length=14)
     
-    volume_1d = df_1d['volume'].values
-    # Daily volume moving average: 20-period
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    # Align to 4h timeframe
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Chop on 12h
+    chop_val = choppiness_index(high, low, close, length=14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(lookback, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(highest[i]) or np.isnan(lowest[i]) or 
-            np.isnan(middle[i]) or np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(kama_val[i]) or np.isnan(rsi_val[i]) or np.isnan(chop_val[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: price breaks above upper band with high volume
-        if (close[i] > highest[i] and volume[i] > vol_ma_1d_aligned[i] * 1.5 and 
-            position != 1):
+        # Long: KAMA rising + RSI oversold + Chop > 61.8 (ranging)
+        if (kama_dir[i] > 0 and rsi_val[i] < 30 and chop_val[i] > 61.8 and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: price breaks below lower band with high volume
-        elif (close[i] < lowest[i] and volume[i] > vol_ma_1d_aligned[i] * 1.5 and 
-              position != -1):
+        # Short: KAMA falling + RSI overbought + Chop > 61.8 (ranging)
+        elif (kama_dir[i] < 0 and rsi_val[i] > 70 and chop_val[i] > 61.8 and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: price returns to middle of channel
-        elif position == 1 and close[i] < middle[i]:
+        # Exit: Opposite signal or Chop < 38.2 (trending)
+        elif position == 1 and (kama_dir[i] < 0 or rsi_val[i] > 70 or chop_val[i] < 38.2):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > middle[i]:
+        elif position == -1 and (kama_dir[i] > 0 or rsi_val[i] < 30 or chop_val[i] < 38.2):
             position = 0
             signals[i] = 0.0
         else:
