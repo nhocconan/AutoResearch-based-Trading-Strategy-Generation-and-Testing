@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Breakout_Volume_v1
+4h_1d_Camarilla_Breakout_Volume_v2
 Hypothesis: Daily Camarilla pivot levels (R4/S4) with volume confirmation and 
-12h ATR volatility filter. Long when price breaks above R4 with volume spike and 
-ATR < median ATR (low volatility environment). Short when price breaks below S4 
-with volume spike and ATR < median ATR. Uses 1d Camarilla for structure, volume 
-confirmation for conviction, and ATR filter to avoid whipsaws in high volatility.
-Works in bull via breakout continuation, in bear via breakdown continuation. 
-Targets 50-150 total trades over 4 years to minimize fee drag.
+4h ATR volatility filter. Long when price breaks above R4 with volume spike and 
+ATR < median ATR (low volatility). Short when price breaks below S4 with volume 
+spike and ATR < median ATR. Uses 1d Camarilla for structure, volume confirmation 
+for conviction, and ATR filter to avoid whipsaws. Targets 50-150 total trades 
+over 4 years to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_Breakout_Volume_v1"
-timeframe = "12h"
+name = "4h_1d_Camarilla_Breakout_Volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -51,7 +50,7 @@ def generate_signals(prices):
     camarilla_r4_array = np.full(len(df_1d), camarilla_r4)
     camarilla_s4_array = np.full(len(df_1d), camarilla_s4)
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4_array)
     camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4_array)
     
