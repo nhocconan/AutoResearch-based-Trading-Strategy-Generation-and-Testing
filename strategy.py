@@ -8,10 +8,9 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Elder Ray (Bull/Bear Power) + 1d regime filter
-    # Bull Power = High - EMA13(close), Bear Power = EMA13(close) - Low
-    # Regime: ADX(14) > 25 = trending (follow Elder Ray signals), ADX < 20 = ranging (fade extremes)
-    # Volume > 1.3x 20-period MA confirms momentum
+    # Hypothesis: 12h Donchian(20) breakout with 1d trend filter and volume confirmation
+    # Donchian breakout captures momentum, 1d EMA(50) filters trend direction,
+    # Volume > 1.8x 20-period MA confirms breakout strength.
     # Discrete position sizing (0.25) to minimize fee churn. Target: 12-37 trades/year.
     
     close = prices['close'].values
@@ -19,114 +18,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Elder Ray and regime
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d EMA(13) for Elder Ray
+    # Calculate 1d EMA(50) for trend filter
     close_1d_series = pd.Series(close_1d)
-    ema_13_1d = close_1d_series.ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Elder Ray: Bull Power and Bear Power
-    bull_power = high_1d - ema_13_1d  # High - EMA13
-    bear_power = ema_13_1d - low_1d   # EMA13 - Low
+    # Donchian channels (20-period) on 12h
+    highest_20 = np.full(n, np.nan)
+    lowest_20 = np.full(n, np.nan)
     
-    # Align to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    for i in range(20, n):
+        highest_20[i] = np.max(high[i-20:i])
+        lowest_20[i] = np.min(low[i-20:i])
     
-    # Calculate 1d ADX(14) for regime filter
-    # ADX components: +DM, -DM, TR
-    plus_dm = np.zeros(len(high_1d))
-    minus_dm = np.zeros(len(high_1d))
-    tr = np.zeros(len(high_1d))
+    # Volume confirmation: current volume > 1.8x 20-period average
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma_20[i] = np.mean(volume[i-20:i])
     
-    for i in range(1, len(high_1d)):
-        plus_dm[i] = max(0, high_1d[i] - high_1d[i-1])
-        minus_dm[i] = max(0, low_1d[i-1] - low_1d[i])
-        tr[i] = max(high_1d[i] - low_1d[i], 
-                   abs(high_1d[i] - close_1d[i-1]), 
-                   abs(low_1d[i] - close_1d[i-1]))
-    
-    # Smooth with Wilder's smoothing (alpha = 1/period)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(data[1:period])
-        # Wilder's smoothing: result[i] = (result[i-1] * (period-1) + data[i]) / period
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    atr_1d = wilders_smoothing(tr, 14)
-    plus_di_1d = 100 * wilders_smoothing(plus_dm, 14) / atr_1d
-    minus_di_1d = 100 * wilders_smoothing(minus_dm, 14) / atr_1d
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    adx_1d = wilders_smoothing(dx_1d, 14)
-    
-    # Align ADX to 6h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Volume confirmation: 1d volume > 1.3x 20-period MA
-    vol_ma_20_1d = np.full(len(volume_1d), np.nan)
-    for i in range(20, len(volume_1d)):
-        vol_ma_20_1d[i] = np.mean(volume_1d[i-20:i])
-    
-    vol_ratio_1d = np.full(len(volume_1d), np.nan)
-    for i in range(20, len(volume_1d)):
-        if vol_ma_20_1d[i] > 0:
-            vol_ratio_1d[i] = volume_1d[i] / vol_ma_20_1d[i]
+    vol_ratio = np.full(n, np.nan)
+    for i in range(20, n):
+        if vol_ma_20[i] > 0:
+            vol_ratio[i] = volume[i] / vol_ma_20[i]
         else:
-            vol_ratio_1d[i] = 1.0
-    
-    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+            vol_ratio[i] = 1.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ratio_1d_aligned[i])):
+        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Regime determination
-        trending = adx_1d_aligned[i] > 25
-        ranging = adx_1d_aligned[i] < 20
+        # Determine trend from 1d EMA(50)
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Volume confirmation
-        vol_confirmed = vol_ratio_1d_aligned[i] > 1.3
+        # Donchian breakout conditions
+        long_breakout = close[i] > highest_20[i]
+        short_breakout = close[i] < lowest_20[i]
         
-        # Elder Ray signals
-        strong_bull = bull_power_aligned[i] > 0 and bull_power_aligned[i] > bear_power_aligned[i]
-        strong_bear = bear_power_aligned[i] > 0 and bear_power_aligned[i] > bull_power_aligned[i]
+        # Entry conditions with volume confirmation and trend filter
+        long_entry = long_breakout and (vol_ratio[i] > 1.8) and uptrend
+        short_entry = short_breakout and (vol_ratio[i] > 1.8) and downtrend
         
-        # Entry logic: regime-dependent
-        if trending and vol_confirmed:
-            # Trending market: follow Elder Ray
-            long_entry = strong_bull
-            short_entry = strong_bear
-        elif ranging and vol_confirmed:
-            # Ranging market: fade extremes (contrarian)
-            long_entry = bear_power_aligned[i] > 0  # Oversold: bear power positive but weakening
-            short_entry = bull_power_aligned[i] > 0  # Overbought: bull power positive but weakening
-        else:
-            # Transition regime: no trades
-            long_entry = False
-            short_entry = False
-        
-        # Exit conditions: opposite signal or power divergence
-        long_exit = strong_bear or (position == 1 and bear_power_aligned[i] > bull_power_aligned[i])
-        short_exit = strong_bull or (position == -1 and bull_power_aligned[i] > bear_power_aligned[i])
+        # Exit conditions: opposite Donchian breakout
+        long_exit = short_breakout
+        short_exit = long_breakout
         
         if long_entry and position != 1:
             position = 1
@@ -151,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_elder_ray_regime_vol_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_breakout_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
