@@ -8,17 +8,17 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA200 trend filter and volume spike
+    # Hypothesis: 12h Camarilla breakout with 1d EMA200 trend filter and volume confirmation
     # Uses 1d Camarilla levels for structure, 1d EMA200 for trend, volume spike for confirmation
-    # Designed for low trade frequency (target: 20-50/year) to minimize fee drag
-    # Works in bull/bear via trend filter: long only in uptrend, short only in downtrend
+    # Designed for low trade frequency (target: 12-37/year) to minimize fee drag
+    # Works in bull/bear via trend filter + breakout structure
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot levels and EMA200 trend
+    # Get 1d data for Camarilla pivot levels and EMA200
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 200:
         return np.zeros(n)
@@ -27,7 +27,7 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Calculate 1d Camarilla pivot levels (H3/L3 for breakout entries)
+    # Calculate 1d Camarilla pivot levels (L3/H3 for entries)
     camarilla_h3_1d = np.full(len(df_1d), np.nan)
     camarilla_l3_1d = np.full(len(df_1d), np.nan)
     pivot_1d = np.full(len(df_1d), np.nan)
@@ -46,15 +46,15 @@ def generate_signals(prices):
     # Calculate 1d EMA200 for trend filter
     ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Align 1d indicators to 4h timeframe
+    # Align all 1d indicators to 12h timeframe
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3_1d)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3_1d)
-    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Volume confirmation: volume > 2.0 * 20-period average (4h) - stricter to reduce trades
+    # Volume confirmation: volume > 2.0 * 50-period average (12h)
     vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
+    for i in range(50, n):
+        vol_ma[i] = np.mean(volume[i-50:i])
     volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
@@ -62,14 +62,14 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema200_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
+        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
             np.isnan(camarilla_l3_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Determine 1d trend
-        bullish_trend = close[i] > ema200_aligned[i]
-        bearish_trend = close[i] < ema200_aligned[i]
+        bullish_trend = close[i] > ema200_1d_aligned[i]
+        bearish_trend = close[i] < ema200_1d_aligned[i]
         
         # Entry logic: Camarilla breakout with volume and trend filter
         long_entry = False
@@ -109,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_camarilla_h3l3_ema200_volume_v1"
-timeframe = "4h"
+name = "12h_1d_camarilla_ema200_volume_v1"
+timeframe = "12h"
 leverage = 1.0
