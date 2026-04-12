@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_volatility_breakout_v1"
+name = "4h_1d_camarilla_breakout_volatility_filter_v2"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,64 +17,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volatility filter
+    # Get 1d data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 1d ATR for volatility regime detection (using previous day's ATR)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Previous 1d bar data to avoid look-ahead
+    high_1d_prev = df_1d['high'].shift(1).values
+    low_1d_prev = df_1d['low'].shift(1).values
+    close_1d_prev = df_1d['close'].shift(1).values
     
-    # Calculate True Range for 1d
-    high_low_1d = high_1d - low_1d
-    high_close_1d = np.abs(high_1d - np.roll(close_1d, 1))
-    low_close_1d = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(high_low_1d, np.maximum(high_close_1d, low_close_1d))
+    # Calculate 1d Camarilla levels (H4/L4 breakout)
+    pivot_prev = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
+    range_1d_prev = high_1d_prev - low_1d_prev
+    h4_prev = pivot_prev + (range_1d_prev * 1.1 / 2)
+    l4_prev = pivot_prev - (range_1d_prev * 1.1 / 2)
     
-    # 1d ATR(10) - previous day's value to avoid look-ahead
-    atr_1d = pd.Series(tr_1d).rolling(window=10, min_periods=10).mean().values
-    atr_1d_prev = np.roll(atr_1d, 1)  # Use previous day's ATR
-    atr_1d_prev[0] = np.nan  # First value invalid
+    # Align to 4h
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4_prev)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4_prev)
     
-    # 1d ATR(40) for volatility ratio
-    atr_40_1d = pd.Series(tr_1d).rolling(window=40, min_periods=40).mean().values
-    atr_40_1d_prev = np.roll(atr_40_1d, 1)
-    atr_40_1d_prev[0] = np.nan
+    # Volatility filter: ATR ratio (ATR(10)/ATR(30)) < 0.8 = low volatility regime
+    high_low = high - low
+    high_close = np.abs(high - np.roll(close, 1))
+    low_close = np.abs(low - np.roll(close, 1))
+    tr1 = high_low
+    tr2 = high_close
+    tr3 = low_close
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Volatility ratio: low when ATR(10)/ATR(40) < 0.6 (low volatility regime)
-    vol_ratio = atr_1d_prev / atr_40_1d_prev
-    low_vol_1d = vol_ratio < 0.6
+    atr10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    atr30 = pd.Series(tr).rolling(window=30, min_periods=30).mean().values
+    atr_ratio = atr10 / atr30
+    low_vol = atr_ratio < 0.8  # Low volatility regime for better breakout follow-through
     
-    # Align 1d volatility regime to 4h
-    low_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, low_vol_1d)
-    
-    # 4h Donchian channel breakout (20-period)
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Entry signals: breakout in low volatility regime
-    long_breakout = close > highest_20
-    short_breakout = close < lowest_20
-    
-    # Exit signals: return to midpoint of Donchian channel
-    midpoint_20 = (highest_20 + lowest_20) / 2.0
-    long_exit = close < midpoint_20
-    short_exit = close > midpoint_20
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after sufficient lookback
-        # Skip if volatility data not ready
-        if np.isnan(low_vol_1d_aligned[i]):
+    for i in range(200, n):
+        # Skip if any values not ready
+        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
+            np.isnan(low_vol[i]) or np.isnan(vol_confirm[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Check for entry signals (only in low volatility regime)
-        long_signal = long_breakout[i] and low_vol_1d_aligned[i]
-        short_signal = short_breakout[i] and low_vol_1d_aligned[i]
+        # Long: break above H4 in low volatility with volume confirmation
+        long_signal = close[i] > h4_aligned[i] and low_vol[i] and vol_confirm[i]
+        # Short: break below L4 in low volatility with volume confirmation
+        short_signal = close[i] < l4_aligned[i] and low_vol[i] and vol_confirm[i]
+        
+        # Exit on opposite breakout to pivot level
+        pivot_prev_val = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
+        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_prev_val)
+        exit_long = close[i] < pivot_aligned[i]
+        exit_short = close[i] > pivot_aligned[i]
         
         # Execute trades
         if long_signal and position != 1:
@@ -83,10 +83,10 @@ def generate_signals(prices):
         elif short_signal and position != -1:
             position = -1
             signals[i] = -0.25
-        elif long_exit and position == 1:
+        elif exit_long and position == 1:
             position = 0
             signals[i] = 0.0
-        elif short_exit and position == -1:
+        elif exit_short and position == -1:
             position = 0
             signals[i] = 0.0
         else:
