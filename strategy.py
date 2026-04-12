@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_trix_volume_regime"
-timeframe = "4h"
+name = "1d_1w_camarilla_breakout_volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,43 +17,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for TRIX and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    
-    # Calculate TRIX on daily close (15-period triple EMA)
-    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False, min_periods=15).mean()
-    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
-    trix_raw = (ema3 / ema3.shift(1) - 1) * 100
-    trix = trix_raw.values
-    
-    # Calculate 34-period EMA for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Get 1w data for regime filter (choppiness-like using range)
+    # Get weekly data for Camarilla calculation
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    if len(df_1w) < 1:
         return np.zeros(n)
     
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
-    # Weekly range as volatility measure
-    weekly_range = high_1w - low_1w
-    # Use 8-week average range for normalization
-    avg_range = pd.Series(weekly_range).rolling(window=8, min_periods=8).mean().values
-    # Avoid division by zero
-    range_ratio = np.where(avg_range > 0, weekly_range / avg_range, 1.0)
+    close_1w = df_1w['close'].values
     
-    # Align all indicators to 4h
-    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    range_ratio_aligned = align_htf_to_ltf(prices, df_1w, range_ratio)
+    # Calculate Camarilla levels from previous week
+    # H3 = C + 1.1*(H-L)/4
+    # L3 = C - 1.1*(H-L)/4
+    # H4 = C + 1.1*(H-L)/2
+    # L4 = C - 1.1*(H-L)/2
+    camarilla_h3 = close_1w + 1.1 * (high_1w - low_1w) / 4
+    camarilla_l3 = close_1w - 1.1 * (high_1w - low_1w) / 4
+    camarilla_h4 = close_1w + 1.1 * (high_1w - low_1w) / 2
+    camarilla_l4 = close_1w - 1.1 * (high_1w - low_1w) / 2
     
-    # Volume filter - 20-period average on 4h data
+    # Align to daily timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l4)
+    
+    # Volume filter - 20-period average on daily data
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
@@ -61,33 +50,23 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(trix_aligned[i]) or np.isnan(ema34_aligned[i]) or 
-            np.isnan(range_ratio_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
+            np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # TRIX signal: zero line cross
-        trix_pos = trix_aligned[i] > 0
-        trix_neg = trix_aligned[i] < 0
+        # Camarilla breakout signals with volume confirmation
+        # Long: Price breaks above H4
+        long_signal = close[i] > camarilla_h4_aligned[i] and volume_ok[i]
+        # Short: Price breaks below L4
+        short_signal = close[i] < camarilla_l4_aligned[i] and volume_ok[i]
         
-        # Trend filter: price vs 34 EMA
-        uptrend = close[i] > ema34_aligned[i]
-        downtrend = close[i] < ema34_aligned[i]
-        
-        # Regime filter: avoid extreme volatility (range_ratio > 2.0 = choppy)
-        low_volatility = range_ratio_aligned[i] < 2.0
-        
-        # Entry conditions with volume confirmation
-        # Long: TRIX positive AND uptrend AND low volatility AND volume
-        long_signal = trix_pos and uptrend and low_volatility and volume_ok[i]
-        # Short: TRIX negative AND downtrend AND low volatility AND volume
-        short_signal = trix_neg and downtrend and low_volatility and volume_ok[i]
-        
-        # Exit when TRIX crosses zero
-        exit_long = trix_aligned[i] <= 0
-        exit_short = trix_aligned[i] >= 0
+        # Exit when price returns to H3/L3 levels
+        exit_long = close[i] < camarilla_h3_aligned[i]
+        exit_short = close[i] > camarilla_l3_aligned[i]
         
         # Execute trades
         if long_signal and position != 1:
