@@ -29,19 +29,19 @@ def generate_signals(prices):
     high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
     low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     
-    # Calculate 12-period ATR for volatility filter
+    # Calculate 14-period ATR for volatility filter
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr1[0] = tr2[0] = tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr12 = np.full(n, np.nan)
-    for i in range(11, n):
-        atr12[i] = np.nanmean(tr[i-11:i+1])
+    atr14 = np.full(n, np.nan)
+    for i in range(13, n):
+        atr14[i] = np.nanmean(tr[i-13:i+1])
     
     # Calculate 20-period ATR EMA for volatility regime
     atr_ema20 = np.full(n, np.nan)
-    atr_series = pd.Series(atr12)
+    atr_series = pd.Series(atr14)
     atr_ema20_values = atr_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     atr_ema20[:] = atr_ema20_values
     
@@ -51,13 +51,13 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if data not ready
         if (np.isnan(ema10_1d_aligned[i]) or np.isnan(high_20_aligned[i]) or 
-            np.isnan(low_20_aligned[i]) or np.isnan(atr12[i]) or 
+            np.isnan(low_20_aligned[i]) or np.isnan(atr14[i]) or 
             np.isnan(atr_ema20[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: current ATR12 > 1.0x 20-period ATR EMA (elevated volatility)
-        vol_filter = atr12[i] > atr_ema20[i] * 1.0
+        # Volatility filter: current ATR14 > 1.0x 20-period ATR EMA (elevated volatility)
+        vol_filter = atr14[i] > atr_ema20[i] * 1.0
         
         # Trend filter: price above/below 1d 10 EMA
         price_above_ema10 = close[i] > ema10_1d_aligned[i]
@@ -71,8 +71,8 @@ def generate_signals(prices):
         short_entry = short_breakout and price_below_ema10 and vol_filter
         
         # Exit conditions: reversal signal or volatility contraction
-        long_exit = (close[i] < ema10_1d_aligned[i]) or (atr12[i] < atr_ema20[i] * 0.8)
-        short_exit = (close[i] > ema10_1d_aligned[i]) or (atr12[i] < atr_ema20[i] * 0.8)
+        long_exit = (close[i] < ema10_1d_aligned[i]) or (atr14[i] < atr_ema20[i] * 0.8)
+        short_exit = (close[i] > ema10_1d_aligned[i]) or (atr14[i] < atr_ema20[i] * 0.8)
         
         if long_entry and position != 1:
             position = 1
@@ -97,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_donchian_ema10_breakout_vol_filter_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_ema10_breakout_vol_filter_v1"
+timeframe = "4h"
 leverage = 1.0
