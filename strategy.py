@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v1"
-timeframe = "4h"
+name = "1d_1w_kama_rsi_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,34 +17,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for trend context
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Use previous day's data to avoid look-ahead
-    high_1d_prev = df_1d['high'].shift(1).values
-    low_1d_prev = df_1d['low'].shift(1).values
-    close_1d_prev = df_1d['close'].shift(1).values
+    # KAMA on weekly data to determine trend direction
+    close_1w = df_1w['close'].values
+    # Efficiency Ratio
+    change = np.abs(np.diff(close_1w, prepend=close_1w[0]))
+    volatility = np.abs(np.diff(close_1w))
+    er = np.zeros_like(close_1w)
+    er[1:] = change[1:] / (np.cumsum(volatility) + 1e-10)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # KAMA calculation
+    kama = np.zeros_like(close_1w)
+    kama[0] = close_1w[0]
+    for i in range(1, len(close_1w)):
+        kama[i] = kama[i-1] + sc[i] * (close_1w[i] - kama[i-1])
     
-    # Calculate Camarilla pivot levels from previous day's data
-    pivot_prev = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-    range_1d_prev = high_1d_prev - low_1d_prev
+    # Align KAMA to daily timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1w, kama)
     
-    # Camarilla levels (H3 and L3 - core reversal levels)
-    h3_prev = pivot_prev + (range_1d_prev * 1.1 / 4)
-    l3_prev = pivot_prev - (range_1d_prev * 1.1 / 4)
+    # Weekly RSI for momentum filter
+    delta_1w = np.diff(close_1w, prepend=close_1w[0])
+    gain_1w = np.where(delta_1w > 0, delta_1w, 0)
+    loss_1w = np.where(delta_1w < 0, -delta_1w, 0)
+    avg_gain_1w = pd.Series(gain_1w).rolling(window=14, min_periods=14).mean().values
+    avg_loss_1w = pd.Series(loss_1w).rolling(window=14, min_periods=14).mean().values
+    rs_1w = avg_gain_1w / (avg_loss_1w + 1e-10)
+    rsi_1w = 100 - (100 / (1 + rs_1w))
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
-    # Align levels to 4h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3_prev)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3_prev)
-    
-    # Volume filter - 20-period average on 4h data
+    # Daily volume filter - 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
     
-    # RSI for momentum filter (14-period)
+    # Daily RSI for entry timing
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -53,29 +64,30 @@ def generate_signals(prices):
     rs = avg_gain / (avg_loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
     
-    # RSI range: avoid extremes but allow momentum
-    rsi_ok = (rsi >= 30) & (rsi <= 70)
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if not ready
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(volume_ok[i]) or np.isnan(rsi_ok[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_1w_aligned[i]) or
+            np.isnan(volume_ok[i]) or np.isnan(rsi[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: price breaks above H3 with volume confirmation
-        long_signal = close[i] > h3_aligned[i] and volume_ok[i] and rsi_ok[i]
-        # Short: price breaks below L3 with volume confirmation
-        short_signal = close[i] < l3_aligned[i] and volume_ok[i] and rsi_ok[i]
+        # Long: price above weekly KAMA, weekly RSI > 50, daily RSI < 30 (oversold), volume confirmation
+        long_signal = (close[i] > kama_aligned[i] and 
+                      rsi_1w_aligned[i] > 50 and 
+                      rsi[i] < 30 and 
+                      volume_ok[i])
+        # Short: price below weekly KAMA, weekly RSI < 50, daily RSI > 70 (overbought), volume confirmation
+        short_signal = (close[i] < kama_aligned[i] and 
+                       rsi_1w_aligned[i] < 50 and 
+                       rsi[i] > 70 and 
+                       volume_ok[i])
         
-        # Exit when price returns to pivot
-        pivot_prev_val = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_prev_val)
-        exit_long = close[i] < pivot_aligned[i]
-        exit_short = close[i] > pivot_aligned[i]
+        # Exit when daily RSI returns to neutral zone
+        exit_long = rsi[i] > 50
+        exit_short = rsi[i] < 50
         
         # Execute trades
         if long_signal and position != 1:
