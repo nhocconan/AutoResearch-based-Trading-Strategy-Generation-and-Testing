@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_donchian_breakout_volume"
-timeframe = "6h"
+name = "12h_1w_camarilla_volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,63 +17,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for Donchian channels
+    # Get weekly data for Camarilla levels
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 40:
         return np.zeros(n)
     
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 20-period Donchian channels on weekly
-    # Upper band: highest high over last 20 weeks
-    donchian_upper = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    # Lower band: lowest low over last 20 weeks
-    donchian_lower = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Calculate weekly Camarilla levels
+    range_1w = high_1w - low_1w
+    camarilla_h4 = close_1w + 1.5 * range_1w / 2
+    camarilla_l4 = close_1w - 1.5 * range_1w / 2
     
-    # Align Donchian channels to 6h timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1w, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1w, donchian_lower)
+    # Align to 12h timeframe
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l4)
     
-    # Get 1d data for volume filter
+    # Get daily data for volume filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 20-period volume average on daily
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    volume_1d = df_1d['volume'].values
+    volume_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
     
-    # Get current 6h volume for comparison
-    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Current 12h volume filter
+    volume_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ok = volume > volume_ma_12h
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(vol_ma_6h[i])):
+        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
+            np.isnan(volume_1d_aligned[i]) or np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume filter: current 6h volume > 1d 20-period average volume
-        volume_filter = volume[i] > vol_ma_1d_aligned[i]
+        # Camarilla breakout signals with volume confirmation
+        long_signal = close[i] > camarilla_h4_aligned[i] and volume_ok[i] and volume[i] > volume_1d_aligned[i]
+        short_signal = close[i] < camarilla_l4_aligned[i] and volume_ok[i] and volume[i] > volume_1d_aligned[i]
         
-        # Breakout conditions
-        breakout_up = close[i] > donchian_upper_aligned[i] and volume_filter
-        breakout_down = close[i] < donchian_lower_aligned[i] and volume_filter
-        
-        # Exit conditions: price crosses back through the opposite band
-        exit_long = close[i] < donchian_lower_aligned[i]
-        exit_short = close[i] > donchian_upper_aligned[i]
+        # Exit when price returns to weekly close
+        exit_long = close[i] < close_1w[-1] if not np.isnan(close_1w[-1]) else False
+        exit_short = close[i] > close_1w[-1] if not np.isnan(close_1w[-1]) else False
         
         # Execute trades
-        if breakout_up and position != 1:
+        if long_signal and position != 1:
             position = 1
             signals[i] = 0.25
-        elif breakout_down and position != -1:
+        elif short_signal and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
