@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_1d_Supertrend_Follow_Trend_v1
-Hypothesis: Use Supertrend on daily timeframe to determine trend direction, then enter on 6h pullbacks in the direction of the daily trend.
-Long when daily trend is up and 6h price pulls back to EMA20; short when daily trend is down and 6h price pulls back to EMA20.
-Exit when price crosses EMA20 in the opposite direction or daily trend flips.
-Designed for low trade frequency (target: 50-150 total over 4 years) by requiring trend alignment and pullback entries.
-Works in bull via trend-following longs, in bear via trend-following shorts.
+4h_12h_Camarilla_Breakout_Volume_Regime_v1
+Hypothesis: Use 12h Camarilla pivot levels for directional bias on 4h chart, enter on breakout of H4/L4 with volume confirmation and choppiness regime filter to avoid whipsaws. Designed for low trade frequency (target: 50-150 total over 4 years) to minimize fee drag. Works in bull via breakouts, in bear via mean-reversion from extreme levels.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Supertrend_Follow_Trend_v1"
-timeframe = "6h"
+name = "4h_12h_Camarilla_Breakout_Volume_Regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,87 +21,97 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Daily data for Supertrend calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # 12h data for Camarilla levels and choppiness
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Calculate Supertrend on daily (ATR=10, multiplier=3)
-    atr_period = 10
-    multiplier = 3
+    # Previous 12h bar's OHLC for Camarilla calculation
+    prev_high = df_12h['high'].iloc[-2] if len(df_12h) >= 2 else df_12h['high'].iloc[-1]
+    prev_low = df_12h['low'].iloc[-2] if len(df_12h) >= 2 else df_12h['low'].iloc[-1]
+    prev_close = df_12h['close'].iloc[-2] if len(df_12h) >= 2 else df_12h['close'].iloc[-1]
     
-    hl2 = (df_1d['high'] + df_1d['low']) / 2
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift())
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift())
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(alpha=1/atr_period, adjust=False, min_periods=atr_period).mean()
+    # Calculate 12h Camarilla levels
+    range_val = prev_high - prev_low
+    if range_val <= 0:
+        return np.zeros(n)
+    daily_h4 = prev_close + 1.1 * range_val * 1.1 / 2
+    daily_l4 = prev_close - 1.1 * range_val * 1.1 / 2
     
-    upperband = hl2 + multiplier * atr
-    lowerband = hl2 - multiplier * atr
+    # Align 12h levels to 4h timeframe
+    daily_h4_array = np.full(len(df_12h), daily_h4)
+    daily_l4_array = np.full(len(df_12h), daily_l4)
+    daily_h4_aligned = align_htf_to_ltf(prices, df_12h, daily_h4_array)
+    daily_l4_aligned = align_htf_to_ltf(prices, df_12h, daily_l4_array)
     
-    # Initialize Supertrend
-    supertrend = pd.Series(index=df_1d.index, dtype=float)
-    direction = pd.Series(index=df_1d.index, dtype=int)  # 1 for uptrend, -1 for downtrend
+    # 12h Choppiness Index for regime filter
+    def calculate_choppiness(high_arr, low_arr, close_arr, period=14):
+        atr = np.zeros_like(close_arr)
+        tr = np.zeros_like(close_arr)
+        for i in range(1, len(close_arr)):
+            hl = high_arr[i] - low_arr[i]
+            hc = np.abs(high_arr[i] - close_arr[i-1])
+            lc = np.abs(low_arr[i] - close_arr[i-1])
+            tr[i] = max(hl, hc, lc)
+        # Wilder's smoothing for ATR
+        atr[period] = np.mean(tr[1:period+1])
+        for i in range(period+1, len(tr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        # Sum of absolute true range over period
+        atr_sum = np.zeros_like(close_arr)
+        for i in range(period, len(close_arr)):
+            atr_sum[i] = np.sum(atr[i-period+1:i+1])
+        # Choppiness formula
+        chop = np.zeros_like(close_arr)
+        for i in range(period, len(close_arr)):
+            if atr_sum[i] > 0:
+                max_h = np.max(high_arr[i-period+1:i+1])
+                min_l = np.min(low_arr[i-period+1:i+1])
+                chop[i] = 100 * np.log10(atr_sum[i] / (max_h - min_l)) / np.log10(period)
+            else:
+                chop[i] = 50.0
+        return chop
     
-    supertrend.iloc[0] = upperband.iloc[0]
-    direction.iloc[0] = 1
+    chop = calculate_choppiness(df_12h['high'].values, df_12h['low'].values, df_12h['close'].values)
+    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
     
-    for i in range(1, len(df_1d)):
-        if close.iloc[i] > upperband.iloc[i-1]:
-            direction.iloc[i] = 1
-        elif close.iloc[i] < lowerband.iloc[i-1]:
-            direction.iloc[i] = -1
-        else:
-            direction.iloc[i] = direction.iloc[i-1]
-            if direction.iloc[i] == 1 and lowerband.iloc[i] < lowerband.iloc[i-1]:
-                lowerband.iloc[i] = lowerband.iloc[i-1]
-            if direction.iloc[i] == -1 and upperband.iloc[i] > upperband.iloc[i-1]:
-                upperband.iloc[i] = upperband.iloc[i-1]
-        
-        if direction.iloc[i] == 1:
-            supertrend.iloc[i] = lowerband.iloc[i]
-        else:
-            supertrend.iloc[i] = upperband.iloc[i]
-    
-    # Align daily Supertrend and direction to 6h timeframe
-    supertrend_array = supertrend.values
-    direction_array = direction.values
-    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend_array)
-    direction_aligned = align_htf_to_ltf(prices, df_1d, direction_array)
-    
-    # EMA20 on 6h for pullback entries
-    close_series = pd.Series(close)
-    ema20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Volume moving average (20-period) for confirmation
+    volume_series = pd.Series(volume)
+    volume_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any data invalid
-        if (np.isnan(supertrend_aligned[i]) or np.isnan(direction_aligned[i]) or
-            np.isnan(ema20[i])):
+        if (np.isnan(daily_h4_aligned[i]) or np.isnan(daily_l4_aligned[i]) or
+            np.isnan(chop_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine trend direction from daily Supertrend
-        daily_uptrend = direction_aligned[i] == 1
-        daily_downtrend = direction_aligned[i] == -1
+        # Volume confirmation: current volume > 1.5x 20-period MA
+        volume_confirm = volume[i] > 1.5 * volume_ma[i]
         
-        # Entry conditions: pullback to EMA20 in direction of daily trend
-        long_entry = daily_uptrend and close[i] <= ema20[i] and low[i] <= ema20[i]
-        short_entry = daily_downtrend and close[i] >= ema20[i] and high[i] >= ema20[i]
+        # Regime filter: chop > 50 indicates ranging market (good for mean reversion)
+        # We use chop > 50 for both long and short to avoid strong trends
+        regime_filter = chop_aligned[i] > 50
         
-        # Exit conditions: trend flip or price crosses EMA20 in opposite direction
-        long_exit = not daily_uptrend or close[i] >= ema20[i]
-        short_exit = not daily_downtrend or close[i] <= ema20[i]
+        # Breakout conditions with filters
+        long_breakout = (close[i] > daily_h4_aligned[i]) and volume_confirm and regime_filter
+        short_breakout = (close[i] < daily_l4_aligned[i]) and volume_confirm and regime_filter
+        
+        # Exit conditions: return to midpoint between H4 and L4
+        midpoint = (daily_h4_aligned[i] + daily_l4_aligned[i]) / 2
+        long_exit = close[i] < midpoint
+        short_exit = close[i] > midpoint
         
         # Signal logic
-        if long_entry and position != 1:
+        if long_breakout and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_entry and position != -1:
+        elif short_breakout and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
