@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_camarilla_breakout_v2"
-timeframe = "4h"
+name = "12h_1d_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -33,11 +33,24 @@ def generate_signals(prices):
     S3 = prev_close - H_minus_L * 1.1 / 4
     S4 = prev_close - H_minus_L * 1.1 / 2
     
-    # Map daily Camarilla levels to each 4h bar using proper alignment
-    R4_mapped = align_htf_to_ltf(prices, df_1d, R4)
-    R3_mapped = align_htf_to_ltf(prices, df_1d, R3)
-    S3_mapped = align_htf_to_ltf(prices, df_1d, S3)
-    S4_mapped = align_htf_to_ltf(prices, df_1d, S4)
+    # Map daily Camarilla levels to each 12h bar
+    R4_mapped = np.full(n, np.nan)
+    R3_mapped = np.full(n, np.nan)
+    S3_mapped = np.full(n, np.nan)
+    S4_mapped = np.full(n, np.nan)
+    
+    for i in range(n):
+        current_time = pd.Timestamp(prices.iloc[i]['open_time'])
+        # Find the day that ended before this 12h bar
+        for j in range(len(df_1d)):
+            day_start = pd.Timestamp(df_1d.iloc[j]['open_time'])
+            day_end = day_start + pd.Timedelta(days=1)
+            if day_start <= current_time < day_end:
+                R4_mapped[i] = R4[j]
+                R3_mapped[i] = R3[j]
+                S3_mapped[i] = S3[j]
+                S4_mapped[i] = S4[j]
+                break
     
     # Daily ATR for volatility filter
     tr1 = df_1d['high'].values[1:] - df_1d['low'].values[1:]
@@ -45,28 +58,45 @@ def generate_signals(prices):
     tr3 = np.abs(df_1d['low'].values[1:] - df_1d['close'].values[:-1])
     tr_daily = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr_daily = pd.Series(tr_daily).ewm(span=10, adjust=False, min_periods=10).mean().values
-    atr_daily_mapped = align_htf_to_ltf(prices, df_1d, atr_daily)
     
-    # Volume confirmation: current 4h volume > 20-period average of daily volume
-    vol_1d = df_1d['volume'].values
-    vol_1d_mapped = align_htf_to_ltf(prices, df_1d, vol_1d)
+    # Map ATR to 12h timeframe
+    atr_daily_mapped = np.full(n, np.nan)
+    for i in range(n):
+        current_time = pd.Timestamp(prices.iloc[i]['open_time'])
+        for j in range(len(df_1d)):
+            day_start = pd.Timestamp(df_1d.iloc[j]['open_time'])
+            day_end = day_start + pd.Timedelta(days=1)
+            if day_start <= current_time < day_end:
+                atr_daily_mapped[i] = atr_daily[j]
+                break
+    
+    # Volume confirmation: current 12h volume > 20-period average of daily volume
+    vol_1d_mapped = np.full(n, np.nan)
+    for i in range(n):
+        current_time = pd.Timestamp(prices.iloc[i]['open_time'])
+        for j in range(len(df_1d)):
+            day_start = pd.Timestamp(df_1d.iloc[j]['open_time'])
+            day_end = day_start + pd.Timedelta(days=1)
+            if day_start <= current_time < day_end:
+                vol_1d_mapped[i] = df_1d.iloc[j]['volume']
+                break
     vol_ma = pd.Series(vol_1d_mapped).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_filter = volume > vol_ma
     
-    # Chop index for regime filter (4h)
+    # Chop index for regime filter (12h)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    atr_4h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    chop_raw = 100 * np.log10(tr_sum / (atr_4h * 14)) / np.log10(14)
+    atr_12h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    chop_raw = 100 * np.log10(tr_sum / (atr_12h * 14)) / np.log10(14)
     chop = np.where(tr_sum > 0, chop_raw, 50)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if not ready
         if (np.isnan(R4_mapped[i]) or np.isnan(R3_mapped[i]) or 
             np.isnan(S3_mapped[i]) or np.isnan(S4_mapped[i]) or
