@@ -1,10 +1,10 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 """
-4h_1d_camarilla_breakout_volume_trend
-Hypothesis: 4-hour strategy using Camarilla pivot levels from daily timeframe for entry/exit, with volume confirmation and trend filtering.
-Uses daily Camarilla levels (H4, L4) for breakout entries, volume > 1.5x 20-period average for confirmation, and EMA21 trend filter.
-Designed to work in both bull and bear markets by only taking breakouts aligned with daily EMA21 trend.
-Target: 20-30 trades/year (80-120 total over 4 years) to minimize fee drag.
+4h_1d_donchian_breakout_volume_trend
+Hypothesis: 4-hour strategy using Donchian channel breakout with daily trend filter and volume confirmation.
+Breakouts above/below 4-hour Donchian(20) only when aligned with daily EMA(50) trend and volume > 1.5x average.
+Designed to capture strong trends while minimizing false breakouts in choppy markets.
+Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,76 +21,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and trend
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     
-    # Calculate daily Camarilla levels
-    # Camarilla: H4 = close + 1.5 * (high - low), L4 = close - 1.5 * (high - low)
-    camarilla_h4 = close_1d + 1.5 * (high_1d - low_1d)
-    camarilla_l4 = close_1d - 1.5 * (high_1d - low_1d)
+    # Daily EMA50 for trend direction
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Daily EMA21 for trend filter
-    ema21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # Align to 4h timeframe
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    ema21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema21_1d)
+    # Calculate 4-hour Donchian channel (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ok = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
-            np.isnan(ema21_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        vol_confirmed = volume[i] > 1.5 * vol_ma[i]
-        
-        # Trend determination: EMA21 > price = uptrend, EMA21 < price = downtrend
-        uptrend = ema21_1d_aligned[i] > close[i]
-        downtrend = ema21_1d_aligned[i] < close[i]
-        
-        # Entry conditions
-        if vol_confirmed:
-            if uptrend and close[i] > camarilla_h4_aligned[i] and position != 1:
-                # Long breakout above H4 in uptrend
-                position = 1
-                signals[i] = 0.25
-            elif downtrend and close[i] < camarilla_l4_aligned[i] and position != -1:
-                # Short breakdown below L4 in downtrend
-                position = -1
-                signals[i] = -0.25
-        # Exit conditions: opposite Camarilla level touch or trend reversal
-        elif position == 1:
-            if close[i] < camarilla_l4_aligned[i] or not uptrend:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.25
-        elif position == -1:
-            if close[i] > camarilla_h4_aligned[i] or not downtrend:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = -0.25
+        # Determine trend
+        uptrend = ema50_1d_aligned[i] > close_1d[0]  # Simplified: compare to first available value
+        # Better approach: use slope of EMA
+        if i >= 21:
+            ema50_prev = ema50_1d_aligned[i-1]
+            ema50_curr = ema50_1d_aligned[i]
+            uptrend = ema50_curr > ema50_prev
+            downtrend = ema50_curr < ema50_prev
         else:
+            uptrend = ema50_1d_aligned[i] > ema50_1d_aligned[max(0, i-1)]
+            downtrend = ema50_1d_aligned[i] < ema50_1d_aligned[max(0, i-1)]
+        
+        # Long breakout: price breaks above Donchian high with uptrend and volume
+        if (close[i] > high_20[i]) and uptrend and volume_ok[i] and position != 1:
+            position = 1
+            signals[i] = 0.25
+        # Short breakdown: price breaks below Donchian low with downtrend and volume
+        elif (close[i] < low_20[i]) and downtrend and volume_ok[i] and position != -1:
+            position = -1
+            signals[i] = -0.25
+        # Exit on opposite breakout
+        elif position == 1 and (close[i] < low_20[i]):
+            position = 0
             signals[i] = 0.0
+        elif position == -1 and (close[i] > high_20[i]):
+            position = 0
+            signals[i] = 0.0
+        else:
+            # Hold current position
+            if position == 1:
+                signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.0
     
     return signals
 
-name = "4h_1d_camarilla_breakout_volume_trend"
+name = "4h_1d_donchian_breakout_volume_trend"
 timeframe = "4h"
 leverage = 1.0
