@@ -3,21 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h_12h_camarilla_breakout_volume_v1
-# Uses daily Camarilla levels to determine intraday 6h bias.
-# Long when price breaks above daily H3 with volume confirmation and 12h trend up (EMA50 > EMA200).
-# Short when price breaks below daily L3 with volume confirmation and 12h trend down (EMA50 < EMA200).
-# Uses 12h EMA crossover for trend filter to avoid counter-trend trades.
-# Designed for moderate trade frequency (target: 50-150 total trades over 4 years) to balance edge and cost.
+# Hypothesis: 4h_1d_camarilla_breakout_v2
+# Uses daily Camarilla levels (from previous day) for entry on 4h timeframe.
+# Long when price breaks above daily H3 with volume confirmation (volume > 1.5x 20-period average).
+# Short when price breaks below daily L3 with volume confirmation.
+# Uses ADX > 20 to filter for trending markets, avoiding false signals in ranges.
+# Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drag.
 # Works in bull markets (breakouts continuation) and bear markets (breakdowns continuation).
 
-name = "6h_12h_camarilla_breakout_volume_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,11 +25,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation and 12h data for trend filter
+    # Get daily data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    df_12h = get_htf_data(prices, '12h')
-    
-    if len(df_1d) < 2 or len(df_12h) < 200:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     # Calculate Camarilla levels from previous day
@@ -42,36 +40,60 @@ def generate_signals(prices):
     camarilla_h3 = close_prev + range_prev * 1.1 / 4
     camarilla_l3 = close_prev - range_prev * 1.1 / 4
     
-    # Align Camarilla levels to 6h timeframe (daily levels update only after daily bar closes)
+    # Align to 4h timeframe (daily levels update only after daily bar closes)
     h3_level = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     l3_level = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # 12h EMA50 and EMA200 for trend filter
-    close_12h = df_12h['close'].values
-    ema50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema200 = pd.Series(close_12h).ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # Align 12h EMAs to 6h timeframe
-    ema50_aligned = align_htf_to_ltf(prices, df_12h, ema50)
-    ema200_aligned = align_htf_to_ltf(prices, df_12h, ema200)
-    
-    # Volume confirmation: volume > 1.5 * 50-period average
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Volume confirmation: volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
+    
+    # ADX trend filter: only trade when ADX > 20 (trending market)
+    # Calculate True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # Plus and Minus Directional Movement
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    
+    # Wilder's smoothing function
+    def wilders_smooth(data, period):
+        result = np.full_like(data, np.nan, dtype=float)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    atr = wilders_smooth(tr, 14)
+    plus_dm_smooth = wilders_smooth(plus_dm, 14)
+    minus_dm_smooth = wilders_smooth(minus_dm, 14)
+    
+    # Avoid division by zero
+    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
+    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = wilders_smooth(dx, 14)
+    adx_filter = adx > 20  # trending market only
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):  # start after warmup
+    for i in range(50, n):  # start after warmup
         # Skip if levels not ready
-        if (np.isnan(h3_level[i]) or np.isnan(l3_level[i]) or 
-            np.isnan(ema50_aligned[i]) or np.isnan(ema200_aligned[i])):
+        if np.isnan(h3_level[i]) or np.isnan(l3_level[i]) or np.isnan(adx_filter[i]):
             signals[i] = 0.0
             continue
         
-        # Require volume confirmation
-        if not vol_confirm[i]:
-            # Hold current position if volume filter fails
+        # Require both volume and trend filters
+        if not (vol_confirm[i] and adx_filter[i]):
+            # Hold current position if filters fail
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -80,16 +102,12 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Determine 12h trend
-        trend_up = ema50_aligned[i] > ema200_aligned[i]
-        trend_down = ema50_aligned[i] < ema200_aligned[i]
-        
-        # Long signal: price breaks above daily H3 with volume and 12h trend up
-        if close[i] > h3_level[i] and trend_up and position != 1:
+        # Long signal: price breaks above daily H3 with volume
+        if close[i] > h3_level[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below daily L3 with volume and 12h trend down
-        elif close[i] < l3_level[i] and trend_down and position != -1:
+        # Short signal: price breaks below daily L3 with volume
+        elif close[i] < l3_level[i] and position != -1:
             position = -1
             signals[i] = -0.25
         # Exit conditions: opposite breakout
