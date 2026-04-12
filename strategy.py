@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 6h_1d_elder_ray_reversal_with_volume
-# Hypothesis: Elder Ray (Bull/Bear Power) on 1d with volume confirmation for reversals at extremes
-# Works in bull/bear by capturing exhaustion moves when price extends beyond 13EMA with volume divergence.
-# Target: 25-40 trades/year (100-160 total over 4 years) to minimize fee drag.
+# 12h_1w_ema_trend_with_volume_and_atr
+# Hypothesis: 12-hour trend following using weekly EMA trend filter, with price crossing above/below EMA as entry signal.
+# Volume confirmation and ATR volatility filter reduce false signals. Works in bull/bear by only taking trades in direction of higher timeframe trend.
+# Target: 15-35 trades/year (60-140 total over 4 years) to minimize fee drag.
 
-name = "6h_1d_elder_ray_reversal_with_volume"
-timeframe = "6h"
+name = "12h_1w_ema_trend_with_volume_and_atr"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -22,62 +22,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Elder Ray calculation
+    # Get weekly data for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    
+    # Weekly EMA(50) for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Get daily data for ATR calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 13-period EMA for Elder Ray
-    close_ser = pd.Series(close_1d)
-    ema13 = close_ser.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Daily ATR(14) for volatility filter
+    tr1 = np.abs(np.subtract(high_1d, low_1d))
+    tr2 = np.abs(np.subtract(high_1d, np.roll(close_1d, 1)))
+    tr3 = np.abs(np.subtract(low_1d, np.roll(close_1d, 1)))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Elder Ray components
-    bull_power = high_1d - ema13  # Bull Power: High - EMA13
-    bear_power = low_1d - ema13   # Bear Power: Low - EMA13
+    # Align weekly EMA and daily ATR to 12h timeframe
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
-    # Volume moving average for confirmation
-    vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_expansion = df_1d['volume'].values > (vol_ma_1d * 1.5)
-    
-    # Align Elder Ray and volume expansion to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    vol_expansion_aligned = align_htf_to_ltf(prices, df_1d, vol_expansion.astype(float))
+    # Volume confirmation: volume > 1.3x 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    vol_confirm = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(vol_expansion_aligned[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: Bear Power shows exhaustion (less negative) with volume expansion
-        # and price near support
-        if (bear_power_aligned[i] > bear_power_aligned[i-1] * 1.2 and  # Bear Power improving
-            vol_expansion_aligned[i] > 0.5 and                       # Volume expansion
-            close[i] < close[i-1] * 1.02 and                         # Not chasing extended moves
-            position != 1):
+        # Long entry: price crosses above weekly EMA with volume and volatility filter
+        if (close[i] > ema_50_1w_aligned[i] and vol_confirm[i] and 
+            atr_aligned[i] > 0 and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: Bull Power shows exhaustion (less positive) with volume expansion
-        elif (bull_power_aligned[i] < bull_power_aligned[i-1] * 0.8 and  # Bull Power weakening
-              vol_expansion_aligned[i] > 0.5 and                       # Volume expansion
-              close[i] > close[i-1] * 0.98 and                         # Not chasing extended moves
-              position != -1):
+        # Short entry: price crosses below weekly EMA with volume and volatility filter
+        elif (close[i] < ema_50_1w_aligned[i] and vol_confirm[i] and 
+              atr_aligned[i] > 0 and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: reverse signal or power crosses zero
-        elif position == 1 and bull_power_aligned[i] < 0:
+        # Exit: reverse signal
+        elif position == 1 and close[i] < ema_50_1w_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and bear_power_aligned[i] > 0:
+        elif position == -1 and close[i] > ema_50_1w_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
