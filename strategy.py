@@ -85,23 +85,9 @@ def generate_signals(prices):
         uptrend = close[i] > ema_4h_aligned[i]
         downtrend = close[i] < ema_4h_aligned[i]
         
-        # Volume confirmation: current 1h volume > 1.5x 4h average volume per hour
-        # Approximate 4h average volume per hour: volume_4h / 4
-        vol_ma_4h = np.full(len(df_4h), np.nan)
-        for j in range(20, len(df_4h)):
-            if j == 20:
-                vol_ma_4h[j] = np.mean(volume_1d[j*4:(j+1)*4]) if (j+1)*4 <= len(volume_1d) else np.nan
-            else:
-                # Simple approximation: use 4h volume MA
-                start_idx = max(0, j*4 - 20)
-                end_idx = min(len(volume), j*4)
-                if end_idx > start_idx:
-                    vol_ma_4h[j] = np.mean(volume[start_idx:end_idx])
-                else:
-                    vol_ma_4h[j] = vol_ma_4h[j-1] if j > 0 else np.nan
-        # Simplified volume check: compare to rolling mean of volume
+        # Volume confirmation: current 1h volume > 1.5x 20-period rolling average
         if i >= 20:
-            vol_ma = np.mean(volume[max(0, i-20):i+1])
+            vol_ma = np.mean(volume[max(0, i-20):i])
             vol_ratio = volume[i] / vol_ma if vol_ma > 0 else 1.0
         else:
             vol_ratio = 1.0
