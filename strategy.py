@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v4"
+name = "4h_1d_camarilla_volume_scalper_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,7 +25,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1-day ATR (14-period) for volatility-based position sizing
+    # Calculate 1-day ATR (14-period)
     tr1 = high_1d[1:] - low_1d[1:]
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
@@ -41,11 +41,11 @@ def generate_signals(prices):
     atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
     # Volatility-based position sizing (inverse volatility)
-    # Higher volatility = smaller position, capped between 0.15 and 0.25
-    vol_scaling = np.clip(1.0 / (atr_ratio_aligned + 0.001), 0.6, 1.4)
-    base_size = 0.20
+    # Higher volatility = smaller position, capped between 0.20 and 0.30
+    vol_scaling = np.clip(1.0 / (atr_ratio_aligned + 0.001), 0.8, 1.5)
+    base_size = 0.25
     position_size = base_size * vol_scaling
-    position_size = np.clip(position_size, 0.15, 0.25)
+    position_size = np.clip(position_size, 0.20, 0.30)
     
     # Calculate Camarilla levels (H3, L3) using previous day's data
     camarilla_high = np.full(len(close_1d), np.nan)
@@ -62,12 +62,6 @@ def generate_signals(prices):
     camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
     camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
     
-    # Calculate 200 EMA on 4h for trend filter
-    close_series = pd.Series(close)
-    ema_200 = close_series.ewm(span=200, adjust=False, min_periods=200).mean().values
-    price_above_ema = close > ema_200
-    price_below_ema = close < ema_200
-    
     # Volume filter: current volume > 20-period average (on 4h data)
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
@@ -79,22 +73,20 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if not ready
         if (np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]) or 
-            np.isnan(volume_ok[i]) or np.isnan(position_size[i]) or
-            np.isnan(price_above_ema[i]) or np.isnan(price_below_ema[i])):
+            np.isnan(volume_ok[i]) or np.isnan(position_size[i])):
             signals[i] = 0.0 if position == 0 else (position_size[i] if position == 1 else -position_size[i])
             continue
         
-        # Breakout conditions with volume and trend confirmation
-        breakout_up = close[i] > camarilla_high_aligned[i] and price_above_ema[i]
-        breakout_down = close[i] < camarilla_low_aligned[i] and price_below_ema[i]
+        # Breakout conditions with volume confirmation
+        breakout_up = close[i] > camarilla_high_aligned[i]
+        breakout_down = close[i] < camarilla_low_aligned[i]
         vol_ok = volume_ok[i]
         
-        # Entry signals - require BOTH volume and trend confirmation
+        # Entry signals - require volume confirmation only
         long_signal = breakout_up and vol_ok
         short_signal = breakout_down and vol_ok
         
-        # Exit when price returns to the 1-day close (punishment level)
-        # Use previous day's close as exit level
+        # Exit when price returns to previous day's close (mean reversion)
         prev_close = np.full(len(close_1d), np.nan)
         for j in range(1, len(close_1d)):
             prev_close[j] = close_1d[j-1]
