@@ -1,32 +1,15 @@
-#!/usr/bin/env python3
-"""
-4h_1d_camarilla_breakout_plus_volume
-Breakout above/below Camarilla H3/L3 levels from daily timeframe with volume confirmation.
-Enter on break of H3 (long) or L3 (short) with volume > 1.5x 20-period average.
-Exit when price returns to Pivot point or opposite H4/L4 level.
-Uses discrete position sizing (0.25) to limit risk and reduce trade frequency.
-Designed for 4h timeframe with 1d Camarilla levels to capture multi-day breakouts.
-Works in both bull and bear markets by following institutional pivot levels.
-"""
+# 6h_1d_camarilla_breakout_with_volume_and_atr
+# Hypothesis: 6-hour Camarilla breakout with volume confirmation and ATR volatility filter
+# Works in bull/bear by using volatility-adjusted breakouts and volume confirmation to avoid false signals.
+# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
 
-name = "4h_1d_camarilla_breakout_plus_volume"
-timeframe = "4h"
+name = "6h_1d_camarilla_breakout_with_volume_and_atr"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given high, low, close"""
-    typical = (high + low + close) / 3
-    range_val = high - low
-    # Camarilla levels
-    H4 = close + range_val * 1.1 / 2
-    H3 = close + range_val * 1.1 / 4
-    L3 = close - range_val * 1.1 / 4
-    L4 = close - range_val * 1.1 / 2
-    return H3, L3, H4, L4
 
 def generate_signals(prices):
     n = len(prices)
@@ -38,36 +21,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation
+    # Get daily data for Camarilla and ATR calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for each day
-    H3_1d = np.full_like(close_1d, np.nan)
-    L3_1d = np.full_like(close_1d, np.nan)
-    H4_1d = np.full_like(close_1d, np.nan)
-    L4_1d = np.full_like(close_1d, np.nan)
-    P_1d = np.full_like(close_1d, np.nan)  # Pivot point
+    # Previous day's range
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
     
-    for i in range(len(df_1d)):
-        H3, L3, H4, L4 = calculate_camarilla(high_1d[i], low_1d[i], close_1d[i])
-        H3_1d[i] = H3
-        L3_1d[i] = L3
-        H4_1d[i] = H4
-        L4_1d[i] = L4
-        P_1d[i] = (high_1d[i] + low_1d[i] + close_1d[i]) / 3
+    # Camarilla levels (based on previous day)
+    range_ = prev_high - prev_low
+    # Resistance levels
+    r3 = prev_close + range_ * 1.1 / 2
+    r4 = prev_close + range_ * 1.1
+    # Support levels
+    s3 = prev_close - range_ * 1.1 / 2
+    s4 = prev_close - range_ * 1.1
     
-    # Align Camarilla levels to 4h timeframe
-    H3_4h = align_htf_to_ltf(prices, df_1d, H3_1d)
-    L3_4h = align_htf_to_ltf(prices, df_1d, L3_1d)
-    H4_4h = align_htf_to_ltf(prices, df_1d, H4_1d)
-    L4_4h = align_htf_to_ltf(prices, df_1d, L4_1d)
-    P_4h = align_htf_to_ltf(prices, df_1d, P_1d)
+    # ATR for volatility filter (14-day ATR)
+    tr1 = np.abs(np.subtract(high_1d, low_1d))
+    tr2 = np.abs(np.subtract(high_1d, np.roll(close_1d, 1)))
+    tr3 = np.abs(np.subtract(low_1d, np.roll(close_1d, 1)))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Align Camarilla levels and ATR to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -78,25 +67,27 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(H3_4h[i]) or np.isnan(L3_4h[i]) or 
-            np.isnan(H4_4h[i]) or np.isnan(L4_4h[i]) or np.isnan(P_4h[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: price breaks above H3 with volume confirmation
-        if (close[i] > H3_4h[i] and vol_confirm[i] and position != 1):
+        # Long entry: close breaks above R4 with volume and volatility filter
+        if (close[i] > r4_aligned[i] and vol_confirm[i] and 
+            atr_aligned[i] > 0 and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: price breaks below L3 with volume confirmation
-        elif (close[i] < L3_4h[i] and vol_confirm[i] and position != -1):
+        # Short entry: close breaks below S4 with volume and volatility filter
+        elif (close[i] < s4_aligned[i] and vol_confirm[i] and 
+              atr_aligned[i] > 0 and position != -1):
             position = -1
             signals[i] = -0.25
-        # Long exit: price returns to Pivot or breaks below L4
-        elif position == 1 and (close[i] <= P_4h[i] or close[i] < L4_4h[i]):
+        # Exit: reverse signal or close crosses back to opposite S3/R3
+        elif position == 1 and close[i] < s3_aligned[i]:
             position = 0
             signals[i] = 0.0
-        # Short exit: price returns to Pivot or breaks above H4
-        elif position == -1 and (close[i] >= P_4h[i] or close[i] > H4_4h[i]):
+        elif position == -1 and close[i] > r3_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
