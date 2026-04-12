@@ -50,7 +50,7 @@ def generate_signals(prices):
     donch_high_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_high_12h)
     donch_low_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_low_12h)
     
-    # Calculate 4h ATR(14) for position sizing
+    # Calculate 4h ATR(14) for volatility filter
     tr1_h = np.abs(high - low)
     tr2_h = np.abs(high - np.roll(close, 1))
     tr3_h = np.abs(low - np.roll(close, 1))
@@ -63,20 +63,22 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
+    # Precompute ATR MA(20) for volatility filter
+    atr_ma_20 = np.full(n, np.nan)
+    for i in range(33, n):  # 14 + 19 for 20-period MA
+        if not np.isnan(np.mean(atr_12h_aligned[i-19:i+1])):
+            atr_ma_20[i] = np.mean(atr_12h_aligned[i-19:i+1])
+    
     for i in range(100, n):
         # Skip if data not ready
         if (np.isnan(ema_21_12h_aligned[i]) or np.isnan(atr_12h_aligned[i]) or 
             np.isnan(donch_high_12h_aligned[i]) or np.isnan(donch_low_12h_aligned[i]) or 
-            np.isnan(atr_4h[i])):
+            np.isnan(atr_4h[i]) or np.isnan(atr_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Volatility filter: ATR > 0.5 * ATR MA(20) to avoid low volatility
-        atr_ma_20 = np.full(n, np.nan)
-        for j in range(33, n):  # 14 + 19 for 20-period MA
-            if not np.isnan(np.mean(atr_12h_aligned[j-19:j+1])):
-                atr_ma_20[j] = np.mean(atr_12h_aligned[j-19:j+1])
-        vol_filter = atr_12h_aligned[i] > 0.5 * atr_ma_20[i] if not np.isnan(atr_ma_20[i]) else False
+        vol_filter = atr_12h_aligned[i] > 0.5 * atr_ma_20[i]
         
         # Trend filter: price relative to 12h EMA21
         uptrend = close[i] > ema_21_12h_aligned[i]
@@ -118,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_donchian_ema_trend_filter_v1"
+name = "4h_12h_donchian_ema_trend_filter_v2"
 timeframe = "4h"
 leverage = 1.0
