@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-1d_1w_Camarilla_Breakout_Trend_v1
-Hypothesis: On daily timeframe, enter long when price breaks above weekly Camarilla R3 with strong trend confirmation (ADX>25), enter short when price breaks below weekly Camarilla S3 with ADX>25. Uses weekly Camarilla levels for structure and ADX for trend strength. Designed for very few trades (target 7-25/year) to avoid fee drag and work in both bull and bear markets by requiring strong trend conditions.
+4h_1d_Camarilla_Breakout_Volume_v1
+Hypothesis: On 4h timeframe, enter long when price breaks above daily Camarilla R3 with volume confirmation (volume > 1.5x average), enter short when price breaks below daily Camarilla S3 with volume confirmation. Uses daily Camarilla levels for structure and volume filter to avoid false breakouts. Designed for moderate trade frequency (target 20-50/year) to balance opportunity and cost, effective in both bull and bear markets by requiring strong volume-backed breakouts.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Camarilla_Breakout_Trend_v1"
-timeframe = "1d"
+name = "4h_1d_Camarilla_Breakout_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,62 +20,43 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # === WEEKLY INDICATORS: Camarilla pivot levels ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # === DAILY INDICATORS: Camarilla pivot levels ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly Camarilla pivot levels
-    pivot = (high_1w + low_1w + close_1w) / 3
-    range_1w = high_1w - low_1w
+    # Calculate daily Camarilla pivot levels
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
     # Camarilla R3 and S3 levels (key reversal levels)
-    r3 = close_1w + range_1w * 1.1 / 4
-    s3 = close_1w - range_1w * 1.1 / 4
+    r3 = close_1d + range_1d * 1.1 / 4
+    s3 = close_1d - range_1d * 1.1 / 4
     
-    # Align to daily timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    # Align to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # === WEEKLY ADX TREND STRENGTH ===
-    # Calculate True Range
-    tr = np.maximum(high_1w - low_1w, np.maximum(np.abs(high_1w - np.roll(close_1w, 1)), np.abs(low_1w - np.roll(close_1w, 1))))
-    tr[0] = high_1w[0] - low_1w[0]
-    
-    # Calculate Directional Movement
-    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smooth TR, DM+, DM- with Wilder's smoothing (alpha = 1/14)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            result[period-1] = np.mean(data[:period])
-            for i in range(period, len(data)):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    atr14 = wilders_smoothing(tr, 14)
-    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
-    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
-    
-    # Calculate DI+ and DI-
-    di_plus = np.where(atr14 > 0, dm_plus_smooth / atr14 * 100, 0)
-    di_minus = np.where(atr14 > 0, dm_minus_smooth / atr14 * 100, 0)
-    
-    # Calculate DX and ADX
-    dx = np.where((di_plus + di_minus) > 0, np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
-    adx = wilders_smoothing(dx, 14)
-    
-    # Align ADX to daily timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    # Volume average (20-period) for confirmation
+    vol_avg = np.zeros(n)
+    vol_sum = 0.0
+    vol_count = 0
+    for i in range(n):
+        vol_sum += volume[i]
+        vol_count += 1
+        if i >= 20:
+            vol_sum -= volume[i-20]
+            vol_count -= 1
+        if vol_count > 0:
+            vol_avg[i] = vol_sum / vol_count
+        else:
+            vol_avg[i] = 0.0
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -83,22 +64,23 @@ def generate_signals(prices):
     for i in range(50, n):  # start after warmup
         # Skip if indicators not available
         if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(adx_aligned[i])):
+            vol_avg[i] == 0.0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Breakout conditions with ADX trend filter
-        long_breakout = (close[i] > r3_aligned[i]) and (adx_aligned[i] > 25)
-        short_breakout = (close[i] < s3_aligned[i]) and (adx_aligned[i] > 25)
+        # Breakout conditions with volume confirmation
+        vol_confirm = volume[i] > 1.5 * vol_avg[i]
+        long_breakout = (close[i] > r3_aligned[i]) and vol_confirm
+        short_breakout = (close[i] < s3_aligned[i]) and vol_confirm
         
-        # Exit conditions: reversal back inside Camarilla H3-L3 range or ADX weakens
-        h3 = close_1w + range_1w * 1.1 / 2
-        l3 = close_1w - range_1w * 1.1 / 2
-        h3_aligned = align_htf_to_ltf(prices, df_1w, h3)
-        l3_aligned = align_htf_to_ltf(prices, df_1w, l3)
+        # Exit conditions: reversal back inside Camarilla H3-L3 range
+        h3 = close_1d + range_1d * 1.1 / 2
+        l3 = close_1d - range_1d * 1.1 / 2
+        h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+        l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
         
-        exit_long = (close[i] < h3_aligned[i]) or (close[i] > l3_aligned[i]) or (adx_aligned[i] < 20)
-        exit_short = (close[i] > l3_aligned[i]) or (close[i] < h3_aligned[i]) or (adx_aligned[i] < 20)
+        exit_long = close[i] < h3_aligned[i]
+        exit_short = close[i] > l3_aligned[i]
         
         if long_breakout and position != 1:
             position = 1
