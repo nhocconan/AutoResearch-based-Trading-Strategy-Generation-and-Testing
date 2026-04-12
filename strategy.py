@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v5"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,11 +34,12 @@ def generate_signals(prices):
     h3 = pivot + (range_1d * 1.1 / 4)   # Resistance 3
     l3 = pivot - (range_1d * 1.1 / 4)   # Support 3
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # Volume filter - 20-period average on 12h data
+    # Volume filter - 20-period average on 4h data
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
@@ -57,17 +58,17 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if not ready
         if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(volume_ok[i]) or np.isnan(atr[i])):
+            np.isnan(pivot_aligned[i]) or np.isnan(volume_ok[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: price breaks above H3 with volume confirmation and ATR momentum
-        long_signal = close[i] > h3_aligned[i] and volume_ok[i] and atr[i] > np.mean(atr[max(0, i-20):i+1])
-        # Short: price breaks below L3 with volume confirmation and ATR momentum
-        short_signal = close[i] < l3_aligned[i] and volume_ok[i] and atr[i] > np.mean(atr[max(0, i-20):i+1])
+        # Long: price breaks above H3 with volume confirmation
+        long_signal = close[i] > h3_aligned[i] and volume_ok[i]
+        # Short: price breaks below L3 with volume confirmation
+        short_signal = close[i] < l3_aligned[i] and volume_ok[i]
         
         # Exit when price returns to pivot
-        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
         exit_long = close[i] < pivot_aligned[i]
         exit_short = close[i] > pivot_aligned[i]
         
