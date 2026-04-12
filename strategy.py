@@ -9,7 +9,7 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -33,7 +33,7 @@ def generate_signals(prices):
     S3 = prev_close - H_minus_L * 1.1 / 4
     S4 = prev_close - H_minus_L * 1.1 / 2
     
-    # Map weekly Camarilla levels to each daily bar (using previous week's values)
+    # Map weekly Camarilla levels to each daily bar
     R4_mapped = np.full(n, np.nan)
     R3_mapped = np.full(n, np.nan)
     S3_mapped = np.full(n, np.nan)
@@ -92,7 +92,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if not ready
         if (np.isnan(R4_mapped[i]) or np.isnan(R3_mapped[i]) or 
             np.isnan(S3_mapped[i]) or np.isnan(S4_mapped[i]) or
