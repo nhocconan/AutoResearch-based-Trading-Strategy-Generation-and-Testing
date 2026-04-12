@@ -3,21 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_camarilla_breakout_v2
+# Hypothesis: 4h_1d_camarilla_breakout_v3
 # Uses daily Camarilla pivot levels (H4/L4) as support/resistance on 4h chart.
-# Long when price breaks above H4 with volume confirmation (volume > 1.5x 20-period avg).
-# Short when price breaks below L4 with volume confirmation.
+# Long when price breaks above H4 with volume confirmation (volume > 1.5x 20-period avg) AND close above 200-period EMA.
+# Short when price breaks below L4 with volume confirmation AND close below 200-period EMA.
 # Exits when price returns to daily pivot point (PP).
+# EMA200 filter ensures alignment with long-term trend, reducing false breakouts in choppy markets.
 # Designed for low trade frequency (target: 20-40 trades/year) to minimize fee drag.
 # Works in trending markets via breakouts and ranging markets via mean reversion to pivot.
 
-name = "4h_1d_camarilla_breakout_v2"
+name = "4h_1d_camarilla_breakout_v3"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -49,6 +50,10 @@ def generate_signals(prices):
     l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
     
+    # EMA200 filter (4h timeframe)
+    close_s = pd.Series(close)
+    ema200 = close_s.ewm(span=200, adjust=False, min_periods=200).mean().values
+    
     # Volume confirmation: volume > 1.5 * 20-period average (4h timeframe)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
@@ -56,13 +61,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # start after warmup
+    for i in range(200, n):  # start after warmup
         # Skip if data not ready
-        if np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(pp_aligned[i]):
+        if np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(pp_aligned[i]) or np.isnan(ema200[i]):
             signals[i] = 0.0
             continue
         
-        # Require volume confirmation for new entries
+        # Require volume confirmation and EMA200 filter for new entries
         if not vol_confirm[i]:
             # Hold current position if volume filter fails
             if position == 1:
@@ -73,12 +78,12 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above H4
-        if close[i] > h4_aligned[i] and position != 1:
+        # Long signal: price breaks above H4 AND close above EMA200
+        if close[i] > h4_aligned[i] and close[i] > ema200[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below L4
-        elif close[i] < l4_aligned[i] and position != -1:
+        # Short signal: price breaks below L4 AND close below EMA200
+        elif close[i] < l4_aligned[i] and close[i] < ema200[i] and position != -1:
             position = -1
             signals[i] = -0.25
         # Exit conditions: price returns to daily pivot point (mean reversion)
