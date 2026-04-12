@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-6h_1w_1d_ElderRay_Pullback_v1
-Hypothesis: On 6h timeframe, buy pullbacks to weekly EMA20 during bull regimes (weekly close > weekly EMA50) and sell pullbacks during bear regimes (weekly close < weekly EMA50). Uses Elder Ray (bull/bear power) to confirm momentum alignment. Designed for low trade frequency by requiring trend alignment and pullback to EMA20. Works in bull via long pullbacks in uptrends and in bear via short pullbacks in downtrends.
+12h_1d_Camarilla_Reversal_v2
+Hypothesis: On 12h timeframe, buy near L3 and sell near H3 of daily Camarilla pivot levels,
+with volume confirmation and volatility regime filter. Designed for mean-reversion in ranging
+markets and breakout strength in trending markets. Target: 15-30 trades/year (60-120 total).
+Works in bull/bear via volatility regime and volume confirmation.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_1d_ElderRay_Pullback_v1"
-timeframe = "6h"
+name = "12h_1d_Camarilla_Reversal_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,91 +23,105 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # === WEEKLY TREND FILTER ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    # Weekly EMA20 and EMA50
-    ema20_1w = np.zeros_like(close_1w)
-    ema50_1w = np.zeros_like(close_1w)
-    alpha20 = 2 / (20 + 1)
-    alpha50 = 2 / (50 + 1)
-    ema20_1w[0] = close_1w[0]
-    ema50_1w[0] = close_1w[0]
-    for i in range(1, len(close_1w)):
-        ema20_1w[i] = alpha20 * close_1w[i] + (1 - alpha20) * ema20_1w[i-1]
-        ema50_1w[i] = alpha50 * close_1w[i] + (1 - alpha50) * ema50_1w[i-1]
-    
-    # Weekly trend: bull if close > EMA50, bear if close < EMA50
-    weekly_bull = close_1w > ema50_1w
-    weekly_bear = close_1w < ema50_1w
-    
-    # Align weekly trend to 6m
-    weekly_bull_aligned = align_htf_to_ltf(prices, df_1w, weekly_bull.astype(float))
-    weekly_bear_aligned = align_htf_to_ltf(prices, df_1w, weekly_bear.astype(float))
-    
-    # === DAILY ELDER RAY ===
+    # === DAILY CAMARILLA LEVELS ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Daily EMA13 for Elder Ray
-    ema13_1d = np.zeros_like(close_1d)
-    alpha13 = 2 / (13 + 1)
-    ema13_1d[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        ema13_1d[i] = alpha13 * close_1d[i] + (1 - alpha13) * ema13_1d[i-1]
+    # Previous day's close for Camarilla calculation
+    close_prev = np.concatenate([[close_1d[0]], close_1d[:-1]])
+    range_1d = high_1d - low_1d
     
-    # Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high_1d - ema13_1d
-    bear_power = low_1d - ema13_1d
+    h3 = close_prev + (range_1d * 1.1 / 4)
+    l3 = close_prev - (range_1d * 1.1 / 4)
+    h4 = close_prev + (range_1d * 1.1)
+    l4 = close_prev - (range_1d * 1.1)
     
-    # Align Elder Ray to 6m
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    # === WEEKLY VOLATILITY REGIME FILTER ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
     
-    # === 6H EMA20 FOR PULLBACK ENTRY ===
-    ema20_6h = np.zeros(n)
-    alpha20 = 2 / (20 + 1)
-    ema20_6h[0] = close[0]
-    for i in range(1, n):
-        ema20_6h[i] = alpha20 * close[i] + (1 - alpha20) * ema20_6h[i-1]
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    # True Range
+    tr1 = np.abs(high_1w[1:] - low_1w[:-1])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # ATR(14)
+    atr_14 = np.full_like(tr, np.nan)
+    for i in range(len(tr)):
+        if i < 14:
+            atr_14[i] = np.nan
+        elif i == 14:
+            atr_14[i] = np.nanmean(tr[1:15])
+        else:
+            atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
+    
+    # Volatility regime: low volatility = trending, high volatility = ranging
+    vol_ma = np.full_like(atr_14, np.nan)
+    for i in range(len(atr_14)):
+        if i < 30:
+            vol_ma[i] = np.nan
+        else:
+            vol_ma[i] = np.nanmean(atr_14[i-29:i+1])
+    
+    # High volatility regime (ranging) when current ATR > MA
+    vol_regime = atr_14 > vol_ma
+    
+    # Align data to 12h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    vol_regime_aligned = align_htf_to_ltf(prices, df_1w, vol_regime.astype(float))
+    
+    # Volume average (20-period for 12h = ~10 days)
+    vol_avg = np.zeros(n)
+    vol_sum = 0.0
+    vol_count = 0
+    for i in range(n):
+        vol_sum += volume[i]
+        vol_count += 1
+        if i >= 20:
+            vol_sum -= volume[i-20]
+            vol_count -= 1
+        vol_avg[i] = vol_sum / vol_count if vol_count > 0 else 0.0
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # start after warmup
+    for i in range(50, n):
         # Skip if indicators not available
-        if (np.isnan(weekly_bull_aligned[i]) or np.isnan(weekly_bear_aligned[i]) or 
-            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
-            np.isnan(ema20_6h[i])):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
+            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
+            np.isnan(vol_regime_aligned[i]) or vol_avg[i] == 0.0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Entry conditions: pullback to EMA20 with Elder Ray confirmation
-        long_setup = (weekly_bull_aligned[i] > 0.5 and 
-                     close[i] <= ema20_6h[i] * 1.005 and  # within 0.5% above EMA20
-                     bull_power_aligned[i] > 0)  # bullish momentum
+        # Volume confirmation: at least 1.3x average
+        vol_confirm = volume[i] > 1.3 * vol_avg[i]
         
-        short_setup = (weekly_bear_aligned[i] > 0.5 and 
-                      close[i] >= ema20_6h[i] * 0.995 and  # within 0.5% below EMA20
-                      bear_power_aligned[i] < 0)  # bearish momentum
+        # Only trade in high volatility (ranging) regime
+        in_range_regime = vol_regime_aligned[i] > 0.5
         
-        # Exit conditions: reverse when Elder Ray diverges or price extends too far
-        exit_long = (weekly_bull_aligned[i] < 0.5 or 
-                    bear_power_aligned[i] < 0 or  # bearish momentum appears
-                    close[i] >= ema20_6h[i] * 1.02)  # extended 2% above EMA20
+        # Entry conditions: mean reversion at L3/H3
+        long_setup = (close[i] <= l3_aligned[i]) and vol_confirm and in_range_regime
+        short_setup = (close[i] >= h3_aligned[i]) and vol_confirm and in_range_regime
         
-        exit_short = (weekly_bear_aligned[i] < 0.5 or 
-                     bull_power_aligned[i] > 0 or  # bullish momentum appears
-                     close[i] <= ema20_6h[i] * 0.98)  # extended 2% below EMA20
+        # Exit conditions: mean reversion to opposite level or breakout
+        exit_long = close[i] >= h3_aligned[i]
+        exit_short = close[i] <= l3_aligned[i]
         
         if long_setup and position != 1:
             position = 1
