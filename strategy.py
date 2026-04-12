@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_12h_camarilla_ema50_volume_v1
-Hypothesis: 4-hour strategy using 12-hour EMA50 for trend direction and 12-hour Camarilla pivot levels for entries, with volume confirmation.
-Works in bull/bear by requiring alignment with the 12h trend (EMA50) and confirming with volume to avoid false breakouts.
-Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
+1d_1w_kama_rsi_chop_filter_v1
+Hypothesis: Daily strategy using KAMA for trend direction, RSI for momentum, and Choppiness Index for regime filtering.
+KAMA adapts to market noise, reducing whipsaws in sideways markets. RSI identifies overbought/oversold conditions.
+Choppiness Index filters out choppy regimes (CHOP > 61.8) where trend following fails, focusing on trending markets.
+Works in bull/bear by only taking trades aligned with the weekly trend (KAMA direction) and avoiding false signals in chop.
+Target: 10-25 trades/year (40-100 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
@@ -18,68 +20,109 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 12h data for trend and Camarilla
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get weekly data for trend and Choppiness Index
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # 12h EMA50 for trend direction
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Weekly KAMA for trend direction (adaptive smoothing)
+    def calculate_kama(close, length=10, fast=2, slow=30):
+        # Efficiency Ratio
+        change = np.abs(np.diff(close, n=length))
+        volatility = np.sum(np.abs(np.diff(close)), axis=0)
+        # Handle first 'length' elements
+        er = np.zeros_like(close)
+        er[length:] = change[length-1:] / np.maximum(volatility[length-1:], 1e-10)
+        # Smoothing constants
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        # KAMA calculation
+        kama = np.zeros_like(close)
+        kama[0] = close[0]
+        for i in range(1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    # Previous 12h bar's range for Camarilla
-    prev_high_12h = np.roll(high_12h, 1)
-    prev_low_12h = np.roll(low_12h, 1)
-    prev_close_12h = np.roll(close_12h, 1)
+    kama_1w = calculate_kama(close_1w, length=10, fast=2, slow=30)
+    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
     
-    range_12h = prev_high_12h - prev_low_12h
-    # Resistance levels
-    r3 = prev_close_12h + range_12h * 1.1 / 2
-    r4 = prev_close_12h + range_12h * 1.1
-    # Support levels
-    s3 = prev_close_12h - range_12h * 1.1 / 2
-    s4 = prev_close_12h - range_12h * 1.1
+    # Weekly Choppiness Index (14-period)
+    def calculate_chop(high, low, close, length=14):
+        # True Range
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        # Pad to same length as close
+        tr = np.concatenate([[np.nan], tr])
+        # Sum of TR over period
+        atr_sum = np.nansum(tr.reshape(-1, length), axis=1) if len(tr) >= length else np.full(len(close), np.nan)
+        atr_sum = np.concatenate([np.full(length-1, np.nan), atr_sum])
+        # Highest high and lowest low over period
+        hh = np.maximum.accumulate(high)
+        ll = np.minimum.accumulate(low)
+        # For rolling window, use pandas for simplicity
+        hh_series = pd.Series(high)
+        ll_series = pd.Series(low)
+        tr_series = pd.Series(tr)
+        roll_max = hh_series.rolling(window=length, min_periods=length).max().values
+        roll_min = ll_series.rolling(window=length, min_periods=length).min().values
+        roll_sum = tr_series.rolling(window=length, min_periods=length).sum().values
+        # Chop = 100 * log10(sum(tr)/(max(high)-min(low))) / log10(length)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            chop = 100 * np.log10(roll_sum / np.maximum(roll_max - roll_min, 1e-10)) / np.log10(length)
+        return chop
     
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_12h, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_12h, s4)
+    chop_1w = calculate_chop(high_1w, low_1w, close_1w, length=14)
+    chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w)
     
-    # Volume confirmation: volume > 1.8x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.8)
+    # Daily RSI (14-period)
+    def calculate_rsi(close, length=14):
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        # First average gain/loss
+        avg_gain = np.zeros_like(close)
+        avg_loss = np.zeros_like(close)
+        avg_gain[length] = np.mean(gain[:length])
+        avg_loss[length] = np.mean(loss[:length])
+        # Wilder smoothing
+        for i in range(length+1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (length-1) + gain[i-1]) / length
+            avg_loss[i] = (avg_loss[i-1] * (length-1) + loss[i-1]) / length
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+    
+    rsi = calculate_rsi(close, length=14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(30, n):
         # Skip if data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(ema50_12h_aligned[i])):
+        if (np.isnan(kama_1w_aligned[i]) or np.isnan(chop_1w_aligned[i]) or 
+            np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: price > EMA50 (uptrend) AND close breaks above R4 with volume
-        if (close[i] > ema50_12h_aligned[i] and close[i] > r4_aligned[i] and vol_confirm[i] and position != 1):
+        # Long entry: price > KAMA (uptrend) AND RSI < 30 (oversold) AND CHOP < 61.8 (trending)
+        if (close[i] > kama_1w_aligned[i] and rsi[i] < 30 and chop_1w_aligned[i] < 61.8 and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: price < EMA50 (downtrend) AND close breaks below S4 with volume
-        elif (close[i] < ema50_12h_aligned[i] and close[i] < s4_aligned[i] and vol_confirm[i] and position != -1):
+        # Short entry: price < KAMA (downtrend) AND RSI > 70 (overbought) AND CHOP < 61.8 (trending)
+        elif (close[i] < kama_1w_aligned[i] and rsi[i] > 70 and chop_1w_aligned[i] < 61.8 and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: reverse signal or close crosses back to opposite S3/R3
-        elif position == 1 and close[i] < s3_aligned[i]:
+        # Exit: reverse signal or RSI crosses back to neutral (40-60) or CHOP > 61.8 (choppy)
+        elif position == 1 and (rsi[i] > 50 or chop_1w_aligned[i] > 61.8):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > r3_aligned[i]:
+        elif position == -1 and (rsi[i] < 50 or chop_1w_aligned[i] > 61.8):
             position = 0
             signals[i] = 0.0
         else:
@@ -93,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_camarilla_ema50_volume_v1"
-timeframe = "4h"
+name = "1d_1w_kama_rsi_chop_filter_v1"
+timeframe = "1d"
 leverage = 1.0
