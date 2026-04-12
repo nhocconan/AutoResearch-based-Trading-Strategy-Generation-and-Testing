@@ -3,21 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d_1w_camarilla_breakout_v3
-# Uses weekly high/low to calculate daily Camarilla levels for the next week.
-# Buys when price breaks above weekly H3 with volume confirmation and ADX > 25.
-# Shorts when price breaks below weekly L3 with volume confirmation and ADX > 25.
-# Uses a 2-bar confirmation to reduce false breakouts and whipsaws.
-# Designed for low trade frequency (target: 10-30 trades/year) to minimize fee drag.
+# Hypothesis: 12h_1d_camarilla_breakout_v1
+# Uses daily pivot-based Camarilla levels for 12h timeframe entries.
+# Buys when price breaks above H3 with volume confirmation, shorts below L3.
+# Uses ADX > 20 to filter for trending markets, avoiding range-bound false signals.
+# Designed for low trade frequency (target: 12-37/year) to minimize fee drag.
 # Works in bull markets (breakouts continuation) and bear markets (breakdowns continuation).
+# Focus on BTC/ETH as primary targets.
 
-name = "1d_1w_camarilla_breakout_v3"
-timeframe = "1d"
+name = "12h_1d_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,30 +25,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get daily data for Camarilla calculation (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous week
-    high_prev = df_1w['high'].shift(1).values
-    low_prev = df_1w['low'].shift(1).values
-    close_prev = df_1w['close'].shift(1).values
+    # Calculate Camarilla levels from previous day
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
     
     # Camarilla formulas
     range_prev = high_prev - low_prev
     camarilla_h3 = close_prev + range_prev * 1.1 / 4
     camarilla_l3 = close_prev - range_prev * 1.1 / 4
     
-    # Align to daily timeframe (weekly levels update only after weekly bar closes)
-    h3_level = align_htf_to_ltf(prices, df_1w, camarilla_h3)
-    l3_level = align_htf_to_ltf(prices, df_1w, camarilla_l3)
+    # Align to 12h timeframe (daily levels update only after daily bar closes)
+    h3_level = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_level = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Volume confirmation: volume > 1.5 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: volume > 1.5 * 30-period average (adjusted for 12h)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
-    # ADX trend filter: only trade when ADX > 20 (moderate trend)
+    # ADX trend filter: only trade when ADX > 20 (trending market)
     # Calculate True Range
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
@@ -80,12 +80,12 @@ def generate_signals(prices):
     minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
     dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
     adx = wilders_smooth(dx, 14)
-    adx_filter = adx > 20  # moderate trend only
+    adx_filter = adx > 20  # trending market only
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):  # start after warmup
+    for i in range(50, n):  # start after warmup
         # Skip if levels not ready
         if np.isnan(h3_level[i]) or np.isnan(l3_level[i]) or np.isnan(adx_filter[i]):
             signals[i] = 0.0
@@ -102,19 +102,19 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above weekly H3 with volume (2-bar confirmation)
-        if close[i] > h3_level[i] and close[i-1] > h3_level[i-1] and position != 1:
+        # Long signal: price breaks above daily H3 with volume
+        if close[i] > h3_level[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below weekly L3 with volume (2-bar confirmation)
-        elif close[i] < l3_level[i] and close[i-1] < l3_level[i-1] and position != -1:
+        # Short signal: price breaks below daily L3 with volume
+        elif close[i] < l3_level[i] and position != -1:
             position = -1
             signals[i] = -0.25
         # Exit conditions: opposite breakout
-        elif close[i] < l3_level[i] and close[i-1] < l3_level[i-1] and position == 1:
+        elif close[i] < l3_level[i] and position == 1:
             position = 0
             signals[i] = 0.0
-        elif close[i] > h3_level[i] and close[i-1] > h3_level[i-1] and position == -1:
+        elif close[i] > h3_level[i] and position == -1:
             position = 0
             signals[i] = 0.0
         else:
