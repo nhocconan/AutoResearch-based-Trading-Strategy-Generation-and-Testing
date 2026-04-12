@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -23,81 +23,79 @@ def generate_signals(prices):
     if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Calculate daily pivot points using previous day's data
-    prev_high = np.roll(df_1d['high'].values, 1)
-    prev_low = np.roll(df_1d['low'].values, 1)
-    prev_close = np.roll(df_1d['close'].values, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
-    
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_val = prev_high - prev_low
-    
-    # Key levels: R1, S1, R2, S2
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
-    r2 = pivot + range_val
-    s2 = pivot - range_val
-    
-    # Align levels to 4h timeframe
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    r2_4h = align_htf_to_ltf(prices, df_1d, r2)
-    s2_4h = align_htf_to_ltf(prices, df_1d, s2)
-    
-    # Calculate weekly trend using EMA crossover
-    close_1w = df_1w['close'].values
-    ema_10 = np.full(len(close_1w), np.nan)
-    ema_30 = np.full(len(close_1w), np.nan)
-    for i in range(10, len(close_1w)):
-        ema_10[i] = np.mean(close_1w[i-10:i]) if i == 10 else (2 * close_1w[i-1] + 9 * ema_10[i-1]) / 10
-    for i in range(30, len(close_1w)):
-        ema_30[i] = np.mean(close_1w[i-30:i]) if i == 30 else (2 * close_1w[i-1] + 29 * ema_30[i-1]) / 30
-    weekly_trend = np.where(ema_10 > ema_30, 1, np.where(ema_10 < ema_30, -1, 0))
-    weekly_trend_4h = align_htf_to_ltf(prices, df_1w, weekly_trend)
-    
-    # Calculate volatility filter using daily ATR (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate daily EMA(50) for trend
     close_1d = df_1d['close'].values
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1d = np.full(len(close_1d), np.nan)
-    for i in range(14, len(atr_1d)):
-        atr_1d[i] = np.nanmean(tr[i-13:i+1])
-    atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    ema_50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Calculate weekly EMA(20) for trend
+    close_1w = df_1w['close'].values
+    ema_20_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 20:
+        ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1h = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # Calculate 1h RSI(14) for entry timing
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    for i in range(14, n):
+        avg_gain[i] = np.mean(gain[i-14:i])
+        avg_loss[i] = np.mean(loss[i-14:i])
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Calculate volume filter (20-period average)
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(weekly_trend_4h[i]) or np.isnan(atr_4h[i]) or 
-            np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or np.isnan(r2_4h[i]) or np.isnan(s2_4h[i])):
+        if (np.isnan(ema_50_1h[i]) or np.isnan(ema_20_1h[i]) or 
+            np.isnan(rsi[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Only take trades in direction of weekly trend
-        weekly_bullish = weekly_trend_4h[i] == 1
-        weekly_bearish = weekly_trend_4h[i] == -1
+        # Session filter
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
         
-        # Entry conditions: S2/R2 breakout with weekly trend alignment
-        long_breakout = (close[i] > r2_4h[i]) and weekly_bullish
-        short_breakout = (close[i] < s2_4h[i]) and weekly_bearish
+        # Volume filter: current volume > 1.5x 20-period average
+        volume_filter = volume[i] > vol_ma[i] * 1.5
         
-        # Exit conditions: touch opposite S1/R1 level or weekly trend reversal
-        long_exit = (close[i] < s1_4h[i]) or (weekly_trend_4h[i] == -1)
-        short_exit = (close[i] > r1_4h[i]) or (weekly_trend_4h[i] == 1)
+        # Trend filters: daily EMA50 and weekly EMA20 alignment
+        daily_bullish = close[i] > ema_50_1h[i]
+        weekly_bullish = ema_20_1h[i] > ema_50_1h[i]  # Weekly EMA20 above Daily EMA50
+        daily_bearish = close[i] < ema_50_1h[i]
+        weekly_bearish = ema_20_1h[i] < ema_50_1h[i]  # Weekly EMA20 below Daily EMA50
         
-        if long_breakout and position != 1:
+        # Entry conditions: RSI extremes with trend alignment
+        long_entry = (rsi[i] < 30) and daily_bullish and weekly_bullish and volume_filter
+        short_entry = (rsi[i] > 70) and daily_bearish and weekly_bearish and volume_filter
+        
+        # Exit conditions: RSI mean reversion or trend breakdown
+        long_exit = (rsi[i] > 50) or (not daily_bullish) or (not weekly_bullish)
+        short_exit = (rsi[i] < 50) or (not daily_bearish) or (not weekly_bearish)
+        
+        if long_entry and position != 1:
             position = 1
-            signals[i] = 0.25
-        elif short_breakout and position != -1:
+            signals[i] = 0.20
+        elif short_entry and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.20
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -107,14 +105,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_1w_1d_pivot_breakout_weekly_trend_v2"
-timeframe = "4h"
+name = "1h_1d_1w_ema_rsi_mean_reversion_v1"
+timeframe = "1h"
 leverage = 1.0
