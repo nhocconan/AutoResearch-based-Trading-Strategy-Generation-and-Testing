@@ -8,10 +8,10 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Hypothesis: 12h Camarilla long/short bias from 1d pivot + volume confirmation
-    # Works in bull/bear by fading extreme intraday moves at key pivot levels.
-    # Uses 12h timeframe to reduce frequency, volume filter to avoid false signals.
-    # Target: 15-25 trades/year per symbol.
+    # Hypothesis: 4h price closing above/below 1d SMA50 with 12h trend filter and volume confirmation
+    # Uses long-term trend (12h SMA50) to filter direction, 1d SMA50 as dynamic support/resistance
+    # Volume confirmation ensures breakouts have participation. Works in bull/bear by
+    # only taking trades aligned with higher timeframe trend. Target: 20-30 trades/year.
     
     # Session filter: 8:00-20:00 UTC (avoid low volume Asian session)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -22,50 +22,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation
+    # Get 12h data for trend filter (HTF)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    
+    # 12h SMA50 for trend filter
+    sma_50_12h = np.full(len(df_12h), np.nan)
+    for i in range(49, len(df_12h)):
+        sma_50_12h[i] = np.mean(close_12h[i-49:i+1])
+    sma_50_12h_aligned = align_htf_to_ltf(prices, df_12h, sma_50_12h)
+    
+    # Get 1d data for support/resistance levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     
-    # Calculate 1d Camarilla levels (based on previous day)
-    camarilla_H5 = np.full(len(df_1d), np.nan)
-    camarilla_H4 = np.full(len(df_1d), np.nan)
-    camarilla_H3 = np.full(len(df_1d), np.nan)
-    camarilla_L3 = np.full(len(df_1d), np.nan)
-    camarilla_L4 = np.full(len(df_1d), np.nan)
-    camarilla_L5 = np.full(len(df_1d), np.nan)
+    # 1d SMA50 as dynamic support/resistance
+    sma_50_1d = np.full(len(df_1d), np.nan)
+    for i in range(49, len(df_1d)):
+        sma_50_1d[i] = np.mean(close_1d[i-49:i+1])
+    sma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
     
-    for i in range(1, len(df_1d)):
-        # Use previous day's data for today's levels
-        prev_high = high_1d[i-1]
-        prev_low = low_1d[i-1]
-        prev_close = close_1d[i-1]
-        range_val = prev_high - prev_low
-        
-        camarilla_H5[i] = prev_close + 1.1 * range_val * 1.1
-        camarilla_H4[i] = prev_close + 1.1 * range_val * 0.5
-        camarilla_H3[i] = prev_close + 1.1 * range_val * 0.25
-        camarilla_L3[i] = prev_close - 1.1 * range_val * 0.25
-        camarilla_L4[i] = prev_close - 1.1 * range_val * 0.5
-        camarilla_L5[i] = prev_close - 1.1 * range_val * 1.1
-    
-    # Align Camarilla levels to 12h timeframe
-    H5_12h = align_htf_to_ltf(prices, df_1d, camarilla_H5)
-    H4_12h = align_htf_to_ltf(prices, df_1d, camarilla_H4)
-    H3_12h = align_htf_to_ltf(prices, df_1d, camarilla_H3)
-    L3_12h = align_htf_to_ltf(prices, df_1d, camarilla_L3)
-    L4_12h = align_htf_to_ltf(prices, df_1d, camarilla_L4)
-    L5_12h = align_htf_to_ltf(prices, df_1d, camarilla_L5)
-    
-    # Volume confirmation: current volume > 1.5 * 20-period average
+    # Volume filter: current volume > 1.5 * 20-period average
     vol_ma_20 = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma_20[i] = np.mean(volume[i-20:i])
-    volume_filter = volume > (1.5 * vol_ma_20)
+    for i in range(19, n):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    vol_filter = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -76,24 +63,31 @@ def generate_signals(prices):
             continue
         
         # Skip if data not ready
-        if (np.isnan(H3_12h[i]) or np.isnan(L3_12h[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(sma_50_12h_aligned[i]) or np.isnan(sma_50_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Mean reversion at Camarilla H3/L3 levels
-        # Long when price touches L3 with volume, short when touches H3 with volume
-        long_signal = (low[i] <= L3_12h[i] + 0.1 * (H3_12h[i] - L3_12h[i])) and volume_filter[i]
-        short_signal = (high[i] >= H3_12h[i] - 0.1 * (H3_12h[i] - L3_12h[i])) and volume_filter[i]
+        # Trend filter: price should be on same side of 12h SMA50 as 1d SMA50
+        trend_bullish = close[i] > sma_50_12h_aligned[i]
+        trend_bearish = close[i] < sma_50_12h_aligned[i]
         
-        # Exit when price moves back toward center or opposite extreme
-        long_exit = (close[i] >= (H3_12h[i] + L3_12h[i]) / 2) or (high[i] >= H4_12h[i])
-        short_exit = (close[i] <= (H3_12h[i] + L3_12h[i]) / 2) or (low[i] <= L4_12h[i])
+        # Position relative to 1d SMA50
+        price_above_1d_sma = close[i] > sma_50_1d_aligned[i]
+        price_below_1d_sma = close[i] < sma_50_1d_aligned[i]
         
-        if long_signal and position != 1:
+        # Entry conditions with volume confirmation
+        long_entry = trend_bullish and price_above_1d_sma and vol_filter[i]
+        short_entry = trend_bearish and price_below_1d_sma and vol_filter[i]
+        
+        # Exit conditions: trend reversal or price crosses back below/above 1d SMA50
+        long_exit = (not trend_bullish) or (price_below_1d_sma)
+        short_exit = (not trend_bearish) or (price_above_1d_sma)
+        
+        if long_entry and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_signal and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
@@ -113,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_camarilla_mean_reversion_v1"
-timeframe = "12h"
+name = "4h_12h_1d_sma50_trend_filter_volume"
+timeframe = "4h"
 leverage = 1.0
