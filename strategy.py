@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-1d_1w_Keltner_CCI_Breakout_v1
-Hypothesis: Daily breakout of Keltner Channel (2x ATR) with CCI(20) momentum confirmation and weekly trend filter (price > weekly SMA50). Designed to capture sustained trends in both bull and bear markets with low frequency (target: 30-100 trades over 4 years). Uses discrete position sizing (0.25) to minimize churn.
+6h_1d_WeeklyPivot_DonchianBreakout_v2
+Hypothesis: Combine weekly pivot points with 6-hour Donchian channel breakouts and volume confirmation.
+Weekly pivot provides directional bias from higher timeframe, while Donchian breakout captures momentum.
+Volume filter ensures breakouts have conviction. Designed to work in both bull and bear markets by
+focusing on institutional levels and breakout confirmation. Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Keltner_CCI_Breakout_v1"
-timeframe = "1d"
+name = "6h_1d_WeeklyPivot_DonchianBreakout_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,61 +23,87 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # === WEEKLY TREND FILTER (SMA50) ===
+    # === WEEKLY PIVOT CALCULATION ===
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 1:
         return np.zeros(n)
-    weekly_close = df_1w['close'].values
-    sma_50_1w = pd.Series(weekly_close).rolling(window=50, min_periods=50).mean().values
-    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
     
-    # === DAILY KELTNER CHANNEL (2x ATR) ===
-    # Calculate ATR(14)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate EMA(20) of close for Keltner middle
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate weekly pivot points (P), resistance (R1,R2), support (S1,S2)
+    pivot = np.zeros(len(df_1w))
+    R1 = np.zeros(len(df_1w))
+    S1 = np.zeros(len(df_1w))
+    R2 = np.zeros(len(df_1w))
+    S2 = np.zeros(len(df_1w))
     
-    # Keltner Upper/Lower bands
-    keltner_upper = ema_20 + 2.0 * atr
-    keltner_lower = ema_20 - 2.0 * atr
+    for i in range(len(df_1w)):
+        pp = (high_1w[i] + low_1w[i] + close_1w[i]) / 3
+        r = high_1w[i] - low_1w[i]
+        pivot[i] = pp
+        R1[i] = 2 * pp - low_1w[i]
+        S1[i] = 2 * pp - high_1w[i]
+        R2[i] = pp + r
+        S2[i] = pp - r
     
-    # === CCI(20) MOMENTUM ===
-    typical_price = (high + low + close) / 3.0
-    sma_tp = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
-    mad = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
-    cci = (typical_price - sma_tp) / (0.015 * mad)
+    # Align weekly pivot levels to 6h timeframe
+    pivot_6h = align_htf_to_ltf(prices, df_1w, pivot)
+    R1_6h = align_htf_to_ltf(prices, df_1w, R1)
+    S1_6h = align_htf_to_ltf(prices, df_1w, S1)
+    R2_6h = align_htf_to_ltf(prices, df_1w, R2)
+    S2_6h = align_htf_to_ltf(prices, df_1w, S2)
+    
+    # === DAILY DONCHIAN CHANNEL (20-period) ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Calculate Donchian channels
+    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian channels to 6h timeframe
+    upper_6h = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_6h = align_htf_to_ltf(prices, df_1d, lower_20)
+    
+    # === VOLUME FILTER ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(sma_50_1w_aligned[i]) or np.isnan(keltner_upper[i]) or 
-            np.isnan(keltner_lower[i]) or np.isnan(cci[i])):
+        if (np.isnan(pivot_6h[i]) or np.isnan(R1_6h[i]) or np.isnan(S1_6h[i]) or
+            np.isnan(upper_6h[i]) or np.isnan(lower_6h[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: Close above Keltner Upper + CCI > 100 + price above weekly SMA50
-        long_signal = (close[i] > keltner_upper[i]) and (cci[i] > 100) and (close[i] > sma_50_1w_aligned[i])
+        # Determine bias from weekly pivot
+        bullish_bias = close[i] > pivot_6h[i]
+        bearish_bias = close[i] < pivot_6h[i]
         
-        # Short: Close below Keltner Lower + CCI < -100 + price below weekly SMA50
-        short_signal = (close[i] < keltner_lower[i]) and (cci[i] < -100) and (close[i] < sma_50_1w_aligned[i])
+        # Breakout conditions with volume confirmation
+        long_breakout = (close[i] > upper_6h[i]) and (vol_ratio[i] > 1.5) and bullish_bias
+        short_breakout = (close[i] < lower_6h[i]) and (vol_ratio[i] > 1.5) and bearish_bias
         
-        # Exit: CCI crosses back through zero (mean reversion)
-        exit_long = (position == 1) and (cci[i] < 0)
-        exit_short = (position == -1) and (cci[i] > 0)
+        # Exit conditions: return to opposite pivot level
+        exit_long = (position == 1) and (close[i] < S1_6h[i])
+        exit_short = (position == -1) and (close[i] > R1_6h[i])
         
         # Execute trades
-        if long_signal and position != 1:
+        if long_breakout and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_signal and position != -1:
+        elif short_breakout and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
