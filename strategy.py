@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
 """
-12h_1d_KAMA_Trend_Filter
-Hypothesis: On 12h timeframe, take long positions when price is above KAMA and RSI > 50,
-and short positions when price is below KAMA and RSI < 50. Use 1d volume > 1.5x average for confirmation.
-KAMA adapts to market noise, reducing whipsaw in sideways markets. Designed for 12h timeframe with low trade frequency.
-Works in bull markets (trend following) and bear markets (trend following short).
-Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
+4h_12h_Camarilla_Triangle_Breakout
+Hypothesis: Combine 12h trend (EMA21) with 4h breakout from contracting triangle pattern.
+Go long when price breaks above triangle resistance in uptrend, short when breaks below support in downtrend.
+Triangle identified by higher lows and lower highs over 5 periods. Volume confirmation required.
+Designed to capture breakouts with momentum in trending markets, avoiding false breakouts in ranges.
+Target: 60-120 total trades over 4 years (15-30/year) on 4h timeframe.
+Works in bull (breakouts continuation) and bear (breakdowns continuation).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_KAMA_Trend_Filter"
-timeframe = "12h"
+name = "4h_12h_Camarilla_Triangle_Breakout"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,68 +27,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1D DATA FOR VOLUME FILTER ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # === 12H DATA FOR TREND FILTER ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 21:
         return np.zeros(n)
     
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_1d = volume_1d / vol_ma_1d
-    vol_ratio_12h = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    close_12h = df_12h['close'].values
+    ema21_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema21_12h)
     
-    # === KAMA CALCULATION ON 12H CLOSE ===
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, n=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)  # 10-period volatility
-    # Handle first 10 values
-    change = np.concatenate([np.full(10, np.nan), change])
-    volatility = np.concatenate([np.full(10, np.nan), volatility[9:]])
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
-    # KAMA
-    kama = np.full_like(close, np.nan)
-    kama[0] = close[0]
-    for i in range(1, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    # === VOLUME FILTER (20-period average) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / vol_ma
     
-    # === RSI CALCULATION ON 12H CLOSE ===
-    delta = np.diff(close)
-    delta = np.concatenate([[np.nan], delta])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # === TRIANGLE DETECTION (5-period higher lows & lower highs) ===
+    # Higher lows: each low > previous low
+    hl_condition = np.ones(n, dtype=bool)
+    for i in range(1, 5):
+        hl_condition[i:] &= (low[i:] > low[:-i])
     
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Lower highs: each high < previous high
+    hh_condition = np.ones(n, dtype=bool)
+    for i in range(1, 5):
+        hh_condition[i:] &= (high[i:] < high[:-i])
+    
+    triangle_condition = hl_condition & hh_condition
+    
+    # Triangle boundaries: recent high and low
+    resistance = pd.Series(high).rolling(window=5, min_periods=5).max().values
+    support = pd.Series(low).rolling(window=5, min_periods=5).min().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(vol_ratio_12h[i])):
+        if (np.isnan(ema21_12h_aligned[i]) or np.isnan(resistance[i]) or 
+            np.isnan(support[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Entry conditions: price relative to KAMA + RSI + volume
-        price_above_kama = close[i] > kama[i]
-        price_below_kama = close[i] < kama[i]
-        rsi_bullish = rsi[i] > 50
-        rsi_bearish = rsi[i] < 50
-        volume_confirmed = vol_ratio_12h[i] > 1.5
+        # Determine trend from 12h EMA21
+        close_12h_arr = df_12h['close'].values
+        close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h_arr)
+        trend_up = close_12h_aligned[i] > ema21_12h_aligned[i]
+        trend_down = close_12h_aligned[i] < ema21_12h_aligned[i]
         
-        long_signal = price_above_kama and rsi_bullish and volume_confirmed
-        short_signal = price_below_kama and rsi_bearish and volume_confirmed
+        # Breakout conditions: price breaks triangle boundary + trend + volume
+        breakout_up = close[i] > resistance[i-1] and triangle_condition[i-1]
+        breakout_down = close[i] < support[i-1] and triangle_condition[i-1]
         
-        # Exit conditions: opposite condition
-        exit_long = position == 1 and (price_below_kama or not rsi_bullish)
-        exit_short = position == -1 and (price_above_kama or not rsi_bearish)
+        long_signal = breakout_up and trend_up and vol_ratio[i] > 1.5
+        short_signal = breakout_down and trend_down and vol_ratio[i] > 1.5
+        
+        # Exit conditions: opposite breakout or trend reversal
+        exit_long = (position == 1 and 
+                    (breakout_down or not trend_up))
+        exit_short = (position == -1 and 
+                     (breakout_up or not trend_down))
         
         # Execute trades
         if long_signal and position != 1:
