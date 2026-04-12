@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-# 4h_1d_donchian_breakout_volume_atr_v1
-# Hypothesis: 4-hour Donchian breakout with volume confirmation and ATR volatility filter
-# Works in bull/bear by using volatility-adjusted breakouts and volume confirmation to avoid false signals.
+# 4h_1d_camarilla_breakout_v2
+# Hypothesis: 4-hour breakout of Camarilla levels from daily timeframe with volume confirmation.
+# Uses tight entry conditions (breakout of R4/S4 levels) and exits on retest of S3/R3.
+# Designed to work in both bull and bear markets by focusing on volatility-adjusted breakouts.
 # Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
 
-name = "4h_1d_donchian_breakout_volume_atr_v1"
+name = "4h_1d_camarilla_breakout_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,7 +23,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR calculation
+    # Get daily data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -31,17 +32,26 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # ATR for volatility filter (14-day ATR)
-    tr1 = np.abs(np.subtract(high_1d, low_1d))
-    tr2 = np.abs(np.subtract(high_1d, np.roll(close_1d, 1)))
-    tr3 = np.abs(np.subtract(low_1d, np.roll(close_1d, 1)))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    # Previous day's range (using roll to shift by 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
     
-    # Donchian channel (20-period) on 4h timeframe
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate range and handle first value (no previous day)
+    range_ = prev_high - prev_low
+    range_[0] = 0  # No range for first day
+    
+    # Camarilla levels (based on previous day)
+    r3 = prev_close + range_ * 1.1 / 2
+    r4 = prev_close + range_ * 1.1
+    s3 = prev_close - range_ * 1.1 / 2
+    s4 = prev_close - range_ * 1.1
+    
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,27 +61,25 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(atr_aligned[i])):
+        # Skip if data not ready (check for NaN in aligned arrays)
+        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: close breaks above Donchian high with volume and volatility filter
-        if (close[i] > donchian_high[i] and vol_confirm[i] and 
-            atr_aligned[i] > 0 and position != 1):
+        # Long entry: close breaks above R4 with volume confirmation
+        if (close[i] > r4_aligned[i] and vol_confirm[i] and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: close breaks below Donchian low with volume and volatility filter
-        elif (close[i] < donchian_low[i] and vol_confirm[i] and 
-              atr_aligned[i] > 0 and position != -1):
+        # Short entry: close breaks below S4 with volume confirmation
+        elif (close[i] < s4_aligned[i] and vol_confirm[i] and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: reverse signal or ATR-based stop (simplified as opposite band touch)
-        elif position == 1 and close[i] < donchian_low[i]:
+        # Exit: reverse signal or close crosses back to opposite S3/R3
+        elif position == 1 and close[i] < s3_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > donchian_high[i]:
+        elif position == -1 and close[i] > r3_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
