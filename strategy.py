@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Breakout_With_Volume_Filter_v1
-Hypothesis: Trade daily Camarilla H3/L3 breakouts on 12h timeframe with volume > 2x 24-period average and price >1% beyond level.
-Use 50 EMA on 12h for trend filter: long only in uptrend, short only in downtrend.
-Exit on trend reversal or opposite level touch. Designed for low trade frequency (~12-37/year) with high conviction.
+4h_1d_Camarilla_Breakout_With_Volume_Filter_v3
+Hypothesis: Trade daily Camarilla H3/L3 breakouts only with volume > 2x 20-period average and price >1% beyond level.
+Use 50 EMA for trend filter: long only in uptrend, short only in downtrend.
+Exit on trend reversal or opposite level touch. Designed for low trade frequency (~20-40/year) with high conviction.
 Works in bull markets (continuation breaks) and bear markets (mean reversion from extremes).
 """
 
@@ -11,8 +11,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_Breakout_With_Volume_Filter_v1"
-timeframe = "12h"
+name = "4h_1d_Camarilla_Breakout_With_Volume_Filter_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -44,18 +44,18 @@ def generate_signals(prices):
     h4 = pivot + (range_1d * 1.1 / 2)
     l4 = pivot - (range_1d * 1.1 / 2)
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
     l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
     
-    # === TREND FILTER: 50 EMA ON 12H CHART ===
+    # === TREND FILTER: 50 EMA ON 4H CHART ===
     close_series = pd.Series(close)
     ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # === VOLUME FILTER ===
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
