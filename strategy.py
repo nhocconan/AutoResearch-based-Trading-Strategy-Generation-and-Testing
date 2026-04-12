@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v15"
+name = "4h_1d_camarilla_breakout_v16"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,12 +17,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots (using previous day to avoid look-ahead)
+    # Get 1d data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Previous 1d bar data
+    # Previous 1d bar data (use .shift(1) to avoid look-ahead)
     high_1d_prev = df_1d['high'].shift(1).values
     low_1d_prev = df_1d['low'].shift(1).values
     close_1d_prev = df_1d['close'].shift(1).values
@@ -41,7 +41,7 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
-    # Additional filter: avoid low volatility periods
+    # Additional filter: avoid low volatility periods using ATR ratio
     atr_period = 14
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
@@ -51,7 +51,8 @@ def generate_signals(prices):
     tr3[0] = np.abs(low[0] - close[0])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
-    vol_ratio = atr / pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    vol_ratio = atr / atr_ma
     vol_filter = vol_ratio > 0.8  # Avoid extremely low volatility
     
     signals = np.zeros(n)
