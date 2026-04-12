@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_1w_1d_adaptive_cci_v1
-Hypothesis: 6-hour strategy using CCI on weekly and daily timeframes with adaptive thresholds based on volatility regime.
-Long when weekly CCI > +100 and daily CCI crosses above +50; short when weekly CCI < -100 and daily CCI crosses below -50.
-Uses ATR-based volatility filter to avoid chop and dynamic position sizing. Designed to catch strong trends while avoiding range-bound markets.
-Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and fee drag.
+4h_1d_rsi_divergence_volume_confirmation_v1
+Hypothesis: 4-hour strategy using RSI divergence on daily timeframe with volume confirmation.
+Looks for bullish divergence (price makes lower low, RSI makes higher low) for long entries,
+and bearish divergence (price makes higher high, RSI makes lower high) for short entries.
+Requires volume confirmation (>1.5x 20-period average) to filter false signals.
+Designed to work in both bull and bear markets by capturing reversals at extremes.
+Target: 20-35 trades/year (80-140 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
@@ -19,46 +21,42 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for primary trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Calculate weekly CCI(20)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Typical price
-    tp_1w = (high_1w + low_1w + close_1w) / 3
-    # Moving average of typical price
-    ma_tp_1w = pd.Series(tp_1w).rolling(window=20, min_periods=20).mean().values
-    # Mean deviation
-    md_1w = pd.Series(tp_1w).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
-    # CCI calculation
-    cci_1w = (tp_1w - ma_tp_1w) / (0.015 * md_1w)
-    cci_1w = np.where(md_1w == 0, 0, cci_1w)  # avoid division by zero
-    cci_1w_aligned = align_htf_to_ltf(prices, df_1w, cci_1w)
-    
-    # Get daily data for entry signal and volatility filter
+    # Get daily data for RSI calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate daily CCI(14) for entry timing
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate daily RSI (14-period)
     close_1d = df_1d['close'].values
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    tp_1d = (high_1d + low_1d + close_1d) / 3
-    ma_tp_1d = pd.Series(tp_1d).rolling(window=14, min_periods=14).mean().values
-    md_1d = pd.Series(tp_1d).rolling(window=14, min_periods=14).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
-    cci_1d = (tp_1d - ma_tp_1d) / (0.015 * md_1d)
-    cci_1d = np.where(md_1d == 0, 0, cci_1d)
-    cci_1d_aligned = align_htf_to_ltf(prices, df_1d, cci_1d)
+    # Calculate average gain and loss
+    avg_gain = np.zeros_like(close_1d)
+    avg_loss = np.zeros_like(close_1d)
     
-    # Calculate ATR for volatility filter and position sizing
+    # Initialize first average
+    if len(gain) >= 14:
+        avg_gain[13] = np.mean(gain[:14])
+        avg_loss[13] = np.mean(loss[:14])
+    
+    # Calculate subsequent averages
+    for i in range(14, len(close_1d)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
+    
+    # Calculate RSI
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_1d = np.where(rs != 0, 100 - (100 / (1 + rs)), 100)
+    rsi_1d = np.concatenate([np.full(14, np.nan), rsi_1d[14:]])
+    
+    # Align RSI to 4h timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
+    # Calculate ATR for volatility filter
     tr1 = np.abs(high - low)
     tr2 = np.abs(np.roll(high, 1) - close)
     tr3 = np.abs(np.roll(low, 1) - close)
@@ -68,48 +66,46 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(cci_1w_aligned[i]) or np.isnan(cci_1d_aligned[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(atr[i]) or 
+            i < 14):  # Need at least 14 days for RSI
             signals[i] = 0.0
             continue
         
-        # Volatility filter: avoid extremely low volatility (chop) and extreme volatility (chaos)
+        # Volume filter: current volume > 1.5x 20-period average
         if i >= 20:
-            atr_ma = np.mean(atr[max(0, i-20):i])
-            vol_ratio = atr[i] / atr_ma if atr_ma > 0 else 1.0
-            volatility_filter = 0.5 <= vol_ratio <= 2.5  # only trade in normal volatility regimes
+            vol_ma = np.mean(volume[max(0, i-20):i])
+            volume_filter = volume[i] > vol_ma * 1.5
         else:
-            volatility_filter = True
+            volume_filter = False
         
-        # Entry conditions: weekly trend + daily momentum
-        long_entry = (cci_1w_aligned[i] > 100 and 
-                      cci_1d_aligned[i] > 50 and 
-                      i > 20 and cci_1d_aligned[i-1] <= 50 and  # daily CCI crosses above 50
-                      volatility_filter)
-        short_entry = (cci_1w_aligned[i] < -100 and 
-                       cci_1d_aligned[i] < -50 and 
-                       i > 20 and cci_1d_aligned[i-1] >= -50 and  # daily CCI crosses below -50
-                       volatility_filter)
+        # Need at least 2 days of aligned data to check for divergence
+        if i < 1:
+            signals[i] = 0.0
+            continue
+            
+        # Get current and previous values for divergence detection
+        curr_price = close[i]
+        prev_price = close[i-1]
+        curr_rsi = rsi_1d_aligned[i]
+        prev_rsi = rsi_1d_aligned[i-1]
         
-        # Exit conditions: weekly trend reversal or daily mean reversion
-        long_exit = (cci_1w_aligned[i] < 0 or 
-                     cci_1d_aligned[i] < -50 or 
-                     (i > 20 and cci_1d_aligned[i] < cci_1d_aligned[i-1] and cci_1d_aligned[i] < 0))
-        short_exit = (cci_1w_aligned[i] > 0 or 
-                      cci_1d_aligned[i] > 50 or 
-                      (i > 20 and cci_1d_aligned[i] > cci_1d_aligned[i-1] and cci_1d_aligned[i] > 0))
+        # Bullish divergence: price makes lower low, RSI makes higher low
+        bullish_div = (curr_price < prev_price) and (curr_rsi > prev_rsi)
+        # Bearish divergence: price makes higher high, RSI makes lower high
+        bearish_div = (curr_price > prev_price) and (curr_rsi < prev_rsi)
         
-        # Dynamic position sizing based on volatility (inverse vol)
-        if i >= 20:
-            atr_ma = np.mean(atr[max(0, i-20):i])
-            vol_scaling = np.clip(atr_ma / atr[i], 0.5, 2.0)  # inverse vol: smaller size in high vol
-        else:
-            vol_scaling = 1.0
-        base_size = 0.25
-        position_size = base_size * vol_scaling
-        position_size = np.clip(position_size, 0.20, 0.30)
+        # Entry conditions: RSI divergence with volume confirmation
+        long_entry = bullish_div and volume_filter and (curr_rsi < 40)  # Oversold condition
+        short_entry = bearish_div and volume_filter and (curr_rsi > 60)  # Overbought condition
+        
+        # Exit conditions: RSI returns to neutral zone or opposite divergence
+        long_exit = (curr_rsi > 60) or bearish_div
+        short_exit = (curr_rsi < 40) or bullish_div
+        
+        # Position sizing: fixed 0.25 (25% of capital)
+        position_size = 0.25
         
         if long_entry and position != 1:
             position = 1
@@ -134,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_1d_adaptive_cci_v1"
-timeframe = "6h"
+name = "4h_1d_rsi_divergence_volume_confirmation_v1"
+timeframe = "4h"
 leverage = 1.0
