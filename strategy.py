@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Trend_Filter_v1
-Hypothesis: Use daily trend from 1D close above/below EMA50 to filter 4H breakouts at Camarilla R4/S4 levels.
-Go long when 4H close breaks above daily R4 AND daily trend is up (close > EMA50).
-Go short when 4H close breaks below daily S4 AND daily trend is down (close < EMA50).
-Exit when price returns to daily midpoint (R4+S4)/2.
-Targets 20-40 trades per year to minimize fee drag. Works in bull/bear via trend filter.
+12h_1w_Camarilla_Trend_Reversal_v1
+Hypothesis: Use weekly trend from 1W close above/below EMA20 to filter 12H reversals at Camarilla R3/S3 levels.
+Go long when 12H close crosses below weekly S3 AND weekly trend is up (close > EMA20) - buying weakness in uptrend.
+Go short when 12H close crosses above weekly R3 AND weekly trend is down (close < EMA20) - selling strength in downtrend.
+Exit when price returns to weekly midpoint (R3+S3)/2.
+Targets 15-25 trades per year to minimize fee drift. Works in bull/bear via trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_Trend_Filter_v1"
-timeframe = "4h"
+name = "12h_1w_Camarilla_Trend_Reversal_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,70 +26,70 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Daily data for trend and Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Weekly data for trend and Camarilla levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Daily EMA50 for trend filter
-    daily_close = df_1d['close'].values
-    ema50 = np.full(len(daily_close), np.nan)
-    if len(daily_close) >= 50:
-        alpha = 2 / (50 + 1)
-        ema50[0] = daily_close[0]
-        for i in range(1, len(daily_close)):
-            ema50[i] = alpha * daily_close[i] + (1 - alpha) * ema50[i-1]
+    # Weekly EMA20 for trend filter
+    weekly_close = df_1w['close'].values
+    ema20 = np.full(len(weekly_close), np.nan)
+    if len(weekly_close) >= 20:
+        alpha = 2 / (20 + 1)
+        ema20[0] = weekly_close[0]
+        for i in range(1, len(weekly_close)):
+            ema20[i] = alpha * weekly_close[i] + (1 - alpha) * ema20[i-1]
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Previous week's OHLC for Camarilla calculation
+    prev_high = df_1w['high'].shift(1).values
+    prev_low = df_1w['low'].shift(1).values
+    prev_close = df_1w['close'].shift(1).values
     
     # Calculate Camarilla levels
     range_ = prev_high - prev_low
-    camarilla_r4 = prev_close + range_ * 1.1 / 2
-    camarilla_s4 = prev_close - range_ * 1.1 / 2
+    camarilla_r3 = prev_close + range_ * 1.1 / 4
+    camarilla_s3 = prev_close - range_ * 1.1 / 4
     
     # Handle invalid ranges
     valid_range = range_ > 0
-    camarilla_r4 = np.where(valid_range, camarilla_r4, np.nan)
-    camarilla_s4 = np.where(valid_range, camarilla_s4, np.nan)
+    camarilla_r3 = np.where(valid_range, camarilla_r3, np.nan)
+    camarilla_s3 = np.where(valid_range, camarilla_s3, np.nan)
     
-    # Align to 4h timeframe
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50)
+    # Align to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
+    ema20_aligned = align_htf_to_ltf(prices, df_1w, ema20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any data invalid
-        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or
-            np.isnan(ema50_aligned[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(ema20_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter: daily close above/below EMA50
-        daily_close_price = df_1d['close'].values
-        daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close_price)
-        trend_up = daily_close_aligned[i] > ema50_aligned[i]
+        # Trend filter: weekly close above/below EMA20
+        weekly_close_price = df_1w['close'].values
+        weekly_close_aligned = align_htf_to_ltf(prices, df_1w, weekly_close_price)
+        trend_up = weekly_close_aligned[i] > ema20_aligned[i]
         
-        # Breakout conditions
-        long_breakout = close[i] > camarilla_r4_aligned[i] and trend_up
-        short_breakout = close[i] < camarilla_s4_aligned[i] and not trend_up
+        # Reversal conditions: buying weakness in uptrid, selling strength in downtrend
+        long_reversal = close[i] < camarilla_s3_aligned[i] and trend_up
+        short_reversal = close[i] > camarilla_r3_aligned[i] and not trend_up
         
         # Exit conditions: return to Camarilla midpoint
-        camarilla_midpoint = (camarilla_r4_aligned[i] + camarilla_s4_aligned[i]) / 2
+        camarilla_midpoint = (camarilla_r3_aligned[i] + camarilla_s3_aligned[i]) / 2
         
-        long_exit = close[i] < camarilla_midpoint
-        short_exit = close[i] > camarilla_midpoint
+        long_exit = close[i] > camarilla_midpoint
+        short_exit = close[i] < camarilla_midpoint
         
         # Signal logic
-        if long_breakout and position != 1:
+        if long_reversal and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_breakout and position != -1:
+        elif short_reversal and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
