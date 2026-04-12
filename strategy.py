@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_breakout_volume_regime
-# Hypothesis: 12-hour Camarilla breakout with volume confirmation and choppiness regime filter
-# Uses daily pivots for structure, volume to confirm breakout strength, and choppiness to avoid ranging markets
-# Target: 25-40 trades/year (100-160 total over 4 years) to minimize fee drag while capturing major moves
-
-name = "12h_1d_camarilla_breakout_volume_regime"
-timeframe = "12h"
+"""
+4h_1d_camarilla_breakout_volume_regime
+Hypothesis: 4-hour Camarilla breakout with volume confirmation and volatility regime filter.
+Uses 1d Camarilla levels from prior day, volume > 1.5x 20-period average, and ATR-based volatility filter.
+Designed for fewer trades (<50/year) to minimize fee drag and work in both bull/bear markets.
+"""
+name = "4h_1d_camarilla_breakout_volume_regime"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,7 +23,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla and choppiness calculation
+    # Get daily data for Camarilla and ATR calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -31,15 +32,18 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's data for Camarilla calculation
+    # Previous day's range
     prev_high = np.roll(high_1d, 1)
     prev_low = np.roll(low_1d, 1)
     prev_close = np.roll(close_1d, 1)
     
-    # Calculate previous day's range
-    range_ = prev_high - prev_low
+    # Handle first value (no previous day)
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
     
     # Camarilla levels (based on previous day)
+    range_ = prev_high - prev_low
     # Resistance levels
     r3 = prev_close + range_ * 1.1 / 2
     r4 = prev_close + range_ * 1.1
@@ -47,57 +51,43 @@ def generate_signals(prices):
     s3 = prev_close - range_ * 1.1 / 2
     s4 = prev_close - range_ * 1.1
     
-    # Choppiness Index calculation (14-period)
-    # True Range
+    # ATR for volatility filter (14-day ATR)
     tr1 = np.abs(np.subtract(high_1d, low_1d))
     tr2 = np.abs(np.subtract(high_1d, np.roll(close_1d, 1)))
     tr3 = np.abs(np.subtract(low_1d, np.roll(close_1d, 1)))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Sum of TR over 14 periods
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    
-    # Highest high and lowest low over 14 periods
-    hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index: 100 * log10(tr_sum / (hh - ll)) / log10(14)
-    # Avoid division by zero
-    range_14 = hh - ll
-    chop = np.full_like(tr_sum, 50.0, dtype=np.float64)  # default to neutral
-    mask = (range_14 > 0) & ~np.isnan(tr_sum) & ~np.isnan(range_14)
-    chop[mask] = 100 * np.log10(tr_sum[mask] / range_14[mask]) / np.log10(14)
-    
-    # Align Camarilla levels and Choppiness to 12h timeframe
+    # Align Camarilla levels and ATR to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
-    # Volume confirmation: volume > 1.3x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.3)
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if data not ready
         if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
             np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(chop_aligned[i])):
+            np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: close breaks above R4 with volume and in trending market (chop < 61.8)
+        # Long entry: close breaks above R4 with volume and volatility filter
         if (close[i] > r4_aligned[i] and vol_confirm[i] and 
-            chop_aligned[i] < 61.8 and position != 1):
+            atr_aligned[i] > 0 and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: close breaks below S4 with volume and in trending market (chop < 61.8)
+        # Short entry: close breaks below S4 with volume and volatility filter
         elif (close[i] < s4_aligned[i] and vol_confirm[i] and 
-              chop_aligned[i] < 61.8 and position != -1):
+              atr_aligned[i] > 0 and position != -1):
             position = -1
             signals[i] = -0.25
         # Exit: reverse signal or close crosses back to opposite S3/R3
