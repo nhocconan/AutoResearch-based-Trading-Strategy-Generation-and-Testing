@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""
-6h_1d_wkly_pivot_volume_fade_v1
-Hypothesis: Fade at weekly pivot extremes (R4/S4) with volume confirmation on 6h timeframe.
-Weekly pivot levels act as strong support/resistance. Fading these extremes with volume
-confirmation works in both bull and bear markets as price tends to revert from overextended levels.
-Uses 1d data for weekly pivot calculation to avoid look-ahead. Target: 20-40 trades/year.
-"""
+# 12h_1w_camarilla_breakout_volume
+# Hypothesis: 12-hour strategy using weekly Camarilla pivot levels for breakout signals,
+# with volume confirmation and 12h EMA50 for trend direction.
+# Weekly pivots provide strong support/resistance levels that work across market regimes.
+# Volume confirmation reduces false breakouts. EMA50 filter ensures alignment with higher timeframe trend.
+# Target: 12-37 trades per year (50-150 total over 4 years) to minimize fee drag.
 
-name = "6h_1d_wkly_pivot_volume_fade_v1"
-timeframe = "6h"
+name = "12h_1w_camarilla_breakout_volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,87 +24,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for weekly pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    # Get weekly data for Camarilla pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate weekly pivot points using previous week's data
-    # Need to group daily data into weeks
-    weeks_high = []
-    weeks_low = []
-    weeks_close = []
+    # 12h EMA50 for trend direction
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Simple approach: use rolling window of 5 days (1 week) for pivot calculation
-    # This avoids complex resampling and uses available 1d data
-    if len(high_1d) >= 5:
-        # Rolling window of 5 days for weekly high/low/close
-        week_high = pd.Series(high_1d).rolling(window=5, min_periods=5).max().values
-        week_low = pd.Series(low_1d).rolling(window=5, min_periods=5).min().values
-        week_close = pd.Series(close_1d).rolling(window=5, min_periods=5).last().values
-        
-        # Calculate pivot points for previous week (shift by 1 to avoid look-ahead)
-        prev_week_high = np.roll(week_high, 1)
-        prev_week_low = np.roll(week_low, 1)
-        prev_week_close = np.roll(week_close, 1)
-        
-        # Weekly pivot calculation
-        pp = (prev_week_high + prev_week_low + prev_week_close) / 3.0
-        r1 = 2 * pp - prev_week_low
-        r2 = pp + (prev_week_high - prev_week_low)
-        r3 = prev_week_high + 2 * (pp - prev_week_low)
-        r4 = prev_week_high + 3 * (pp - prev_week_low)  # Extreme resistance
-        
-        s1 = 2 * pp - prev_week_high
-        s2 = pp - (prev_week_high - prev_week_low)
-        s3 = prev_week_low - 2 * (prev_week_high - pp)
-        s4 = prev_week_low - 3 * (prev_week_high - pp)  # Extreme support
-        
-        # Align weekly pivot levels to 6h timeframe
-        pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-        r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-        s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    else:
-        # Not enough data for weekly calculation
-        pp_aligned = np.full(n, np.nan)
-        r4_aligned = np.full(n, np.nan)
-        s4_aligned = np.full(n, np.nan)
+    # Previous weekly bar's range for Camarilla calculation
+    prev_high_1w = np.roll(high_1w, 1)
+    prev_low_1w = np.roll(low_1w, 1)
+    prev_close_1w = np.roll(close_1w, 1)
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    range_1w = prev_high_1w - prev_low_1w
+    # Resistance levels
+    r3 = prev_close_1w + range_1w * 1.1 / 2
+    r4 = prev_close_1w + range_1w * 1.1
+    # Support levels
+    s3 = prev_close_1w - range_1w * 1.1 / 2
+    s4 = prev_close_1w - range_1w * 1.1
+    
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
+    
+    # Volume confirmation: volume > 1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    vol_confirm = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(pp_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(ema50_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: price near S4 support with volume confirmation (fade extreme)
-        if (close[i] <= s4_aligned[i] * 1.005 and  # Allow small buffer
-            vol_confirm[i] and 
-            position != 1):
+        # Long entry: price > EMA50 (uptrend) AND close breaks above R4 with volume
+        if (close[i] > ema50_12h_aligned[i] and close[i] > r4_aligned[i] and vol_confirm[i] and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: price near R4 resistance with volume confirmation (fade extreme)
-        elif (close[i] >= r4_aligned[i] * 0.995 and  # Allow small buffer
-              vol_confirm[i] and 
-              position != -1):
+        # Short entry: price < EMA50 (downtrend) AND close breaks below S4 with volume
+        elif (close[i] < ema50_12h_aligned[i] and close[i] < s4_aligned[i] and vol_confirm[i] and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: price returns to pivot point or opposite extreme
-        elif position == 1 and close[i] >= pp_aligned[i]:
+        # Exit: reverse signal or close crosses back to opposite S3/R3
+        elif position == 1 and close[i] < s3_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] <= pp_aligned[i]:
+        elif position == -1 and close[i] > r3_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
