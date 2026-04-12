@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,75 +13,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points and moving averages
+    # Get daily data for 200-period EMA filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # Calculate daily pivot points using previous day's data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate daily 200-period EMA
     close_1d = df_1d['close'].values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
-    
-    # Key levels: S1, R1 (Camarilla) - tighter range for fewer trades
-    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
-    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    
-    # Align levels to daily timeframe
-    s1_daily = align_htf_to_ltf(prices, df_1d, s1)
-    r1_daily = align_htf_to_ltf(prices, df_1d, r1)
-    
-    # Volume filter: 20-period EMA (daily)
-    vol_ema = np.full(n, np.nan)
-    vol_series = pd.Series(volume)
-    vol_ema_values = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_ema[:] = vol_ema_values
-    
-    # ATR for volatility filter
+    # Calculate 6-period ATR for volatility filter
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr1[0] = tr2[0] = tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = np.full(n, np.nan)
-    for i in range(14, n):
-        atr[i] = np.nanmean(tr[i-14:i+1])
+    atr6 = np.full(n, np.nan)
+    for i in range(5, n):
+        atr6[i] = np.nanmean(tr[i-5:i+1])
+    
+    # Calculate 20-period ATR EMA for volatility regime
+    atr_ema20 = np.full(n, np.nan)
+    atr_series = pd.Series(atr6)
+    atr_ema20_values = atr_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr_ema20[:] = atr_ema20_values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(s1_daily[i]) or np.isnan(r1_daily[i]) or 
-            np.isnan(vol_ema[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(atr6[i]) or 
+            np.isnan(atr_ema20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x EMA
-        volume_filter = volume[i] > vol_ema[i] * 1.5
+        # Volatility filter: current ATR6 > 1.2x 20-period ATR EMA (high volatility regime)
+        vol_filter = atr6[i] > atr_ema20[i] * 1.2
         
-        # Volatility filter: ATR > 0.5 * 20-period ATR mean
-        atr_ma = np.full(n, np.nan)
-        if i >= 34:
-            atr_ma[i] = np.nanmean(atr[i-20:i])
-        vol_filter = atr[i] > atr_ma[i] * 0.5 if not np.isnan(atr_ma[i]) else True
+        # Trend filter: price above/below daily 200 EMA
+        price_above_ema200 = close[i] > ema200_1d_aligned[i]
+        price_below_ema200 = close[i] < ema200_1d_aligned[i]
         
-        # Entry conditions: Touch of S1/R1 with volume and volatility (mean reversion)
-        long_entry = (low[i] <= s1_daily[i]) and volume_filter and vol_filter
-        short_entry = (high[i] >= r1_daily[i]) and volume_filter and vol_filter
+        # Entry conditions: breakout in direction of trend with volatility expansion
+        long_breakout = close[i] > high[i-1]  # break above previous high
+        short_breakout = close[i] < low[i-1]  # break below previous low
         
-        # Exit conditions: Return to pivot
-        pivot = (prev_high + prev_low + prev_close) / 3
-        pivot_daily = align_htf_to_ltf(prices, df_1d, pivot)
-        long_exit = close[i] > pivot_daily[i] if not np.isnan(pivot_daily[i]) else False
-        short_exit = close[i] < pivot_daily[i] if not np.isnan(pivot_daily[i]) else False
+        long_entry = long_breakout and price_above_ema200 and vol_filter
+        short_entry = short_breakout and price_below_ema200 and vol_filter
+        
+        # Exit conditions: reversal signal or volatility contraction
+        long_exit = (close[i] < ema200_1d_aligned[i]) or (atr6[i] < atr_ema20[i] * 0.8)
+        short_exit = (close[i] > ema200_1d_aligned[i]) or (atr6[i] < atr_ema20[i] * 0.8)
         
         if long_entry and position != 1:
             position = 1
@@ -106,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_camarilla_s1r1_mean_reversion_vol_filter_v1"
-timeframe = "1d"
+name = "6h_1d_ema200_breakout_vol_filter_v1"
+timeframe = "6h"
 leverage = 1.0
