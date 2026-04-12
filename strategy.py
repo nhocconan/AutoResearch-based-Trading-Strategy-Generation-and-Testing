@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-1h_4h_1d_Camarilla_Pullback_Volume
-Hypothesis: In 1h timeframe, buy pullbacks to 4h EMA20 during 1d uptrend with volume confirmation, sell rallies to 4h EMA20 during 1d downtrend.
-Uses 1d trend filter to avoid counter-trend trades, 4h EMA20 as dynamic support/resistance, and volume spike for entry confirmation.
-Session filter (08-20 UTC) reduces noise. Low trade frequency (~20-40/year) minimizes fee drag.
+1d_1w_Multi_Factor_Confluence_Strategy
+Hypothesis: Daily price action above/below weekly VWAP combined with daily momentum (RSI) and volume confirmation
+creates high-probability entries. Weekly trend filter avoids counter-trend trades. Designed for low frequency
+(~15-25 trades/year) to minimize fee drag while capturing sustained moves in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_Camarilla_Pullback_Volume"
-timeframe = "1h"
+name = "1d_1w_Multi_Factor_Confluence_Strategy"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,71 +24,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4H EMA20 FOR DYNAMIC SUPPORT/RESISTANCE ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # === WEEKLY VWAP AS TREND FILTER ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # === 1D TREND FILTER (EMA50) ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Calculate VWAP for each week: typical price * volume / cumulative volume
+    typical_price_1w = (high_1w + low_1w + close_1w) / 3.0
+    vwap_1w = np.cumsum(typical_price_1w * volume_1w) / np.cumsum(volume_1w)
+    vwap_1w = np.where(np.cumsum(volume_1w) == 0, 0, vwap_1w)  # avoid div by zero
     
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align weekly VWAP to daily timeframe
+    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
     
-    # === VOLUME CONFIRMATION (1H) ===
+    # === DAILY MOMENTUM (RSI) ===
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing (equivalent to alpha=1/14)
+    alpha = 1.0 / 14
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[0] = gain[0]
+    avg_loss[0] = loss[0]
+    
+    for i in range(1, len(gain)):
+        avg_gain[i] = alpha * gain[i] + (1 - alpha) * avg_gain[i-1]
+        avg_loss[i] = alpha * loss[i] + (1 - alpha) * avg_loss[i-1]
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # === DAILY VOLUME CONFIRMATION ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
-    
-    # === SESSION FILTER: 08-20 UTC ===
-    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if not ready
-        if (np.isnan(ema20_4h_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(vol_ratio[i]) or np.isnan(hours[i])):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+        if (np.isnan(vwap_1w_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(vol_ratio[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
+        # Long conditions: price above weekly VWAP, RSI > 50 (bullish momentum), volume confirmation
+        long_condition = (close[i] > vwap_1w_aligned[i]) and (rsi[i] > 50) and (vol_ratio[i] > 1.5)
         
-        if not in_session:
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
-            continue
+        # Short conditions: price below weekly VWAP, RSI < 50 (bearish momentum), volume confirmation
+        short_condition = (close[i] < vwap_1w_aligned[i]) and (rsi[i] < 50) and (vol_ratio[i] > 1.5)
         
-        # Long: price pulls back to 4h EMA20 during 1d uptrend with volume spike
-        long_signal = (close[i] >= ema20_4h_aligned[i] * 0.998) and \
-                      (close[i] <= ema20_4h_aligned[i] * 1.002) and \
-                      (close[i] > ema50_1d_aligned[i]) and \
-                      (vol_ratio[i] > 1.8)
-        
-        # Short: price rallies to 4h EMA20 during 1d downtrend with volume spike
-        short_signal = (close[i] <= ema20_4h_aligned[i] * 1.002) and \
-                       (close[i] >= ema20_4h_aligned[i] * 0.998) and \
-                       (close[i] < ema50_1d_aligned[i]) and \
-                       (vol_ratio[i] > 1.8)
-        
-        # Exit when price moves 0.6% away from EMA20 (avoid whipsaw)
-        exit_long = close[i] > ema20_4h_aligned[i] * 1.006 and position == 1
-        exit_short = close[i] < ema20_4h_aligned[i] * 0.994 and position == -1
+        # Exit conditions: RSI mean reversion or price crosses VWAP in opposite direction
+        exit_long = (rsi[i] < 40) or (close[i] < vwap_1w_aligned[i] and position == 1)
+        exit_short = (rsi[i] > 60) or (close[i] > vwap_1w_aligned[i] and position == -1)
         
         # Execute trades
-        if long_signal and position != 1:
+        if long_condition and position != 1:
             position = 1
-            signals[i] = 0.20
-        elif short_signal and position != -1:
+            signals[i] = 0.25
+        elif short_condition and position != -1:
             position = -1
-            signals[i] = -0.20
+            signals[i] = -0.25
         elif exit_long and position == 1:
             position = 0
             signals[i] = 0.0
@@ -97,6 +100,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Hold position
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
