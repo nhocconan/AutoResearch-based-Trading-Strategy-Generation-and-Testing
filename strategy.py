@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_camarilla_breakout_v2
-# Uses daily high/low to calculate daily Camarilla levels for the next day.
+# Hypothesis: 12h_1d_camarilla_breakout_v1
+# Uses daily high/low to calculate daily Camarilla levels for the next 12h period.
 # Buys when price breaks above daily H3 with volume confirmation.
 # Shorts when price breaks below daily L3 with volume confirmation.
 # Uses ADX > 25 to filter for strong trends, avoiding false signals in weak trends or ranges.
-# Designed for low trade frequency (target: 19-50 trades/year) to minimize fee drag.
+# Designed for low trade frequency (target: 12-37 trades/year) to minimize fee drag.
 # Works in bull markets (breakouts continuation) and bear markets (breakdowns continuation).
 
-name = "4h_1d_camarilla_breakout_v2"
-timeframe = "4h"
+name = "12h_1d_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -40,11 +40,11 @@ def generate_signals(prices):
     camarilla_h3 = close_prev + range_prev * 1.1 / 4
     camarilla_l3 = close_prev - range_prev * 1.1 / 4
     
-    # Align to 4h timeframe (daily levels update only after daily bar closes)
+    # Align to 12h timeframe (daily levels update only after daily bar closes)
     h3_level = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     l3_level = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Volume confirmation: volume > 2.0 * 20-period average (4h timeframe)
+    # Volume confirmation: volume > 2.0 * 20-period average (12h timeframe)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 2.0)
     
