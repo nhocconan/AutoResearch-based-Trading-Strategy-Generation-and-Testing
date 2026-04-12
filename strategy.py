@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_camarilla_breakout_v35
-# Combines Camarilla breakout with RSI momentum filter and volume confirmation.
-# Uses 1d Camarilla levels for structure, 4h RSI for momentum strength, and volume spike for institutional confirmation.
-# Works in bull markets by buying breakouts above H4 with bullish momentum, and in bear markets by selling breakdowns below L4 with bearish momentum.
-# Target: 20-40 trades/year per symbol for low friction and high edge.
-name = "4h_1d_camarilla_breakout_v35"
+# Hypothesis: 4h_1d_camarilla_breakout_v36
+# Camarilla pivot levels from 1-day chart with volume confirmation and chop regime filter.
+# Works in bull markets by capturing breakouts above H4 resistance, and in bear markets
+# by shorting breakdowns below L4 support. Uses volume spike to confirm institutional
+# participation and chop filter to avoid false signals in ranging markets.
+# Target: 20-40 trades/year per symbol for low friction.
+name = "4h_1d_camarilla_breakout_v36"
 timeframe = "4h"
 leverage = 1.0
 
@@ -45,18 +46,19 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
-    # RSI momentum filter: RSI > 50 for long, RSI < 50 for short
-    rsi_period = 14
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=rsi_period, min_periods=rsi_period).mean()
-    avg_loss = loss.rolling(window=rsi_period, min_periods=rsi_period).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
-    rsi_long_filter = rsi_values > 50
-    rsi_short_filter = rsi_values < 50
+    # Chop regime filter: avoid choppy markets (CHOP > 61.8)
+    # Calculate CHOP using 14-period ATR and highest/lowest
+    atr_period = 14
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10((highest_high - lowest_low) / (atr * np.sqrt(14))) / np.log10(14)
+    chop_filter = chop < 61.8  # trending market
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -67,9 +69,9 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Check volume filter
-        if not vol_confirm[i]:
-            # Hold current position if volume filter fails
+        # Check volume and chop filters
+        if not (vol_confirm[i] and chop_filter[i]):
+            # Hold current position if filters fail
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -78,12 +80,12 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above H4 with volume and bullish RSI
-        if close[i] > h4_level[i] and rsi_long_filter[i] and position != 1:
+        # Long signal: price breaks above H4 with volume
+        if close[i] > h4_level[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below L4 with volume and bearish RSI
-        elif close[i] < l4_level[i] and rsi_short_filter[i] and position != -1:
+        # Short signal: price breaks below L4 with volume
+        elif close[i] < l4_level[i] and position != -1:
             position = -1
             signals[i] = -0.25
         # Exit conditions: opposite breakout
