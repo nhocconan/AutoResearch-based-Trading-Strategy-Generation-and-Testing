@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_donchian_trend_v1"
-timeframe = "12h"
+name = "1d_1w_kama_rsi_chop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,23 +17,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian channel calculation
+    # Get 1d data for indicators
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Donchian channels (20-day high/low) on daily data
-    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # KAMA on daily close
+    close_series = pd.Series(close_1d)
+    change = abs(close_series.diff(10))
+    volatility = abs(close_series.diff(1)).rolling(window=10, min_periods=10).sum()
+    er = change / volatility.replace(0, 1e-10)
+    sc = (er * (0.66 - 0.06) + 0.06) ** 2
+    kama = [close_1d[0]]
+    for i in range(1, len(close_1d)):
+        kama.append(kama[-1] + sc[i] * (close_1d[i] - kama[-1]))
+    kama = np.array(kama)
     
-    # Align Donchian levels to 12h timeframe
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    # RSI(14) on daily close
+    delta = pd.Series(close_1d).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    # Get 1w data for trend filter (EMA 50)
+    # Choppiness Index (14) on daily data
+    atr = np.zeros(len(high_1d))
+    atr[0] = high_1d[0] - low_1d[0]
+    for i in range(1, len(high_1d)):
+        tr = max(high_1d[i] - low_1d[i], abs(high_1d[i] - close_1d[i-1]), abs(low_1d[i] - close_1d[i-1]))
+        atr[i] = (atr[i-1] * 13 + tr) / 14
+    sum_atr14 = pd.Series(atr).rolling(window=14, min_periods=14).sum()
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min()
+    chop = 100 * np.log10(sum_atr14 / (highest_high - lowest_low)) / np.log10(14)
+    chop = chop.values
+    
+    # Align indicators to 1d timeframe (no shift needed as already daily)
+    kama_aligned = kama
+    rsi_aligned = rsi
+    chop_aligned = chop
+    
+    # Get 1w data for trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
@@ -42,7 +74,7 @@ def generate_signals(prices):
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Volume filter - 20-period average on 12h data
+    # Volume filter - 20-period average on 1d data
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
@@ -50,10 +82,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(chop_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -61,15 +94,26 @@ def generate_signals(prices):
         uptrend = close[i] > ema_50_1w_aligned[i]
         downtrend = close[i] < ema_50_1w_aligned[i]
         
-        # Donchian breakout signals with volume confirmation
-        # Long: price breaks above 20-day high in uptrend
-        long_signal = close[i] > high_20_aligned[i] and uptrend and volume_ok[i]
-        # Short: price breaks below 20-day low in downtrend
-        short_signal = close[i] < low_20_aligned[i] and downtrend and volume_ok[i]
+        # KAMA direction
+        kama_up = close_1d[i] > kama_aligned[i]
+        kama_down = close_1d[i] < kama_aligned[i]
         
-        # Exit when price crosses back through the opposite Donchian level
-        exit_long = close[i] < low_20_aligned[i]
-        exit_short = close[i] > high_20_aligned[i]
+        # RSI conditions
+        rsi_oversold = rsi_aligned[i] < 30
+        rsi_overbought = rsi_aligned[i] > 70
+        
+        # Chop regime
+        chop_high = chop_aligned[i] > 61.8  # ranging
+        chop_low = chop_aligned[i] < 38.2   # trending
+        
+        # Long: KAMA up + RSI oversold + not extreme chop + volume
+        long_signal = kama_up and rsi_oversold and chop_high and volume_ok[i]
+        # Short: KAMA down + RSI overbought + not extreme chop + volume
+        short_signal = kama_down and rsi_overbought and chop_high and volume_ok[i]
+        
+        # Exit when KAMA reverses
+        exit_long = kama_down
+        exit_short = kama_up
         
         # Execute trades
         if long_signal and position != 1:
