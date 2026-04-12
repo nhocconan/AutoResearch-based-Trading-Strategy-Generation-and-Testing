@@ -13,64 +13,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Elder Ray and ATR
+    # Get 1d data for trend filter and Donchian channels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 22:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 13-period EMA for Elder Ray (trend filter)
+    # Calculate 1d 10-period EMA (trend filter)
     close_1d = df_1d['close'].values
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema10_1d = pd.Series(close_1d).ewm(span=10, adjust=False, min_periods=10).mean().values
+    ema10_1d_aligned = align_htf_to_ltf(prices, df_1d, ema10_1d)
     
-    # Calculate Elder Ray components
-    bull_power = high - ema13_1d  # High - EMA13
-    bear_power = low - ema13_1d   # Low - EMA13
+    # Calculate 1d 20-period high and low for Donchian channels
+    high_20 = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     
-    # Align to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    
-    # Calculate 22-period ATR for volatility filter
+    # Calculate 12-period ATR for volatility filter
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr1[0] = tr2[0] = tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = np.full(n, np.nan)
-    for i in range(21, n):
-        atr[i] = np.nanmean(tr[i-21:i+1])
+    atr12 = np.full(n, np.nan)
+    for i in range(11, n):
+        atr12[i] = np.nanmean(tr[i-11:i+1])
     
-    # Calculate 22-period ATR EMA for volatility regime
-    atr_ema = np.full(n, np.nan)
-    atr_series = pd.Series(atr)
-    atr_ema_values = atr_series.ewm(span=22, adjust=False, min_periods=22).mean().values
-    atr_ema[:] = atr_ema_values
+    # Calculate 20-period ATR EMA for volatility regime
+    atr_ema20 = np.full(n, np.nan)
+    atr_series = pd.Series(atr12)
+    atr_ema20_values = atr_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr_ema20[:] = atr_ema20_values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(atr_ema[i])):
+        if (np.isnan(ema10_1d_aligned[i]) or np.isnan(high_20_aligned[i]) or 
+            np.isnan(low_20_aligned[i]) or np.isnan(atr12[i]) or 
+            np.isnan(atr_ema20[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: current ATR > 1.2x 22-period ATR EMA (elevated volatility)
-        vol_filter = atr[i] > atr_ema[i] * 1.2
+        # Volatility filter: current ATR12 > 1.0x 20-period ATR EMA (elevated volatility)
+        vol_filter = atr12[i] > atr_ema20[i] * 1.0
         
-        # Elder Ray signals: bull/bear power crossing zero with volatility expansion
-        bull_cross_up = bull_power_aligned[i] > 0 and bull_power_aligned[i-1] <= 0
-        bear_cross_down = bear_power_aligned[i] < 0 and bear_power_aligned[i-1] >= 0
+        # Trend filter: price above/below 1d 10 EMA
+        price_above_ema10 = close[i] > ema10_1d_aligned[i]
+        price_below_ema10 = close[i] < ema10_1d_aligned[i]
         
-        # Entry conditions: Elder Ray cross with volatility expansion
-        long_entry = bull_cross_up and vol_filter
-        short_entry = bear_cross_down and vol_filter
+        # Entry conditions: Donchian breakout in direction of trend with volatility expansion
+        long_breakout = close[i] > high_20_aligned[i]  # break above 1d 20-period high
+        short_breakout = close[i] < low_20_aligned[i]  # break below 1d 20-period low
         
-        # Exit conditions: reverse Elder Ray cross or volatility contraction
-        long_exit = bear_power_aligned[i] > 0 and bear_power_aligned[i-1] <= 0
-        short_exit = bull_power_aligned[i] < 0 and bull_power_aligned[i-1] >= 0
-        vol_exit = atr[i] < atr_ema[i] * 0.8  # volatility contraction
+        long_entry = long_breakout and price_above_ema10 and vol_filter
+        short_entry = short_breakout and price_below_ema10 and vol_filter
+        
+        # Exit conditions: reversal signal or volatility contraction
+        long_exit = (close[i] < ema10_1d_aligned[i]) or (atr12[i] < atr_ema20[i] * 0.8)
+        short_exit = (close[i] > ema10_1d_aligned[i]) or (atr12[i] < atr_ema20[i] * 0.8)
         
         if long_entry and position != 1:
             position = 1
@@ -78,10 +80,10 @@ def generate_signals(prices):
         elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
-        elif position == 1 and (long_exit or vol_exit):
+        elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (short_exit or vol_exit):
+        elif position == -1 and short_exit:
             position = 0
             signals[i] = 0.0
         else:
@@ -95,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_elder_ray_power_vol_filter_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_ema10_breakout_vol_filter_v1"
+timeframe = "12h"
 leverage = 1.0
