@@ -1,85 +1,137 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_donchian_breakout_volume_trend_v1
-# Breakouts of 4h Donchian(20) with volume confirmation (>1.5x 20-period average) and 1d trend filter (EMA50).
-# Works in both bull and bear markets by capturing strong momentum moves aligned with daily trend.
-# Low trade frequency expected (~20-40/year) due to strict breakout conditions + volume + trend filter.
-name = "4h_1d_donchian_breakout_volume_trend_v1"
-timeframe = "4h"
+# Hypothesis: 6h_1d_parabolic_sar_trend_v1
+# Parabolic SAR on 6h with 1d ADX trend filter (ADX > 25).
+# Captures strong trends while avoiding whipsaws in ranging markets.
+# Works in both bull and bear by following trend direction.
+# Target: 50-150 total trades over 4 years (12-37/year).
+name = "6h_1d_parabolic_sar_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Get 1d data for trend filter (EMA50)
+    # Get 1d data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d ADX
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA50 to 4h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.inf], np.maximum.reduce([tr1, tr2, tr3])])
     
-    # Calculate 4h Donchian channels (20-period)
-    lookback = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    for i in range(lookback-1, n):
-        highest_high[i] = np.max(high[i-lookback+1:i+1])
-        lowest_low[i] = np.min(low[i-lookback+1:i+1])
+    # Smoothed values
+    def wilder_smooth(data, period):
+        smoothed = np.zeros_like(data)
+        smoothed[period-1] = np.nansum(data[:period])
+        for i in range(period, len(data)):
+            smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + data[i]
+        return smoothed
     
-    # Calculate volume average (20-period)
-    vol_avg = np.full(n, np.nan)
-    for i in range(lookback-1, n):
-        vol_avg[i] = np.mean(volume[i-lookback+1:i+1])
+    period = 14
+    tr_smoothed = wilder_smooth(tr, period)
+    dm_plus_smoothed = wilder_smooth(dm_plus, period)
+    dm_minus_smoothed = wilder_smooth(dm_minus, period)
+    
+    # DI+ and DI-
+    di_plus = np.where(tr_smoothed != 0, 100 * dm_plus_smoothed / tr_smoothed, 0)
+    di_minus = np.where(tr_smoothed != 0, 100 * dm_minus_smoothed / tr_smoothed, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilder_smooth(dx, period)
+    
+    # Align ADX to 6h
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Parabolic SAR on 6h
+    def calculate_psar(high, low, af_start=0.02, af_increment=0.02, af_max=0.2):
+        psar = np.zeros_like(high)
+        psar[0] = low[0]
+        up_trend = True
+        af = af_start
+        ep = high[0] if up_trend else low[0]
+        
+        for i in range(1, len(high)):
+            if up_trend:
+                psar[i] = psar[i-1] + af * (ep - psar[i-1])
+                # Prevent SAR from penetrating previous lows
+                psar[i] = min(psar[i], low[i-1], low[i-2] if i >= 2 else low[i-1])
+                if low[i] < psar[i]:  # Trend reversal
+                    up_trend = False
+                    psar[i] = ep
+                    af = af_start
+                    ep = low[i]
+                else:
+                    if high[i] > ep:
+                        ep = high[i]
+                        af = min(af + af_increment, af_max)
+            else:
+                psar[i] = psar[i-1] + af * (ep - psar[i-1])
+                # Prevent SAR from penetrating previous highs
+                psar[i] = max(psar[i], high[i-1], high[i-2] if i >= 2 else high[i-1])
+                if high[i] > psar[i]:  # Trend reversal
+                    up_trend = True
+                    psar[i] = ep
+                    af = af_start
+                    ep = high[i]
+                else:
+                    if low[i] < ep:
+                        ep = low[i]
+                        af = min(af + af_increment, af_max)
+        return psar
+    
+    psar = calculate_psar(high, low)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(lookback, n):
-        # Skip if indicators not ready
-        if np.isnan(ema_50_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(vol_avg[i]):
+    for i in range(1, n):
+        # Skip if ADX not ready
+        if np.isnan(adx_aligned[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Breakout conditions
-        bullish_breakout = close[i] > highest_high[i-1]  # break above previous high
-        bearish_breakout = close[i] < lowest_low[i-1]    # break below previous low
+        # Trend filter: only trade when ADX > 25 (strong trend)
+        strong_trend = adx_aligned[i] > 25
         
-        # Volume confirmation (>1.5x average volume)
-        volume_confirm = volume[i] > 1.5 * vol_avg[i]
+        # PSAR signals: price above SAR = bullish, below SAR = bearish
+        bullish_signal = strong_trend and close[i] > psar[i]
+        bearish_signal = strong_trend and close[i] < psar[i]
         
-        # Trend filter: align with 1d EMA50
-        uptrend = close[i] > ema_50_aligned[i]
-        downtrend = close[i] < ema_50_aligned[i]
+        # Exit when trend weakens or PSAR flips
+        exit_long = not strong_trend or close[i] < psar[i]
+        exit_short = not strong_trend or close[i] > psar[i]
         
-        # Entry signals
-        long_entry = bullish_breakout and volume_confirm and uptrend
-        short_entry = bearish_breakout and volume_confirm and downtrend
-        
-        # Exit conditions: opposite breakout or trend change
-        exit_long = bearish_breakout and volume_confirm
-        exit_short = bullish_breakout and volume_confirm
-        
-        if long_entry and position != 1:
+        if bullish_signal and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_entry and position != -1:
+        elif bearish_signal and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
