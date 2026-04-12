@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_cci_trend_v1"
-timeframe = "1d"
+name = "12h_1d_rsi_divergence_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,23 +17,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for CCI calculation (on daily data itself)
+    # Get 1d data for RSI calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate CCI(20) on daily data
-    tp_1d = (high_1d + low_1d + close_1d) / 3.0
-    sma_tp = pd.Series(tp_1d).rolling(window=20, min_periods=20).mean().values
-    mad = pd.Series(tp_1d).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
-    cci_1d = (tp_1d - sma_tp) / (0.015 * mad)
+    # Calculate RSI(14) on daily data
+    delta = pd.Series(close_1d).diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rs = rs.replace([np.inf, -np.inf], 100)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d = rsi_1d.values
     
-    # Align CCI to daily timeframe (no shift needed as it's already on daily)
-    cci_1d_aligned = align_htf_to_ltf(prices, df_1d, cci_1d)
+    # Align RSI to 12h timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     # Get 1w data for trend filter
     df_1w = get_htf_data(prices, '1w')
@@ -44,17 +47,26 @@ def generate_signals(prices):
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Volume filter - 20-period average on daily data
+    # Volume filter - 20-period average on 12h data
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
     
+    # RSI divergence detection
+    price_highs = pd.Series(high).rolling(window=5, center=True).max().values
+    price_lows = pd.Series(low).rolling(window=5, center=True).min().values
+    
+    # For divergence: look for price making new high/low while RSI doesn't
+    rsi_series = pd.Series(rsi_1d_aligned)
+    rsi_highs = rsi_series.rolling(window=5, center=True).max().values
+    rsi_lows = rsi_series.rolling(window=5, center=True).min().values
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(cci_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
             np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
@@ -63,36 +75,44 @@ def generate_signals(prices):
         uptrend = close[i] > ema_50_1w_aligned[i]
         downtrend = close[i] < ema_50_1w_aligned[i]
         
-        # CCI signals with volume confirmation
-        # Long: CCI > -100 (emerging bullish) in uptrend
-        long_signal = cci_1d_aligned[i] > -100 and uptrend and volume_ok[i]
-        # Short: CCI < 100 (emerging bearish) in downtrend
-        short_signal = cci_1d_aligned[i] < 100 and downtrend and volume_ok[i]
+        # Bullish divergence: price makes lower low, RSI makes higher low
+        bullish_div = False
+        if i >= 10:
+            if (low[i] < low[i-5] and rsi_1d_aligned[i] > rsi_1d_aligned[i-5] and
+                rsi_1d_aligned[i] < 30 and uptrend):
+                bullish_div = True
         
-        # Exit when CCI reverses
-        exit_long = cci_1d_aligned[i] < -100
-        exit_short = cci_1d_aligned[i] > 100
+        # Bearish divergence: price makes higher high, RSI makes lower high
+        bearish_div = False
+        if i >= 10:
+            if (high[i] > high[i-5] and rsi_1d_aligned[i] < rsi_1d_aligned[i-5] and
+                rsi_1d_aligned[i] > 70 and downtrend):
+                bearish_div = True
+        
+        # Volume confirmation
+        vol_confirm = volume_ok[i]
         
         # Execute trades
-        if long_signal and position != 1:
+        if bullish_div and vol_confirm and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_signal and position != -1:
+        elif bearish_div and vol_confirm and position != -1:
             position = -1
             signals[i] = -0.25
-        elif exit_long and position == 1:
-            position = 0
-            signals[i] = 0.0
-        elif exit_short and position == -1:
-            position = 0
-            signals[i] = 0.0
         else:
-            # Hold position
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
+            # Hold or close
+            if position == 1 and (rsi_1d_aligned[i] > 70 or not uptrend):
+                position = 0
                 signals[i] = 0.0
+            elif position == -1 and (rsi_1d_aligned[i] < 30 or not downtrend):
+                position = 0
+                signals[i] = 0.0
+            else:
+                if position == 1:
+                    signals[i] = 0.25
+                elif position == -1:
+                    signals[i] = -0.25
+                else:
+                    signals[i] = 0.0
     
     return signals
