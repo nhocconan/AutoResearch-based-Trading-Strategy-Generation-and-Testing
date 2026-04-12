@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_camarilla_breakout_v1
-# Uses daily Camarilla pivot levels (H4/L4) as key support/resistance on 4h chart.
-# Long when price breaks above H4 with volume confirmation (volume > 1.5x 30-period avg).
-# Short when price breaks below L4 with volume confirmation.
+# Hypothesis: 4h_1d_camarilla_breakout_v2
+# Uses daily Camarilla pivot levels (H4/L4) on 4h chart with volume confirmation and 1w trend filter.
+# Long when price breaks above daily H4 + volume > 1.5x 20-period avg + weekly close > weekly open (bullish week).
+# Short when price breaks below daily L4 + volume > 1.5x 20-period avg + weekly close < weekly open (bearish week).
 # Exits when price returns to daily pivot point (PP).
-# Designed for low trade frequency (target: 20-40 trades/year) to minimize fee drag.
+# Designed for low trade frequency (target: 20-40 trades/year) to minimize fee drift.
 # Works in trending markets via breakouts and in ranging markets via mean reversion to pivot.
 
-name = "4h_1d_camarilla_breakout_v1"
+name = "4h_1d_camarilla_breakout_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -30,8 +30,7 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate daily Camarilla levels
-    # Based on previous day's OHLC
+    # Calculate daily Camarilla levels based on previous day's OHLC
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -49,8 +48,17 @@ def generate_signals(prices):
     l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
     
-    # Volume confirmation: volume > 1.5 * 30-period average (4h timeframe)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    # Weekly trend: bullish if weekly close > weekly open, bearish if close < open
+    weekly_bullish = df_1w['close'].values > df_1w['open'].values
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish)
+    
+    # Volume confirmation: volume > 1.5 * 20-period average (4h timeframe)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
@@ -73,12 +81,12 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above H4
-        if close[i] > h4_aligned[i] and position != 1:
+        # Long signal: price breaks above H4 with weekly bullish trend
+        if close[i] > h4_aligned[i] and weekly_bullish_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below L4
-        elif close[i] < l4_aligned[i] and position != -1:
+        # Short signal: price breaks below L4 with weekly bearish trend
+        elif close[i] < l4_aligned[i] and not weekly_bullish_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
         # Exit conditions: price returns to daily pivot point (mean reversion)
