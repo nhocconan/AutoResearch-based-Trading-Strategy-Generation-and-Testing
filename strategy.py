@@ -1,3 +1,8 @@
+# Hypothesis: Combine 4h price action with 1d support/resistance levels and 1w trend filter
+# Uses 1d pivot points (R1/S1) for entry/exit and 1w SMA crossover for trend filter
+# Volume confirmation reduces false breakouts
+# Designed for fewer trades (<100/year) to minimize fee drag in both bull and bear markets
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,7 +25,7 @@ def generate_signals(prices):
     
     # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
     # Calculate 14-day ATR on daily data
@@ -39,7 +44,7 @@ def generate_signals(prices):
     # Align ATR to 4h timeframe
     atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate weekly trend using SMA crossover
+    # Calculate weekly trend using SMA crossover (20/50)
     close_1w = df_1w['close'].values
     sma_20 = np.full(len(close_1w), np.nan)
     sma_50 = np.full(len(close_1w), np.nan)
@@ -61,17 +66,13 @@ def generate_signals(prices):
     pivot = (prev_high + prev_low + prev_close) / 3
     range_val = prev_high - prev_low
     
-    # Key levels: R1, S1, R2, S2
+    # Key levels: R1, S1
     r1 = 2 * pivot - prev_low
     s1 = 2 * pivot - prev_high
-    r2 = pivot + range_val
-    s2 = pivot - range_val
     
     # Align levels to 4h timeframe
     r1_4h = align_htf_to_ltf(prices, df_1d, r1)
     s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    r2_4h = align_htf_to_ltf(prices, df_1d, r2)
-    s2_4h = align_htf_to_ltf(prices, df_1d, s2)
     
     # Calculate volume moving average (20-period on 4h)
     vol_ma = np.full(n, np.nan)
@@ -81,15 +82,15 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if data not ready
         if (np.isnan(weekly_trend_4h[i]) or np.isnan(atr_4h[i]) or 
             np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 2.0x 20-period average
-        volume_filter = volume[i] > vol_ma[i] * 2.0
+        # Volume filter: current volume > 1.8x 20-period average
+        volume_filter = volume[i] > vol_ma[i] * 1.8
         
         # Only take trades in direction of weekly trend
         weekly_bullish = weekly_trend_4h[i] == 1
@@ -100,8 +101,8 @@ def generate_signals(prices):
         short_breakout = (close[i] < s1_4h[i]) and volume_filter and weekly_bearish
         
         # Exit conditions: touch opposite S1/R1 level or weekly trend reversal or ATR stop
-        long_exit = (close[i] < s1_4h[i]) or (weekly_trend_4h[i] == -1) or (close[i] < r1_4h[i] - 1.5 * atr_4h[i])
-        short_exit = (close[i] > r1_4h[i]) or (weekly_trend_4h[i] == 1) or (close[i] > s1_4h[i] + 1.5 * atr_4h[i])
+        long_exit = (close[i] < s1_4h[i]) or (weekly_trend_4h[i] == -1) or (close[i] < r1_4h[i] - 2.0 * atr_4h[i])
+        short_exit = (close[i] > r1_4h[i]) or (weekly_trend_4h[i] == 1) or (close[i] > s1_4h[i] + 2.0 * atr_4h[i])
         
         if long_breakout and position != 1:
             position = 1
@@ -126,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1w_1d_pivot_breakout_weekly_trend_v1"
+name = "4h_1w_1d_pivot_breakout_weekly_trend_v2"
 timeframe = "4h"
 leverage = 1.0
