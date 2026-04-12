@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h_1d_camarilla_breakout_v1
-# 12-hour timeframe with 1-day Camarilla pivots, volume confirmation, and choppiness filter.
-# Targets institutional breakouts in trending markets while avoiding false signals in ranges.
-# Designed for low trade frequency (12-37/year) to minimize fee drag and work in both bull and bear markets.
-name = "12h_1d_camarilla_breakout_v1"
-timeframe = "12h"
+# Hypothesis: 4h_1d_trix_volume_chop_v1
+# TRIX (12) with volume confirmation and chop regime filter to capture momentum in trending markets.
+# TRIX > 0 indicates bullish momentum, TRIX < 0 bearish. Volume confirms institutional participation.
+# Chop filter avoids false signals in ranging markets. Works in bull by riding momentum, in bear by
+# catching momentum shifts during relief rallies or breakdowns. Target: 20-30 trades/year.
+name = "4h_1d_trix_volume_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,36 +22,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation
+    # Get 1d data for TRIX calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    close_prev = df_1d['close'].shift(1).values
+    # Calculate TRIX (12) on daily close
+    close_1d = df_1d['close'].values
+    # EMA1
+    ema1 = pd.Series(close_1d).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # EMA2 of EMA1
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # EMA3 of EMA2
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # TRIX = (EMA3 - prev EMA3) / prev EMA3 * 100
+    trix_raw = np.zeros_like(close_1d)
+    trix_raw[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100
     
-    # Camarilla formulas
-    range_prev = high_prev - low_prev
-    camarilla_h4 = close_prev + range_prev * 1.1 / 2
-    camarilla_l4 = close_prev - range_prev * 1.1 / 2
+    # Align TRIX to 4h timeframe
+    trix_1d_aligned = align_htf_to_ltf(prices, df_1d, trix_raw)
     
-    # Align to 12h timeframe
-    h4_level = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_level = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # Volume confirmation: volume > 1.3 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    vol_confirm = volume > (vol_ma * 1.3)
     
     # Chop regime filter: avoid choppy markets (CHOP > 61.8)
-    # Calculate CHOP using 14-period ATR and highest/lowest
+    atr_period = 14
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
     
     highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
     lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
@@ -60,9 +62,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # start after warmup
-        # Skip if levels not ready
-        if np.isnan(h4_level[i]) or np.isnan(l4_level[i]):
+    for i in range(30, n):  # start after warmup
+        # Skip if TRIX not ready
+        if np.isnan(trix_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -77,19 +79,19 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above H4 with volume
-        if close[i] > h4_level[i] and position != 1:
+        # Long signal: TRIX turns positive with volume
+        if trix_1d_aligned[i] > 0 and trix_1d_aligned[i-1] <= 0 and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below L4 with volume
-        elif close[i] < l4_level[i] and position != -1:
+        # Short signal: TRIX turns negative with volume
+        elif trix_1d_aligned[i] < 0 and trix_1d_aligned[i-1] >= 0 and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: opposite breakout
-        elif close[i] < l4_level[i] and position == 1:
+        # Exit conditions: opposite TRIX crossover
+        elif trix_1d_aligned[i] < 0 and trix_1d_aligned[i-1] >= 0 and position == 1:
             position = 0
             signals[i] = 0.0
-        elif close[i] > h4_level[i] and position == -1:
+        elif trix_1d_aligned[i] > 0 and trix_1d_aligned[i-1] <= 0 and position == -1:
             position = 0
             signals[i] = 0.0
         else:
