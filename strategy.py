@@ -1,11 +1,3 @@
-# 4h_1d_ema50_rsi_mean_reversion_v1
-# Strategy: Mean reversion on 4h timeframe using 1d EMA50 trend filter and RSI extremes
-# Works in both bull and bear markets by trading reversions to trend with volatility filter
-# Entry: RSI oversold/overbought + price relative to 1d EMA50 + volatility filter
-# Exit: Trend change or volatility drop
-# Position sizing: 0.25 long/short to manage drawdown
-# Target: 20-50 trades/year to avoid fee drag
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -69,17 +61,6 @@ def generate_signals(prices):
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Precompute ATR MA for volatility filter
-    atr_ma_20_1d = np.full(len(df_1d), np.nan)
-    for j in range(19, len(df_1d)):
-        start_idx = max(0, j-19)
-        end_idx = j+1
-        valid_slice = atr_1d[start_idx:end_idx]
-        valid_vals = valid_slice[~np.isnan(valid_slice)]
-        if len(valid_vals) >= 5:  # Require at least 5 valid values
-            atr_ma_20_1d[j] = np.mean(valid_vals)
-    atr_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_20_1d)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -90,12 +71,18 @@ def generate_signals(prices):
         
         # Skip if data not ready
         if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(rsi_1d_aligned[i]) or np.isnan(atr_ma_20_1d_aligned[i])):
+            np.isnan(rsi_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Volatility filter: 1d ATR > 0.3 * its 20-period MA (avoid low volatility)
-        vol_filter = atr_1d_aligned[i] > 0.3 * atr_ma_20_1d_aligned[i]
+        atr_ma_20_1d = np.full(len(df_1d), np.nan)
+        for j in range(34, len(df_1d)):
+            if not np.isnan(np.mean(atr_1d[j-19:j+1])):
+                atr_ma_20_1d[j] = np.mean(atr_1d[j-19:j+1])
+        atr_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_20_1d)
+        vol_filter = (not np.isnan(atr_ma_20_1d_aligned[i]) and 
+                     atr_1d_aligned[i] > 0.3 * atr_ma_20_1d_aligned[i])
         
         # Trend filter: price above/below 1d EMA50
         uptrend = close[i] > ema_50_1d_aligned[i]
