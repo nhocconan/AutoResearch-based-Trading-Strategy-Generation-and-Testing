@@ -13,26 +13,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian channel
+    # Get daily data for pivot points
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Daily Donchian(20) using previous day's data
+    # Calculate daily pivot points using previous day's data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 20-period high/low (previous days only)
-    high_20 = np.full(len(high_1d), np.nan)
-    low_20 = np.full(len(low_1d), np.nan)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    for i in range(20, len(high_1d)):
-        high_20[i] = np.max(high_1d[i-20:i])
-        low_20[i] = np.min(low_1d[i-20:i])
+    # Key levels: S1, R1 (Camarilla) - tighter range for fewer trades
+    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
     
-    # Align Donchian levels to 4h timeframe
-    donch_high_4h = align_htf_to_ltf(prices, df_1d, high_20)
-    donch_low_4h = align_htf_to_ltf(prices, df_1d, low_20)
+    # Align levels to 4h timeframe
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
     
     # Volume filter: 20-period EMA
     vol_ema = np.full(n, np.nan)
@@ -55,7 +59,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(donch_high_4h[i]) or np.isnan(donch_low_4h[i]) or 
+        if (np.isnan(s1_4h[i]) or np.isnan(r1_4h[i]) or 
             np.isnan(vol_ema[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -63,26 +67,28 @@ def generate_signals(prices):
         # Volume filter: current volume > 1.5x EMA
         volume_filter = volume[i] > vol_ema[i] * 1.5
         
-        # Volatility filter: ATR > 0.3 * 20-period ATR mean
+        # Volatility filter: ATR > 0.5 * 20-period ATR mean
         atr_ma = np.full(n, np.nan)
         if i >= 34:
             atr_ma[i] = np.nanmean(atr[i-20:i])
-        vol_filter = atr[i] > atr_ma[i] * 0.3 if not np.isnan(atr_ma[i]) else True
+        vol_filter = atr[i] > atr_ma[i] * 0.5 if not np.isnan(atr_ma[i]) else True
         
-        # Entry conditions: Donchian breakout with volume and volatility
-        long_entry = (close[i] > donch_high_4h[i]) and volume_filter and vol_filter
-        short_entry = (close[i] < donch_low_4h[i]) and volume_filter and vol_filter
+        # Entry conditions: Touch of S1/R1 with volume and volatility (mean reversion)
+        long_entry = (low[i] <= s1_4h[i]) and volume_filter and vol_filter
+        short_entry = (high[i] >= r1_4h[i]) and volume_filter and vol_filter
         
-        # Exit conditions: Opposite Donchian level
-        long_exit = close[i] < donch_low_4h[i]
-        short_exit = close[i] > donch_high_4h[i]
+        # Exit conditions: Return to pivot
+        pivot = (prev_high + prev_low + prev_close) / 3
+        pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
+        long_exit = close[i] > pivot_4h[i] if not np.isnan(pivot_4h[i]) else False
+        short_exit = close[i] < pivot_4h[i] if not np.isnan(pivot_4h[i]) else False
         
         if long_entry and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.30
         elif short_entry and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.30
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -92,14 +98,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_1d_donchian_breakout_vol_filter_v1"
+name = "4h_1d_camarilla_s1r1_mean_reversion_vol_filter_v1"
 timeframe = "4h"
 leverage = 1.0
