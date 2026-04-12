@@ -4,11 +4,12 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h_1d_camarilla_breakout_v1
-# Camarilla pivot levels from 1-day chart with volume confirmation and chop regime filter.
-# Works in bull markets by capturing breakouts above H4 resistance, and in bear markets
-# by shorting breakdowns below L4 support. Uses volume spike to confirm institutional
-# participation and chop filter to avoid false signals in ranging markets.
-# Target: 20-40 trades/year per symbol for low friction.
+# Uses daily Camarilla pivot levels (H4/L4) with volume confirmation and ADX trend filter.
+# In bull markets, buys breakouts above H4 resistance with volume.
+# In bear markets, shorts breakdowns below L4 support with volume.
+# ADX > 25 ensures we only trade in trending markets, avoiding false signals in ranges.
+# Target: 20-40 trades/year per symbol for low friction and high edge.
+
 name = "4h_1d_camarilla_breakout_v1"
 timeframe = "4h"
 leverage = 1.0
@@ -38,7 +39,7 @@ def generate_signals(prices):
     camarilla_h4 = close_prev + range_prev * 1.1 / 2
     camarilla_l4 = close_prev - range_prev * 1.1 / 2
     
-    # Align to 4h timeframe
+    # Align to 4h timeframe (already delayed by 1 day due to shift)
     h4_level = align_htf_to_ltf(prices, df_1d, camarilla_h4)
     l4_level = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
@@ -46,30 +47,51 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
-    # Chop regime filter: avoid choppy markets (CHOP > 61.8)
-    # Calculate CHOP using 14-period ATR and highest/lowest
+    # ADX trend filter: only trade when ADX > 25 (trending market)
+    # Calculate True Range
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10((highest_high - lowest_low) / (atr * np.sqrt(14))) / np.log10(14)
-    chop_filter = chop < 61.8  # trending market
+    # Plus and Minus Directional Movement
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    
+    # Smooth TR, +DM, -DM using Welles Wilder's smoothing (alpha = 1/period)
+    def wilders_smooth(data, period):
+        result = np.full_like(data, np.nan, dtype=float)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    atr = wilders_smooth(tr, 14)
+    plus_dm_smooth = wilders_smooth(plus_dm, 14)
+    minus_dm_smooth = wilders_smooth(minus_dm, 14)
+    
+    # Avoid division by zero
+    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
+    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = wilders_smooth(dx, 14)
+    adx_filter = adx > 25  # trending market
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # start after warmup
+    for i in range(30, n):  # start after warmup
         # Skip if levels not ready
-        if np.isnan(h4_level[i]) or np.isnan(l4_level[i]):
+        if np.isnan(h4_level[i]) or np.isnan(l4_level[i]) or np.isnan(adx_filter[i]):
             signals[i] = 0.0
             continue
         
-        # Check volume and chop filters
-        if not (vol_confirm[i] and chop_filter[i]):
+        # Check volume and trend filters
+        if not (vol_confirm[i] and adx_filter[i]):
             # Hold current position if filters fail
             if position == 1:
                 signals[i] = 0.25
