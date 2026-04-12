@@ -1,19 +1,33 @@
 #!/usr/bin/env python3
 """
-4h_1d_Keltner_Channel_Breakout_v1
-Hypothesis: Use 1d Keltner Channel (20, 1.5) with 4h price breakouts and volume confirmation.
-Trade long when price breaks above upper KC with volume > 1.5x average, short when breaks below lower KC.
-Only trade in direction of 1d EMA50 trend to avoid counter-trend whipsaws.
-Targets 20-40 trades/year to minimize fee drag. Works in bull (follow trend breakouts) and bear (fade reversals at KC bands).
+1d_1w_Alligator_Momentum_v1
+Hypothesis: Williams Alligator on weekly timeframe defines trend direction (bull/bear). 
+On daily timeframe, enter long when price crosses above Alligator teeth (SMMA8) in bullish weekly trend, 
+and short when price crosses below teeth in bearish weekly trend. Use volume confirmation (volume > 1.5x 20-day average) 
+to avoid false breakouts. Exit when price crosses back over teeth or when weekly trend changes.
+Designed for low trade frequency (10-25/year) to minimize fee drag. Works in bull (follow weekly trend) 
+and bear (fade counter-trend moves at weekly extremes).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Keltner_Channel_Breakout_v1"
-timeframe = "4h"
+name = "1d_1w_Alligator_Momentum_v1"
+timeframe = "1d"
 leverage = 1.0
+
+def smma(data, period):
+    """Smoothed Moving Average (SMMA)"""
+    if len(data) < period:
+        return np.full_like(data, np.nan, dtype=float)
+    result = np.full_like(data, np.nan, dtype=float)
+    # First value is SMA
+    result[period-1] = np.mean(data[:period])
+    # Subsequent values: SMMA = (PREV_SMMA * (N-1) + CURRENT_VALUE) / N
+    for i in range(period, len(data)):
+        result[i] = (result[i-1] * (period-1) + data[i]) / period
+    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -26,36 +40,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Keltner Channel and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Weekly data for Alligator (trend definition)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 13:
         return np.zeros(n)
     
-    # === DAILY KELTNER CHANNEL ===
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    weekly_close = df_1w['close'].values
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
     
-    # EMA20 for middle line
-    ema20 = pd.Series(daily_close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    # ATR10 for bands
-    tr1 = np.maximum(daily_high[1:] - daily_low[1:], np.abs(daily_high[1:] - daily_close[:-1]))
-    tr2 = np.maximum(tr1, np.abs(daily_low[1:] - daily_close[:-1]))
-    tr = np.concatenate([[np.nan], tr2])  # First element NaN
-    atr10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # === WEEKLY ALLIGATOR ===
+    # Jaw: SMMA(13, 8)
+    jaw = smma(weekly_close, 13)
+    # Teeth: SMMA(8, 5) 
+    teeth = smma(weekly_close, 8)
+    # Lips: SMMA(5, 3)
+    lips = smma(weekly_close, 5)
     
-    # Upper and lower bands (multiplier 1.5)
-    upper_kc = ema20 + 1.5 * atr10
-    lower_kc = ema20 - 1.5 * atr10
+    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1w, lips)
     
-    upper_kc_4h = align_htf_to_ltf(prices, df_1d, upper_kc)
-    lower_kc_4h = align_htf_to_ltf(prices, df_1d, lower_kc)
+    # Weekly trend: bullish when Lips > Teeth > Jaw, bearish when Lips < Teeth < Jaw
+    weekly_bullish = lips_aligned > teeth_aligned
+    weekly_bearish = lips_aligned < teeth_aligned
     
-    # === DAILY EMA50 TREND FILTER ===
-    ema50 = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h = align_htf_to_ltf(prices, df_1d, ema50)
-    
-    # === VOLUME FILTER (20-period average) ===
+    # === DAILY ENTRY CONDITIONS ===
+    # Volume confirmation: volume > 1.5x 20-day average
     vol_ma = np.full(n, np.nan)
     if n >= 20:
         vol_sum = np.sum(volume[:20])
@@ -67,31 +78,23 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(50, n):  # Start after warmup period
         # Skip if any data invalid
-        if (np.isnan(upper_kc_4h[i]) or np.isnan(lower_kc_4h[i]) or 
-            np.isnan(ema50_4h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
+            np.isnan(jaw_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.5x average
+        # Volume confirmation
         vol_confirm = volume[i] > vol_ma[i] * 1.5
         
-        # Trend filter: price above/below EMA50
-        trend_up = close[i] > ema50_4h[i]
+        # Entry conditions based on weekly Alligator alignment
+        long_entry = vol_confirm and weekly_bullish[i] and close[i] > teeth_aligned[i]
+        short_entry = vol_confirm and weekly_bearish[i] and close[i] < teeth_aligned[i]
         
-        # Breakout conditions
-        breakout_up = high[i] > upper_kc_4h[i] and vol_confirm
-        breakout_down = low[i] < lower_kc_4h[i] and vol_confirm
-        
-        # Entry logic: only trade in direction of daily trend
-        long_entry = breakout_up and trend_up
-        short_entry = breakout_down and not trend_up
-        
-        # Exit logic: reverse signal or price returns to EMA20 (middle KC)
-        ema20_4h = align_htf_to_ltf(prices, df_1d, ema20)
-        long_exit = not breakout_up or close[i] < ema20_4h[i]
-        short_exit = not breakout_down or close[i] > ema20_4h[i]
+        # Exit conditions: price crosses back over teeth OR weekly trend changes
+        long_exit = not weekly_bullish[i] or close[i] < teeth_aligned[i]
+        short_exit = not weekly_bearish[i] or close[i] > teeth_aligned[i]
         
         # Signal logic
         if long_entry and position != 1:
