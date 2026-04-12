@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_volume_v5"
-timeframe = "12h"
+name = "6h_1w_camarilla_breakout_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,55 +17,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR and Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for Camarilla levels and trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate daily ATR (14-period)
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    # Calculate weekly ATR (14-period) for volatility filter
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate ATR ratio (current ATR / 20-period ATR mean)
-    atr_ma_20 = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
-    atr_ratio = atr_1d / atr_ma_20
+    # Calculate ATR ratio (current ATR / 20-period ATR mean) for volatility scaling
+    atr_ma_20 = pd.Series(atr_1w).rolling(window=20, min_periods=20).mean().values
+    atr_ratio = atr_1w / atr_ma_20
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1w, atr_ratio)
     
-    # Align ATR ratio to 12h timeframe
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # Calculate weekly Camarilla levels (using previous week's data)
+    camarilla_high = np.full(len(close_1w), np.nan)
+    camarilla_low = np.full(len(close_1w), np.nan)
     
-    # Calculate ATR-based position size (inverse volatility scaling)
+    for i in range(1, len(close_1w)):
+        H = high_1w[i-1]
+        L = low_1w[i-1]
+        C = close_1w[i-1]
+        camarilla_high[i] = C + ((H - L) * 1.1 / 2)
+        camarilla_low[i] = C - ((H - L) * 1.1 / 2)
+    
+    # Align Camarilla levels to 6h timeframe
+    camarilla_high_aligned = align_htf_to_ltf(prices, df_1w, camarilla_high)
+    camarilla_low_aligned = align_htf_to_ltf(prices, df_1w, camarilla_low)
+    
+    # Calculate weekly pivot point (for exit)
+    pivot_point = np.full(len(close_1w), np.nan)
+    for i in range(1, len(close_1w)):
+        H = high_1w[i-1]
+        L = low_1w[i-1]
+        C = close_1w[i-1]
+        pivot_point[i] = (H + L + C) / 3
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_point)
+    
+    # Volume filter: current volume > 20-period average (on 6h data)
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_ok = volume > vol_ma
+    
+    # Determine weekly trend using close vs 20-week SMA
+    sma_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
+    weekly_trend = np.where(close_1w > sma_20, 1, -1)  # 1=uptrend, -1=downtrend
+    weekly_trend_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend)
+    
+    # Base position size with volatility scaling (inverse volatility)
     # Higher volatility = smaller position, capped at 0.30
     vol_scaling = np.clip(1.0 / (atr_ratio_aligned + 0.001), 0.5, 1.5)
     base_size = 0.25
     position_size = base_size * vol_scaling
     position_size = np.clip(position_size, 0.10, 0.30)
-    
-    # Calculate Camarilla levels using previous day's data
-    camarilla_high = np.full(len(close_1d), np.nan)
-    camarilla_low = np.full(len(close_1d), np.nan)
-    
-    for i in range(1, len(close_1d)):
-        H = high_1d[i-1]
-        L = low_1d[i-1]
-        C = close_1d[i-1]
-        camarilla_high[i] = C + ((H - L) * 1.1 / 2)
-        camarilla_low[i] = C - ((H - L) * 1.1 / 2)
-    
-    # Align Camarilla levels to 12h timeframe
-    camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
-    camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
-    
-    # Volume filter: current volume > 20-period average (on 12h data)
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -73,28 +85,22 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if not ready
         if (np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]) or 
-            np.isnan(volume_ok[i]) or np.isnan(position_size[i])):
+            np.isnan(volume_ok[i]) or np.isnan(position_size[i]) or np.isnan(weekly_trend_aligned[i])):
             signals[i] = 0.0 if position == 0 else (position_size[i] if position == 1 else -position_size[i])
             continue
         
-        # Breakout conditions with volume confirmation
+        # Breakout conditions with volume confirmation and trend filter
         breakout_up = close[i] > camarilla_high_aligned[i]
         breakout_down = close[i] < camarilla_low_aligned[i]
         vol_ok = volume_ok[i]
+        trend_up = weekly_trend_aligned[i] == 1
+        trend_down = weekly_trend_aligned[i] == -1
         
-        # Entry signals
-        long_signal = breakout_up and vol_ok
-        short_signal = breakout_down and vol_ok
+        # Entry signals: only trade in direction of weekly trend
+        long_signal = breakout_up and vol_ok and trend_up
+        short_signal = breakout_down and vol_ok and trend_down
         
-        # Exit when price returns to the Camarilla pivot (close of previous day)
-        pivot_point = np.full(len(close_1d), np.nan)
-        for j in range(1, len(close_1d)):
-            H = high_1d[j-1]
-            L = low_1d[j-1]
-            C = close_1d[j-1]
-            pivot_point[j] = (H + L + C) / 3
-        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_point)
-        
+        # Exit when price returns to the weekly pivot
         exit_long = close[i] < pivot_aligned[i]
         exit_short = close[i] > pivot_aligned[i]
         
