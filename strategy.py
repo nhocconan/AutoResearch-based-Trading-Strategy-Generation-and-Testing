@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-4h_1d_TRIX_Volume_Spike_v1
-Hypothesis: 4h TRIX crossing above/below zero with 1d volume spike (>1.5x average) and price above/below 1d EMA(50) for trend filter. 
-TRIX captures momentum, volume spike confirms institutional interest, EMA filter ensures trend alignment. 
-Designed for low trade frequency (20-50/year) by requiring momentum confirmation, volume surge, and trend alignment. 
-Works in bull/bear via EMA trend filter and mean-reversion exit when TRIX crosses zero in opposite direction.
+12h_1d_Williams_Alligator_MeanReversion
+Hypothesis: Williams Alligator (3 SMAs) on daily timeframe defines trend (jaws/teeth/lips).
+Price crossing lips with 12h momentum confirmation and volume spike triggers mean-reversion trades.
+Works in bull/bear: in trend, fade extreme deviations from Alligator; in range, trade reversals at extremes.
+Target: 15-30 trades/year via strict Alligator alignment + volume + momentum filters.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_TRIX_Volume_Spike_v1"
-timeframe = "4h"
+name = "12h_1d_Williams_Alligator_MeanReversion"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,114 +25,128 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY DATA ===
+    # === DAILY WILLIAMS ALLIGATOR ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Daily EMA(50) for trend filter
-    if len(close_1d) >= 50:
-        ema_50_1d = np.zeros_like(close_1d)
-        ema_50_1d[0] = close_1d[0]
-        alpha = 2.0 / (50 + 1)
-        for i in range(1, len(close_1d)):
-            ema_50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_50_1d[i-1]
-    else:
-        ema_50_1d = np.full_like(close_1d, np.nan)
+    # Williams Alligator: Jaw (13), Teeth (8), Lips (5) SMAs
+    # Jaw: 13-period SMMA (smoothed) of median price
+    median_price_1d = (high_1d + low_1d) / 2
+    jaw = np.full_like(median_price_1d, np.nan)
+    if len(median_price_1d) >= 13:
+        # SMMA: smoothed moving average
+        jaw[12] = np.mean(median_price_1d[:13])
+        for i in range(13, len(median_price_1d)):
+            jaw[i] = (jaw[i-1] * 12 + median_price_1d[i]) / 13
     
-    # Daily volume average (20-period)
-    vol_avg_1d = np.zeros(len(volume_1d))
+    # Teeth: 8-period SMMA
+    teeth = np.full_like(median_price_1d, np.nan)
+    if len(median_price_1d) >= 8:
+        teeth[7] = np.mean(median_price_1d[:8])
+        for i in range(8, len(median_price_1d)):
+            teeth[i] = (teeth[i-1] * 7 + median_price_1d[i]) / 8
+    
+    # Lips: 5-period SMMA
+    lips = np.full_like(median_price_1d, np.nan)
+    if len(median_price_1d) >= 5:
+        lips[4] = np.mean(median_price_1d[:5])
+        for i in range(5, len(median_price_1d)):
+            lips[i] = (lips[i-1] * 4 + median_price_1d[i]) / 5
+    
+    # === 12H MOMENTUM (ROC 5) ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 6:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    roc_5 = np.full_like(close_12h, np.nan)
+    if len(close_12h) >= 6:
+        roc_5[5:] = (close_12h[5:] - close_12h[:-5]) / close_12h[:-5] * 100
+    
+    # === VOLUME AVERAGE (20-period) ===
+    vol_avg = np.zeros(n)
     vol_sum = 0.0
     vol_count = 0
-    for i in range(len(volume_1d)):
-        vol_sum += volume_1d[i]
+    for i in range(n):
+        vol_sum += volume[i]
         vol_count += 1
         if i >= 20:
-            vol_sum -= volume_1d[i-20]
+            vol_sum -= volume[i-20]
             vol_count -= 1
-        if vol_count > 0:
-            vol_avg_1d[i] = vol_sum / vol_count
-        else:
-            vol_avg_1d[i] = 0.0
+        vol_avg[i] = vol_sum / vol_count if vol_count > 0 else 0.0
     
-    # Calculate TRIX (1-period ROC of triple-smoothed EMA)
-    # TRIX = 100 * (EMA3 - EMA3_prev) / EMA3_prev
-    if len(close) >= 15:
-        # First EMA(12)
-        ema1 = np.zeros(n)
-        ema1[0] = close[0]
-        alpha1 = 2.0 / (12 + 1)
-        for i in range(1, n):
-            ema1[i] = alpha1 * close[i] + (1 - alpha1) * ema1[i-1]
-        
-        # Second EMA(12) of first EMA
-        ema2 = np.zeros(n)
-        ema2[0] = ema1[0]
-        alpha2 = 2.0 / (12 + 1)
-        for i in range(1, n):
-            ema2[i] = alpha2 * ema1[i] + (1 - alpha2) * ema2[i-1]
-        
-        # Third EMA(12) of second EMA
-        ema3 = np.zeros(n)
-        ema3[0] = ema2[0]
-        alpha3 = 2.0 / (12 + 1)
-        for i in range(1, n):
-            ema3[i] = alpha3 * ema2[i] + (1 - alpha3) * ema3[i-1]
-        
-        # TRIX calculation
-        trix = np.zeros(n)
-        trix[0] = 0.0
-        for i in range(1, n):
-            if ema3[i-1] != 0:
-                trix[i] = 100 * (ema3[i] - ema3[i-1]) / ema3[i-1]
-            else:
-                trix[i] = 0.0
-    else:
-        trix = np.zeros(n)
-    
-    # Align daily data to 4h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
-    
-    # Volume spike detection (current 4h volume > 1.5x daily average volume scaled to 4h)
-    # Approximate: daily volume / 6 = average 4h volume (since 6*4h = 24h)
-    vol_spike = volume > (1.5 * vol_avg_1d_aligned / 6.0)
+    # Align all indicators to 12h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    roc_5_aligned = align_htf_to_ltf(prices, df_12h, roc_5)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # start after warmup
         # Skip if indicators not available
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg_1d_aligned[i]) or 
-            np.isnan(trix[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(roc_5_aligned[i]) or vol_avg[i] == 0.0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter: price above/below daily EMA(50)
-        price_above_ema = close[i] > ema_50_1d_aligned[i]
-        price_below_ema = close[i] < ema_50_1d_aligned[i]
+        # Alligator alignment: check if jaws/teeth/lips are ordered (trending) or tangled (ranging)
+        # In uptrend: Lips > Teeth > Jaw
+        # In downtrend: Lips < Teeth < Jaw
+        # In range: tangled (no clear order)
+        lips_val = lips_aligned[i]
+        teeth_val = teeth_aligned[i]
+        jaw_val = jaw_aligned[i]
         
-        # TRIX signals: crossing zero
-        trix_cross_up = trix[i] > 0 and trix[i-1] <= 0
-        trix_cross_down = trix[i] < 0 and trix[i-1] >= 0
+        # Alligator is "sleeping" (tangled) when lines are close - ranging market
+        alligator_sleeping = (abs(lips_val - teeth_val) < (jaw_val * 0.001) and 
+                              abs(teeth_val - jaw_val) < (jaw_val * 0.001))
         
-        # Entry conditions with volume spike and trend filter
-        long_entry = trix_cross_up and vol_spike[i] and price_above_ema
-        short_entry = trix_cross_down and vol_spike[i] and price_below_ema
+        # Alligator is "awake" (ordered) - trending market
+        alligator_awake_up = lips_val > teeth_val > jaw_val
+        alligator_awake_down = lips_val < teeth_val < jaw_val
         
-        # Exit when TRIX crosses zero in opposite direction (mean reversion)
-        exit_long = trix_cross_down
-        exit_short = trix_cross_up
+        # Volume confirmation: spike > 2.0x average
+        vol_confirm = volume[i] > 2.0 * vol_avg[i]
         
-        if long_entry and position != 1:
+        # 12h momentum confirmation
+        mom_confirm = roc_5_aligned[i] > 0  # positive momentum for long
+        mom_confirm_short = roc_5_aligned[i] < 0  # negative momentum for short
+        
+        # Mean reentry signals: price deviation from lips with confirmation
+        # Long: price significantly below lips in ranging market OR 
+        #       price below lips with bullish momentum in uptrend
+        dev_from_lips = (close[i] - lips_val) / lips_val * 100  # % deviation
+        
+        long_setup = False
+        short_setup = False
+        
+        if alligator_sleeping:  # ranging market - pure mean reversion
+            # Price > 1.5% above lips = short opportunity
+            # Price < 1.5% below lips = long opportunity
+            long_setup = (dev_from_lips < -1.5) and vol_confirm
+            short_setup = (dev_from_lips > 1.5) and vol_confirm
+        elif alligator_awake_up:  # uptrend - fade only strong deviations with momentum
+            long_setup = (dev_from_lips < -2.0) and vol_confirm and mom_confirm
+            short_setup = False  # don't fight uptrend
+        elif alligator_awake_down:  # downtrend - fade only strong deviations with momentum
+            long_setup = False  # don't fight downtrend
+            short_setup = (dev_from_lips > 2.0) and vol_confirm and mom_confirm_short
+        
+        # Exit when price returns to lips (mean reversion complete) or Alligator wakes up against position
+        exit_long = (close[i] >= lips_val) or (position == 1 and alligator_awake_down)
+        exit_short = (close[i] <= lips_val) or (position == -1 and alligator_awake_up)
+        
+        if long_setup and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_entry and position != -1:
+        elif short_setup and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
