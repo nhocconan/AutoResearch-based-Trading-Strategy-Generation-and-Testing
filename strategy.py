@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v3"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for 1-day lookback (previous day's data)
+    # Get daily data
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -35,11 +35,11 @@ def generate_signals(prices):
     h3_prev = pivot_prev + (range_1d_prev * 1.1 / 4)
     l3_prev = pivot_prev - (range_1d_prev * 1.1 / 4)
     
-    # Align levels to 12h timeframe (using previous day's data)
+    # Align levels to 4h timeframe (using previous day's data)
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3_prev)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3_prev)
     
-    # Volume filter - 10-period average on 12h data
+    # Volume filter - 10-period average on 4h data
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=10, min_periods=10).mean().values
     volume_ok = volume > vol_ma
@@ -72,7 +72,8 @@ def generate_signals(prices):
         short_signal = close[i] < l3_aligned[i] and volume_ok[i] and rsi_ok[i]
         
         # Exit when price returns to pivot
-        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_prev)
+        pivot_prev_val = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
+        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_prev_val)
         exit_long = close[i] < pivot_aligned[i]
         exit_short = close[i] > pivot_aligned[i]
         
