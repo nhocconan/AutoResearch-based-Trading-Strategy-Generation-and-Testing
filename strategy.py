@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-1h_4h_1d_Camarilla_Breakout_v1
-Hypothesis: Use daily and 4h Camarilla pivot levels with volume confirmation.
-Long when price breaks above H4 (daily) with volume > 1.5x average, short when breaks below L4 (daily).
-Use 4h trend filter (EMA20 > EMA50) to avoid counter-trend trades.
-Designed for low trade frequency (target: 60-150 total over 4 years) to minimize fee drag.
-Works in bull via breakouts, in bear via trend-filtered short breakdowns.
+6h_1w_1d_RangeBreakout_v1
+Hypothesis: Use weekly range to define trend bias and daily range for entry timing.
+In bull market (price > weekly midpoint), buy dips to daily support with volume confirmation.
+In bear market (price < weekly midpoint), sell rallies to daily resistance with volume confirmation.
+Uses 6h timeframe for lower frequency (~20-40 trades/year) to reduce fee drag.
+Works in bull via buying weakness, in bear via selling strength.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_Camarilla_Breakout_v1"
-timeframe = "1h"
+name = "6h_1w_1d_RangeBreakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,81 +27,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla levels
+    # Weekly data for trend bias
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    # Previous week's OHLC for range
+    prev_week_high = df_1w['high'].iloc[-2] if len(df_1w) >= 2 else df_1w['high'].iloc[-1]
+    prev_week_low = df_1w['low'].iloc[-2] if len(df_1w) >= 2 else df_1w['low'].iloc[-1]
+    prev_week_close = df_1w['close'].iloc[-2] if len(df_1w) >= 2 else df_1w['close'].iloc[-1]
+    
+    # Calculate weekly midpoint
+    weekly_midpoint = (prev_week_high + prev_week_low) / 2
+    weekly_midpoint_array = np.full(len(df_1w), weekly_midpoint)
+    weekly_midpoint_aligned = align_htf_to_ltf(prices, df_1w, weekly_midpoint_array)
+    
+    # Daily data for entry levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = df_1d['high'].iloc[-2] if len(df_1d) >= 2 else df_1d['high'].iloc[-1]
-    prev_low = df_1d['low'].iloc[-2] if len(df_1d) >= 2 else df_1d['low'].iloc[-1]
-    prev_close = df_1d['close'].iloc[-2] if len(df_1d) >= 2 else df_1d['close'].iloc[-1]
+    # Previous day's OHLC for support/resistance
+    prev_day_high = df_1d['high'].iloc[-2] if len(df_1d) >= 2 else df_1d['high'].iloc[-1]
+    prev_day_low = df_1d['low'].iloc[-2] if len(df_1d) >= 2 else df_1d['low'].iloc[-1]
     
-    # Calculate daily Camarilla levels
-    range_val = prev_high - prev_low
-    if range_val <= 0:
-        return np.zeros(n)
-    daily_h4 = prev_close + 1.1 * range_val * 1.1 / 2
-    daily_l4 = prev_close - 1.1 * range_val * 1.1 / 2
+    # Daily support and resistance (simple)
+    daily_support = prev_day_low
+    daily_resistance = prev_day_high
     
-    # Align daily levels to 1h timeframe
-    daily_h4_array = np.full(len(df_1d), daily_h4)
-    daily_l4_array = np.full(len(df_1d), daily_l4)
-    daily_h4_aligned = align_htf_to_ltf(prices, df_1d, daily_h4_array)
-    daily_l4_aligned = align_htf_to_ltf(prices, df_1d, daily_l4_array)
+    # Align daily levels to 6h timeframe
+    daily_support_array = np.full(len(df_1d), daily_support)
+    daily_resistance_array = np.full(len(df_1d), daily_resistance)
+    daily_support_aligned = align_htf_to_ltf(prices, df_1d, daily_support_array)
+    daily_resistance_aligned = align_htf_to_ltf(prices, df_1d, daily_resistance_array)
     
-    # 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # 4h EMA trend filter
-    close_4h = df_4h['close'].values
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Volume average (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume average (24-period for 6h ~ 4 days)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any data invalid
-        if (np.isnan(daily_h4_aligned[i]) or np.isnan(daily_l4_aligned[i]) or
-            np.isnan(ema_20_4h_aligned[i]) or np.isnan(ema_50_4h_aligned[i]) or
+        if (np.isnan(weekly_midpoint_aligned[i]) or
+            np.isnan(daily_support_aligned[i]) or np.isnan(daily_resistance_aligned[i]) or
             np.isnan(vol_ma[i])):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend condition from 4h
-        bullish_trend = ema_20_4h_aligned[i] > ema_50_4h_aligned[i]
-        bearish_trend = ema_20_4h_aligned[i] < ema_50_4h_aligned[i]
+        # Trend bias from weekly midpoint
+        bullish_bias = close[i] > weekly_midpoint_aligned[i]
+        bearish_bias = close[i] < weekly_midpoint_aligned[i]
         
         # Volume confirmation
         vol_spike = volume[i] > 1.5 * vol_ma[i]
         
-        # Breakout conditions with filters
-        long_breakout = close[i] > daily_h4_aligned[i] and bullish_trend and vol_spike
-        short_breakout = close[i] < daily_l4_aligned[i] and bearish_trend and vol_spike
+        # Entry conditions
+        long_entry = bullish_bias and close[i] <= daily_support_aligned[i] and vol_spike
+        short_entry = bearish_bias and close[i] >= daily_resistance_aligned[i] and vol_spike
         
-        # Exit conditions: return to midpoint
-        daily_pivot = (prev_high + prev_low + prev_close) / 3
-        daily_pivot_array = np.full(len(df_1d), daily_pivot)
-        daily_pivot_aligned = align_htf_to_ltf(prices, df_1d, daily_pivot_array)
-        
-        long_exit = close[i] < daily_pivot_aligned[i]
-        short_exit = close[i] > daily_pivot_aligned[i]
+        # Exit conditions: opposite touch
+        long_exit = close[i] >= daily_resistance_aligned[i]
+        short_exit = close[i] <= daily_support_aligned[i]
         
         # Signal logic
-        if long_breakout and position != 1:
+        if long_entry and position != 1:
             position = 1
-            signals[i] = 0.20
-        elif short_breakout and position != -1:
+            signals[i] = 0.25
+        elif short_entry and position != -1:
             position = -1
-            signals[i] = -0.20
+            signals[i] = -0.25
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -109,6 +104,6 @@ def generate_signals(prices):
             position = 0
             signals[i] = 0.0
         else:
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
