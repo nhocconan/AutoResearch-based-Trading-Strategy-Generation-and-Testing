@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_adx_donchian_volume_v1"
-timeframe = "4h"
+name = "6h_12h_camarilla_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,73 +17,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX and Donchian channel
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data for Camarilla pivot calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 5:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate ADX (14) on daily data
-    plus_dm = np.zeros_like(high_1d)
-    minus_dm = np.zeros_like(high_1d)
-    tr = np.zeros_like(high_1d)
+    # Calculate Camarilla pivot levels from 12h data
+    pivot = (high_12h + low_12h + close_12h) / 3.0
+    range_12h = high_12h - low_12h
     
-    for i in range(1, len(high_1d)):
-        high_diff = high_1d[i] - high_1d[i-1]
-        low_diff = low_1d[i-1] - low_1d[i]
-        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
-        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
-        tr[i] = max(high_1d[i] - low_1d[i], abs(high_1d[i] - close_1d[i-1]), abs(low_1d[i] - close_1d[i-1]))
+    # Camarilla levels (using standard multipliers)
+    h4 = pivot + (range_12h * 1.1 / 2)   # Resistance 4
+    h3 = pivot + (range_12h * 1.1 / 4)   # Resistance 3
+    l3 = pivot - (range_12h * 1.1 / 4)   # Support 3
+    l4 = pivot - (range_12h * 1.1 / 2)   # Support 4
     
-    # Smooth with Wilder's smoothing (alpha = 1/period)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(data[1:period]) / period
-        # Wilder smoothing: today = (yesterday * (period-1) + today) / period
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # Align Camarilla levels to 6h timeframe
+    h4_aligned = align_htf_to_ltf(prices, df_12h, h4)
+    h3_aligned = align_htf_to_ltf(prices, df_12h, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_12h, l3)
+    l4_aligned = align_htf_to_ltf(prices, df_12h, l4)
     
-    period = 14
-    plus_di_14 = 100 * wilders_smoothing(plus_dm, period) / wilders_smoothing(tr, period)
-    minus_di_14 = 100 * wilders_smoothing(minus_dm, period) / wilders_smoothing(tr, period)
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
-    adx_1d = wilders_smoothing(dx, period)
-    
-    # Calculate Donchian channel (20) on daily data
-    def rolling_max(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i < window - 1:
-                result[i] = np.nan
-            else:
-                result[i] = np.max(arr[i-window+1:i+1])
-        return result
-    
-    def rolling_min(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i < window - 1:
-                result[i] = np.nan
-            else:
-                result[i] = np.min(arr[i-window+1:i+1])
-        return result
-    
-    donchian_high_20 = rolling_max(high_1d, 20)
-    donchian_low_20 = rolling_min(low_1d, 20)
-    
-    # Align ADX and Donchian levels to 4h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
-    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
-    
-    # Volume filter - 20-period average on 4h data
+    # Volume filter - 20-period average on 6h data
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
@@ -93,21 +52,21 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(donchian_high_20_aligned[i]) or 
-            np.isnan(donchian_low_20_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(h4_aligned[i]) or np.isnan(h3_aligned[i]) or 
+            np.isnan(l3_aligned[i]) or np.isnan(l4_aligned[i]) or
+            np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: price breaks above Donchian high with ADX > 25 and volume confirmation
-        long_signal = (close[i] > donchian_high_20_aligned[i] and 
-                      adx_1d_aligned[i] > 25 and volume_ok[i])
-        # Short: price breaks below Donchian low with ADX > 25 and volume confirmation
-        short_signal = (close[i] < donchian_low_20_aligned[i] and 
-                       adx_1d_aligned[i] > 25 and volume_ok[i])
+        # Long: price breaks above H3 with volume confirmation
+        long_signal = close[i] > h3_aligned[i] and volume_ok[i]
+        # Short: price breaks below L3 with volume confirmation
+        short_signal = close[i] < l3_aligned[i] and volume_ok[i]
         
-        # Exit when price returns to opposite Donchian level or ADX weakens
-        exit_long = (close[i] < donchian_low_20_aligned[i] or adx_1d_aligned[i] < 20)
-        exit_short = (close[i] > donchian_high_20_aligned[i] or adx_1d_aligned[i] < 20)
+        # Exit when price returns to pivot
+        pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot)
+        exit_long = close[i] < pivot_aligned[i]
+        exit_short = close[i] > pivot_aligned[i]
         
         # Execute trades
         if long_signal and position != 1:
