@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_trix_volume_chop_v1
-# TRIX (12-period) crossover signals combined with volume confirmation and chop regime filter.
-# TRIX measures momentum of smoothed price changes, effective in both trending and ranging markets.
-# In bull markets: long when TRIX crosses above zero with volume; in bear markets: short when TRIX crosses below zero.
-# Volume confirms institutional participation; chop filter (CHOP < 61.8) avoids false signals in ranging markets.
-# Target: 20-40 trades/year per symbol for low friction.
-name = "4h_1d_trix_volume_chop_v1"
-timeframe = "4h"
+# Hypothesis: 6h_1d_1w_ema_confluence_v1
+# Combines 6h EMA trend with 1d and 1w EMA confluence for trend strength.
+# Goes long when 6h EMA > 1d EMA > 1w EMA with volume confirmation.
+# Goes short when 6h EMA < 1d EMA < 1w EMA with volume confirmation.
+# Uses volume > 1.5x 20-period average to confirm institutional participation.
+# Designed to work in both bull and bear markets by requiring multi-timeframe alignment.
+# Target: 20-30 trades/year per symbol (~80-120 total over 4 years).
+name = "6h_1d_1w_ema_confluence_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,54 +24,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for TRIX calculation
+    # Get 1d and 1w data for EMA calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    df_1w = get_htf_data(prices, '1w')
+    
+    if len(df_1d) < 2 or len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate TRIX on 1-day close
+    # Calculate EMA(21) on each timeframe
     close_1d = df_1d['close'].values
-    # EMA1
-    ema1 = pd.Series(close_1d).ewm(span=12, adjust=False, min_periods=12).mean().values
-    # EMA2
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    # EMA3
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    # TRIX = (EMA3 - previous EMA3) / previous EMA3 * 100
-    trix_raw = np.zeros_like(close_1d)
-    trix_raw[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100
-    # Align to 4h timeframe
-    trix = align_htf_to_ltf(prices, df_1d, trix_raw)
+    close_1w = df_1w['close'].values
+    
+    ema_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    
+    # Align to 6h timeframe
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # Calculate 6h EMA(21)
+    ema_6h = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
     # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
-    # Chop regime filter: avoid choppy markets (CHOP > 61.8)
-    atr_period = 14
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
-    
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10((highest_high - lowest_low) / (atr * np.sqrt(14))) / np.log10(14)
-    chop_filter = chop < 61.8  # trending market
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # start after warmup
-        # Skip if TRIX not ready
-        if np.isnan(trix[i]):
+    for i in range(21, n):  # start after EMA warmup
+        # Skip if any EMA not ready
+        if (np.isnan(ema_6h[i]) or np.isnan(ema_1d_aligned[i]) or 
+            np.isnan(ema_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Check volume and chop filters
-        if not (vol_confirm[i] and chop_filter[i]):
-            # Hold current position if filters fail
+        # Check volume filter
+        if not vol_confirm[i]:
+            # Hold current position if volume filter fails
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -79,19 +70,21 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: TRIX crosses above zero with volume
-        if trix[i] > 0 and trix[i-1] <= 0 and position != 1:
+        # Long condition: 6h EMA > 1d EMA > 1w EMA (bullish alignment)
+        if (ema_6h[i] > ema_1d_aligned[i] > ema_1w_aligned[i] and 
+            position != 1):
             position = 1
             signals[i] = 0.25
-        # Short signal: TRIX crosses below zero with volume
-        elif trix[i] < 0 and trix[i-1] >= 0 and position != -1:
+        # Short condition: 6h EMA < 1d EMA < 1w EMA (bearish alignment)
+        elif (ema_6h[i] < ema_1d_aligned[i] < ema_1w_aligned[i] and 
+              position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit conditions: opposite TRIX cross
-        elif trix[i] < 0 and trix[i-1] >= 0 and position == 1:
+        # Exit conditions: breakdown of alignment
+        elif position == 1 and not (ema_6h[i] > ema_1d_aligned[i] > ema_1w_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif trix[i] > 0 and trix[i-1] <= 0 and position == -1:
+        elif position == -1 and not (ema_6h[i] < ema_1d_aligned[i] < ema_1w_aligned[i]):
             position = 0
             signals[i] = 0.0
         else:
