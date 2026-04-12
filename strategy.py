@@ -1,40 +1,17 @@
 #!/usr/bin/env python3
 """
-1d_1w_Aroon_Breakout_Trend_v1
-Hypothesis: Uses weekly Aroon trend strength to identify strong trends, then enters on daily Aroon crossovers in the trend direction. 
-Aroon > 70 indicates strong trend, reducing false signals. Works in both bull and bear markets by following the weekly trend.
-Targets 8-20 trades/year per symbol with high-probability trend-following entries.
+12h_1d_Camarilla_Pivot_Breakout_Volume_Trend_v1
+Hypothesis: Uses 1-day Camarilla pivot levels (R4/S4) for breakout entries with volume confirmation and daily EMA trend filter.
+Trades on 12h timeframe with strict entry conditions to limit trades to 12-37/year. Designed to work in both bull and bear markets by trading breakouts in direction of daily trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Aroon_Breakout_Trend_v1"
-timeframe = "1d"
+name = "12h_1d_Camarilla_Pivot_Breakout_Volume_Trend_v1"
+timeframe = "12h"
 leverage = 1.0
-
-def aroon_up(down_period, n):
-    """Calculate Aroon Up: ((n - periods since highest high) / n) * 100"""
-    return ((n - np.argmax(down_period[::-1])) / n) * 100 if len(down_period) > 0 else np.nan
-
-def aroon_down(up_period, n):
-    """Calculate Aroon Down: ((n - periods since lowest low) / n) * 100"""
-    return ((n - np.argmin(up_period[::-1])) / n) * 100 if len(up_period) > 0 else np.nan
-
-def calculate_aroon(high, low, period=25):
-    """Calculate Aroon Up and Down arrays"""
-    n = len(high)
-    aroon_up_arr = np.full(n, np.nan)
-    aroon_down_arr = np.full(n, np.nan)
-    
-    for i in range(period - 1, n):
-        window_high = high[i - period + 1:i + 1]
-        window_low = low[i - period + 1:i + 1]
-        aroon_up_arr[i] = aroon_up(window_high, period)
-        aroon_down_arr[i] = aroon_down(window_low, period)
-    
-    return aroon_up_arr, aroon_down_arr
 
 def generate_signals(prices):
     n = len(prices)
@@ -47,51 +24,59 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for Aroon trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 25:
+    # Load 1d data ONCE before loop for Camarilla pivots and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly Aroon for trend strength (25 periods)
-    aroon_up_1w, aroon_down_1w = calculate_aroon(df_1w['high'].values, df_1w['low'].values, 25)
-    strong_uptrend_1w = aroon_up_1w > 70  # Strong uptrend when Aroon Up > 70
-    strong_downtrend_1w = aroon_down_1w > 70  # Strong downtrend when Aroon Down > 70
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align weekly Aroon signals to daily timeframe
-    strong_uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, strong_uptrend_1w.astype(float))
-    strong_downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, strong_downtrend_1w.astype(float))
-    
-    # Calculate daily Aroon for entry signals (25 periods)
-    aroon_up_daily, aroon_down_daily = calculate_aroon(high, low, 25)
-    
-    # Volume filter: 20-period average
+    # Volume filter: 20-period average on 12h
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate Camarilla levels from daily data
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Camarilla levels: R4 = close + 1.5*(high-low), S4 = close - 1.5*(high-low)
+    camarilla_r4 = close_1d + 1.5 * (high_1d - low_1d)
+    camarilla_s4 = close_1d - 1.5 * (high_1d - low_1d)
+    
+    # Align Camarilla levels and EMA to 12h timeframe (wait for daily close)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(25, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(aroon_up_daily[i]) or np.isnan(aroon_down_daily[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(strong_uptrend_1w_aligned[i]) or 
-            np.isnan(strong_downtrend_1w_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        volume_filter = volume[i] > 1.3 * vol_ma_20[i]
+        # Volume confirmation: current volume > 1.5x 20-period average (stricter)
+        volume_filter = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Daily Aroon crossover signals
-        aroon_cross_up = (aroon_up_daily[i] > aroon_down_daily[i]) and (aroon_up_daily[i-1] <= aroon_down_daily[i-1])
-        aroon_cross_down = (aroon_down_daily[i] > aroon_up_daily[i]) and (aroon_down_daily[i-1] <= aroon_up_daily[i-1])
+        # Trend filter: price above/below 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Entry conditions: only trade in direction of weekly trend
-        long_entry = aroon_cross_up and volume_filter and strong_uptrend_1w_aligned[i] > 0.5
-        short_entry = aroon_cross_down and volume_filter and strong_downtrend_1w_aligned[i] > 0.5
+        # Breakout conditions using Camarilla levels (R4/S4)
+        breakout_up = close[i] > camarilla_r4_aligned[i]  # Break above R4
+        breakdown_down = close[i] < camarilla_s4_aligned[i]  # Break below S4
         
-        # Exit conditions: opposite Aroon crossover or loss of weekly trend strength
-        long_exit = aroon_cross_down or strong_uptrend_1w_aligned[i] <= 0.5
-        short_exit = aroon_cross_up or strong_downtrend_1w_aligned[i] <= 0.5
+        # Entry conditions: only trade in direction of 1d trend
+        long_entry = breakout_up and volume_filter and uptrend
+        short_entry = breakdown_down and volume_filter and downtrend
+        
+        # Exit conditions: return to opposite Camarilla level or trend reversal
+        long_exit = (close[i] < camarilla_s4_aligned[i]) or (not uptrend)  # Break below S4 or trend change
+        short_exit = (close[i] > camarilla_r4_aligned[i]) or (not downtrend)  # Break above R4 or trend change
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
