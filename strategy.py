@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-12h_1d_RSI_Momentum_Trend_v1
-Hypothesis: 12h timeframe with 1d RSI momentum and 1d EMA trend filter.
-Long when 1d RSI > 60 and price > 1d EMA, short when 1d RSI < 40 and price < 1d EMA.
-Uses 1d data for signals to avoid overtrading (target ~15-25 trades/year).
-Works in bull markets via RSI momentum and in bear via mean-reversion at extremes.
+1d_1w_KAMA_RSI_Chop_Filter_v1
+Hypothesis: Daily KAMA direction with RSI momentum and weekly chop filter.
+Works in bull markets via KAMA trend following and in bear markets via RSI mean reversion
+when choppy. Weekly chop filter avoids whipsaws in strong trends. Target 15-25 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_RSI_Momentum_Trend_v1"
-timeframe = "12h"
+name = "1d_1w_KAMA_RSI_Chop_Filter_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,64 +23,84 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load weekly data ONCE before loop for chop filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 1d RSI (14 period)
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
+    # Calculate KAMA (20 period) on daily
+    close_d = df_1w['close'].values  # Using weekly close for efficiency
+    change = np.abs(np.diff(close_d, prepend=close_d[0]))
+    direction = np.abs(np.diff(close_d, k=10, prepend=close_d[:10]))
+    er = np.where(change != 0, direction / change, 0)
+    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
+    kama = np.zeros_like(close_d)
+    kama[0] = close_d[0]
+    for i in range(1, len(close_d)):
+        kama[i] = kama[i-1] + sc[i] * (close_d[i] - kama[i-1])
+    kama_1d = align_htf_to_ltf(prices, df_1w, kama)
+    
+    # Calculate RSI (14) on daily
+    delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
-    
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d[:13] = np.nan  # Not enough data
-    
-    # Align RSI to 12h timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # Calculate 1d EMA (21 period) for trend filter
-    ema_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate Choppiness Index (14) on weekly
+    atr_1w = []
+    for i in range(len(df_1w)):
+        if i == 0:
+            atr_1w.append(0)
+        else:
+            tr = max(
+                df_1w['high'].iloc[i] - df_1w['low'].iloc[i],
+                abs(df_1w['high'].iloc[i] - df_1w['close'].iloc[i-1]),
+                abs(df_1w['low'].iloc[i] - df_1w['close'].iloc[i-1])
+            )
+            atr_1w.append(tr)
+    atr_1w = np.array(atr_1w)
+    sum_atr = pd.Series(atr_1w).rolling(window=14, min_periods=14).sum()
+    hh = pd.Series(df_1w['high']).rolling(window=14, min_periods=14).max()
+    ll = pd.Series(df_1w['low']).rolling(window=14, min_periods=14).min()
+    chop = 100 * np.log10(sum_atr / (hh - ll)) / np.log10(14)
+    chop = chop.fillna(50).values
+    chop_1d = align_htf_to_ltf(prices, df_1w, chop)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(ema_1d_aligned[i])):
+        if (np.isnan(kama_1d[i]) or np.isnan(rsi[i]) or 
+            np.isnan(chop_1d[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Momentum conditions: RSI > 60 for long, < 40 for short
-        rsi_high = rsi_1d_aligned[i] > 60
-        rsi_low = rsi_1d_aligned[i] < 40
+        # KAMA trend: price above/below KAMA
+        above_kama = close[i] > kama_1d[i]
+        below_kama = close[i] < kama_1d[i]
         
-        # Trend filter: price above/below 1d EMA
-        above_ema = close[i] > ema_1d_aligned[i]
-        below_ema = close[i] < ema_1d_aligned[i]
+        # RSI momentum: oversold/overbought
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
+        
+        # Chop filter: chop > 61.8 = ranging (mean revert), chop < 38.2 = trending (trend follow)
+        chop_value = chop_1d[i]
+        ranging = chop_value > 61.8
+        trending = chop_value < 38.2
         
         # Entry conditions
-        long_entry = rsi_high and above_ema
-        short_entry = rsi_low and below_ema
+        long_entry = (above_kama and rsi_oversold and ranging) or (above_kama and trending)
+        short_entry = (below_kama and rsi_overbought and ranging) or (below_kama and trending)
         
-        # Exit conditions: RSI returns to neutral zone or trend reversal
-        long_exit = (rsi_1d_aligned[i] < 50) or (close[i] < ema_1d_aligned[i])
-        short_exit = (rsi_1d_aligned[i] > 50) or (close[i] > ema_1d_aligned[i])
+        # Exit conditions: opposite signal or extreme RSI
+        long_exit = (below_kama) or (rsi[i] > 70)
+        short_exit = (above_kama) or (rsi[i] < 30)
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
