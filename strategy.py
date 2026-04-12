@@ -8,13 +8,12 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1d Camarilla pivot breakout with 1w volume confirmation and chop regime filter
-    # Primary timeframe: 1d, HTF: 1w for trend confirmation
-    # Camarilla levels from 1d provide institutional support/resistance
-    # 1w volume spike confirms institutional participation across longer timeframe
-    # Chop regime filter avoids whipsaws in ranging markets
-    # Works in bull/bear by fading extremes in range and following breakouts in trend
-    # Target: 7-25 trades/year per symbol (30-100 total over 4 years)
+    # Hypothesis: 6h Elder Ray + 12h trend filter
+    # Elder Ray measures bull/bear power relative to EMA13
+    # 12h EMA34 trend filter ensures we trade with higher timeframe momentum
+    # Volume confirmation reduces false signals
+    # Works in bull/bear by adapting to trend direction
+    # Target: 50-150 total trades over 4 years (~12-37/year)
     
     # Session filter: 8:00-20:00 UTC (avoid low volume Asian session)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -25,115 +24,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and volume context
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 34:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate 1d Camarilla levels (using previous day's range)
-    camarilla_h4 = np.full(len(df_1d), np.nan)
-    camarilla_l4 = np.full(len(df_1d), np.nan)
-    camarilla_h3 = np.full(len(df_1d), np.nan)
-    camarilla_l3 = np.full(len(df_1d), np.nan)
-    camarilla_h2 = np.full(len(df_1d), np.nan)
-    camarilla_l2 = np.full(len(df_1d), np.nan)
-    camarilla_h1 = np.full(len(df_1d), np.nan)
-    camarilla_l1 = np.full(len(df_1d), np.nan)
-    camarilla_pivot = np.full(len(df_1d), np.nan)
+    # Calculate 6h EMA13 for Elder Ray
+    close_s = pd.Series(close)
+    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    for i in range(1, len(df_1d)):
-        # Previous day's OHLC
-        phigh = high_1d[i-1]
-        plow = low_1d[i-1]
-        pclose = close_1d[i-1]
-        
-        # Pivot point
-        camarilla_pivot[i] = (phigh + plow + 2 * pclose) / 4
-        
-        # Range
-        rng = phigh - plow
-        
-        # Camarilla levels
-        camarilla_h4[i] = camarilla_pivot[i] + rng * 1.1 / 2
-        camarilla_l4[i] = camarilla_pivot[i] - rng * 1.1 / 2
-        camarilla_h3[i] = camarilla_pivot[i] + rng * 1.1 / 4
-        camarilla_l3[i] = camarilla_pivot[i] - rng * 1.1 / 4
-        camarilla_h2[i] = camarilla_pivot[i] + rng * 1.1 / 6
-        camarilla_l2[i] = camarilla_pivot[i] - rng * 1.1 / 6
-        camarilla_h1[i] = camarilla_pivot[i] + rng * 1.1 / 12
-        camarilla_l1[i] = camarilla_pivot[i] - rng * 1.1 / 12
+    # Calculate 6h Elder Ray components
+    bull_power = high - ema13  # Bull power: high minus EMA
+    bear_power = low - ema13   # Bear power: low minus EMA
     
-    # Align 1d Camarilla levels to 1d timeframe (identity alignment for same TF)
-    h4_aligned = camarilla_h4
-    l4_aligned = camarilla_l4
-    h3_aligned = camarilla_h3
-    l3_aligned = camarilla_l3
-    h2_aligned = camarilla_h2
-    l2_aligned = camarilla_l2
-    h1_aligned = camarilla_h1
-    l1_aligned = camarilla_l1
-    pivot_aligned = camarilla_pivot
+    # Calculate 12h EMA34 for trend filter
+    close_12h_s = pd.Series(close_12h)
+    ema34_12h = close_12h_s.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
-    # Get 1w data for volume confirmation and trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    volume_1w = df_1w['volume'].values
-    
-    # 1w volume spike filter (current week volume > 1.5 * 20-week average)
-    vol_ma_20_1w = np.full(len(df_1w), np.nan)
-    for i in range(19, len(df_1w)):
-        vol_ma_20_1w[i] = np.mean(volume_1w[i-19:i+1])
-    vol_ma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20_1w)
-    volume_spike_1w = volume > 1.5 * vol_ma_20_1w_aligned
-    
-    # Chop regime filter (using 1d data)
-    # Chop > 61.8 = ranging (mean revert at Camarilla H3/L3)
-    # Chop < 38.2 = trending (follow breakouts at H4/L4)
-    atr_1d = np.full(len(df_1d), np.nan)
-    for i in range(14, len(df_1d)):
-        tr = np.max([
-            high_1d[i] - low_1d[i],
-            np.abs(high_1d[i] - close_1d[i-1]),
-            np.abs(low_1d[i] - close_1d[i-1])
-        ])
-        if i == 14:
-            atr_1d[i] = np.mean([high_1d[j] - low_1d[j] for j in range(i-13, i+1)])
-        else:
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr) / 14
-    
-    # Calculate Chop (14-period)
-    sum_tr_14 = np.full(len(df_1d), np.nan)
-    max_min_range_14 = np.full(len(df_1d), np.nan)
-    chop = np.full(len(df_1d), 50.0)  # default neutral
-    
-    for i in range(13, len(df_1d)):
-        # Sum of true range over 14 periods
-        tr_sum = 0
-        for j in range(i-13, i+1):
-            tr = np.max([
-                high_1d[j] - low_1d[j],
-                np.abs(high_1d[j] - close_1d[j-1]) if j > 0 else 0,
-                np.abs(low_1d[j] - close_1d[j-1]) if j > 0 else 0
-            ])
-            tr_sum += tr
-        sum_tr_14[i] = tr_sum
-        
-        # Max high - min low over 14 periods
-        max_high = np.max(high_1d[i-13:i+1])
-        min_low = np.min(low_1d[i-13:i+1])
-        max_min_range_14[i] = max_high - min_low
-        
-        if max_min_range_14[i] > 0:
-            chop[i] = 100 * np.log10(sum_tr_14[i] / max_min_range_14[i]) / np.log10(14)
-    
-    chop_aligned = chop  # 1d data, no alignment needed
+    # Calculate 6h volume spike filter (current volume > 1.5 * 20-period average)
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(19, n):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    volume_spike = volume > 1.5 * vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -144,26 +62,34 @@ def generate_signals(prices):
             continue
         
         # Skip if data not ready
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(volume_spike_1w[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema34_12h_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Regime-based logic
-        if chop_aligned[i] > 61.8:  # Ranging market - mean revert at H3/L3
-            # Long near L3, short near H3
-            long_entry = close[i] <= l3_aligned[i] and volume_spike_1w[i]
-            short_entry = close[i] >= h3_aligned[i] and volume_spike_1w[i]
-            long_exit = close[i] >= pivot_aligned[i]
-            short_exit = close[i] <= pivot_aligned[i]
-        else:  # Trending market - follow breakouts at H4/L4
-            # Breakout entries
-            long_entry = close[i] > h4_aligned[i] and volume_spike_1w[i]
-            short_entry = close[i] < l4_aligned[i] and volume_spike_1w[i]
-            # Exit on opposite test of H4/L4 or volume dropout
-            long_exit = close[i] < l4_aligned[i] or (not volume_spike_1w[i])
-            short_exit = close[i] > h4_aligned[i] or (not volume_spike_1w[i])
+        # Trend filter: 12h EMA34 direction
+        uptrend = close_12h_s.iloc[-1] > ema34_12h_aligned[i] if len(close_12h_s) > 0 else False
+        # Simplified: use current 12h price vs EMA
+        # Find corresponding 12h bar index
+        idx_12h = i // 2  # 2x 6h bars per 12h bar (approximate, but aligned array handles timing)
+        if idx_12h < len(ema34_12h_aligned):
+            uptrend = close[i] > ema34_12h_aligned[i]  # Use aligned 6h price vs 12h EMA
+        else:
+            uptrend = True  # Default to long if insufficient data
+        
+        # Elder Ray logic with volume confirmation
+        if uptrend:
+            # In uptrend: look for bullish signals
+            long_entry = bull_power[i] > 0 and volume_spike[i] and bear_power[i] < 0
+            short_entry = False  # Only short in downtrend
+            long_exit = bull_power[i] < 0  # Exit when bull power turns negative
+            short_exit = False
+        else:
+            # In downtrend: look for bearish signals
+            long_entry = False  # Only long in uptrend
+            short_entry = bear_power[i] < 0 and volume_spike[i] and bull_power[i] > 0
+            long_exit = False
+            short_exit = bear_power[i] > 0  # Exit when bear power turns positive
         
         if long_entry and position != 1:
             position = 1
@@ -188,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_camarilla_breakout_vol_chop_v1"
-timeframe = "1d"
+name = "6h_12h_elder_ray_trend_v1"
+timeframe = "6h"
 leverage = 1.0
