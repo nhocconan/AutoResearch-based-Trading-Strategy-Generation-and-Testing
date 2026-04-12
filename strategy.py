@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Reversal_MeanReversion
-Hypothesis: Trade reversals at daily Camarilla H4/L4 levels during low volatility regimes.
-Use Bollinger Band width percentile to identify range-bound markets (high probability of mean reversion).
-Enter when price touches H4/L4 with rejection candle (close within 50% of range) and BBW < 30th percentile.
-Exit on opposite level touch or BBW expansion above 70th percentile.
-Designed for low-frequency mean reversion in ranging markets (works in both bull and bear markets as consolidation phases).
+12h_1d_Camarilla_Breakout_With_Volume_Filter_v1
+Hypothesis: Trade daily Camarilla H3/L3 breakouts on 12h timeframe with volume > 2x 24-period average and price >1% beyond level.
+Use 50 EMA on 12h for trend filter: long only in uptrend, short only in downtrend.
+Exit on trend reversal or opposite level touch. Designed for low trade frequency (~12-37/year) with high conviction.
+Works in bull markets (continuation breaks) and bear markets (mean reversion from extremes).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_Reversal_MeanReversion"
-timeframe = "4h"
+name = "12h_1d_Camarilla_Breakout_With_Volume_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,6 +23,7 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     # === DAILY DATA FOR CAMARILLA PIVOTS ===
     df_1d = get_htf_data(prices, '1d')
@@ -39,65 +39,65 @@ def generate_signals(prices):
     pivot = typical_price
     range_1d = high_1d - low_1d
     
+    h3 = pivot + (range_1d * 1.1 / 4)
+    l3 = pivot - (range_1d * 1.1 / 4)
     h4 = pivot + (range_1d * 1.1 / 2)
     l4 = pivot - (range_1d * 1.1 / 2)
     
-    # Align to 4h timeframe
+    # Align to 12h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
     l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
     
-    # === REGIME FILTER: BOLLINGER BAND WIDTH PERCENTILE ===
+    # === TREND FILTER: 50 EMA ON 12H CHART ===
     close_series = pd.Series(close)
-    sma20 = close_series.rolling(window=20, min_periods=20).mean()
-    std20 = close_series.rolling(window=20, min_periods=20).std()
-    upper_bb = sma20 + (2 * std20)
-    lower_bb = sma20 - (2 * std20)
-    bb_width = (upper_bb - lower_bb) / sma20
+    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Percentile rank of BBW (lookback 50 periods)
-    bbw_percentile = pd.Series(bb_width).rolling(window=50, min_periods=10).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100 if len(x) > 0 else 50, raw=False
-    ).values
-    
-    # Range regime: BBW below 30th percentile (low volatility)
-    low_volatility = bbw_percentile < 30
+    # === VOLUME FILTER ===
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
-            np.isnan(bbw_percentile[i])):
+        if (np.isnan(ema50[i]) or np.isnan(h3_aligned[i]) or 
+            np.isnan(l3_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Rejection candle: close within 50% of the day's range from the level
-        daily_range = high_1d[-1] - low_1d[-1] if len(high_1d) > 0 else 0
-        range_50pct = daily_range * 0.5
+        # Determine trend
+        uptrend = close[i] > ema50[i]
+        downtrend = close[i] < ema50[i]
         
-        # Long setup: price touches L4 and shows rejection (close above L4 + 50% range)
-        long_setup = (low[i] <= l4_aligned[i] and 
-                     close[i] > l4_aligned[i] + range_50pct and
-                     low_volatility[i])
+        # Volume strength (must be significantly above average)
+        strong_volume = volume[i] > (vol_ma[i] * 2.0)
         
-        # Short setup: price touches H4 and shows rejection (close below H4 - 50% range)
-        short_setup = (high[i] >= h4_aligned[i] and 
-                      close[i] < h4_aligned[i] - range_50pct and
-                      low_volatility[i])
+        # Price must be beyond the level by at least 1% to avoid false breakouts
+        level_buffer = 0.01
         
-        # Exit: opposite level touch or volatility expansion (BBW > 70th percentile)
-        volatility_expansion = bbw_percentile[i] > 70
+        # Long: price breaks H3 with strong volume in uptrend
+        long_signal = (close[i] > h3_aligned[i] * (1 + level_buffer) and 
+                      uptrend and 
+                      strong_volume)
+        
+        # Short: price breaks L3 with strong volume in downtrend
+        short_signal = (close[i] < l3_aligned[i] * (1 - level_buffer) and 
+                       downtrend and 
+                       strong_volume)
+        
+        # Exit: opposite H3/L3 level or trend reversal
         exit_long = (position == 1 and 
-                    (high[i] >= h4_aligned[i] or volatility_expansion))
+                    (close[i] < l3_aligned[i] or not uptrend))
         exit_short = (position == -1 and 
-                     (low[i] <= l4_aligned[i] or volatility_expansion))
+                     (close[i] > h3_aligned[i] or not downtrend))
         
         # Execute trades
-        if long_setup and position != 1:
+        if long_signal and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_setup and position != -1:
+        elif short_signal and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
