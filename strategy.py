@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_12h_1d_triple_timeframe_momentum_confluence
-Hypothesis: Combines momentum signals from 6h (primary), 12h, and 1d timeframes to capture major trend moves while avoiding whipsaws.
-Enters long when: 6h price > 6h EMA20 AND 12h price > 12h EMA50 AND 1d price > 1d EMA50
-Enters short when: 6h price < 6h EMA20 AND 12h price < 12h EMA50 AND 1d price < 1d EMA50
-Uses volume confirmation to avoid low-probability breakouts.
-Designed to work in both bull and bear markets by requiring alignment across three timeframes.
-Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag while capturing sustained moves.
+4h_1d_rsi_congestion_filter_v1
+Hypothesis: 4-hour strategy using daily RSI to filter congestion periods and 4-hour price action for entries.
+Enters long when RSI < 30 (oversold) and price breaks above 4-hour high of last 20 bars with volume confirmation.
+Enters short when RSI > 70 (overbought) and price breaks below 4-hour low of last 20 bars with volume confirmation.
+Uses congestion filter: only trade when daily RSI is in extreme zones to avoid whipsaws in ranging markets.
+Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drift while capturing mean-reversion moves in extremes.
 """
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,70 +22,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    # Get 1d data for trend filter
+    # Get daily data for RSI congestion filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # 12h EMA50 for trend direction
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    
-    # 1d EMA50 for trend direction
+    # Calculate daily RSI (14)
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # 6h EMA20 for faster trend signal
-    ema20_6h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate 4-hour rolling high/low for breakout detection
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume filter: current volume > 1.3x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(ema20_6h[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volume filter
-        volume_filter = volume[i] > vol_ma_20[i] * 1.3
+        volume_filter = volume[i] > vol_ma[i] * 1.3
         
-        # Multi-timeframe alignment check
-        uptrend_aligned = (close[i] > ema20_6h[i] and 
-                          close[i] > ema50_12h_aligned[i] and 
-                          close[i] > ema50_1d_aligned[i])
-        downtrend_aligned = (close[i] < ema20_6h[i] and 
-                            close[i] < ema50_12h_aligned[i] and 
-                            close[i] < ema50_1d_aligned[i])
+        # Congestion filter: only trade in extreme RSI zones
+        oversold = rsi_1d_aligned[i] < 30
+        overbought = rsi_1d_aligned[i] > 70
         
-        # Fixed position size
-        position_size = 0.25
+        # Breakout conditions
+        bullish_breakout = close[i] > high_20[i-1]  # Break above recent high
+        bearish_breakout = close[i] < low_20[i-1]   # Break below recent low
         
-        # Entry conditions: All timeframes aligned + volume
-        long_entry = uptrend_aligned and volume_filter
-        short_entry = downtrend_aligned and volume_filter
+        # Entry conditions
+        long_entry = oversold and bullish_breakout and volume_filter
+        short_entry = overbought and bearish_breakout and volume_filter
         
-        # Exit conditions: Loss of alignment in any timeframe
-        long_exit = not uptrend_aligned
-        short_exit = not downtrend_aligned
+        # Exit conditions: opposite RSI extreme or opposite breakout
+        long_exit = rsi_1d_aligned[i] > 70 or close[i] < low_20[i-1]
+        short_exit = rsi_1d_aligned[i] < 30 or close[i] > high_20[i-1]
         
+        # Fixed position size to minimize churn
         if long_entry and position != 1:
             position = 1
-            signals[i] = position_size
+            signals[i] = 0.25
         elif short_entry and position != -1:
             position = -1
-            signals[i] = -position_size
+            signals[i] = -0.25
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -96,14 +90,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = position_size
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -position_size
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "6h_12h_1d_triple_timeframe_momentum_confluence"
-timeframe = "6h"
+name = "4h_1d_rsi_congestion_filter_v1"
+timeframe = "4h"
 leverage = 1.0
