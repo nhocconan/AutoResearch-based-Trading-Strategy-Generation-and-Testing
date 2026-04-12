@@ -60,13 +60,21 @@ def generate_signals(prices):
     # Align weekly EMA to 4h timeframe
     ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
+    # Calculate ATR(20) for the 1d ATR MA
+    atr_ma_20_1d = np.full(len(df_1d), np.nan)
+    for j in range(34, len(df_1d)):  # 14 + 19 for 20-period MA
+        if not np.isnan(np.mean(atr_1d[j-19:j+1])):
+            atr_ma_20_1d[j] = np.mean(atr_1d[j-19:j+1])
+    atr_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_20_1d)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(200, n):
         # Skip if data not ready
         if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(atr_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i])):
+            np.isnan(atr_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or
+            np.isnan(atr_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -75,13 +83,7 @@ def generate_signals(prices):
         vol_filter = volume[i] > 1.5 * (vol_ma_20_1d_aligned[i] / 6)
         
         # Volatility filter: daily ATR > 0.5 * its 20-period MA (avoid low volatility)
-        atr_ma_20_1d = np.full(len(df_1d), np.nan)
-        for j in range(34, len(df_1d)):  # 14 + 19 for 20-period MA
-            if not np.isnan(np.mean(atr_1d[j-19:j+1])):
-                atr_ma_20_1d[j] = np.mean(atr_1d[j-19:j+1])
-        atr_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_20_1d)
-        vol_filter_volatility = (not np.isnan(atr_ma_20_1d_aligned[i]) and 
-                                atr_1d_aligned[i] > 0.5 * atr_ma_20_1d_aligned[i])
+        vol_filter_volatility = atr_1d_aligned[i] > 0.5 * atr_ma_20_1d_aligned[i]
         
         # Trend alignment: weekly EMA20 direction + price above/below daily EMA50
         weekly_uptrend = close[i] > ema_20_1w_aligned[i]
