@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v11"
+name = "4h_1d_camarilla_breakout_v12"
 timeframe = "4h"
 leverage = 1.0
 
@@ -49,34 +49,43 @@ def generate_signals(prices):
     atr10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     atr30 = pd.Series(tr).rolling(window=30, min_periods=30).mean().values
     atr_ratio = atr10 / atr30
-    low_vol = atr_ratio < 0.7  # More restrictive volatility filter
+    low_vol = atr_ratio < 0.7
     
-    # Volume confirmation: volume > 2.0x 30-period average (more strict)
+    # Volume confirmation: volume > 2.0x 30-period average
     vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    vol_confirm = volume > (vol_ma * 2.0)  # Increased volume threshold
+    vol_confirm = volume > (vol_ma * 2.0)
+    
+    # Additional filter: avoid choppy markets using ADX(14) < 20
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    plus_di14 = 100 * (pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / tr14)
+    minus_di14 = 100 * (pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / tr14)
+    dx = 100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14 + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    not_choppy = adx > 20
     
     signals = np.zeros(n)
-    position = 0  # 1=long, -1=short, 0=flat
+    position = 0
     
     for i in range(200, n):
-        # Skip if any values not ready
         if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(low_vol[i]) or np.isnan(vol_confirm[i])):
+            np.isnan(low_vol[i]) or np.isnan(vol_confirm[i]) or
+            np.isnan(not_choppy[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: break above H4 in low volatility with volume confirmation
-        long_signal = close[i] > h4_aligned[i] and low_vol[i] and vol_confirm[i]
-        # Short: break below L4 in low volatility with volume confirmation
-        short_signal = close[i] < l4_aligned[i] and low_vol[i] and vol_confirm[i]
+        long_signal = close[i] > h4_aligned[i] and low_vol[i] and vol_confirm[i] and not_choppy[i]
+        short_signal = close[i] < l4_aligned[i] and low_vol[i] and vol_confirm[i] and not_choppy[i]
         
-        # Exit on opposite breakout to pivot level
         pivot_prev_val = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
         pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_prev_val)
         exit_long = close[i] < pivot_aligned[i]
         exit_short = close[i] > pivot_aligned[i]
         
-        # Execute trades
         if long_signal and position != 1:
             position = 1
             signals[i] = 0.25
@@ -90,7 +99,6 @@ def generate_signals(prices):
             position = 0
             signals[i] = 0.0
         else:
-            # Hold position
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
