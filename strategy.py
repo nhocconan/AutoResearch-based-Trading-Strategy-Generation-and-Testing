@@ -8,11 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Camarilla pivot breakout with 1d volume spike and chop regime filter
+    # Hypothesis: 12h Camarilla pivot breakout with 1d volume spike and chop regime filter
     # Works in bull/bear by trading institutional levels with volume confirmation
-    # Chop filter avoids whipsaws in ranging markets. Target: 20-50 trades/year per symbol.
+    # Chop filter avoids ranging markets. Target: 12-37 trades/year per symbol.
     
-    # Session filter: 8:00-20:00 UTC (avoid low volume Asian session)
+    # Session filter: 8:00-20:00 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
@@ -21,7 +21,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and volume context (HTF)
+    # Get 1d data for Camarilla pivots and volume
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -31,70 +31,65 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # 1d Camarilla pivot levels (using previous day's OHLC)
-    camarilla_h4 = np.full(len(df_1d), np.nan)  # resistance
-    camarilla_l4 = np.full(len(df_1d), np.nan)  # support
-    camarilla_h3 = np.full(len(df_1d), np.nan)  # resistance
-    camarilla_l3 = np.full(len(df_1d), np.nan)  # support
+    # Calculate 1d Camarilla pivot levels (based on previous day)
+    camarilla_high = np.full(len(df_1d), np.nan)
+    camarilla_low = np.full(len(df_1d), np.nan)
+    camarilla_close = np.full(len(df_1d), np.nan)
     
     for i in range(1, len(df_1d)):
-        # Calculate pivot from previous day
-        high_prev = high_1d[i-1]
-        low_prev = low_1d[i-1]
-        close_prev = close_1d[i-1]
-        
-        # Camarilla formulas
-        camarilla_h4[i] = close_prev + 1.5 * (high_prev - low_prev)
-        camarilla_l4[i] = close_prev - 1.5 * (high_prev - low_prev)
-        camarilla_h3[i] = close_prev + 1.25 * (high_prev - low_prev)
-        camarilla_l3[i] = close_prev - 1.25 * (high_prev - low_prev)
+        # Previous day's OHLC
+        ph = high_1d[i-1]
+        pl = low_1d[i-1]
+        pc = close_1d[i-1]
+        pivot = (ph + pl + 2*pc) / 4
+        camarilla_high[i] = pc + 1.1 * (ph - pl) / 2  # H4 resistance
+        camarilla_low[i] = pc - 1.1 * (ph - pl) / 2   # L4 support
+        camarilla_close[i] = pc
     
-    # Align Camarilla levels to 4h timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Align Camarilla levels to 12h timeframe
+    camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
+    camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
     
-    # 1d volume spike filter: current volume > 2.0 * 20-period average
+    # 1d volume spike filter: current volume > 1.5 * 20-period average
     vol_ma_20_1d = np.full(len(df_1d), np.nan)
-    for i in range(20, len(df_1d)):
-        vol_ma_20_1d[i] = np.mean(volume_1d[i-20:i])
+    for i in range(19, len(df_1d)):
+        vol_ma_20_1d[i] = np.mean(volume_1d[i-19:i+1])
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    volume_filter = volume > (2.0 * vol_ma_20_1d_aligned)
+    volume_spike = volume > 1.5 * vol_ma_20_1d_aligned
     
-    # 1d Choppiness Index regime filter: CHOP > 61.8 = ranging (mean revert), CHOP < 38.2 = trending
-    # We'll use CHOP < 50 as our filter to avoid strong trends where breakouts fail
+    # 1d Choppiness Index regime filter: CHOP < 38.2 = trending (good for breakouts)
     atr_1d = np.full(len(df_1d), np.nan)
     for i in range(1, len(df_1d)):
-        tr = max(
-            high_1d[i] - low_1d[i],
-            abs(high_1d[i] - close_1d[i-1]),
-            abs(low_1d[i] - close_1d[i-1])
-        )
+        tr = max(high_1d[i] - low_1d[i], 
+                abs(high_1d[i] - close_1d[i-1]), 
+                abs(low_1d[i] - close_1d[i-1]))
         if i == 1:
             atr_1d[i] = tr
         else:
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr) / 14  # 14-period ATR
+            atr_1d[i] = 0.9 * atr_1d[i-1] + 0.1 * tr
     
     # Calculate highest high and lowest low over 14 periods
     hh_1d = np.full(len(df_1d), np.nan)
     ll_1d = np.full(len(df_1d), np.nan)
-    for i in range(14, len(df_1d)):
-        hh_1d[i] = np.max(high_1d[i-14:i+1])
-        ll_1d[i] = np.min(low_1d[i-14:i+1])
+    for i in range(13, len(df_1d)):
+        hh_1d[i] = np.max(high_1d[i-13:i+1])
+        ll_1d[i] = np.min(low_1d[i-13:i+1])
     
-    # Chop = 100 * log10(sum(atr14) / log10(hh14 - ll14)) / log10(14)
-    sum_atr_14 = np.full(len(df_1d), np.nan)
+    chop_1d = np.full(len(df_1d), np.nan)
     for i in range(14, len(df_1d)):
-        sum_atr_14[i] = np.sum(atr_1d[i-14:i+1])
+        if hh_1d[i] != ll_1d[i]:
+            sum_tr = 0
+            for j in range(i-13, i+1):
+                tr = max(high_1d[j] - low_1d[j], 
+                        abs(high_1d[j] - close_1d[j-1]), 
+                        abs(low_1d[j] - close_1d[j-1]))
+                sum_tr += tr
+            chop_1d[i] = 100 * np.log10(sum_tr / (atr_1d[i] * 14)) / np.log10(14)
+        else:
+            chop_1d[i] = 50  # neutral when range is zero
     
-    chop = np.full(len(df_1d), np.nan)
-    for i in range(14, len(df_1d)):
-        if hh_1d[i] > ll_1d[i] and sum_atr_14[i] > 0:
-            chop[i] = 100 * np.log10(sum_atr_14[i]) / np.log10(hh_1d[i] - ll_1d[i])
-    
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    chop_filter = chop_aligned < 50.0  # Avoid strong trending markets
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    chop_filter = chop_1d_aligned < 38.2  # trending regime
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -105,23 +100,22 @@ def generate_signals(prices):
             continue
         
         # Skip if data not ready
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]) or 
+            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(chop_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Breakout conditions
-        breakout_long = close[i] > h4_aligned[i]  # Break above H4 resistance
-        breakout_short = close[i] < l4_aligned[i]  # Break below L4 support
+        breakout_long = close[i] > camarilla_high_aligned[i]
+        breakout_short = close[i] < camarilla_low_aligned[i]
         
-        # Entry conditions: breakout + volume filter + chop filter
-        long_entry = breakout_long and volume_filter[i] and chop_filter[i]
-        short_entry = breakout_short and volume_filter[i] and chop_filter[i]
+        # Entry conditions: breakout + volume spike + trending regime
+        long_entry = breakout_long and volume_spike[i] and chop_filter[i]
+        short_entry = breakout_short and volume_spike[i] and chop_filter[i]
         
-        # Exit conditions: opposite breakout or loss of filters
-        long_exit = (close[i] < l3_aligned[i]) or (not volume_filter[i]) or (not chop_filter[i])
-        short_exit = (close[i] > h3_aligned[i]) or (not volume_filter[i]) or (not chop_filter[i])
+        # Exit conditions: opposite breakout or regime change
+        long_exit = (close[i] < camarilla_low_aligned[i]) or (not chop_filter[i])
+        short_exit = (close[i] > camarilla_high_aligned[i]) or (not chop_filter[i])
         
         if long_entry and position != 1:
             position = 1
@@ -146,6 +140,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_camarilla_breakout_vol_chop_v1"
-timeframe = "4h"
+name = "12h_1d_camarilla_breakout_vol_chop_v1"
+timeframe = "12h"
 leverage = 1.0
