@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-4h_1d_1w_Camarilla_Breakout_Volume_Trend_v1
-Hypothesis: On 4h timeframe, buy breakouts above Camarilla H3 with 1d uptrend filter and volume confirmation,
-sell breakdowns below L3 with 1d downtrend and volume confirmation. Exit at opposite H3/L3 levels.
-Uses weekly volatility regime filter to avoid choppy markets. Designed for low trade frequency
-(20-40/year) by requiring multiple confluence factors. Works in bull/bear via 1d trend filter.
+4h_1d_Camarilla_Breakout_Volume_Regime_v1
+Hypothesis: On 4h timeframe, buy breakouts above Camarilla H3 with 1d trend filter and volume confirmation,
+sell breakdowns below L3 with 1d downtrend and volume confirmation. Exit at H4/L4 levels.
+Uses daily trend filter to avoid counter-trend trades. Designed for low trade frequency
+(20-50/year) by requiring multiple confluence factors. Works in bull/bear via 1d trend filter
+and mean-reversion exit at Camarilla levels.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_1w_Camarilla_Breakout_Volume_Trend_v1"
+name = "4h_1d_Camarilla_Breakout_Volume_Regime_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -35,59 +36,32 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Camarilla pivot levels using previous day's close
-    close_prev = np.roll(close_1d, 1)
-    close_prev[0] = close_1d[0]  # first day uses its own close
+    close_prev = np.concatenate([[close_1d[0]], close_1d[:-1]])
     range_1d = high_1d - low_1d
     
+    h5 = close_prev + (range_1d * 1.1 / 2)
+    h4 = close_prev + (range_1d * 1.1)
     h3 = close_prev + (range_1d * 1.1 / 4)
     l3 = close_prev - (range_1d * 1.1 / 4)
-    h4 = close_prev + (range_1d * 1.1)
     l4 = close_prev - (range_1d * 1.1)
+    l5 = close_prev - (range_1d * 1.1 / 2)
     
-    # === WEEKLY VOLATILITY REGIME FILTER ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    # True Range for ATR
-    tr1 = np.abs(high_1w[1:] - low_1w[:-1])
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # ATR(14)
-    atr_14 = np.full_like(tr, np.nan)
-    for i in range(len(tr)):
-        if i < 14:
-            atr_14[i] = np.nan
-        elif i == 14:
-            atr_14[i] = np.nanmean(tr[1:15])
-        else:
-            atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
-    
-    # Volatility regime: low volatility = trending market
-    vol_ma = np.full_like(atr_14, np.nan)
-    for i in range(len(atr_14)):
-        if i < 30:
-            vol_ma[i] = np.nan
-        else:
-            vol_ma[i] = np.mean(atr_14[i-29:i+1])
-    
-    # Low volatility regime (trending) when current ATR < MA
-    vol_regime = atr_14 < vol_ma
+    # === DAILY TREND FILTER: EMA(50) vs EMA(200) ===
+    close_series = pd.Series(close_1d)
+    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200 = close_series.ewm(span=200, adjust=False, min_periods=200).mean().values
+    daily_uptrend = ema_50 > ema_200
+    daily_downtrend = ema_50 < ema_200
     
     # Align data to 4h timeframe
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
     l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    vol_regime_aligned = align_htf_to_ltf(prices, df_1w, vol_regime.astype(float))
+    daily_uptrend_aligned = align_htf_to_ltf(prices, df_1d, daily_uptrend.astype(float))
+    daily_downtrend_aligned = align_htf_to_ltf(prices, df_1d, daily_downtrend.astype(float))
     
-    # Volume average (20-period for 4h = ~5 days) for confirmation
+    # Volume average (20-period for 4h = ~3.3 days) for confirmation
     vol_avg = np.zeros(n)
     vol_sum = 0.0
     vol_count = 0
@@ -109,23 +83,21 @@ def generate_signals(prices):
         # Skip if indicators not available
         if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
             np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
-            np.isnan(vol_regime_aligned[i]) or vol_avg[i] == 0.0):
+            np.isnan(daily_uptrend_aligned[i]) or np.isnan(daily_downtrend_aligned[i]) or 
+            vol_avg[i] == 0.0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Volume confirmation: at least 1.5x average
         vol_confirm = volume[i] > 1.5 * vol_avg[i]
         
-        # Only trade in low volatility (trending) regime
-        in_trend_regime = vol_regime_aligned[i] > 0.5
-        
         # Entry conditions
-        long_setup = (close[i] > h3_aligned[i]) and vol_confirm and in_trend_regime
-        short_setup = (close[i] < l3_aligned[i]) and vol_confirm and in_trend_regime
+        long_setup = (close[i] > h3_aligned[i]) and vol_confirm and (daily_uptrend_aligned[i] > 0.5)
+        short_setup = (close[i] < l3_aligned[i]) and vol_confirm and (daily_downtrend_aligned[i] > 0.5)
         
-        # Exit conditions: mean reversion to opposite H3/L3 levels
-        exit_long = close[i] < l3_aligned[i]
-        exit_short = close[i] > h3_aligned[i]
+        # Exit conditions: mean reversion to H4/L4 levels
+        exit_long = close[i] < l4_aligned[i]
+        exit_short = close[i] > h4_aligned[i]
         
         if long_setup and position != 1:
             position = 1
