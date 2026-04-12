@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_1d_williams_alligator_ema200"
-timeframe = "6h"
+name = "4h_1d_donchian_breakout_volume_confirmation"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,69 +17,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Williams Alligator from 12h
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 13:
-        return np.zeros(n)
-    close_12h = df_12h['close'].values
-    jaw = pd.Series(close_12h).rolling(window=13, center=False).mean().shift(8).values
-    teeth = pd.Series(close_12h).rolling(window=8, center=False).mean().shift(5).values
-    lips = pd.Series(close_12h).rolling(window=5, center=False).mean().shift(3).values
-    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
-    
-    # EMA200 filter from 1d
+    # Donchian channel from 1d
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 20:
         return np.zeros(n)
-    ema_200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
     
-    # Volume filter: current volume > 20-period average
+    # Volume confirmation: current volume > 20-period average on 4h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > vol_ma
+    volume_ok = volume > vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if not ready
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(ema_200_aligned[i])):
+        if np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Alligator alignment: jaws < teeth < lips for downtrend, jaws > teeth > lips for uptrend
-        alligator_long = jaw_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > lips_aligned[i]
-        alligator_short = jaw_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < lips_aligned[i]
+        # Breakout conditions
+        long_breakout = close[i] > donch_high_aligned[i]
+        short_breakout = close[i] < donch_low_aligned[i]
         
-        # EMA200 filter: price above/below long-term trend
-        price_above_ema200 = close[i] > ema_200_aligned[i]
-        price_below_ema200 = close[i] < ema_200_aligned[i]
-        
-        # Volume confirmation
-        vol_ok = volume_filter[i]
-        
-        # Entry signals
-        long_signal = alligator_long and price_above_ema200 and vol_ok
-        short_signal = alligator_short and price_below_ema200 and vol_ok
-        
-        # Exit when Alligator lines cross (trend change)
-        exit_long = jaw_aligned[i] < teeth_aligned[i]
-        exit_short = jaw_aligned[i] > teeth_aligned[i]
-        
-        # Execute trades
-        if long_signal and position != 1:
+        # Entry with volume confirmation
+        if long_breakout and volume_ok[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_signal and position != -1:
+        elif short_breakout and volume_ok[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        elif exit_long and position == 1:
+        # Exit on opposite breakout
+        elif short_breakout and position == 1:
             position = 0
             signals[i] = 0.0
-        elif exit_short and position == -1:
+        elif long_breakout and position == -1:
             position = 0
             signals[i] = 0.0
         else:
@@ -87,3 +64,8 @@ def generate_signals(prices):
             signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
+
+# Hypothesis: 4h Donchian(20) breakout with 1d channel context and volume confirmation
+# Works in bull/bear markets by capturing breakouts in direction of higher timeframe trend
+# Volume filter reduces false breakouts, keeping trades ~25-40/year to avoid fee drag
+# Position size 0.25 limits drawdown during adverse moves (e.g., 2022 crash)
