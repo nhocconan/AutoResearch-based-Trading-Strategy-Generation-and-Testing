@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v1"
-timeframe = "4h"
+name = "12h_1d_camarilla_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,11 +32,11 @@ def generate_signals(prices):
     R4 = prev_close + H_minus_L * 1.1 / 2
     S4 = prev_close - H_minus_L * 1.1 / 2
     
-    # Map 1d Camarilla levels to each 4h bar using proper alignment
+    # Map 1d Camarilla levels to each 12h bar using proper alignment
     R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
     S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
     
-    # Volume confirmation: current 4h volume > 20-period average of 1d volume
+    # Volume confirmation: current 12h volume > 20-period average of 1d volume
     vol_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)
     vol_ma = pd.Series(vol_1d_aligned).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_filter = volume > vol_ma
