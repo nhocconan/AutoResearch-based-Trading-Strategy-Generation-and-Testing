@@ -1,31 +1,16 @@
 #!/usr/bin/env python3
 """
-4h_1d_Liquidity_Zone_Breakout_v1
-Hypothesis: Trade breakouts from 1d liquidity zones (equal highs/lows) with volume confirmation and 4h trend filter.
-Works in bull/bear via trend filter. Targets 20-40 trades/year by requiring multiple confluence factors.
+1d_1w_Camarilla_Breakout_Trend_v1
+Hypothesis: Daily close above/below weekly Camarilla R4/S4 levels with 1-week EMA(21) trend filter and volume confirmation. Designed for low trade frequency (7-25/year) by requiring strong breakouts, trend alignment, and volume surge. Works in bull/bear via EMA trend filter and mean-reversion exit at weekly pivot. Targets BTC/ETH/USD with focus on avoiding overtrading.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Liquidity_Zone_Breakout_v1"
-timeframe = "4h"
+name = "1d_1w_Camarilla_Breakout_Trend_v1"
+timeframe = "1d"
 leverage = 1.0
-
-def find_equal_levels(arr, tolerance_pct=0.003):
-    """Find equal highs/lows within tolerance percentage"""
-    n = len(arr)
-    if n < 2:
-        return np.zeros(n, dtype=bool)
-    
-    equal_levels = np.zeros(n, dtype=bool)
-    for i in range(1, n-1):
-        # Check if current high/low equals previous within tolerance
-        if abs(arr[i] - arr[i-1]) / arr[i-1] <= tolerance_pct:
-            equal_levels[i] = True
-            equal_levels[i-1] = True
-    return equal_levels
 
 def generate_signals(prices):
     n = len(prices)
@@ -37,40 +22,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY DATA FOR LIQUIDITY ZONES ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # === WEEKLY DATA ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Find daily equal highs/lows (liquidity zones)
-    eq_highs = find_equal_levels(high_1d, 0.003)  # 0.3% tolerance
-    eq_lows = find_equal_levels(low_1d, 0.003)
+    # Weekly pivot calculation
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
     
-    # Build resistance/support levels from liquidity zones
-    resistance = np.where(eq_highs, high_1d, np.nan)
-    support = np.where(eq_lows, low_1d, np.nan)
+    # Weekly Camarilla levels (R4/S4 for stronger breakouts)
+    r4_1w = close_1w + range_1w * 1.5
+    s4_1w = close_1w - range_1w * 1.5
     
-    # Forward fill levels to create zones
-    resistance_series = pd.Series(resistance)
-    resistance_filled = resistance_series.ffill().bfill().values
-    support_series = pd.Series(support)
-    support_filled = support_series.ffill().bfill().values
-    
-    # === 4H TREND FILTER (EMA 34) ===
-    if len(close) >= 34:
-        ema_34 = np.zeros_like(close)
-        ema_34[0] = close[0]
-        alpha = 2.0 / (34 + 1)
-        for i in range(1, len(close)):
-            ema_34[i] = alpha * close[i] + (1 - alpha) * ema_34[i-1]
+    # === 1W EMA(21) FOR TREND FILTER ===
+    if len(close_1w) >= 21:
+        ema_21_1w = np.zeros_like(close_1w)
+        ema_21_1w[0] = close_1w[0]
+        alpha = 2.0 / (21 + 1)
+        for i in range(1, len(close_1w)):
+            ema_21_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_21_1w[i-1]
     else:
-        ema_34 = np.full_like(close, np.nan)
+        ema_21_1w = np.full_like(close_1w, np.nan)
     
-    # Volume average (20-period)
+    # Align weekly data to daily timeframe
+    r4_1w_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
+    s4_1w_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    
+    # Volume average (20-period for 1d = ~20 days) for confirmation
     vol_avg = np.zeros(n)
     vol_sum = 0.0
     vol_count = 0
@@ -90,25 +75,25 @@ def generate_signals(prices):
     
     for i in range(50, n):  # start after warmup
         # Skip if indicators not available
-        if (np.isnan(resistance_filled[i]) or np.isnan(support_filled[i]) or 
-            np.isnan(ema_34[i]) or vol_avg[i] == 0.0):
+        if (np.isnan(r4_1w_aligned[i]) or np.isnan(s4_1w_aligned[i]) or 
+            np.isnan(pivot_1w_aligned[i]) or np.isnan(ema_21_1w_aligned[i]) or vol_avg[i] == 0.0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: at least 1.5x average
-        vol_confirm = volume[i] > 1.5 * vol_avg[i]
+        # Volume confirmation: at least 2.0x average
+        vol_confirm = volume[i] > 2.0 * vol_avg[i]
         
-        # Trend filter
-        price_above_ema = close[i] > ema_34[i]
-        price_below_ema = close[i] < ema_34[i]
+        # Trend filter: price above/below 1w EMA(21)
+        price_above_ema = close[i] > ema_21_1w_aligned[i]
+        price_below_ema = close[i] < ema_21_1w_aligned[i]
         
-        # Breakout entries at liquidity zones with volume and trend
-        long_setup = (close[i] > resistance_filled[i]) and vol_confirm and price_above_ema
-        short_setup = (close[i] < support_filled[i]) and vol_confirm and price_below_ema
+        # Breakout entries at weekly S4/R4 with volume and trend filters
+        long_setup = (close[i] > r4_1w_aligned[i]) and vol_confirm and price_above_ema
+        short_setup = (close[i] < s4_1w_aligned[i]) and vol_confirm and price_below_ema
         
-        # Exit when price returns to opposite zone (mean reversion)
-        exit_long = close[i] < support_filled[i]
-        exit_short = close[i] > resistance_filled[i]
+        # Exit when price returns to weekly pivot (mean reversion)
+        exit_long = close[i] < pivot_1w_aligned[i]
+        exit_short = close[i] > pivot_1w_aligned[i]
         
         if long_setup and position != 1:
             position = 1
