@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Get daily data for pivot points and ATR
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     # Calculate 14-day ATR on daily data
@@ -31,8 +31,8 @@ def generate_signals(prices):
     for i in range(14, len(atr_1d)):
         atr_1d[i] = np.nanmean(tr[i-13:i+1])
     
-    # Align ATR to 12h timeframe
-    atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Align ATR to 4h timeframe
+    atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     # Calculate daily pivot points using previous day's data
     prev_high = np.roll(high_1d, 1)
@@ -51,13 +51,13 @@ def generate_signals(prices):
     r2 = pivot + range_val
     s2 = pivot - range_val
     
-    # Align levels to 12h timeframe
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
-    r2_12h = align_htf_to_ltf(prices, df_1d, r2)
-    s2_12h = align_htf_to_ltf(prices, df_1d, s2)
+    # Align levels to 4h timeframe
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    r2_4h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_4h = align_htf_to_ltf(prices, df_1d, s2)
     
-    # Calculate volume moving average (20-period on 12h)
+    # Calculate volume moving average (20-period on 4h)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -65,31 +65,31 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if data not ready
-        if (np.isnan(atr_12h[i]) or 
-            np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(atr_4h[i]) or 
+            np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
+            np.isnan(r2_4h[i]) or np.isnan(s2_4h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 2.0x 20-period average
-        volume_filter = volume[i] > vol_ma[i] * 2.0
+        # Volume filter: current volume > 1.8x 20-period average
+        volume_filter = volume[i] > vol_ma[i] * 1.8
         
-        # Entry conditions: S1/R1 breakout with volume confirmation
-        long_breakout = (close[i] > r1_12h[i]) and volume_filter
-        short_breakout = (close[i] < s1_12h[i]) and volume_filter
+        # Entry conditions: R2/S2 breakout with volume confirmation
+        long_breakout = (close[i] > r2_4h[i]) and volume_filter
+        short_breakout = (close[i] < s2_4h[i]) and volume_filter
         
-        # Exit conditions: touch opposite S1/R1 level or ATR stop
-        long_exit = (close[i] < s1_12h[i]) or (close[i] < r1_12h[i] - 1.5 * atr_12h[i])
-        short_exit = (close[i] > r1_12h[i]) or (close[i] > s1_12h[i] + 1.5 * atr_12h[i])
+        # Exit conditions: touch opposite R1/S1 level or ATR stop
+        long_exit = (close[i] < r1_4h[i]) or (close[i] < r2_4h[i] - 2.0 * atr_4h[i])
+        short_exit = (close[i] > s1_4h[i]) or (close[i] > s2_4h[i] + 2.0 * atr_4h[i])
         
         if long_breakout and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.30
         elif short_breakout and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.30
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -99,14 +99,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_1d_pivot_breakout_volume_filter_v1"
-timeframe = "12h"
+name = "4h_1d_pivot_r2s2_breakout_volume_filter_v1"
+timeframe = "4h"
 leverage = 1.0
