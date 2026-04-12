@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 """
-4h_1d_Alligator_Trend_Filter_V1
-Hypothesis: Uses Williams Alligator (three SMAs) on 1d timeframe as a trend filter on 4h chart.
-Enter long when price > Alligator Jaw (13-period SMA) and Alligator is bullish (Teeth > Lips).
-Enter short when price < Alligator Jaw and Alligator is bearish (Teeth < Lips).
-Requires 4h volume above 20-period average to confirm momentum.
-Designed for low trade frequency by requiring trend alignment and volume confirmation.
-Works in bull via buying uptrend pullbacks, in bear via selling rallies in downtrend.
+1d_1w_Camarilla_Reversion_v1
+Hypothesis: Uses weekly trend filter (price above/below weekly EMA20) with daily Camarilla pivot reversals.
+Long when weekly uptrend AND price touches Camarilla L3 level; short when weekly downtrend AND price touches Camarilla H3 level.
+Designed for low trade frequency by requiring weekly trend alignment and precise pivot level touches.
+Works in bull via buying pullbacks in uptrend, in bear via selling rallies in downtrend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Alligator_Trend_Filter_V1"
-timeframe = "4h"
+name = "1d_1w_Camarilla_Reversion_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,54 +25,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY DATA FOR ALLIGATOR ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # === WEEKLY DATA ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
+    close_1w = df_1w['close'].values
+    close_ws = pd.Series(close_1w)
+    ema20_w = close_ws.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_w_aligned = align_htf_to_ltf(prices, df_1w, ema20_w)
+    
+    # === DAILY DATA ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Williams Alligator: Jaw (13), Teeth (8), Lips (5) SMAs
-    close_1d_series = pd.Series(close_1d)
-    jaw = close_1d_series.rolling(window=13, min_periods=13).mean().values
-    teeth = close_1d_series.rolling(window=8, min_periods=8).mean().values
-    lips = close_1d_series.rolling(window=5, min_periods=5).mean().values
+    # Daily volume average for confirmation
+    volume_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
     
-    # Align Alligator components
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    # Calculate Camarilla pivot levels for previous day
+    # Camarilla: H4 = C + (H-L)*1.1/2, H3 = C + (H-L)*1.1/4, L3 = C - (H-L)*1.1/4, L4 = C - (H-L)*1.1/2
+    # We use previous day's OHLC to calculate today's levels
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
     
-    # === 4H VOLUME FILTER ===
-    volume_series = pd.Series(volume)
-    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
+    # Set first day's values to avoid roll issues
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
+    
+    camarilla_h3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    camarilla_l3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    
+    # Align Camarilla levels
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if not ready
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema20_w_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
+            np.isnan(camarilla_l3_aligned[i]) or np.isnan(volume_ma_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Alligator trend conditions
-        alligator_bullish = teeth_aligned[i] > lips_aligned[i]
-        alligator_bearish = teeth_aligned[i] < lips_aligned[i]
-        price_above_jaw = close[i] > jaw_aligned[i]
-        price_below_jaw = close[i] < jaw_aligned[i]
+        # Weekly trend filter
+        weekly_uptrend = close[i] > ema20_w_aligned[i]
+        weekly_downtrend = close[i] < ema20_w_aligned[i]
         
-        # Volume confirmation
-        volume_ok = volume[i] > vol_ma[i]
+        # Volume confirmation (above average)
+        volume_confirm = volume[i] > volume_ma_aligned[i]
+        
+        # Camarilla level touches with small tolerance
+        tol = 0.001  # 0.1% tolerance
+        touch_h3 = abs(high[i] - camarilla_h3_aligned[i]) / camarilla_h3_aligned[i] < tol
+        touch_l3 = abs(low[i] - camarilla_l3_aligned[i]) / camarilla_l3_aligned[i] < tol
         
         # Entry conditions
-        long_setup = alligator_bullish and price_above_jaw and volume_ok
-        short_setup = alligator_bearish and price_below_jaw and volume_ok
+        long_setup = weekly_uptrend and touch_l3 and volume_confirm
+        short_setup = weekly_downtrend and touch_h3 and volume_confirm
         
-        # Exit when trend changes or volume fails
-        exit_long = not (alligator_bullish and price_above_jaw and volume_ok)
-        exit_short = not (alligator_bearish and price_below_jaw and volume_ok)
+        # Exit when trend reverses or opposite touch
+        exit_long = not weekly_uptrend or touch_h3
+        exit_short = not weekly_downtrend or touch_l3
         
         if long_setup and position != 1:
             position = 1
