@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_donchian_breakout_volume_v1
-# Donchian(20) breakout on 4h timeframe confirmed by 1d volume surge and price > 1d VWAP.
-# Works in bull markets via breakouts and in bear markets via short breakdowns.
-# Volume confirmation reduces false breakouts. Target: 20-40 trades/year.
-name = "4h_1d_donchian_breakout_volume_v1"
-timeframe = "4h"
+# Hypothesis: 1d_1w_cci_reversal_v1
+# Uses weekly Commodity Channel Index (CCI) to detect overbought/oversold conditions
+# combined with daily price action for entry timing. CCI > 100 = overbought (short),
+# CCI < -100 = oversold (long). Works in both bull and bear markets by capturing
+# mean reversals at extremes. Low trade frequency expected due to strict CCI thresholds.
+name = "1d_1w_cci_reversal_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,53 +20,56 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for volume surge and VWAP
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for CCI calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 1d VWAP (volume-weighted average price)
-    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
-    vwap_1d = (typical_price_1d * df_1d['volume'].values).cumsum() / df_1d['volume'].values.cumsum()
-    vwap_1d = vwap_1d.values
+    # Calculate weekly CCI(20)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d volume average (20-period)
-    vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    # Typical price
+    tp_1w = (high_1w + low_1w + close_1w) / 3.0
     
-    # Align 1d indicators to 4h timeframe
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Simple moving average of typical price
+    tp_ma = pd.Series(tp_1w).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 4h Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Mean deviation
+    tp_dev = np.abs(tp_1w - tp_ma)
+    md = pd.Series(tp_dev).rolling(window=20, min_periods=20).mean().values
+    
+    # CCI calculation
+    cci = (tp_1w - tp_ma) / (0.015 * md)
+    
+    # Align CCI to daily timeframe (with proper delay for weekly bar close)
+    cci_aligned = align_htf_to_ltf(prices, df_1w, cci)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
-        # Skip if 1d indicators not ready
-        if np.isnan(vwap_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]):
+    for i in range(20, n):  # Start after CCI warmup
+        # Skip if CCI not ready
+        if np.isnan(cci_aligned[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume surge condition: current 4h volume > 1.5x 1d average volume
-        volume_surge = volume[i] > 1.5 * vol_ma_1d_aligned[i]
+        cci_val = cci_aligned[i]
         
-        # Breakout conditions
-        bullish_breakout = (close[i] > highest_high[i-1]) and volume_surge and (close[i] > vwap_1d_aligned[i])
-        bearish_breakout = (close[i] < lowest_low[i-1]) and volume_surge and (close[i] < vwap_1d_aligned[i])
+        # Entry signals based on CCI extremes
+        long_signal = cci_val < -100  # Oversold
+        short_signal = cci_val > 100  # Overbought
         
-        # Exit conditions: opposite breakout or loss of momentum
-        exit_long = (close[i] < lowest_low[i-1]) and volume_surge
-        exit_short = (close[i] > highest_high[i-1]) and volume_surge
+        # Exit conditions
+        exit_long = cci_val > -50  # Exit long when CCI rises above -50
+        exit_short = cci_val < 50  # Exit short when CCI falls below 50
         
-        if bullish_breakout and position != 1:
+        if long_signal and position != 1:
             position = 1
             signals[i] = 0.25
-        elif bearish_breakout and position != -1:
+        elif short_signal and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
