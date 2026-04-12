@@ -13,12 +13,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and Donchian channels
+    # Get daily data for 20-period EMA (trend filter) and 20-period high/low (Donchian channels)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate daily 20-period EMA for trend filter
+    # Calculate daily 20-period EMA
     close_1d = df_1d['close'].values
     ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
@@ -97,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_ema20_breakout_vol_filter_v2"
-timeframe = "4h"
+name = "12h_1d_donchian_ema20_breakout_vol_filter_v1"
+timeframe = "12h"
 leverage = 1.0
