@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """
-6h_1w_Pivot_Trend_Follow
-Hypothesis: Weekly pivot points define strong support/resistance. In trending markets, price respects these levels. Uses weekly pivot direction (based on prior week's close) to filter 6h trend (EMA21) for breakout entries. Works in bull/bear by only trading with the weekly bias. Target: 20-40 trades/year to minimize fee drag.
+12h_1d_Bollinger_Breakout_TrendFilter
+Hypothesis: Uses daily Bollinger Bands with breakout confirmation on 12h timeframe, filtered by 1d ADX trend strength and volume.
+Designed to capture strong trend continuation moves while avoiding whipsaws in ranging markets. Works in both bull and bear by requiring strong trend (ADX>25) and volume expansion.
+Target: 20-30 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_Pivot_Trend_Follow"
-timeframe = "6h"
+name = "12h_1d_Bollinger_Breakout_TrendFilter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,74 +24,104 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === WEEKLY PIVOT POINTS ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # === DAILY BOLLINGER BANDS ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points (standard formula)
-    pivot = (high_1w + low_1w + close_1w) / 3.0
-    r1 = 2 * pivot - low_1w
-    s1 = 2 * pivot - high_1w
-    r2 = pivot + (high_1w - low_1w)
-    s2 = pivot - (high_1w - low_1w)
-    r3 = high_1w + 2 * (pivot - low_1w)
-    s3 = low_1w - 2 * (high_1w - pivot)
+    # Calculate 20-period SMA and standard deviation
+    sma_20 = np.full(len(close_1d), np.nan)
+    std_20 = np.full(len(close_1d), np.nan)
     
-    # Weekly bias: bullish if prior week close > prior week pivot
-    weekly_bullish = close_1w > pivot
-    weekly_bearish = close_1w < pivot
+    for i in range(19, len(close_1d)):
+        sma_20[i] = np.mean(close_1d[i-19:i+1])
+        std_20[i] = np.std(close_1d[i-19:i+1])
     
-    # Align to 6h
-    pivot_6h = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_6h = align_htf_to_ltf(prices, df_1w, r1)
-    s1_6h = align_htf_to_ltf(prices, df_1w, s1)
-    r2_6h = align_htf_to_ltf(prices, df_1w, r2)
-    s2_6h = align_htf_to_ltf(prices, df_1w, s2)
-    r3_6h = align_htf_to_ltf(prices, df_1w, r3)
-    s3_6h = align_htf_to_ltf(prices, df_1w, s3)
-    weekly_bullish_6h = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
-    weekly_bearish_6h = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
+    # Upper and lower bands (2 standard deviations)
+    upper_band = sma_20 + (2 * std_20)
+    lower_band = sma_20 - (2 * std_20)
     
-    # === 6h TREND (EMA21) ===
-    ema_fast = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Align Bollinger Bands to 12h timeframe
+    upper_12h = align_htf_to_ltf(prices, df_1d, upper_band)
+    lower_12h = align_htf_to_ltf(prices, df_1d, lower_band)
+    sma_12h = align_htf_to_ltf(prices, df_1d, sma_20)
     
-    # Weekly pivot-based trend filter: price > EMA21 in bullish week, < EMA21 in bearish week
-    trend_bull = (ema_fast > pivot_6h) & weekly_bullish_6h.astype(bool)
-    trend_bear = (ema_fast < pivot_6h) & weekly_bearish_6h.astype(bool)
+    # === 1d ADX TREND FILTER ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === VOLUME CONFIRMATION ===
+    # Calculate True Range and Directional Movement
+    tr_1d = np.zeros(len(close_1d))
+    plus_dm_1d = np.zeros(len(close_1d))
+    minus_dm_1d = np.zeros(len(close_1d))
+    
+    for i in range(1, len(close_1d)):
+        high_diff = high_1d[i] - high_1d[i-1]
+        low_diff = low_1d[i-1] - low_1d[i]
+        
+        tr_1d[i] = max(
+            high_1d[i] - low_1d[i],
+            abs(high_1d[i] - close_1d[i-1]),
+            abs(low_1d[i] - close_1d[i-1])
+        )
+        
+        plus_dm_1d[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
+        minus_dm_1d[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
+    
+    # Wilder's smoothing
+    def WilderSmoothing(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        result[period-1] = np.nansum(arr[1:period+1])
+        for i in range(period, len(arr)):
+            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
+    
+    period = 14
+    tr_smooth_1d = WilderSmoothing(tr_1d, period)
+    plus_di_1d = 100 * WilderSmoothing(plus_dm_1d, period) / tr_smooth_1d
+    minus_di_1d = 100 * WilderSmoothing(minus_dm_1d, period) / tr_smooth_1d
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
+    adx_1d = WilderSmoothing(dx_1d, period)
+    
+    # Align ADX to 12h timeframe
+    adx_12h = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # === VOLUME CONFIRMATION (12h) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(21, n):
+    for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or
-            np.isnan(ema_fast[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(upper_12h[i]) or np.isnan(lower_12h[i]) or 
+            np.isnan(adx_12h[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(sma_12h[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: bullish week, price above EMA21, breaks above R1 with volume
-        long_entry = trend_bull[i] and (close[i] > ema_fast[i]) and (close[i] > r1_6h[i]) and (vol_ratio[i] > 1.5)
-        # Short: bearish week, price below EMA21, breaks below S1 with volume
-        short_entry = trend_bear[i] and (close[i] < ema_fast[i]) and (close[i] < s1_6h[i]) and (vol_ratio[i] > 1.5)
+        # Breakout conditions
+        # Long: Price breaks above upper Bollinger Band with volume + strong trend
+        long_breakout = (close[i] > upper_12h[i]) and (vol_ratio[i] > 1.8) and (adx_12h[i] > 25)
         
-        # Exit: trend reversal or price touches opposite S1/R1
-        exit_long = position == 1 and (not trend_bull[i] or close[i] < s1_6h[i])
-        exit_short = position == -1 and (not trend_bear[i] or close[i] > r1_6h[i])
+        # Short: Price breaks below lower Bollinger Band with volume + strong trend
+        short_breakout = (close[i] < lower_12h[i]) and (vol_ratio[i] > 1.8) and (adx_12h[i] > 25)
+        
+        # Exit: Price returns to middle Bollinger Band or trend weakens
+        exit_long = (position == 1) and ((close[i] < sma_12h[i]) or (adx_12h[i] < 20))
+        exit_short = (position == -1) and ((close[i] > sma_12h[i]) or (adx_12h[i] < 20))
         
         # Execute trades
-        if long_entry and position != 1:
+        if long_breakout and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_entry and position != -1:
+        elif short_breakout and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
