@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Breakout_Strategy_v2
-Hypothesis: 12-hour breakout of daily Camarilla H4/L4 levels with volume confirmation and ADX trend filter.
-Designed for low-frequency, high-probability trades in both bull and bear markets.
-Target: 12-37 trades/year to minimize fee drag while capturing significant moves.
+4h_1d_Camarilla_Breakout_Volume_Filter_v1
+Hypothesis: 4-hour breakout of daily Camarilla H4/L4 levels with volume confirmation (>2x 20-period average) and ADX trend filter (ADX > 25).
+Uses discrete position sizing (0.25) to minimize churn. Designed for low-frequency, high-probability trades in both bull and bear markets.
+Target: 20-50 total trades over 4 years (5-12/year) to avoid fee drag while capturing significant moves.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_Breakout_Strategy_v2"
-timeframe = "12h"
+name = "4h_1d_Camarilla_Breakout_Volume_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -45,11 +45,11 @@ def generate_signals(prices):
             H4[i] = close_1d[i] + range_ * 1.1 / 2
             L4[i] = close_1d[i] - range_ * 1.1 / 2
     
-    # Align Camarilla levels to 12h timeframe
-    H4_12h = align_htf_to_ltf(prices, df_1d, H4)
-    L4_12h = align_htf_to_ltf(prices, df_1d, L4)
+    # Align Camarilla levels to 4h timeframe
+    H4_4h = align_htf_to_ltf(prices, df_1d, H4)
+    L4_4h = align_htf_to_ltf(prices, df_1d, L4)
     
-    # === 12h TREND FILTER (ADX) ===
+    # === ADX TREND FILTER ===
     plus_dm = np.zeros(n)
     minus_dm = np.zeros(n)
     tr = np.zeros(n)
@@ -89,17 +89,17 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(H4_12h[i]) or np.isnan(L4_12h[i]) or 
+        if (np.isnan(H4_4h[i]) or np.isnan(L4_4h[i]) or 
             np.isnan(adx[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Breakout conditions
         # Long: Price breaks above H4 with volume + strong trend (ADX > 25)
-        long_breakout = (close[i] > H4_12h[i]) and (vol_ratio[i] > 2.0) and (adx[i] > 25)
+        long_breakout = (close[i] > H4_4h[i]) and (vol_ratio[i] > 2.0) and (adx[i] > 25)
         
         # Short: Price breaks below L4 with volume + strong trend (ADX > 25)
-        short_breakout = (close[i] < L4_12h[i]) and (vol_ratio[i] > 2.0) and (adx[i] > 25)
+        short_breakout = (close[i] < L4_4h[i]) and (vol_ratio[i] > 2.0) and (adx[i] > 25)
         
         # Exit: Price returns to opposite H3/L3 level or trend weakens
         # Calculate H3/L3 for exit
@@ -112,11 +112,11 @@ def generate_signals(prices):
             else:
                 H3[i_1d] = close_1d[i_1d] + range_ * 1.1 / 4
                 L3[i_1d] = close_1d[i_1d] - range_ * 1.1 / 4
-        H3_12h = align_htf_to_ltf(prices, df_1d, H3)
-        L3_12h = align_htf_to_ltf(prices, df_1d, L3)
+        H3_4h = align_htf_to_ltf(prices, df_1d, H3)
+        L3_4h = align_htf_to_ltf(prices, df_1d, L3)
         
-        exit_long = (position == 1) and ((close[i] < L3_12h[i]) or (adx[i] < 20))
-        exit_short = (position == -1) and ((close[i] > H3_12h[i]) or (adx[i] < 20))
+        exit_long = (position == 1) and ((close[i] < L3_4h[i]) or (adx[i] < 20))
+        exit_short = (position == -1) and ((close[i] > H3_4h[i]) or (adx[i] < 20))
         
         # Execute trades
         if long_breakout and position != 1:
