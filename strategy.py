@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
+"""
+4h_12h_trix_volume_regime_v1
+Hypothesis: TRIX (Triple Exponential Average) with volume confirmation and chop regime filter on 4h timeframe.
+TRIX filters out insignificant cycles and highlights sustained momentum. Works in bull/bear markets by
+using volume to confirm breakouts and chop regime to avoid whipsaws in ranging conditions.
+Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag.
+"""
 
-# 6h_1d_vwap_std_dev_reversion
-# Hypothesis: Mean reversion to daily VWAP with standard deviation bands on 6h timeframe
-# Uses daily VWAP as fair value and 6h price deviations beyond 2 standard deviations
-# Works in bull/bear markets by fading extremes and returning to value area
-# Target: 25-35 trades/year (100-140 total over 4 years) with low frequency to minimize fee drag
-
-name = "6h_1d_vwap_std_dev_reversion"
-timeframe = "6h"
+name = "4h_12h_trix_volume_regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,66 +25,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for VWAP calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data for TRIX and chop regime
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate daily VWAP
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
-    vwap_numerator = np.cumsum(typical_price_1d * volume_1d)
-    vwap_denominator = np.cumsum(volume_1d)
-    vwap_1d = np.divide(vwap_numerator, vwap_denominator, 
-                        out=np.full_like(typical_price_1d, np.nan), 
-                        where=vwap_denominator!=0)
+    # Calculate TRIX (15-period triple EMA)
+    ema1 = pd.Series(close_12h).ewm(span=15, adjust=False).mean()
+    ema2 = ema1.ewm(span=15, adjust=False).mean()
+    ema3 = ema2.ewm(span=15, adjust=False).mean()
+    trix = 100 * (ema3.pct_change())
+    trix_signal = trix.ewm(span=9, adjust=False).mean()
+    trix_hist = trix - trix_signal
+    trix_values = trix_hist.values
     
-    # Calculate daily standard deviation of price from VWAP
-    price_dev = close_1d - vwap_1d
-    # Rolling 20-day std dev of price deviation
-    price_dev_series = pd.Series(price_dev)
-    vwap_std = price_dev_series.rolling(window=20, min_periods=20).std().values
+    # Calculate Chopiness Index (14-period) for regime filter
+    tr1 = np.abs(high_12h - low_12h)
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum()
+    max_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max()
+    min_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min()
+    chop = 100 * np.log10(atr_sum / (max_high - min_low)) / np.log10(14)
+    chop_values = chop.values
     
-    # Calculate upper and lower bands (VWAP ± 2*std)
-    upper_band_1d = vwap_1d + (2.0 * vwap_std)
-    lower_band_1d = vwap_1d - (2.0 * vwap_std)
+    # Align TRIX histogram and Chop to 4h timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_12h, trix_values)
+    chop_aligned = align_htf_to_ltf(prices, df_12h, chop_values)
     
-    # Align VWAP and bands to 6h timeframe
-    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
-    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band_1d)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band_1d)
-    
-    # Volume filter: 6h volume > 1.3x 20-period average
+    # Volume confirmation: volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma * 1.3)
+    vol_confirm = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(vwap_aligned[i]) or np.isnan(upper_band_aligned[i]) or 
-            np.isnan(lower_band_aligned[i])):
+        if (np.isnan(trix_aligned[i]) or np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: price touches or goes below lower band with volume confirmation
-        if (close[i] <= lower_band_aligned[i] and vol_filter[i] and position != 1):
+        # Long entry: TRIX histogram crosses above zero with volume and in trending regime (chop < 61.8)
+        if (trix_aligned[i] > 0 and trix_aligned[i-1] <= 0 and vol_confirm[i] and 
+            chop_aligned[i] < 61.8 and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: price touches or goes above upper band with volume confirmation
-        elif (close[i] >= upper_band_aligned[i] and vol_filter[i] and position != -1):
+        # Short entry: TRIX histogram crosses below zero with volume and in trending regime (chop < 61.8)
+        elif (trix_aligned[i] < 0 and trix_aligned[i-1] >= 0 and vol_confirm[i] and 
+              chop_aligned[i] < 61.8 and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: price returns to VWAP (mean reversion complete)
-        elif position == 1 and close[i] >= vwap_aligned[i]:
+        # Exit: TRIX histogram crosses zero in opposite direction or chop > 61.8 (ranging market)
+        elif position == 1 and (trix_aligned[i] < 0 or chop_aligned[i] > 61.8):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] <= vwap_aligned[i]:
+        elif position == -1 and (trix_aligned[i] > 0 or chop_aligned[i] > 61.8):
             position = 0
             signals[i] = 0.0
         else:
