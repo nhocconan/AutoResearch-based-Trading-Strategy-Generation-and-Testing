@@ -3,89 +3,100 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_camarilla_breakout_v1
-# Uses daily Camarilla pivot levels (H4/L4) on 4h chart.
-# Long when price breaks above H4 with volume confirmation (volume > 1.5x 20-period avg).
-# Short when price breaks below L4 with volume confirmation.
-# Exits when price returns to daily pivot point (PP).
-# Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drag.
-# Works in trending markets via breakouts and in ranging markets via mean reversion to pivot.
+# Hypothesis: 6h_1d_1w_alligator_trend_follow_v1
+# Uses Williams Alligator (Jaw/Teeth/Lips) from 1d and 1w to define trend regime.
+# Long when price > all three lines on both 1d and 1w, short when price < all three lines.
+# Filters with 6h ADX > 25 to ensure trending conditions.
+# Exits when price crosses below/above Teeth line on 1d.
+# Designed for low trade frequency (target: 15-25 trades/year) by requiring multi-timeframe alignment.
+# Works in trending markets via Alligator alignment and avoids whipsaws via ADX filter.
+# Tested on BTC/ETH/ETH: should perform in both bull and bear via trend following.
 
-name = "4h_1d_camarilla_breakout_v1"
-timeframe = "4h"
+name = "6h_1d_1w_alligator_trend_follow_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
+    # Get daily and weekly data for Alligator calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    df_1w = get_htf_data(prices, '1w')
+    
+    if len(df_1d) < 13 or len(df_1w) < 13:
         return np.zeros(n)
     
-    # Calculate daily Camarilla levels
-    # Based on previous day's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Alligator lines for daily
+    median_price_1d = (df_1d['high'] + df_1d['low']) / 2
+    jaw_1d = median_price_1d.rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth_1d = median_price_1d.rolling(window=8, min_periods=8).mean().shift(5).values
+    lips_1d = median_price_1d.rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Calculate pivot point and Camarilla levels for each day
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Calculate Alligator lines for weekly
+    median_price_1w = (df_1w['high'] + df_1w['low']) / 2
+    jaw_1w = median_price_1w.rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth_1w = median_price_1w.rolling(window=8, min_periods=8).mean().shift(5).values
+    lips_1w = median_price_1w.rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Camarilla levels: H4 = PP + 1.1/2 * range, L4 = PP - 1.1/2 * range
-    h4 = pp + (1.1 / 2) * range_1d
-    l4 = pp - (1.1 / 2) * range_1d
+    # Align to 6h timeframe
+    jaw_1d_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
+    teeth_1d_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
+    lips_1d_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
+    jaw_1w_aligned = align_htf_to_ltf(prices, df_1w, jaw_1w)
+    teeth_1w_aligned = align_htf_to_ltf(prices, df_1w, teeth_1w)
+    lips_1w_aligned = align_htf_to_ltf(prices, df_1w, lips_1w)
     
-    # Align daily levels to 4h timeframe (daily values update after daily bar closes)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    
-    # Volume confirmation: volume > 1.5 * 20-period average (4h timeframe)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    # Calculate 6h ADX for trend filter
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    tr = np.maximum(high[1:] - low[1:], np.absolute(high[1:] - low[:-1]), np.absolute(low[1:] - high[:-1]))
+    plus_dm = np.insert(plus_dm, 0, 0)
+    minus_dm = np.insert(minus_dm, 0, 0)
+    tr = np.insert(tr, 0, 0)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    dx = 100 * np.absolute(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # start after warmup
+    for i in range(50, n):
         # Skip if data not ready
-        if np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(pp_aligned[i]):
+        if (np.isnan(jaw_1d_aligned[i]) or np.isnan(teeth_1d_aligned[i]) or np.isnan(lips_1d_aligned[i]) or
+            np.isnan(jaw_1w_aligned[i]) or np.isnan(teeth_1w_aligned[i]) or np.isnan(lips_1w_aligned[i]) or
+            np.isnan(adx[i])):
             signals[i] = 0.0
             continue
         
-        # Require volume confirmation for new entries
-        if not vol_confirm[i]:
-            # Hold current position if volume filter fails
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
-            continue
+        # Long condition: price above all Alligator lines on both timeframes + ADX > 25
+        long_condition = (close[i] > jaw_1d_aligned[i] and close[i] > teeth_1d_aligned[i] and close[i] > lips_1d_aligned[i] and
+                          close[i] > jaw_1w_aligned[i] and close[i] > teeth_1w_aligned[i] and close[i] > lips_1w_aligned[i] and
+                          adx[i] > 25)
         
-        # Long signal: price breaks above H4
-        if close[i] > h4_aligned[i] and position != 1:
+        # Short condition: price below all Alligator lines on both timeframes + ADX > 25
+        short_condition = (close[i] < jaw_1d_aligned[i] and close[i] < teeth_1d_aligned[i] and close[i] < lips_1d_aligned[i] and
+                           close[i] < jaw_1w_aligned[i] and close[i] < teeth_1w_aligned[i] and close[i] < lips_1w_aligned[i] and
+                           adx[i] > 25)
+        
+        # Exit conditions: price crosses Teeth line on 1d
+        exit_long = position == 1 and close[i] < teeth_1d_aligned[i]
+        exit_short = position == -1 and close[i] > teeth_1d_aligned[i]
+        
+        if long_condition and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below L4
-        elif close[i] < l4_aligned[i] and position != -1:
+        elif short_condition and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: price returns to daily pivot point (mean reversion)
-        elif position == 1 and close[i] <= pp_aligned[i]:
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and close[i] >= pp_aligned[i]:
+        elif exit_long or exit_short:
             position = 0
             signals[i] = 0.0
         else:
