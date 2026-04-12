@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_alligator_elderray_v1"
-timeframe = "6h"
+name = "12h_1w_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,62 +17,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Alligator and Elder Ray
+    # Get weekly data for Camarilla pivots (HTF)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Alligator: SMAs of median price
-    median_price = (df_1w['high'] + df_1w['low']) / 2
-    jaw = median_price.rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = median_price.rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = median_price.rolling(window=5, min_periods=5).mean().shift(3).values
+    # Use previous weekly bar's data to avoid look-ahead
+    high_1w_prev = df_1w['high'].shift(1).values
+    low_1w_prev = df_1w['low'].shift(1).values
+    close_1w_prev = df_1w['close'].shift(1).values
     
-    # Align Alligator lines to 6h
-    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1w, lips)
+    # Calculate Camarilla pivot levels from previous weekly data
+    pivot_prev = (high_1w_prev + low_1w_prev + close_1w_prev) / 3.0
+    range_1w_prev = high_1w_prev - low_1w_prev
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13 = df_1w['close'].ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = (df_1w['high'] - ema13)
-    bear_power = (df_1w['low'] - ema13)
+    # Camarilla levels (H4 and L4 - breakout levels)
+    h4_prev = pivot_prev + (range_1w_prev * 1.1 / 2)
+    l4_prev = pivot_prev - (range_1w_prev * 1.1 / 2)
     
-    # Align Elder Ray to 6h
-    bull_power_aligned = align_htf_to_ltf(prices, df_1w, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1w, bear_power)
+    # Align levels to 12h timeframe
+    h4_aligned = align_htf_to_ltf(prices, df_1w, h4_prev)
+    l4_aligned = align_htf_to_ltf(prices, df_1w, l4_prev)
     
-    # Volume filter on 6h
+    # Volume filter - 20-period average on 12h data
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
     
+    # Trend filter: 50-period SMA on 12h data
+    close_series = pd.Series(close)
+    sma_50 = close_series.rolling(window=50, min_periods=50).mean().values
+    trend_up = close > sma_50
+    trend_down = close < sma_50
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
-            np.isnan(volume_ok[i])):
+        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
+            np.isnan(volume_ok[i]) or np.isnan(trend_up[i]) or np.isnan(trend_down[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Alligator alignment: Lips > Teeth > Jaw = uptrend, reverse = downtrend
-        alligator_long = lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i]
-        alligator_short = lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i]
+        # Long: price breaks above H4 with volume confirmation and uptrend
+        long_signal = close[i] > h4_aligned[i] and volume_ok[i] and trend_up[i]
+        # Short: price breaks below L4 with volume confirmation and downtrend
+        short_signal = close[i] < l4_aligned[i] and volume_ok[i] and trend_down[i]
         
-        # Elder Ray confirmation
-        elder_long = bull_power_aligned[i] > 0
-        elder_short = bear_power_aligned[i] < 0
-        
-        # Entry conditions
-        long_signal = alligator_long and elder_long and volume_ok[i]
-        short_signal = alligator_short and elder_short and volume_ok[i]
-        
-        # Exit: Alligator reverses or Elder Ray diverges
-        exit_long = not alligator_long or not elder_long
-        exit_short = not alligator_short or not elder_short
+        # Exit when price returns to pivot (mean reversion)
+        pivot_prev_val = (high_1w_prev + low_1w_prev + close_1w_prev) / 3.0
+        pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_prev_val)
+        exit_long = close[i] < pivot_aligned[i]
+        exit_short = close[i] > pivot_aligned[i]
         
         # Execute trades
         if long_signal and position != 1:
