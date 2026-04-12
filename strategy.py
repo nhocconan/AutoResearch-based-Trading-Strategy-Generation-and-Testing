@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-4h_1d_SuperTrend_Pullback_v1
-Hypothesis: Enter on pullbacks to SuperTrend during strong trends (1d ADX > 25) with volume confirmation. 
-SuperTrend (ATR=10, multiplier=3) provides dynamic support/resistance. Works in bull (buy dips in uptrend) 
-and bear (sell rallies in downtrend) by following the trend direction. Target: 20-40 trades/year.
+4h_12h_Camarilla_Breakout_Volume
+Hypothesis: Trade Camarilla pivot breakouts (H4/L4) on 4h with volume confirmation and 12h trend filter (EMA25 > EMA50). 
+Uses 12h EMA cross for trend direction to avoid whipsaws in ranging markets. Designed for 20-40 trades/year with clear breakout logic.
+Works in bull (breakouts continue trend) and bear (failed reversals at pivot levels) markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_SuperTrend_Pullback_v1"
+name = "4h_12h_Camarilla_Breakout_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,105 +24,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY DATA FOR ADX TREND FILTER ===
+    # === 12H DATA FOR TREND FILTER ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    
+    # EMA25 and EMA50 for trend
+    ema25_12h = pd.Series(close_12h).ewm(span=25, adjust=False, min_periods=25).mean().values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Trend: EMA25 > EMA50 = uptrend, EMA25 < EMA50 = downtrend
+    trend_12h = ema25_12h - ema50_12h
+    trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h)
+    
+    # === 4H INDICATORS: CAMARILLA PIVOTS FROM PREVIOUS DAY ===
+    # Need daily high/low/close from previous day
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ADX (14-period)
-    plus_dm = np.zeros_like(high_1d)
-    minus_dm = np.zeros_like(low_1d)
-    tr = np.zeros_like(high_1d)
+    # Calculate Camarilla levels for each day
+    # H4 = Close + 1.1*(High-Low)*1.1/2
+    # L4 = Close - 1.1*(High-Low)*1.1/2
+    camarilla_width = 1.1 * (high_1d - low_1d) * 1.1 / 2
+    h4 = close_1d + camarilla_width
+    l4 = close_1d - camarilla_width
     
-    for i in range(1, len(high_1d)):
-        plus_dm[i] = max(high_1d[i] - high_1d[i-1], 0)
-        minus_dm[i] = max(low_1d[i-1] - low_1d[i], 0)
-        tr[i] = max(high_1d[i] - low_1d[i], 
-                   abs(high_1d[i] - close_1d[i-1]), 
-                   abs(low_1d[i] - close_1d[i-1]))
+    # Align daily Camarilla levels to 4h (constant throughout the day)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
     
-    # Wilder's smoothing
-    def wilders_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        result[period-1] = np.nansum(data[:period])
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
-    
-    period = 14
-    tr_smooth = wilders_smooth(tr, period)
-    plus_dm_smooth = wilders_smooth(plus_dm, period)
-    minus_dm_smooth = wilders_smooth(minus_dm, period)
-    
-    plus_di = np.where(tr_smooth != 0, 100 * plus_dm_smooth / tr_smooth, 0)
-    minus_di = np.where(tr_smooth != 0, 100 * minus_dm_smooth / tr_smooth, 0)
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = wilders_smooth(dx, period)
-    
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # === 4H INDICATORS: SUPERTREND ===
-    atr_period = 10
-    multiplier = 3
-    
-    # Calculate True Range
-    tr_4h = np.zeros_like(high)
-    for i in range(1, len(high)):
-        tr_4h[i] = max(high[i] - low[i], 
-                      abs(high[i] - close[i-1]), 
-                      abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr_4h).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
-    
-    # Basic Upper and Lower Bands
-    basic_ub = (high + low) / 2 + multiplier * atr
-    basic_lb = (high + low) / 2 - multiplier * atr
-    
-    # Final Upper and Lower Bands
-    final_ub = np.zeros_like(close)
-    final_lb = np.zeros_like(close)
-    
-    for i in range(len(close)):
-        if i == 0:
-            final_ub[i] = basic_ub[i]
-            final_lb[i] = basic_lb[i]
-        else:
-            if basic_ub[i] < final_ub[i-1] or close[i-1] > final_ub[i-1]:
-                final_ub[i] = basic_ub[i]
-            else:
-                final_ub[i] = final_ub[i-1]
-                
-            if basic_lb[i] > final_lb[i-1] or close[i-1] < final_lb[i-1]:
-                final_lb[i] = basic_lb[i]
-            else:
-                final_lb[i] = final_lb[i-1]
-    
-    # SuperTrend
-    supertrend = np.zeros_like(close)
-    trend = np.ones_like(close)  # 1 for uptrend, -1 for downtrend
-    
-    for i in range(len(close)):
-        if i == 0:
-            supertrend[i] = final_ub[i]
-            trend[i] = 1
-        else:
-            if trend[i-1] == 1 and close[i] <= final_ub[i]:
-                trend[i] = -1
-                supertrend[i] = final_lb[i]
-            elif trend[i-1] == -1 and close[i] >= final_lb[i]:
-                trend[i] = 1
-                supertrend[i] = final_ub[i]
-            else:
-                trend[i] = trend[i-1]
-                supertrend[i] = final_ub[i] if trend[i] == 1 else final_lb[i]
-    
-    # Volume filter
+    # === 4H VOLUME FILTER ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -130,34 +68,29 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(supertrend[i]) or np.isnan(trend[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(trend_12h_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter: ADX > 25 indicates strong trend
-        strong_trend = adx_aligned[i] > 25
-        
-        # Volume confirmation
+        # Volume strength
         strong_volume = volume[i] > (vol_ma[i] * 1.5)
         
-        # Long: pullback to SuperTrend in uptrend
-        long_signal = (trend[i] == 1 and 
-                      close[i] <= supertrend[i] * 1.005 and  # Allow small overshoot
-                      strong_trend and 
-                      strong_volume)
+        # Long: price breaks above H4 with volume and uptrend
+        long_signal = (close[i] > h4_aligned[i] and 
+                      strong_volume and 
+                      trend_12h_aligned[i] > 0)
         
-        # Short: rally to SuperTrend in downtrend
-        short_signal = (trend[i] == -1 and 
-                       close[i] >= supertrend[i] * 0.995 and  # Allow small overshoot
-                       strong_trend and 
-                       strong_volume)
+        # Short: price breaks below L4 with volume and downtrend
+        short_signal = (close[i] < l4_aligned[i] and 
+                       strong_volume and 
+                       trend_12h_aligned[i] < 0)
         
-        # Exit: trend changes or price moves significantly away from SuperTrend
+        # Exit: price returns to opposite level or trend reverses
         exit_long = (position == 1 and 
-                    (trend[i] == -1 or close[i] > supertrend[i] * 1.02))
+                    (close[i] < l4_aligned[i] or trend_12h_aligned[i] < 0))
         exit_short = (position == -1 and 
-                     (trend[i] == 1 or close[i] < supertrend[i] * 0.98))
+                     (close[i] > h4_aligned[i] or trend_12h_aligned[i] > 0))
         
         # Execute trades
         if long_signal and position != 1:
