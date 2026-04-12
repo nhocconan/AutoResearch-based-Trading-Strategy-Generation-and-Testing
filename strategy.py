@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v34"
-timeframe = "4h"
+name = "12h_1d_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,22 +35,22 @@ def generate_signals(prices):
     h4_prev = pivot_prev + (range_1d_prev * 1.1 / 2)
     l4_prev = pivot_prev - (range_1d_prev * 1.1 / 2)
     
-    # Align levels to 4h timeframe
+    # Align levels to 12h timeframe
     h4_aligned = align_htf_to_ltf(prices, df_1d, h4_prev)
     l4_aligned = align_htf_to_ltf(prices, df_1d, l4_prev)
     
-    # Volume filter - 20-period average on 4h data
+    # Volume filter - 12-period average on 12h data (more conservative)
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_ma = vol_series.rolling(window=12, min_periods=12).mean().values
     volume_ok = volume > vol_ma
     
-    # Trend filter: 50-period SMA on 4h data
+    # Trend filter: 20-period SMA on 12h data
     close_series = pd.Series(close)
-    sma_50 = close_series.rolling(window=50, min_periods=50).mean().values
-    trend_up = close > sma_50
-    trend_down = close < sma_50
+    sma_20 = close_series.rolling(window=20, min_periods=20).mean().values
+    trend_up = close > sma_20
+    trend_down = close < sma_20
     
-    # Choppiness regime filter (14-period on 4h)
+    # Choppiness regime filter (14-period on 12h)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     close_series_pd = pd.Series(close)
