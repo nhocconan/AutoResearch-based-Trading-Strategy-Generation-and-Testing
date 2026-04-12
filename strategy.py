@@ -1,16 +1,15 @@
+#37101: 4h_1d_camarilla_breakout_v1
+# Hypothesis: Daily Camarilla pivot levels (H4/L4) act as strong support/resistance on 4h charts.
+# In trending markets (ADX > 25), price breaks above H4 or below L4 with volume confirmation signal strong momentum.
+# Position size: 0.25 for risk control. Fewer trades (<50/year) to minimize fee drag.
+# Works in bull/bear: ADX filter ensures we only trade when trending, avoiding whipsaws in ranges.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_camarilla_breakout_v2
-# Uses daily Camarilla pivot levels (H4/L4) with volume confirmation and ADX trend filter.
-# In bull markets, buys breakouts above H4 resistance with volume.
-# In bear markets, shorts breakdowns below L4 support with volume.
-# ADX > 25 ensures we only trade in trending markets, avoiding false signals in ranges.
-# Target: 20-40 trades/year per symbol for low friction and high edge.
-
-name = "4h_1d_camarilla_breakout_v2"
+name = "4h_1d_camarilla_breakout_v1"
 timeframe = "4h"
 leverage = 1.0
 
