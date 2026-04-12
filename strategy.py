@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d_1w_camarilla_breakout_v2
-# Uses weekly high/low to calculate daily Camarilla levels for the next week.
-# Buys when price breaks above weekly H3 with volume confirmation (volume > 1.5x 50-day avg).
-# Shorts when price breaks below weekly L3 with volume confirmation.
-# Uses ADX > 20 to filter for trending markets, avoiding false signals in weak trends.
-# Designed for low trade frequency (target: 10-30 trades/year) to minimize fee drag.
+# Hypothesis: 4h_1d_camarilla_breakout_v1
+# Buys when price breaks above daily H3 level with volume confirmation (volume > 1.5x 20-period avg).
+# Shorts when price breaks below daily L3 level with volume confirmation.
+# Uses ADX > 20 to filter for trending markets, avoiding false signals in ranges.
+# Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drag.
 # Works in bull markets (breakouts continuation) and bear markets (breakdowns continuation).
 
-name = "1d_1w_camarilla_breakout_v2"
-timeframe = "1d"
+name = "4h_1d_camarilla_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,27 +24,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get daily data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous week
-    high_prev = df_1w['high'].shift(1).values
-    low_prev = df_1w['low'].shift(1).values
-    close_prev = df_1w['close'].shift(1).values
+    # Calculate Camarilla levels from previous day
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
     
     # Camarilla formulas
     range_prev = high_prev - low_prev
     camarilla_h3 = close_prev + range_prev * 1.1 / 4
     camarilla_l3 = close_prev - range_prev * 1.1 / 4
     
-    # Align to daily timeframe (weekly levels update only after weekly bar closes)
-    h3_level = align_htf_to_ltf(prices, df_1w, camarilla_h3)
-    l3_level = align_htf_to_ltf(prices, df_1w, camarilla_l3)
+    # Align to 4h timeframe (daily levels update only after daily bar closes)
+    h3_level = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_level = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Volume confirmation: volume > 1.5 * 50-period average (balanced for daily)
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Volume confirmation: volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
     # ADX trend filter: only trade when ADX > 20 (trending market)
@@ -102,11 +101,11 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above weekly H3 with volume
+        # Long signal: price breaks above daily H3 with volume
         if close[i] > h3_level[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below weekly L3 with volume
+        # Short signal: price breaks below daily L3 with volume
         elif close[i] < l3_level[i] and position != -1:
             position = -1
             signals[i] = -0.25
