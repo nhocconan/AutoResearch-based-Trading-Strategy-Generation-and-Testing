@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-6h_1w_1d_Camarilla_Reverse_Signal
-Hypothesis: On 6h timeframe, fade daily C3/C4 levels when weekly trend is strong, and breakout when weekly trend is weak.
-Use weekly ADX to determine regime: ADX>25 = trend (use daily C3/C4 as breakout), ADX<25 = range (fade at daily C3/C4).
-Requires volume confirmation and 60-minute time filter to avoid low-activity periods.
-Designed to work in both bull and bear markets by adapting to regime.
-Target: 80-160 total trades over 4 years (20-40/year) on 6h timeframe.
+1d_1w_Camarilla_Breakout_Trend
+Hypothesis: Use weekly market regime to filter daily Camarilla breakouts.
+In trending weeks (price > weekly VWAP), trade breakouts in direction of trend.
+In ranging weeks (price near weekly VWAP), fade extremes at H3/L3.
+This avoids counter-trend breakouts in strong trends and whipsaws in ranges.
+Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_1d_Camarilla_Reverse_Signal"
-timeframe = "6h"
+name = "1d_1w_Camarilla_Breakout_Trend"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,60 +26,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === WEEKLY ADX FOR REGIME ===
+    # === WEEKLY REGIME FILTER ===
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Weekly VWAP approximation: (H+L+C)/3
+    typical_price_1w = (df_1w['high'].values + df_1w['low'].values + df_1w['close'].values) / 3
+    vwap_1w = typical_price_1w  # Simplified VWAP
+    weekly_close = df_1w['close'].values
     
-    # Calculate Wilder's ADX (14)
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(0, high[i] - high[i-1]) if high[i] - high[i-1] > low[i-1] - low[i] else 0
-            minus_dm[i] = max(0, low[i-1] - low[i]) if low[i-1] - low[i] > high[i] - high[i-1] else 0
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Smooth using Wilder's smoothing (alpha = 1/period)
-        atr = np.zeros_like(high)
-        plus_di = np.zeros_like(high)
-        minus_di = np.zeros_like(high)
-        
-        atr[period-1] = np.nansum(tr[:period]) if not np.any(np.isnan(tr[:period])) else np.nan
-        plus_dm_sum = np.nansum(plus_dm[:period]) if not np.any(np.isnan(plus_dm[:period])) else np.nan
-        minus_dm_sum = np.nansum(minus_dm[:period]) if not np.any(np.isnan(minus_dm[:period])) else np.nan
-        
-        if np.isnan(atr[period-1]) or atr[period-1] == 0:
-            return np.full_like(high, np.nan)
-            
-        atr[period-1:] = (atr[period-2:-1] * (period-1) + tr[period-1:]) / period
-        plus_dm_sum[period-1:] = (plus_dm_sum[period-2:-1] * (period-1) + plus_dm[period-1:]) / period
-        minus_dm_sum[period-1:] = (minus_dm_sum[period-2:-1] * (period-1) + minus_dm[period-1:]) / period
-        
-        plus_di = 100 * plus_dm_sum / atr
-        minus_di = 100 * minus_dm_sum / atr
-        dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-        
-        adx = np.full_like(high, np.nan)
-        adx[2*period-2:] = np.nan
-        dx_valid = dx[2*period-1:]
-        if len(dx_valid) > 0:
-            adx[2*period-1] = np.nanmean(dx_valid[:period]) if not np.any(np.isnan(dx_valid[:period])) else np.nan
-            for i in range(2*period, len(high)):
-                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
+    # Trend: price above/below VWAP
+    trend_up = weekly_close > vwap_1w
+    trend_down = weekly_close < vwap_1w
+    ranging = np.abs(weekly_close - vwap_1w) / vwap_1w < 0.02  # Within 2% of VWAP
     
-    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
-    adx_1w_6h = align_htf_to_ltf(prices, df_1w, adx_1w)
+    # Align to daily
+    trend_up_1d = align_htf_to_ltf(prices, df_1w, trend_up)
+    trend_down_1d = align_htf_to_ltf(prices, df_1w, trend_down)
+    ranging_1d = align_htf_to_ltf(prices, df_1w, ranging)
     
-    # === DAILY CAMARILLA LEVELS (C3, C4) ===
+    # === DAILY CAMARILLA LEVELS ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -88,76 +55,94 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    camarilla_c3 = np.full(len(close_1d), np.nan)
-    camarilla_c4 = np.full(len(close_1d), np.nan)
+    camarilla_h3 = np.full(len(close_1d), np.nan)
+    camarilla_l3 = np.full(len(close_1d), np.nan)
+    camarilla_h4 = np.full(len(close_1d), np.nan)
+    camarilla_l4 = np.full(len(close_1d), np.nan)
     
     for i in range(len(close_1d)):
         if np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(close_1d[i]):
             continue
         range_val = high_1d[i] - low_1d[i]
-        camarilla_c3[i] = close_1d[i] + range_val * 1.1 / 4  # C3
-        camarilla_c4[i] = close_1d[i] + range_val * 1.1 / 2  # C4
+        camarilla_h3[i] = close_1d[i] + range_val * 1.1 / 6
+        camarilla_l3[i] = close_1d[i] - range_val * 1.1 / 6
+        camarilla_h4[i] = close_1d[i] + range_val * 1.1 / 4
+        camarilla_l4[i] = close_1d[i] - range_val * 1.1 / 4
     
-    c3_6h = align_htf_to_ltf(prices, df_1d, camarilla_c3)
-    c4_6h = align_htf_to_ltf(prices, df_1d, camarilla_c4)
+    h3_1d = camarilla_h3  # Already daily
+    l3_1d = camarilla_l3
+    h4_1d = camarilla_h4
+    l4_1d = camarilla_l4
     
-    # === VOLUME SURGE FILTER ===
+    # === VOLUME FILTER ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
-    
-    # === TIME FILTER (08-20 UTC) ===
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    time_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
-        # Skip if not ready or outside time filter
-        if (np.isnan(adx_1w_6h[i]) or np.isnan(c3_6h[i]) or np.isnan(c4_6h[i]) or 
-            np.isnan(vol_ratio[i]) or not time_filter[i]):
+    for i in range(50, n):
+        # Skip if not ready
+        if (np.isnan(h3_1d[i]) or np.isnan(l3_1d[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(trend_up_1d[i]) or np.isnan(trend_down_1d[i]) or np.isnan(ranging_1d[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Regime determination
-        trending = adx_1w_6h[i] > 25
-        ranging = adx_1w_6h[i] < 25
-        
-        # Signals based on regime
-        if trending:
-            # Breakout mode: break above C4 = long, break below C3 = short
-            long_signal = close[i] > c4_6h[i] * 1.001 and vol_ratio[i] > 1.5
-            short_signal = close[i] < c3_6h[i] * 0.999 and vol_ratio[i] > 1.5
+        # In trending weeks: trade breakouts in direction of trend
+        if trend_up_1d[i] and not ranging_1d[i]:
+            # Long: break above H3 in uptrend week
+            if close[i] > h3_1d[i] * 1.001 and vol_ratio[i] > 1.5:
+                if position != 1:
+                    position = 1
+                    signals[i] = 0.25
+                else:
+                    signals[i] = 0.25
+            # Exit: close below L3 or reverse signal
+            elif position == 1 and (close[i] < l3_1d[i] * 0.999 or trend_down_1d[i]):
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.25 if position == 1 else 0.0
+                
+        elif trend_down_1d[i] and not ranging_1d[i]:
+            # Short: break below L3 in downtrend week
+            if close[i] < l3_1d[i] * 0.999 and vol_ratio[i] > 1.5:
+                if position != -1:
+                    position = -1
+                    signals[i] = -0.25
+                else:
+                    signals[i] = -0.25
+            # Exit: close above H3 or reverse signal
+            elif position == -1 and (close[i] > h3_1d[i] * 1.001 or trend_up_1d[i]):
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -0.25 if position == -1 else 0.0
+                
         else:
-            # Reverse mode: fade at C3/C4
-            long_signal = close[i] < c3_6h[i] * 0.999 and vol_ratio[i] > 1.5  # Oversold bounce
-            short_signal = close[i] > c4_6h[i] * 1.001 and vol_ratio[i] > 1.5  # Overbought rejection
-        
-        # Exit conditions
-        exit_long = position == 1 and (
-            (trending and close[i] < c3_6h[i]) or  # Breakdown in trend
-            (not trending and close[i] > c4_6h[i] * 0.999)  # Reversal in range
-        )
-        exit_short = position == -1 and (
-            (trending and close[i] > c4_6h[i]) or  # Breakout in trend
-            (not trending and close[i] < c3_6h[i] * 1.001)  # Reversal in range
-        )
-        
-        # Execute trades
-        if long_signal and position != 1:
-            position = 1
-            signals[i] = 0.25
-        elif short_signal and position != -1:
-            position = -1
-            signals[i] = -0.25
-        elif exit_long and position == 1:
-            position = 0
-            signals[i] = 0.0
-        elif exit_short and position == -1:
-            position = 0
-            signals[i] = 0.0
-        else:
-            # Hold position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            # In ranging weeks: fade extremes at H3/L3
+            # Long: pullback to L3 with rejection
+            if close[i] < l3_1d[i] * 1.002 and close[i] > l3_1d[i] * 0.998:
+                if position != 1:
+                    position = 1
+                    signals[i] = 0.25
+                else:
+                    signals[i] = 0.25
+            # Short: pullback to H3 with rejection
+            elif close[i] > h3_1d[i] * 0.998 and close[i] < h3_1d[i] * 1.002:
+                if position != -1:
+                    position = -1
+                    signals[i] = -0.25
+                else:
+                    signals[i] = -0.25
+            # Exit: return to VWAP area or opposite extreme
+            elif position == 1 and close[i] > h3_1d[i] * 0.998:
+                position = 0
+                signals[i] = 0.0
+            elif position == -1 and close[i] < l3_1d[i] * 1.002:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
