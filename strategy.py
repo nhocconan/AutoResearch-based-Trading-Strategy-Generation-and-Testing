@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_elder_ray_power_trend_v1"
-timeframe = "6h"
+name = "4h_12h_camarilla_pivot_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,34 +17,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Elder Ray calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 22:
+    # Get 12h data for Camarilla pivot calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 5:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate EMA(13) for Elder Ray power
-    ema13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate Camarilla pivot levels from 12h data
+    pivot = (high_12h + low_12h + close_12h) / 3.0
+    range_12h = high_12h - low_12h
     
-    # Bull Power = High - EMA13
-    bull_power = high_1d - ema13
-    # Bear Power = Low - EMA13
-    bear_power = low_1d - ema13
+    # Camarilla levels (using standard multipliers)
+    h4 = pivot + (range_12h * 1.1 / 2)   # Resistance 4
+    h3 = pivot + (range_12h * 1.1 / 4)   # Resistance 3
+    l3 = pivot - (range_12h * 1.1 / 4)   # Support 3
+    l4 = pivot - (range_12h * 1.1 / 2)   # Support 4
     
-    # Align Elder Ray components to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    # Align Camarilla levels to 4h timeframe
+    h4_aligned = align_htf_to_ltf(prices, df_12h, h4)
+    h3_aligned = align_htf_to_ltf(prices, df_12h, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_12h, l3)
+    l4_aligned = align_htf_to_ltf(prices, df_12h, l4)
     
-    # Smooth Elder Ray with 8-period EMA for signal line
-    bull_ema = pd.Series(bull_power).ewm(span=8, adjust=False, min_periods=8).mean().values
-    bear_ema = pd.Series(bear_power).ewm(span=8, adjust=False, min_periods=8).mean().values
-    bull_ema_aligned = align_htf_to_ltf(prices, df_1d, bull_ema)
-    bear_ema_aligned = align_htf_to_ltf(prices, df_1d, bear_ema)
-    
-    # Volume filter: 20-period average on 6h data
+    # Volume filter - 20-period average on 4h data
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
@@ -52,23 +50,23 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after warmup for EMA13
+    for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(bull_ema_aligned[i]) or np.isnan(bear_ema_aligned[i]) or 
+        if (np.isnan(h4_aligned[i]) or np.isnan(h3_aligned[i]) or 
+            np.isnan(l3_aligned[i]) or np.isnan(l4_aligned[i]) or
             np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Entry conditions:
-        # Long: Bull Power > 0 and Bull Power > Bear Power (bulls in control) + volume
-        long_signal = (bull_power_aligned[i] > 0) and (bull_power_aligned[i] > bear_power_aligned[i]) and volume_ok[i]
-        # Short: Bear Power < 0 and Bear Power < Bull Power (bears in control) + volume
-        short_signal = (bear_power_aligned[i] < 0) and (bear_power_aligned[i] < bull_power_aligned[i]) and volume_ok[i]
+        # Long: price breaks above H3 with volume confirmation
+        long_signal = close[i] > h3_aligned[i] and volume_ok[i]
+        # Short: price breaks below L3 with volume confirmation
+        short_signal = close[i] < l3_aligned[i] and volume_ok[i]
         
-        # Exit when power crosses zero or reverses
-        exit_long = (bull_power_aligned[i] <= 0) or (bull_power_aligned[i] < bear_power_aligned[i])
-        exit_short = (bear_power_aligned[i] >= 0) or (bear_power_aligned[i] > bull_power_aligned[i])
+        # Exit when price returns to pivot
+        pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot)
+        exit_long = close[i] < pivot_aligned[i]
+        exit_short = close[i] > pivot_aligned[i]
         
         # Execute trades
         if long_signal and position != 1:
