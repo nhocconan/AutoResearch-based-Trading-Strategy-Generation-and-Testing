@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-1d_1w_Volume_Spike_Breakout_v1
-Hypothesis: Breakouts with volume confirmation on daily timeframe, filtered by weekly market regime (trending vs ranging).
-Uses Donchian channel breakouts for entry, volume spike for confirmation, and weekly ADX to avoid ranging markets.
-Designed for low trade frequency (7-25 trades/year) to minimize fee drift while capturing strong trends.
+6h_1d_Pivot_Reversal_v1
+Hypothesis: Fade at extreme daily pivot levels (R3/S3) with volume confirmation on 6h timeframe.
+Works in bull markets by shorting overextended rallies and in bear markets by buying panic dips.
+Uses 6h for execution and 1d pivots for structure, targeting low trade frequency (<30/year) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Volume_Spike_Breakout_v1"
-timeframe = "1d"
+name = "6h_1d_Pivot_Reversal_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -25,71 +25,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for ADX (trend filter)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Donchian Channel (20) on daily data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate daily pivot points (standard formula)
+    # P = (H + L + C) / 3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Volume Spike (volume > 2x 20-day average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
+    r2 = pivot + (high_1d - low_1d)
+    s2 = pivot - (high_1d - low_1d)
+    r3 = high_1d + 2 * (pivot - low_1d)
+    s3 = low_1d - 2 * (high_1d - pivot)
     
-    # Calculate ADX on weekly data for trend strength
-    # True Range
-    tr1 = df_1w['high'] - df_1w['low']
-    tr2 = np.abs(df_1w['high'] - df_1w['close'].shift(1))
-    tr3 = np.abs(df_1w['low'] - df_1w['close'].shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    # Directional Movement
-    up_move = df_1w['high'].diff()
-    down_move = df_1w['low'].diff()
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    # Smoothed values
-    tr_ma = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_dm_ma = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
-    minus_dm_ma = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
-    # Directional Indicators
-    plus_di = 100 * plus_dm_ma / tr_ma
-    minus_di = 100 * minus_dm_ma / tr_ma
-    # DX and ADX
-    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
-    dx = np.where((plus_di + minus_di) != 0, dx, 0)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    # Align ADX to daily timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    # Align pivot levels to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Calculate volume ratio (current vs 20-period average)
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 0)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup period
+    for i in range(20, n):  # Start after volume MA warmup
         # Skip if any required data is invalid
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Breakout conditions
-        breakout_up = close[i] > highest_high[i-1]  # Using previous bar's channel
-        breakout_down = close[i] < lowest_low[i-1]
+        # Extreme level touches with volume confirmation
+        # Long when price touches S3 with above-average volume (panic dip)
+        touch_s3 = low[i] <= s3_aligned[i] * 1.001  # Allow small buffer
+        vol_confirm_long = vol_ratio[i] > 1.5
         
-        # Volume confirmation
-        vol_confirm = volume_spike[i]
-        
-        # Trend filter: only trade when ADX > 25 (trending market)
-        trending_market = adx_aligned[i] > 25
+        # Short when price touches R3 with above-average volume (overextended rally)
+        touch_r3 = high[i] >= r3_aligned[i] * 0.999  # Allow small buffer
+        vol_confirm_short = vol_ratio[i] > 1.5
         
         # Entry conditions
-        long_entry = breakout_up and vol_confirm and trending_market
-        short_entry = breakout_down and vol_confirm and trending_market
+        long_entry = touch_s3 and vol_confirm_long
+        short_entry = touch_r3 and vol_confirm_short
         
-        # Exit conditions: opposite breakout or loss of trend
-        long_exit = breakout_down or (adx_aligned[i] < 20)
-        short_exit = breakout_up or (adx_aligned[i] < 20)
+        # Exit conditions: price moves back toward pivot or opposite extreme touch
+        long_exit = (high[i] >= pivot[i] * 0.999) or touch_r3
+        short_exit = (low[i] <= pivot[i] * 1.001) or touch_s3
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
