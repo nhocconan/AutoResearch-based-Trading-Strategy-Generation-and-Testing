@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h_1w_1d_alligator_elder_ray_v1
-# Uses weekly Elder Ray Index (bull/bear power) from 1d data to determine trend direction,
-# and Alligator (SMAs) on 1w data to filter for trending vs ranging markets.
-# Long when bull power > 0, bear power < 0, and price > Alligator's teeth (green line) on weekly.
-# Short when bear power < 0, bull power > 0, and price < Alligator's teeth on weekly.
-# Uses 13/8/5 SMAs for Alligator jaws/teeth/lips.
-# Designed for low trade frequency in both bull and bear markets by requiring trend alignment
-# across multiple timeframes and avoiding choppy conditions via Alligator convergence.
+# Hypothesis: 12h_1d_donchian_breakout_v1
+# Uses daily Donchian channels (20-day high/low) for breakout signals on 12h chart.
+# Long when price breaks above 20-day high with volume confirmation (volume > 1.5x 20-period avg).
+# Short when price breaks below 20-day low with volume confirmation.
+# Exits when price returns to 10-day moving average (trend fade).
+# Designed for low trade frequency (target: 15-25 trades/year) to minimize fee drag.
+# Works in trending markets via breakouts and in ranging markets via mean reversion to mean.
 
-name = "6h_1w_1d_alligator_elder_ray_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,76 +23,67 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get daily data for Elder Ray calculation
+    # Get daily data for Donchian channel calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Get weekly data for Alligator (SMAs)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 13:  # need at least 13 for slowest SMA
-        return np.zeros(n)
-    
-    # Calculate Elder Ray from daily data
-    # Bull Power = High - EMA13(Close)
-    # Bear Power = Low - EMA13(Close)
-    close_1d = df_1d['close'].values
+    # Calculate daily Donchian channels (20-period high/low)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # EMA13 for Elder Ray
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high_1d - ema13_1d
-    bear_power = low_1d - ema13_1d
+    # Calculate 20-period high and low for Donchian channels
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align Elder Ray to 6h timeframe (daily values update after daily bar closes)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    # Align daily Donchian levels to 12h timeframe (daily values update after daily bar closes)
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     
-    # Calculate Alligator from weekly data: SMAs of median price
-    # Median price = (High + Low) / 2
-    median_price_1w = (df_1w['high'].values + df_1w['low'].values) / 2.0
+    # Calculate 10-day moving average for exit (trend fade)
+    ma_10 = pd.Series(close_1d).rolling(window=10, min_periods=10).mean().values
+    ma_10_aligned = align_htf_to_ltf(prices, df_1d, ma_10)
     
-    # Alligator lines: Jaw (13-period), Teeth (8-period), Lips (5-period) SMAs
-    jaw = pd.Series(median_price_1w).rolling(window=13, min_periods=13).mean().values  # Blue line
-    teeth = pd.Series(median_price_1w).rolling(window=8, min_periods=8).mean().values    # Red line
-    lips = pd.Series(median_price_1w).rolling(window=5, min_periods=5).mean().values    # Green line
-    
-    # Align Alligator lines to 6h timeframe (weekly values update after weekly bar closes)
-    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1w, lips)
+    # Volume confirmation: volume > 1.5 * 20-period average (12h timeframe)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):  # start after warmup
         # Skip if data not ready
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
-            np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i])):
+        if np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or np.isnan(ma_10_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Alligator alignment check: lips > teeth > jaw = bullish alignment
-        # lips < teeth < jaw = bearish alignment
-        bullish_align = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
-        bearish_align = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
+        # Require volume confirmation for new entries
+        if not vol_confirm[i]:
+            # Hold current position if volume filter fails
+            if position == 1:
+                signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.0
+            continue
         
-        # Long conditions: bullish Elder Ray + bullish Alligator alignment
-        if (bull_power_aligned[i] > 0 and bear_power_aligned[i] < 0 and bullish_align and position != 1):
+        # Long signal: price breaks above 20-day high
+        if close[i] > high_20_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short conditions: bearish Elder Ray + bearish Alligator alignment
-        elif (bear_power_aligned[i] < 0 and bull_power_aligned[i] > 0 and bearish_align and position != -1):
+        # Short signal: price breaks below 20-day low
+        elif close[i] < low_20_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit when Alligator lines converge (market becomes ranging)
-        # Convergence: |lips - jaw| < small threshold relative to price
-        elif position == 1 and abs(lips_aligned[i] - jaw_aligned[i]) < 0.001 * close[i]:
+        # Exit conditions: price returns to 10-day moving average (trend fade)
+        elif position == 1 and close[i] <= ma_10_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and abs(lips_aligned[i] - jaw_aligned[i]) < 0.001 * close[i]:
+        elif position == -1 and close[i] >= ma_10_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
