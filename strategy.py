@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """
-6h_1d_1w_Liquidity_Reflex_v1
-Hypothesis: Price tends to revert from 1-day liquidity pools (overnight gaps, Asian/European/US session opens) 
-identified by 1-day high/low clusters, with 1-week trend filter to avoid counter-trend trades.
-Works in bull/bear by fading extreme intraday moves that often reverse regardless of trend.
-Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position size.
+4h_1d_Camarilla_Breakout_Volume_v1
+Hypothesis: 4H breakout above/below daily Camarilla R4/S4 levels with volume confirmation.
+Long when price breaks above R4 and volume > 1.5x 20-period average volume.
+Short when price breaks below S4 and volume > 1.5x 20-period average volume.
+Exit when price returns to daily midpoint (R4+S4)/2.
+Uses daily timeframe for structure, 4H for entries to reduce whipsaw and overtrading.
+Designed for 4H timeframe with low trade frequency (target: 20-50 trades/year).
+Works in both bull and bear markets by following breakouts with volume confirmation.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_1w_Liquidity_Reflex_v1"
-timeframe = "6h"
+name = "4h_1d_Camarilla_Breakout_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,59 +27,65 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 1-day data for liquidity levels (previous day high/low clusters)
+    # Daily data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Previous day's high and low
+    # Previous day's OHLC for Camarilla calculation
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # 1-week trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    # Calculate Camarilla levels
+    range_ = prev_high - prev_low
+    camarilla_r4 = prev_close + range_ * 1.1 / 2
+    camarilla_s4 = prev_close - range_ * 1.1 / 2
+    camarilla_mid = (camarilla_r4 + camarilla_s4) / 2
     
-    # Weekly EMA20 for trend
-    weekly_close = df_1w['close'].values
-    weekly_ema20 = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Handle invalid ranges
+    valid_range = range_ > 0
+    camarilla_r4 = np.where(valid_range, camarilla_r4, np.nan)
+    camarilla_s4 = np.where(valid_range, camarilla_s4, np.nan)
+    camarilla_mid = np.where(valid_range, camarilla_mid, np.nan)
     
-    # Align 1-day liquidity levels and weekly trend to 6h
-    prev_high_aligned = align_htf_to_ltf(prices, df_1d, prev_high)
-    prev_low_aligned = align_htf_to_ltf(prices, df_1d, prev_low)
-    weekly_ema20_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema20)
-    weekly_close_aligned = align_htf_to_ltf(prices, df_1w, weekly_close)
+    # Align to 4H timeframe
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    camarilla_mid_aligned = align_htf_to_ltf(prices, df_1d, camarilla_mid)
+    
+    # Volume confirmation: 20-period average volume on 4H chart
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    
+    volume_threshold = vol_ma * 1.5
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any data invalid
-        if (np.isnan(prev_high_aligned[i]) or np.isnan(prev_low_aligned[i]) or
-            np.isnan(weekly_ema20_aligned[i]) or np.isnan(weekly_close_aligned[i])):
+        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or
+            np.isnan(camarilla_mid_aligned[i]) or np.isnan(volume_threshold[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter: weekly price above/below EMA20
-        weekly_trend_up = weekly_close_aligned[i] > weekly_ema20_aligned[i]
+        # Breakout conditions with volume confirmation
+        long_breakout = high[i] > camarilla_r4_aligned[i] and volume[i] > volume_threshold[i]
+        short_breakout = low[i] < camarilla_s4_aligned[i] and volume[i] > volume_threshold[i]
         
-        # Fade at 1-day liquidity levels with trend filter
-        fade_long = low[i] <= prev_low_aligned[i] and weekly_trend_up
-        fade_short = high[i] >= prev_high_aligned[i] and not weekly_trend_up
-        
-        # Exit at midpoint of previous day's range
-        midpoint = (prev_high_aligned[i] + prev_low_aligned[i]) / 2
-        
-        long_exit = close[i] >= midpoint and position == 1
-        short_exit = close[i] <= midpoint and position == -1
+        # Exit conditions: return to Camarilla midpoint
+        long_exit = close[i] < camarilla_mid_aligned[i]
+        short_exit = close[i] > camarilla_mid_aligned[i]
         
         # Signal logic
-        if fade_long and position != 1:
+        if long_breakout and position != 1:
             position = 1
             signals[i] = 0.25
-        elif fade_short and position != -1:
+        elif short_breakout and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
