@@ -1,20 +1,19 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-4h_1d_4w_Camarilla_Pivot_Volume_Trend_v1
-Hypothesis: Camarilla pivot levels from 1d timeframe provide high-probability reversal zones.
-Trade long at L3 support and short at H3 resistance with volume confirmation and 4h trend filter.
-Use 1w EMA50 trend filter to avoid counter-trend trades. Designed for 20-40 trades/year by requiring
-multiple confluence factors: price at Camarilla level (within 0.2%), volume spike (>1.5x average),
-and trend alignment (price > 4h EMA20 for longs, price < 4h EMA20 for shorts).
-Works in bull markets via buying dips at support and in bear markets via selling rallies at resistance.
+1d_1w_RSI_Overbought_Oversold_Simple_v1
+Hypothesis: On daily timeframe, buy when weekly RSI(14) is oversold (<30) and daily price is above daily VWAP,
+sell when weekly RSI is overbought (>70) and daily price is below daily VWAP. Uses weekly trend filter for alignment.
+Designed for 7-25 trades/year by requiring weekly RSI extremes, reducing noise and avoiding whipsaws.
+Works in bull markets via buying oversold dips and in bear markets via selling overbought rallies.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_4w_Camarilla_Pivot_Volume_Trend_v1"
-timeframe = "4h"
+name = "1d_1w_RSI_Overbought_Oversold_Simple_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,81 +27,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h EMA20 for trend filter
-    ema_20_4h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate daily VWAP (typical price * volume) cumulative
+    typical_price = (high + low + close) / 3
+    vwap_num = np.cumsum(typical_price * volume)
+    vwap_den = np.cumsum(volume)
+    vwap = np.where(vwap_den != 0, vwap_num / vwap_den, typical_price)
     
-    # Volume average (20 period) for spike detection
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Load 1d data ONCE for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Calculate Camarilla pivot levels from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla levels: H4, H3, H2, H1, L1, L2, L3, L4
-    # Based on previous day's range
-    camarilla_h4 = close_1d + 1.5 * (high_1d - low_1d)
-    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d)
-    camarilla_h2 = close_1d + 0.7 * (high_1d - low_1d)
-    camarilla_h1 = close_1d + 0.5 * (high_1d - low_1d)
-    camarilla_l1 = close_1d - 0.5 * (high_1d - low_1d)
-    camarilla_l2 = close_1d - 0.7 * (high_1d - low_1d)
-    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d)
-    camarilla_l4 = close_1d - 1.5 * (high_1d - low_1d)
-    
-    # Align Camarilla levels to 4h timeframe (use previous day's levels)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    
-    # Load 1w data ONCE for EMA50 trend filter
+    # Weekly RSI(14)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    # Calculate 1w EMA50
     close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_1w = 100 - (100 / (1 + rs))
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    
+    # Daily trend filter: price above/below daily EMA50
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_20_4h[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(vwap[i]) or np.isnan(rsi_1w_aligned[i]) or 
+            np.isnan(ema_50[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Price at Camarilla H3 resistance (within 0.2%)
-        at_h3 = abs(close[i] - camarilla_h3_aligned[i]) / camarilla_h3_aligned[i] <= 0.002
+        # VWAP filter: price above VWAP for long, below for short
+        above_vwap = close[i] > vwap[i]
+        below_vwap = close[i] < vwap[i]
         
-        # Price at Camarilla L3 support (within 0.2%)
-        at_l3 = abs(close[i] - camarilla_l3_aligned[i]) / camarilla_l3_aligned[i] <= 0.002
-        
-        # Volume spike: current volume > 1.5x average
-        volume_spike = volume[i] > vol_ma[i] * 1.5
-        
-        # Trend filters
-        above_ema_20 = close[i] > ema_20_4h[i]
-        below_ema_20 = close[i] < ema_20_4h[i]
-        above_ema_50_1w = close[i] > ema_50_1w_aligned[i]
-        below_ema_50_1w = close[i] < ema_50_1w_aligned[i]
+        # Weekly RSI extremes
+        rsi_oversold = rsi_1w_aligned[i] < 30
+        rsi_overbought = rsi_1w_aligned[i] > 70
         
         # Entry conditions
-        long_entry = at_l3 and volume_spike and above_ema_20 and above_ema_50_1w
-        short_entry = at_h3 and volume_spike and below_ema_20 and below_ema_50_1w
+        long_entry = rsi_oversold and above_vwap
+        short_entry = rsi_overbought and below_vwap
         
-        # Exit conditions: price moves back to VWAP equivalent (using close)
-        # Simple exit: reverse signal or price moves 0.5% away from level
-        long_exit = close[i] > camarilla_l3_aligned[i] * 1.005 or at_h3
-        short_exit = close[i] < camarilla_h3_aligned[i] * 0.995 or at_l3
+        # Exit conditions: RSI returns to neutral zone (40-60) or VWAP breach
+        long_exit = rsi_1w_aligned[i] >= 40 or close[i] < vwap[i]
+        short_exit = rsi_1w_aligned[i] <= 60 or close[i] > vwap[i]
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
