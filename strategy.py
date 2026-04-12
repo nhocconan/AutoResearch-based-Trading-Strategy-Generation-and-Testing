@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_ema_cross_volume_confirmation_v1"
-timeframe = "4h"
+name = "6h_1d_1w_camarilla_breakout"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,49 +17,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA calculation
+    # Get 1d and 1w data
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 5 or len(df_1w) < 5:
         return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate EMA(50) and EMA(200) on daily closes
-    close_1d_series = pd.Series(close_1d)
-    ema_50 = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200 = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate 1d Camarilla levels (H4/L4)
+    camarilla_high_1d = np.zeros(len(close_1d))
+    camarilla_low_1d = np.zeros(len(close_1d))
+    for i in range(1, len(close_1d)):
+        H = high_1d[i-1]
+        L = low_1d[i-1]
+        C = close_1d[i-1]
+        camarilla_high_1d[i] = C + ((H - L) * 1.1 / 2)
+        camarilla_low_1d[i] = C - ((H - L) * 1.1 / 2)
     
-    # Align EMAs to 4h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
+    # Calculate 1w weekly pivot (for trend direction)
+    weekly_pivot = np.zeros(len(close_1w))
+    for i in range(1, len(close_1w)):
+        H = high_1w[i-1]
+        L = low_1w[i-1]
+        C = close_1w[i-1]
+        weekly_pivot[i] = (H + L + C) / 3
     
-    # Volume filter: current volume > 20-period average (on 4h data)
+    # Align to 6h timeframe
+    camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high_1d)
+    camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low_1d)
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    
+    # Volume filter: current volume > 20-period average (on 6h data)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
+    
+    # Momentum filter: 6h close > 6h EMA(20)
+    close_series = pd.Series(close)
+    ema_20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    momentum_up = close > ema_20
+    momentum_down = close < ema_20
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # warmup for EMA calculation
+    for i in range(20, n):  # warmup for volume/EMA
         # Skip if not ready
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or 
-            np.isnan(volume_ok[i])):
+        if (np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]) or 
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # EMA trend conditions
-        ema_bullish = ema_50_aligned[i] > ema_200_aligned[i]
-        ema_bearish = ema_50_aligned[i] < ema_200_aligned[i]
+        # Breakout conditions
+        breakout_up = close[i] > camarilla_high_aligned[i]
+        breakout_down = close[i] < camarilla_low_aligned[i]
         
-        # Volume confirmation
+        # Additional filters
         vol_ok = volume_ok[i]
+        mom_up = momentum_up[i]
+        mom_down = momentum_down[i]
         
-        # Entry signals
-        long_signal = ema_bullish and vol_ok
-        short_signal = ema_bearish and vol_ok
+        # Trend filter: use weekly pivot
+        above_weekly_pivot = close[i] > weekly_pivot_aligned[i]
+        below_weekly_pivot = close[i] < weekly_pivot_aligned[i]
         
-        # Exit when EMA crosses in opposite direction
-        exit_long = ema_bearish
-        exit_short = ema_bullish
+        # Entry signals with all filters
+        long_signal = breakout_up and vol_ok and mom_up and above_weekly_pivot
+        short_signal = breakout_down and vol_ok and mom_down and below_weekly_pivot
+        
+        # Exit when price returns to the 1d Camarilla pivot (H4/L4 levels act as support/resistance)
+        exit_long = close[i] < camarilla_low_aligned[i]  # fallback to support
+        exit_short = close[i] > camarilla_high_aligned[i]  # fallback to resistance
         
         # Execute trades
         if long_signal and position != 1:
