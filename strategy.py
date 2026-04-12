@@ -1,12 +1,13 @@
-# 12h_1d_camarilla_breakout_with_volume_and_atr
-# Hypothesis: 12-hour Camarilla breakout with volume confirmation and ATR volatility filter.
-# Uses daily Camarilla levels for institutional support/resistance, volume surge to confirm
-# institutional participation, and ATR filter to avoid low-volatility false breakouts.
-# Designed for fewer trades (target 15-30/year) to minimize fee drag on 12h timeframe.
-# Works in bull/bear by using volatility-adjusted breakouts and volume confirmation.
+#!/usr/bin/env python3
 
-name = "12h_1d_camarilla_breakout_with_volume_and_atr"
-timeframe = "12h"
+# 6h_1d_vwap_std_dev_reversion
+# Hypothesis: Mean reversion to daily VWAP with standard deviation bands on 6h timeframe
+# Uses daily VWAP as fair value and 6h price deviations beyond 2 standard deviations
+# Works in bull/bear markets by fading extremes and returning to value area
+# Target: 25-35 trades/year (100-140 total over 4 years) with low frequency to minimize fee drag
+
+name = "6h_1d_vwap_std_dev_reversion"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,7 +24,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla and ATR calculation
+    # Get daily data for VWAP calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -31,65 +32,58 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Previous day's range
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    # Calculate daily VWAP
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
+    vwap_numerator = np.cumsum(typical_price_1d * volume_1d)
+    vwap_denominator = np.cumsum(volume_1d)
+    vwap_1d = np.divide(vwap_numerator, vwap_denominator, 
+                        out=np.full_like(typical_price_1d, np.nan), 
+                        where=vwap_denominator!=0)
     
-    # Camarilla levels (based on previous day)
-    range_ = prev_high - prev_low
-    # Resistance levels
-    r3 = prev_close + range_ * 1.1 / 2
-    r4 = prev_close + range_ * 1.1
-    # Support levels
-    s3 = prev_close - range_ * 1.1 / 2
-    s4 = prev_close - range_ * 1.1
+    # Calculate daily standard deviation of price from VWAP
+    price_dev = close_1d - vwap_1d
+    # Rolling 20-day std dev of price deviation
+    price_dev_series = pd.Series(price_dev)
+    vwap_std = price_dev_series.rolling(window=20, min_periods=20).std().values
     
-    # ATR for volatility filter (14-day ATR)
-    tr1 = np.abs(np.subtract(high_1d, low_1d))
-    tr2 = np.abs(np.subtract(high_1d, np.roll(close_1d, 1)))
-    tr3 = np.abs(np.subtract(low_1d, np.roll(close_1d, 1)))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate upper and lower bands (VWAP ± 2*std)
+    upper_band_1d = vwap_1d + (2.0 * vwap_std)
+    lower_band_1d = vwap_1d - (2.0 * vwap_std)
     
-    # Align Camarilla levels and ATR to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    # Align VWAP and bands to 6h timeframe
+    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band_1d)
+    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band_1d)
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume filter: 6h volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    vol_filter = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(atr_aligned[i])):
+        if (np.isnan(vwap_aligned[i]) or np.isnan(upper_band_aligned[i]) or 
+            np.isnan(lower_band_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: close breaks above R4 with volume and volatility filter
-        if (close[i] > r4_aligned[i] and vol_confirm[i] and 
-            atr_aligned[i] > 0 and position != 1):
+        # Long entry: price touches or goes below lower band with volume confirmation
+        if (close[i] <= lower_band_aligned[i] and vol_filter[i] and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: close breaks below S4 with volume and volatility filter
-        elif (close[i] < s4_aligned[i] and vol_confirm[i] and 
-              atr_aligned[i] > 0 and position != -1):
+        # Short entry: price touches or goes above upper band with volume confirmation
+        elif (close[i] >= upper_band_aligned[i] and vol_filter[i] and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: reverse signal or close crosses back to opposite S3/R3
-        elif position == 1 and close[i] < s3_aligned[i]:
+        # Exit: price returns to VWAP (mean reversion complete)
+        elif position == 1 and close[i] >= vwap_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > r3_aligned[i]:
+        elif position == -1 and close[i] <= vwap_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
