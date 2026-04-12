@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_camarilla_breakout_volume_regime_v2"
+name = "4h_12h_camarilla_breakout_volume_regime_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,23 +17,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h data for Camarilla levels (previous 12h bar)
+    # 12h data for Camarilla levels
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Previous 12h bar's OHLC for Camarilla calculation
+    # Previous 12h bar's OHLC for Camarilla calculation (strictly previous closed bar)
     prev_close = df_12h['close'].shift(1).values
     prev_high = df_12h['high'].shift(1).values
     prev_low = df_12h['low'].shift(1).values
     
     H_minus_L = prev_high - prev_low
-    # Camarilla levels: R4 (strong resistance), S4 (strong support)
+    # Camarilla levels: R3/R4 (resistance), S3/S4 (support)
     R4 = prev_close + H_minus_L * 1.1 / 2
+    R3 = prev_close + H_minus_L * 1.1 / 4
+    S3 = prev_close - H_minus_L * 1.1 / 4
     S4 = prev_close - H_minus_L * 1.1 / 2
     
     # Map 12h Camarilla levels to each 4h bar using proper alignment
     R4_aligned = align_htf_to_ltf(prices, df_12h, R4)
+    R3_aligned = align_htf_to_ltf(prices, df_12h, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_12h, S3)
     S4_aligned = align_htf_to_ltf(prices, df_12h, S4)
     
     # Volume confirmation: current 4h volume > 20-period average of 12h volume
@@ -71,12 +75,6 @@ def generate_signals(prices):
         short_signal = (close[i] < S4_aligned[i] and trending_regime and volume_filter[i])
         
         # Exit: chop increases (range) or price returns to midpoint between R3/S3
-        # Calculate R3/S3 for exit condition
-        H_minus_L_12h = (df_12h['high'].shift(1) - df_12h['low'].shift(1)).values
-        R3 = df_12h['close'].shift(1).values + H_minus_L_12h * 1.1 / 4
-        S3 = df_12h['close'].shift(1).values - H_minus_L_12h * 1.1 / 4
-        R3_aligned = align_htf_to_ltf(prices, df_12h, R3)
-        S3_aligned = align_htf_to_ltf(prices, df_12h, S3)
         midpoint = (R3_aligned + S3_aligned) / 2
         
         exit_long = (position == 1 and (chop[i] > 60 or close[i] < midpoint[i]))
@@ -85,10 +83,10 @@ def generate_signals(prices):
         # Execute trades
         if long_signal and position != 1:
             position = 1
-            signals[i] = 0.30  # Increased from 0.25 to 0.30 for better performance
+            signals[i] = 0.25  # Conservative size to reduce drawdown
         elif short_signal and position != -1:
             position = -1
-            signals[i] = -0.30
+            signals[i] = -0.25
         elif exit_long and position == 1:
             position = 0
             signals[i] = 0.0
@@ -97,6 +95,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Hold position
-            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
