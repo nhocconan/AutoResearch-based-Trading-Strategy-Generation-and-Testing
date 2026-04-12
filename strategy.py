@@ -44,21 +44,21 @@ def generate_signals(prices):
         donch_high_1d[i] = np.max(high_1d[i-19:i+1])
         donch_low_1d[i] = np.min(low_1d[i-19:i+1])
     
-    # Align daily indicators to 12h timeframe
+    # Align daily indicators to 4h timeframe
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     donch_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
     donch_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
     
-    # Calculate 12h ATR(14) for position sizing
+    # Calculate 4h ATR(14) for position sizing
     tr1_h = np.abs(high - low)
     tr2_h = np.abs(high - np.roll(close, 1))
     tr3_h = np.abs(low - np.roll(close, 1))
     tr1_h[0] = tr2_h[0] = tr3_h[0] = np.nan
     tr_h = np.maximum(tr1_h, np.maximum(tr2_h, tr3_h))
-    atr_12h = np.full(n, np.nan)
+    atr_4h = np.full(n, np.nan)
     for i in range(14, n):
-        atr_12h[i] = np.mean(tr_h[i-14:i+1])
+        atr_4h[i] = np.mean(tr_h[i-14:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -67,7 +67,7 @@ def generate_signals(prices):
         # Skip if data not ready
         if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
             np.isnan(donch_high_1d_aligned[i]) or np.isnan(donch_low_1d_aligned[i]) or 
-            np.isnan(atr_12h[i])):
+            np.isnan(atr_4h[i])):
             signals[i] = 0.0
             continue
         
@@ -118,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_donchian_ema_trend_filter_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_ema_trend_filter_v1"
+timeframe = "4h"
 leverage = 1.0
