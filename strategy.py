@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_1w_Pivot_Reversal_Confluence_v1
-Hypothesis: Trade reversals at weekly pivot levels with 1d trend filter and volume confirmation. 
-In bull markets: buy at weekly S1/S2 in uptrend. In bear markets: sell at weekly R1/R2 in downtrend.
-Weekly pivots provide strong institutional levels; 1d EMA50 filters trend direction; volume spike confirms conviction.
-Targets 15-25 trades/year by requiring confluence of weekly support/resistance, trend alignment, and volume.
-Works in both bull (buying dips in uptrend) and bear (selling rallies in downtrend) markets.
+4h_1d_Camarilla_Volume_Trend_Breakout_v1
+Hypothesis: Use daily Camarilla pivot levels (S3/R3) for entry with 4h ADX>25 for trend filter and volume spike confirmation. Enter long on break above R3, short on break below S3. Exit when price returns to daily pivot point. Designed for 4h timeframe to limit trades (target 20-50/year) and work in both bull (R3 breaks) and bear (S3 breaks) markets. Uses discrete position sizing (0.25) to minimize fee churn.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_Pivot_Reversal_Confluence_v1"
-timeframe = "6h"
+name = "4h_1d_Camarilla_Volume_Trend_Breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,89 +26,82 @@ def generate_signals(prices):
     # Volume average (20 period) for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Weekly pivot points (HIGH, LOW, CLOSE from previous week)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # 4h ADX calculation for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    pivot_point = (high_1w + low_1w + close_1w) / 3
-    pivot_range = high_1w - low_1w
+    # True Range
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
+    tr_4h = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_4h[0] = tr1[0]
     
-    # Weekly support/resistance levels
-    r1 = 2 * pivot_point - low_1w
-    s1 = 2 * pivot_point - high_1w
-    r2 = pivot_point + pivot_range
-    s2 = pivot_point - pivot_range
-    r3 = high_1w + 2 * (pivot_point - low_1w)
-    s3 = low_1w - 2 * (high_1w - pivot_point)
+    # Directional Movement
+    up_move = high_4h - np.roll(high_4h, 1)
+    down_move = np.roll(low_4h, 1) - low_4h
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Align weekly levels to 6h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    # Smoothed values
+    tr_14 = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
+    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
     
-    # Daily EMA50 for trend filter
+    # DI and ADX
+    plus_di = 100 * plus_dm_14 / tr_14
+    minus_di = 100 * minus_dm_14 / tr_14
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx_4h = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
+    
+    # Daily Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Session filter: 08-20 UTC (avoid low-volume Asian session)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    camarilla_r3 = close_1d + 1.125 * (high_1d - low_1d)
+    camarilla_s3 = close_1d - 1.125 * (high_1d - low_1d)
+    
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Daily pivot point for exit
+    pivot_point = (high_1d + low_1d + close_1d) / 3
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_point)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if any data invalid
-        if (np.isnan(vol_ma[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(ema_50_aligned[i])):
+        if (np.isnan(adx_4h_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(pivot_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Session filter: only trade 08-20 UTC
-        if not (8 <= hours[i] <= 20):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
-            continue
+        # Conditions
+        trending = adx_4h_aligned[i] > 25
+        volume_spike = volume[i] > vol_ma[i] * 1.5
+        long_break = close[i] > camarilla_r3_aligned[i]
+        short_break = close[i] < camarilla_s3_aligned[i]
         
-        # Trend direction from daily EMA50
-        uptrend = close[i] > ema_50_aligned[i]
-        downtrend = close[i] < ema_50_aligned[i]
+        long_entry = long_break and volume_spike and trending
+        short_entry = short_break and volume_spike and trending
         
-        # Volume spike confirmation
-        volume_spike = volume[i] > vol_ma[i] * 1.8
-        
-        # Rejection at weekly resistance (sell signal)
-        resistance_rejection = (
-            (close[i] < r1_aligned[i] and low[i] > r1_aligned[i]) or  # Pin bar rejection
-            (close[i] < r2_aligned[i] and low[i] > r2_aligned[i]) or
-            (close[i] < r3_aligned[i] and low[i] > r3_aligned[i])
-        )
-        
-        # Rejection at weekly support (buy signal)
-        support_rejection = (
-            (close[i] > s1_aligned[i] and high[i] < s1_aligned[i]) or  # Pin bar rejection
-            (close[i] > s2_aligned[i] and high[i] < s2_aligned[i]) or
-            (close[i] > s3_aligned[i] and high[i] < s3_aligned[i])
-        )
-        
-        # Entry conditions
-        long_entry = support_rejection and uptrend and volume_spike
-        short_entry = resistance_rejection and downtrend and volume_spike
-        
-        # Exit conditions: opposite signal or middle of range
-        long_exit = resistance_rejection or close[i] > pivot_point[i] if not np.isnan(pivot_point[i]) else False
-        short_exit = support_rejection or close[i] < pivot_point[i] if not np.isnan(pivot_point[i]) else False
+        # Exit conditions
+        long_exit = close[i] < pivot_aligned[i]
+        short_exit = close[i] > pivot_aligned[i]
         
         # Signal logic
         if long_entry and position != 1:
