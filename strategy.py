@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_1w_kama_rsi_chop_filter_v1
-Hypothesis: Daily strategy using Kaufman's Adaptive Moving Average (KAMA) for trend direction,
-RSI for overbought/oversold conditions, and Choppiness Index for regime filtering.
-KAMA adapts to market noise, reducing whipsaws in ranging markets. RSI identifies extreme
-momentum, while Choppiness Index filters out trades in overly choppy (range-bound) or
-strongly trending regimes, focusing on transitions. Works in bull/bear by adapting trend
-detection and avoiding false signals in non-trending conditions.
-Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag.
+6h_12h_ichimoku_cloud_v1
+Hypothesis: 6-hour strategy using 12-hour Ichimoku Cloud for trend direction and entry signals.
+The strategy takes long positions when price is above the cloud and Tenkan-sen crosses above Kijun-sen,
+and short positions when price is below the cloud and Tenkan-sen crosses below Kijun-sen.
+Ichimoku is a comprehensive trend system that adapts to both trending and ranging markets,
+providing clear entry/exit signals with built-in trend filtering.
+Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+Works in bull/bear by requiring price to be outside the cloud (strong trend) and using TK cross for timing.
 """
 
 import numpy as np
@@ -23,87 +23,84 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Calculate KAMA on daily close
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close, n=10))
-    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)
-    # Avoid division by zero
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+2) - 2/(30+2)) + 2/(30+2)) ** 2
-    # Initialize KAMA
-    kama = np.full_like(close, np.nan, dtype=np.float64)
-    kama[9] = close[9]  # Start after 10 periods
-    for i in range(10, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Get 12h data for Ichimoku
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 52:  # Need at least 52 periods for Ichimoku
+        return np.zeros(n)
     
-    # Calculate RSI(14)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    # Pad beginning with NaN
-    rsi = np.concatenate([np.full(14, np.nan), rsi])
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Choppiness Index(14)
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    # Set first TR to high-low (no previous close)
-    tr[0] = high[0] - low[0]
-    # Sum of TR over 14 periods
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    # Max and min close over 14 periods
-    max_close = pd.Series(close).rolling(window=14, min_periods=14).max().values
-    min_close = pd.Series(close).rolling(window=14, min_periods=14).min().values
-    # Choppy Index
-    chop = np.where(
-        (atr_sum > 0) & (max_close != min_close),
-        100 * np.log10(atr_sum / (max_close - min_close)) / np.log10(14),
-        50  # Neutral if undefined
-    )
+    # Ichimoku components (standard parameters: 9, 26, 52)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high_12h).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_12h).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
     
-    # Get weekly data for trend filter (optional, but can add robustness)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        # Fallback to daily EMA50 if weekly data insufficient
-        ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-        trend_filter = close > ema50  # Simple uptrend filter
-    else:
-        close_1w = df_1w['close'].values
-        ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-        ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
-        trend_filter = close > ema20_1w_aligned  # Use weekly EMA20 for trend
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high_12h).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_12h).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high_12h).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_12h).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = (period52_high + period52_low) / 2
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_12h, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_12h, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_12h, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_12h, senkou_span_b)
     
     signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after indicators are ready
-        # Skip if any key data is NaN
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or 
-            np.isnan(trend_filter[i])):
+    for i in range(100, n):
+        # Skip if data not ready
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions: price above KAMA (uptrend), RSI oversold (<30), not too choppy (<61.8)
-        if (close[i] > kama[i] and rsi[i] < 30 and chop[i] < 61.8 and trend_filter[i]):
+        # Determine cloud boundaries (Senkou Span A and B)
+        upper_cloud = np.maximum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        lower_cloud = np.minimum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        
+        # Check for Tenkan/Kijun cross
+        tk_cross_up = tenkan_sen_aligned[i] > kijun_sen_aligned[i]
+        tk_cross_down = tenkan_sen_aligned[i] < kijun_sen_aligned[i]
+        
+        # Long entry: price above cloud AND TK cross up
+        if (close[i] > upper_cloud and tk_cross_up and position != 1):
+            position = 1
             signals[i] = 0.25
-        # Short conditions: price below KAMA (downtrend), RSI overbought (>70), not too choppy (<61.8)
-        elif (close[i] < kama[i] and rsi[i] > 70 and chop[i] < 61.8 and not trend_filter[i]):
+        # Short entry: price below cloud AND TK cross down
+        elif (close[i] < lower_cloud and tk_cross_down and position != -1):
+            position = -1
             signals[i] = -0.25
-        # Exit conditions: RSI returns to neutral (40-60) or market becomes too choppy
-        elif (40 <= rsi[i] <= 60) or chop[i] > 61.8:
+        # Exit: price enters the cloud or reverse TK cross
+        elif position == 1 and (close[i] < upper_cloud or tk_cross_down):
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and (close[i] > lower_cloud or tk_cross_up):
+            position = 0
             signals[i] = 0.0
         else:
-            # Hold previous signal to avoid unnecessary changes
-            signals[i] = signals[i-1]
+            # Hold current position
+            if position == 1:
+                signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.0
     
     return signals
 
-name = "1d_1w_kama_rsi_chop_filter_v1"
-timeframe = "1d"
+name = "6h_12h_ichimoku_cloud_v1"
+timeframe = "6h"
 leverage = 1.0
