@@ -21,7 +21,6 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
     
     # Calculate daily EMA(21) for trend
     close_1d_series = pd.Series(close_1d)
@@ -37,14 +36,9 @@ def generate_signals(prices):
     for i in range(14, len(df_1d)):
         atr_1d[i] = np.mean(tr[i-14:i+1])
     
-    # Calculate daily volume moving average
-    vol_s = pd.Series(volume_1d)
-    vol_ma_20 = vol_s.rolling(window=20, min_periods=20).mean().values
-    
     # Align daily indicators to 12h timeframe
     ema_21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     # Calculate 12h ATR(14) for position sizing and volatility
     tr1_h = np.abs(high - low)
@@ -66,7 +60,7 @@ def generate_signals(prices):
     for i in range(30, n):
         # Skip if data not ready
         if (np.isnan(ema_21_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(vol_ma_20_aligned[i]) or np.isnan(atr_12h[i]) or np.isnan(vol_ma_20_h[i])):
+            np.isnan(atr_12h[i]) or np.isnan(vol_ma_20_h[i])):
             signals[i] = 0.0
             continue
         
