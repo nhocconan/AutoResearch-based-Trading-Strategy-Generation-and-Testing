@@ -1,38 +1,32 @@
-# 6h_1d_camarilla_breakout_volume
-# Uses daily Camarilla pivot levels for breakout detection on 6h timeframe.
-# Long: price breaks above R4 with volume confirmation.
-# Short: price breaks below S4 with volume confirmation.
-# Exit: price returns to Pivot Point level.
-# This strategy targets institutional levels that work in both bull and bear markets.
-# Focus on breakouts at extreme Camarilla levels (R4/S4) to avoid whipsaws.
-# Volume confirmation ensures institutional participation.
-# Target: 20-50 trades per year to minimize fee drag.
+# 1h_4h_1d_rsi_volume_trend
+# Hypothesis: Use 4h RSI for trend direction (oversold/overbought), 1d volume for conviction, and 1h for precise entry timing.
+# Works in bull/bear by fading extremes in ranging markets and following momentum in trends.
+# Target: 20-40 trades/year via strict RSI thresholds and volume confirmation.
+# Timeframe: 1h, leverage: 1.0
 
-name = "6h_1d_camarilla_breakout_volume"
-timeframe = "6h"
+name = "1h_4h_1d_rsi_volume_trend"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels"""
-    typical = (high + low + close) / 3
-    range_ = high - low
-    
-    # Camarilla levels
-    r4 = close + range_ * 1.1 / 2
-    r3 = close + range_ * 1.1 / 4
-    r2 = close + range_ * 1.1 / 6
-    r1 = close + range_ * 1.1 / 12
-    pp = typical
-    s1 = close - range_ * 1.1 / 12
-    s2 = close - range_ * 1.1 / 6
-    s3 = close - range_ * 1.1 / 4
-    s4 = close - range_ * 1.1 / 2
-    
-    return r4, r3, r2, r1, pp, s1, s2, s3, s4
+def rsi(close, period=14):
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.zeros_like(close)
+    avg_loss = np.zeros_like(close)
+    avg_gain[period] = np.mean(gain[:period])
+    avg_loss[period] = np.mean(loss[:period])
+    for i in range(period + 1, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[:period] = np.nan
+    return rsi
 
 def generate_signals(prices):
     n = len(prices)
@@ -44,85 +38,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 4h data for RSI trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
+    close_4h = df_4h['close'].values
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 1d data for volume filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla levels for each day
-    r4_1d = np.full_like(close_1d, np.nan)
-    r3_1d = np.full_like(close_1d, np.nan)
-    r2_1d = np.full_like(close_1d, np.nan)
-    r1_1d = np.full_like(close_1d, np.nan)
-    pp_1d = np.full_like(close_1d, np.nan)
-    s1_1d = np.full_like(close_1d, np.nan)
-    s2_1d = np.full_like(close_1d, np.nan)
-    s3_1d = np.full_like(close_1d, np.nan)
-    s4_1d = np.full_like(close_1d, np.nan)
+    # 4h RSI (14)
+    rsi_4h = rsi(close_4h, 14)
+    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
     
-    for i in range(len(close_1d)):
-        r4, r3, r2, r1, pp, s1, s2, s3, s4 = calculate_camarilla(
-            high_1d[i], low_1d[i], close_1d[i]
-        )
-        r4_1d[i] = r4
-        r3_1d[i] = r3
-        r2_1d[i] = r2
-        r1_1d[i] = r1
-        pp_1d[i] = pp
-        s1_1d[i] = s1
-        s2_1d[i] = s2
-        s3_1d[i] = s3
-        s4_1d[i] = s4
-    
-    # Align Camarilla levels to 6h timeframe
-    r4_6h = align_htf_to_ltf(prices, df_1d, r4_1d)
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3_1d)
-    r2_6h = align_htf_to_ltf(prices, df_1d, r2_1d)
-    r1_6h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    pp_6h = align_htf_to_ltf(prices, df_1d, pp_1d)
-    s1_6h = align_htf_to_ltf(prices, df_1d, s1_1d)
-    s2_6h = align_htf_to_ltf(prices, df_1d, s2_1d)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_6h = align_htf_to_ltf(prices, df_1d, s4_1d)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    # 1d volume MA (20) for conviction
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_1d = volume_1d / vol_ma_1d
+    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or np.isnan(pp_6h[i])):
+        if (np.isnan(rsi_4h_aligned[i]) or np.isnan(vol_ratio_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: price breaks above R4 with volume confirmation
-        if close[i] > r4_6h[i] and vol_confirm[i] and position != 1:
+        rsi_val = rsi_4h_aligned[i]
+        vol_ratio = vol_ratio_1d_aligned[i]
+        
+        # Long: 4h RSI oversold (<30) + above-average 1d volume + price above 1h open (intraday strength)
+        if (rsi_val < 30 and vol_ratio > 1.0 and close[i] > prices['open'].iloc[i] and position != 1):
             position = 1
-            signals[i] = 0.25
-        # Short entry: price breaks below S4 with volume confirmation
-        elif close[i] < s4_6h[i] and vol_confirm[i] and position != -1:
+            signals[i] = 0.20
+        # Short: 4h RSI overbought (>70) + above-average 1d volume + price below 1h open (intraday weakness)
+        elif (rsi_val > 70 and vol_ratio > 1.0 and close[i] < prices['open'].iloc[i] and position != -1):
             position = -1
-            signals[i] = -0.25
-        # Exit: price returns to pivot point level (mean reversion)
-        elif position == 1 and close[i] <= pp_6h[i]:
+            signals[i] = -0.20
+        # Exit: RSI returns to neutral zone (40-60) or volume drops
+        elif position == 1 and (rsi_val > 40 or vol_ratio < 0.8):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] >= pp_6h[i]:
+        elif position == -1 and (rsi_val < 60 or vol_ratio < 0.8):
             position = 0
             signals[i] = 0.0
         else:
-            # Hold current position
+            # Hold position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
