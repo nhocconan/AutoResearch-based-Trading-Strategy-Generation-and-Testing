@@ -1,19 +1,19 @@
-# %%
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h_1d_1w_camarilla_breakout_v1
-# Uses daily and weekly timeframes to calculate 12h-period-adapted Camarilla levels.
-# Enters long when price breaks above daily H3 with volume confirmation and weekly trend alignment.
-# Enters short when price breaks below daily L3 with volume confirmation and weekly trend alignment.
-# Uses weekly ADX > 25 to ensure trading only in strong weekly trends, avoiding false signals.
-# Designed for low trade frequency (target: 12-37 trades/year) to minimize fee drag on 12h timeframe.
-# Works in bull markets (continuation of weekly trend breakouts) and bear markets (continuation of weekly trend breakdowns).
+# Hypothesis: 4h_12h_donchian_breakout_v1
+# Uses 12h Donchian breakout as primary signal with 4h volume confirmation.
+# Long when price breaks above 12h upper band with 4h volume > 1.5x 20-period average.
+# Short when price breaks below 12h lower band with 4h volume > 1.5x 20-period average.
+# Uses 4h ADX > 20 to filter out weak trends and choppy markets.
+# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
+# Works in bull markets (breakout continuation) and bear markets (breakdown continuation).
+# Position size: 0.25 for discrete levels to reduce churn.
 
-name = "12h_1d_1w_camarilla_breakout_v1"
-timeframe = "12h"
+name = "4h_12h_donchian_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,49 +26,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation (base levels)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data for Donchian calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # Calculate 12h Donchian channels (20-period high/low)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate Camarilla levels from previous day
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    close_prev = df_1d['close'].shift(1).values
+    # Donchian upper and lower bands
+    upper_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    lower_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Camarilla formulas
-    range_prev = high_prev - low_prev
-    camarilla_h3 = close_prev + range_prev * 1.1 / 4
-    camarilla_l3 = close_prev - range_prev * 1.1 / 4
+    # Align to 4h timeframe (12h levels update only after 12h bar closes)
+    upper_12h_aligned = align_htf_to_ltf(prices, df_12h, upper_12h)
+    lower_12h_aligned = align_htf_to_ltf(prices, df_12h, lower_12h)
     
-    # Align to 12h timeframe (daily levels update only after daily bar closes)
-    h3_level = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_level = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    
-    # Volume confirmation: volume > 1.5 * 50-period average (balanced for 12h)
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Volume confirmation: 4h volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
-    # Weekly ADX trend filter: only trade when weekly ADX > 25 (strong trend)
-    # Calculate True Range from weekly data
-    wh = df_1w['high'].values
-    wl = df_1w['low'].values
-    wc = df_1w['close'].values
-    
-    # True Range calculation
-    tr1 = wh[1:] - wl[1:]
-    tr2 = np.abs(wh[1:] - wc[:-1])
-    tr3 = np.abs(wl[1:] - wc[:-1])
+    # ADX trend filter: only trade when ADX > 20 (avoid chop)
+    # Calculate True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
     
     # Plus and Minus Directional Movement
-    plus_dm = np.where((wh[1:] - wh[:-1]) > (wl[:-1] - wl[1:]), np.maximum(wh[1:] - wh[:-1], 0), 0)
-    minus_dm = np.where((wl[:-1] - wl[1:]) > (wh[1:] - wh[:-1]), np.maximum(wl[:-1] - wl[1:], 0), 0)
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
     
     # Wilder's smoothing function
     def wilders_smooth(data, period):
@@ -91,22 +79,18 @@ def generate_signals(prices):
     minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
     dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
     adx = wilders_smooth(dx, 14)
-    adx_1w = adx  # weekly ADX values
-    
-    # Align weekly ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
-    adx_filter = adx_aligned > 25  # strong weekly trend only
+    adx_filter = adx > 20  # avoid choppy markets
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):  # start after warmup
         # Skip if levels not ready
-        if np.isnan(h3_level[i]) or np.isnan(l3_level[i]) or np.isnan(adx_filter[i]):
+        if np.isnan(upper_12h_aligned[i]) or np.isnan(lower_12h_aligned[i]) or np.isnan(adx_filter[i]):
             signals[i] = 0.0
             continue
         
-        # Require both volume and strong weekly trend filters
+        # Require both volume and ADX filters
         if not (vol_confirm[i] and adx_filter[i]):
             # Hold current position if filters fail
             if position == 1:
@@ -117,19 +101,19 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above daily H3 with volume and weekly trend alignment
-        if close[i] > h3_level[i] and position != 1:
+        # Long signal: price breaks above 12h upper band with volume
+        if close[i] > upper_12h_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below daily L3 with volume and weekly trend alignment
-        elif close[i] < l3_level[i] and position != -1:
+        # Short signal: price breaks below 12h lower band with volume
+        elif close[i] < lower_12h_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
         # Exit conditions: opposite breakout
-        elif close[i] < l3_level[i] and position == 1:
+        elif close[i] < lower_12h_aligned[i] and position == 1:
             position = 0
             signals[i] = 0.0
-        elif close[i] > h3_level[i] and position == -1:
+        elif close[i] > upper_12h_aligned[i] and position == -1:
             position = 0
             signals[i] = 0.0
         else:
@@ -142,4 +126,3 @@ def generate_signals(prices):
                 signals[i] = 0.0
     
     return signals
-# %%
