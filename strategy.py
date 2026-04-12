@@ -1,3 +1,9 @@
+# 6h_1d_1w_camarilla_pivot_reversion_v1
+# Fades at weekly R3/S3 and continues at weekly R4/S4 with volume confirmation
+# Uses weekly pivots to capture both mean-reversion in range and breakout continuation in trend
+# Works in bull/bear via volume filter and pivot-based structure
+# Target: 50-150 total trades over 4 years (12-37/year)
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -13,92 +19,104 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend and volatility context
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Get daily data for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # Calculate weekly pivot points (standard formula)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Pivot point calculation
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
+    r2_1w = pivot_1w + (high_1w - low_1w)
+    s2_1w = pivot_1w - (high_1w - low_1w)
+    r3_1w = high_1w + 2 * (pivot_1w - low_1w)
+    s3_1w = low_1w - 2 * (high_1w - pivot_1w)
+    r4_1w = r3_1w + (high_1w - low_1w)
+    s4_1w = s3_1w - (high_1w - low_1w)
+    
+    # Calculate volume spike (daily)
     volume_1d = df_1d['volume'].values
+    vol_ma_20 = np.full(len(volume_1d), np.nan)
+    for i in range(19, len(volume_1d)):
+        vol_ma_20[i] = np.mean(volume_1d[i-19:i+1])
+    vol_spike = np.full(len(volume_1d), np.nan)
+    for i in range(19, len(volume_1d)):
+        if vol_ma_20[i] > 0:
+            vol_spike[i] = volume_1d[i] / vol_ma_20[i]
     
-    # Calculate daily EMA(50) for trend
-    close_1d_series = pd.Series(close_1d)
-    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align weekly pivots to 6h
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    r4_1w_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
+    s4_1w_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
     
-    # Calculate daily ATR(14) for volatility
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # Align volume spike to 6h
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
+    
+    # Calculate 6h ATR for volatility filter
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
     tr1[0] = tr2[0] = tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = np.full(len(df_1d), np.nan)
-    for i in range(14, len(df_1d)):
-        atr_1d[i] = np.mean(tr[i-14:i+1])
-    
-    # Calculate daily Donchian(20) channels
-    donch_high_1d = np.full(len(high_1d), np.nan)
-    donch_low_1d = np.full(len(low_1d), np.nan)
-    for i in range(19, len(high_1d)):
-        donch_high_1d[i] = np.max(high_1d[i-19:i+1])
-        donch_low_1d[i] = np.min(low_1d[i-19:i+1])
-    
-    # Align daily indicators to 6h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    donch_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
-    donch_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
-    
-    # Calculate 6h ATR(14) for position sizing
-    tr1_h = np.abs(high - low)
-    tr2_h = np.abs(high - np.roll(close, 1))
-    tr3_h = np.abs(low - np.roll(close, 1))
-    tr1_h[0] = tr2_h[0] = tr3_h[0] = np.nan
-    tr_h = np.maximum(tr1_h, np.maximum(tr2_h, tr3_h))
     atr_6h = np.full(n, np.nan)
     for i in range(14, n):
-        atr_6h[i] = np.mean(tr_h[i-14:i+1])
+        atr_6h[i] = np.mean(tr[i-14:i+1])
+    
+    atr_ma_10 = np.full(n, np.nan)
+    for i in range(23, n):
+        if not np.isnan(np.mean(atr_6h[i-9:i+1])):
+            atr_ma_10[i] = np.mean(atr_6h[i-9:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(donch_high_1d_aligned[i]) or np.isnan(donch_low_1d_aligned[i]) or 
-            np.isnan(atr_6h[i])):
+        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(r3_1w_aligned[i]) or 
+            np.isnan(s3_1w_aligned[i]) or np.isnan(r4_1w_aligned[i]) or 
+            np.isnan(s4_1w_aligned[i]) or np.isnan(vol_spike_aligned[i]) or 
+            np.isnan(atr_6h[i]) or np.isnan(atr_ma_10[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: ATR > 0.5 * ATR MA(10) to avoid low volatility
-        atr_ma_10 = np.full(n, np.nan)
-        for j in range(23, n):  # 14 + 9 for 10-period MA
-            if not np.isnan(np.mean(atr_1d_aligned[j-9:j+1])):
-                atr_ma_10[j] = np.mean(atr_1d_aligned[j-9:j+1])
-        vol_filter = atr_1d_aligned[i] > 0.5 * atr_ma_10[i] if not np.isnan(atr_ma_10[i]) else False
+        # Volatility filter: ATR > 50% of its MA to avoid low volatility
+        vol_filter = atr_6h[i] > 0.5 * atr_ma_10[i]
         
-        # Trend filter: price relative to daily EMA50
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Volume confirmation: volume spike > 1.5x average
+        vol_confirm = vol_spike_aligned[i] > 1.5
         
-        # Breakout conditions: price breaks daily Donchian channels
-        breakout_up = close[i] > donch_high_1d_aligned[i]
-        breakout_down = close[i] < donch_low_1d_aligned[i]
+        # Price levels
+        price = close[i]
         
-        # Entry conditions: Donchian breakout with trend and volatility filter
-        long_entry = breakout_up and vol_filter and uptrend
-        short_entry = breakout_down and vol_filter and downtrend
+        # Fade at R3/S3 (mean reversion in range)
+        fade_long = (price <= s3_1w_aligned[i] * 1.005) and vol_filter and vol_confirm
+        fade_short = (price >= r3_1w_aligned[i] * 0.995) and vol_filter and vol_confirm
         
-        # Exit conditions: price crosses back to daily Donchian mid-point
-        mid_point = (donch_high_1d_aligned[i] + donch_low_1d_aligned[i]) / 2
-        long_exit = close[i] < mid_point
-        short_exit = close[i] > mid_point
+        # Breakout continuation at R4/S4 (trend following)
+        breakout_long = (price >= r4_1w_aligned[i] * 0.995) and vol_filter and vol_confirm
+        breakout_short = (price <= s4_1w_aligned[i] * 1.005) and vol_filter and vol_confirm
         
-        if long_entry and position != 1:
+        # Exit conditions
+        long_exit = (price >= pivot_1w_aligned[i]) or (position == 1 and price <= s3_1w_aligned[i] * 1.005)
+        short_exit = (price <= pivot_1w_aligned[i]) or (position == -1 and price >= r3_1w_aligned[i] * 0.995)
+        
+        if (fade_long or breakout_long) and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_entry and position != -1:
+        elif (fade_short or breakout_short) and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
@@ -118,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_donchian_ema_trend_filter_v1"
+name = "6h_1d_1w_camarilla_pivot_reversion_v1"
 timeframe = "6h"
 leverage = 1.0
