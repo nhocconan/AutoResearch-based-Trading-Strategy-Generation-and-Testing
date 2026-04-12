@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v1"
+name = "4h_1d_camarilla_breakout_volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -67,19 +67,26 @@ def generate_signals(prices):
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
     
+    # Add trend filter: price above/below 50-period SMA on 4h
+    close_series = pd.Series(close)
+    sma_50 = close_series.rolling(window=50, min_periods=50).mean().values
+    price_above_sma = close > sma_50
+    price_below_sma = close < sma_50
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if not ready
         if (np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]) or 
-            np.isnan(volume_ok[i]) or np.isnan(position_size[i])):
+            np.isnan(volume_ok[i]) or np.isnan(position_size[i]) or
+            np.isnan(price_above_sma[i]) or np.isnan(price_below_sma[i])):
             signals[i] = 0.0 if position == 0 else (position_size[i] if position == 1 else -position_size[i])
             continue
         
-        # Breakout conditions with volume confirmation
-        breakout_up = close[i] > camarilla_high_aligned[i]
-        breakout_down = close[i] < camarilla_low_aligned[i]
+        # Breakout conditions with volume and trend confirmation
+        breakout_up = close[i] > camarilla_high_aligned[i] and price_above_sma[i]
+        breakout_down = close[i] < camarilla_low_aligned[i] and price_below_sma[i]
         vol_ok = volume_ok[i]
         
         # Entry signals
