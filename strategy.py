@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h_4h_1d_camarilla_breakout_v1
-# Uses daily Camarilla levels for directional bias, 4h for trend filter (ADX), and 1h for entry timing.
-# Buys when price breaks above daily H3 with 4h ADX > 25 and volume confirmation during active session (08-20 UTC).
-# Shorts when price breaks below daily L3 under same conditions.
-# Designed for low trade frequency (target: 15-37/year) to minimize fee drift.
-# Works in bull markets (continuation breakouts) and bear markets (continuation breakdowns).
+# Hypothesis: 6h_1w_1d_ichimoku_cloud_trend
+# Uses weekly Ichimoku cloud (tenkan-sen, kijun-sen, senkou span A/B) to determine trend direction.
+# Enters long when price is above cloud and tenkan > kijun (bullish TK cross).
+# Enters short when price is below cloud and tenkan < kijun (bearish TK cross).
+# Uses daily volume confirmation to filter weak breakouts.
+# Designed for low trade frequency (target: 15-35 trades/year) to minimize fee drag.
+# Works in bull markets (trend following) and bear markets (trend following shorts).
 
-name = "1h_4h_1d_camarilla_breakout_v1"
-timeframe = "1h"
+name = "6h_1w_1d_ichimoku_cloud_trend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,115 +25,101 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour  # already datetime64[ms], .hour works
-    session_mask = (hours >= 8) & (hours <= 20)
+    # Get weekly data for Ichimoku calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 52:  # need at least 1 year of weekly data
+        return np.zeros(n)
     
-    # Get daily data for Camarilla levels
+    # Get daily data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    close_prev = df_1d['close'].shift(1).values
+    # Ichimoku components (weekly)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    high_9 = pd.Series(df_1w['high']).rolling(window=9, min_periods=9).max().values
+    low_9 = pd.Series(df_1w['low']).rolling(window=9, min_periods=9).min().values
+    tenkan = (high_9 + low_9) / 2
     
-    range_prev = high_prev - low_prev
-    camarilla_h3 = close_prev + range_prev * 1.1 / 4
-    camarilla_l3 = close_prev - range_prev * 1.1 / 4
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    high_26 = pd.Series(df_1w['high']).rolling(window=26, min_periods=26).max().values
+    low_26 = pd.Series(df_1w['low']).rolling(window=26, min_periods=26).min().values
+    kijun = (high_26 + low_26) / 2
     
-    # Align daily levels to 1h timeframe
-    h3_level = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_level = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_a = (tenkan + kijun) / 2
     
-    # Get 4h data for ADX trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    high_52 = pd.Series(df_1w['high']).rolling(window=52, min_periods=52).max().values
+    low_52 = pd.Series(df_1w['low']).rolling(window=52, min_periods=52).min().values
+    senkou_b = (high_52 + low_52) / 2
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Align Ichimoku components to 6h timeframe
+    tenkan_6h = align_htf_to_ltf(prices, df_1w, tenkan)
+    kijun_6h = align_htf_to_ltf(prices, df_1w, kijun)
+    senkou_a_6h = align_htf_to_ltf(prices, df_1w, senkou_a)
+    senkou_b_6h = align_htf_to_ltf(prices, df_1w, senkou_b)
     
-    # Calculate True Range for 4h
-    tr1 = high_4h[1:] - low_4h[1:]
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # Plus and Minus Directional Movement
-    plus_dm = np.where((high_4h[1:] - high_4h[:-1]) > (low_4h[:-1] - low_4h[1:]), np.maximum(high_4h[1:] - high_4h[:-1], 0), 0)
-    minus_dm = np.where((low_4h[:-1] - low_4h[1:]) > (high_4h[1:] - high_4h[:-1]), np.maximum(low_4h[:-1] - low_4h[1:], 0), 0)
-    
-    # Wilder's smoothing
-    def wilders_smooth(data, period):
-        result = np.full_like(data, np.nan, dtype=float)
-        if len(data) < period:
-            return result
-        result[period-1] = np.mean(data[:period])
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    atr_4h = wilders_smooth(tr, 14)
-    plus_dm_smooth = wilders_smooth(plus_dm, 14)
-    minus_dm_smooth = wilders_smooth(minus_dm, 14)
-    
-    plus_di = np.where(atr_4h != 0, 100 * plus_dm_smooth / atr_4h, 0)
-    minus_di = np.where(atr_4h != 0, 100 * minus_dm_smooth / atr_4h, 0)
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx_4h = wilders_smooth(dx, 14)
-    
-    # Align 4h ADX to 1h timeframe
-    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
-    adx_filter = adx_4h_aligned > 25
-    
-    # Volume confirmation: volume > 2.0 * 20-period average (1h timeframe)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 2.0)
+    # Daily volume confirmation: volume > 1.5 * 20-day average
+    vol_ma_daily = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_confirm_daily = df_1d['volume'].values > (vol_ma_daily * 1.5)
+    vol_confirm_6h = align_htf_to_ltf(prices, df_1d, vol_confirm_daily.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # start after warmup
-        # Skip if levels not ready
-        if np.isnan(h3_level[i]) or np.isnan(l3_level[i]) or np.isnan(adx_filter[i]):
+        # Skip if Ichimoku not ready
+        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
+            np.isnan(senkou_a_6h[i]) or np.isnan(senkou_b_6h[i]) or
+            np.isnan(vol_confirm_6h[i])):
             signals[i] = 0.0
             continue
         
-        # Require session, volume, and strong trend filters
-        if not (session_mask[i] and vol_confirm[i] and adx_filter[i]):
-            # Hold current position if filters fail
+        # Determine cloud boundaries
+        cloud_top = np.maximum(senkou_a_6h[i], senkou_b_6h[i])
+        cloud_bottom = np.minimum(senkou_a_6h[i], senkou_b_6h[i])
+        
+        # Check TK cross
+        tk_bullish = tenkan_6h[i] > kijun_6h[i]
+        tk_bearish = tenkan_6h[i] < kijun_6h[i]
+        
+        # Check price relative to cloud
+        price_above_cloud = close[i] > cloud_top
+        price_below_cloud = close[i] < cloud_bottom
+        
+        # Require volume confirmation
+        if vol_confirm_6h[i] < 0.5:  # low volume
+            # Hold current position if volume filter fails
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above daily H3 with volume
-        if close[i] > h3_level[i] and position != 1:
+        # Long signal: price above cloud + bullish TK cross
+        if price_above_cloud and tk_bullish and position != 1:
             position = 1
-            signals[i] = 0.20
-        # Short signal: price breaks below daily L3 with volume
-        elif close[i] < l3_level[i] and position != -1:
+            signals[i] = 0.25
+        # Short signal: price below cloud + bearish TK cross
+        elif price_below_cloud and tk_bearish and position != -1:
             position = -1
-            signals[i] = -0.20
-        # Exit conditions: opposite breakout
-        elif close[i] < l3_level[i] and position == 1:
+            signals[i] = -0.25
+        # Exit conditions: opposite conditions
+        elif (price_below_cloud or not tk_bullish) and position == 1:
             position = 0
             signals[i] = 0.0
-        elif close[i] > h3_level[i] and position == -1:
+        elif (price_above_cloud or not tk_bearish) and position == -1:
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
