@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v2"
-timeframe = "4h"
+name = "1d_1w_rsi_crossover_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,60 +17,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    # Get weekly data for RSI calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla pivot levels from 1d data
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Calculate RSI on weekly data
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Camarilla levels (using standard multipliers)
-    h3 = pivot + (range_1d * 1.1 / 4)   # Resistance 3
-    l3 = pivot - (range_1d * 1.1 / 4)   # Support 3
+    # Use Wilder's smoothing (alpha = 1/period)
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
     
-    # Align Camarilla levels to 4h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Volume filter - 20-period average on 4h data
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Align RSI to daily timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1w, rsi)
+    
+    # Daily volume filter - 20-day average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
     
-    # ATR for momentum filter (14-period)
-    high_low = high - low
-    high_close = np.abs(high - np.roll(close, 1))
-    low_close = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    tr[0] = high_low[0]  # First value
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if not ready
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(pivot_aligned[i]) or np.isnan(volume_ok[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(rsi_aligned[i]) or np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: price breaks above H3 with volume confirmation
-        long_signal = close[i] > h3_aligned[i] and volume_ok[i]
-        # Short: price breaks below L3 with volume confirmation
-        short_signal = close[i] < l3_aligned[i] and volume_ok[i]
+        # RSI crossover signals
+        rsi_prev = rsi_aligned[i-1] if i > 0 else 50
+        rsi_curr = rsi_aligned[i]
         
-        # Exit when price returns to pivot
-        exit_long = close[i] < pivot_aligned[i]
-        exit_short = close[i] > pivot_aligned[i]
+        # Long: RSI crosses above 30 from below
+        long_signal = (rsi_prev <= 30) and (rsi_curr > 30) and volume_ok[i]
+        # Short: RSI crosses below 70 from above
+        short_signal = (rsi_prev >= 70) and (rsi_curr < 70) and volume_ok[i]
         
         # Execute trades
         if long_signal and position != 1:
@@ -79,19 +75,11 @@ def generate_signals(prices):
         elif short_signal and position != -1:
             position = -1
             signals[i] = -0.25
-        elif exit_long and position == 1:
-            position = 0
-            signals[i] = 0.0
-        elif exit_short and position == -1:
-            position = 0
-            signals[i] = 0.0
+        elif position == 1:
+            signals[i] = 0.25
+        elif position == -1:
+            signals[i] = -0.25
         else:
-            # Hold position
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
+            signals[i] = 0.0
     
     return signals
