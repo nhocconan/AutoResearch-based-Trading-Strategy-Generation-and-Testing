@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,58 +13,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Weekly EMA for trend filter
-    weekly_close = df_1w['close'].values
-    weekly_ema = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
-    
-    # Get daily data for KAMA
+    # Get daily data for pivot points
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Daily KAMA calculation
-    daily_close = df_1d['close'].values
-    change = np.abs(np.diff(daily_close, 1))
-    change = np.insert(change, 0, 0)
-    volatility = np.zeros_like(daily_close)
-    for i in range(1, len(daily_close)):
-        volatility[i] = volatility[i-1] + change[i] - (change[i-10] if i >= 10 else 0)
-    er = np.zeros_like(daily_close)
-    for i in range(len(daily_close)):
-        if volatility[i] != 0:
-            er[i] = np.abs(daily_close[i] - daily_close[i-9]) / volatility[i] if i >= 9 else 0
-        else:
-            er[i] = 0
-    sc = (er * (0.6667 - 0.0645) + 0.0645) ** 2
-    kama = np.zeros_like(daily_close)
-    kama[0] = daily_close[0]
-    for i in range(1, len(daily_close)):
-        kama[i] = kama[i-1] + sc[i] * (daily_close[i] - kama[i-1])
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    # Calculate daily pivot points using previous day's data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Daily RSI
-    delta = np.diff(daily_close)
-    delta = np.insert(delta, 0, 0)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Daily volume average
-    daily_volume = df_1d['volume'].values
-    vol_ma = pd.Series(daily_volume).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)
+    # Pivot point
+    pivot = (prev_high + prev_low + prev_close) / 3
+    # Key levels: S1, R1 (Camarilla) - tighter range for fewer trades
+    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
     
-    # ATR for volatility filter
+    # Align levels to 12h timeframe
+    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    
+    # Volume filter: 20-period EMA
+    vol_ema = np.full(n, np.nan)
+    vol_series = pd.Series(volume)
+    vol_ema_values = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ema[:] = vol_ema_values
+    
+    # ATR for volatility filter (14-period)
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -77,27 +60,15 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(weekly_ema_aligned[i]) or np.isnan(kama_aligned[i]) or 
-            np.isnan(rsi_aligned[i]) or np.isnan(vol_ma_aligned[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(pivot_12h[i]) or np.isnan(s1_12h[i]) or np.isnan(r1_12h[i]) or 
+            np.isnan(vol_ema[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below weekly EMA
-        above_weekly_ema = close[i] > weekly_ema_aligned[i]
-        below_weekly_ema = close[i] < weekly_ema_aligned[i]
-        
-        # KAMA direction: price above/below KAMA
-        above_kama = close[i] > kama_aligned[i]
-        below_kama = close[i] < kama_aligned[i]
-        
-        # RSI filter: avoid extreme overbought/oversold
-        rsi_not_extreme = (rsi_aligned[i] > 20) and (rsi_aligned[i] < 80)
-        
-        # Volume filter: current volume > 1.5x 20-day average
-        volume_filter = volume[i] > vol_ma_aligned[i] * 1.5
+        # Volume filter: current volume > 1.5x EMA
+        volume_filter = volume[i] > vol_ema[i] * 1.5
         
         # Volatility filter: ATR > 0.5 * 20-period ATR mean
         atr_ma = np.full(n, np.nan)
@@ -105,13 +76,13 @@ def generate_signals(prices):
             atr_ma[i] = np.nanmean(atr[i-20:i])
         vol_filter = atr[i] > atr_ma[i] * 0.5 if not np.isnan(atr_ma[i]) else True
         
-        # Entry conditions: KAMA direction with weekly trend filter
-        long_entry = above_kama and above_weekly_ema and rsi_not_extreme and volume_filter and vol_filter
-        short_entry = below_kama and below_weekly_ema and rsi_not_extreme and volume_filter and vol_filter
+        # Entry conditions: Touch of S1/R1 with volume and volatility (mean reversion)
+        long_entry = (low[i] <= s1_12h[i]) and volume_filter and vol_filter
+        short_entry = (high[i] >= r1_12h[i]) and volume_filter and vol_filter
         
-        # Exit conditions: opposite KAMA cross
-        long_exit = below_kama
-        short_exit = above_kama
+        # Exit conditions: Return to pivot
+        long_exit = close[i] > pivot_12h[i]
+        short_exit = close[i] < pivot_12h[i]
         
         if long_entry and position != 1:
             position = 1
@@ -136,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_kama_rsi_volume_filter_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_s1r1_mean_reversion_vol_filter_v1"
+timeframe = "12h"
 leverage = 1.0
