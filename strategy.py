@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_camarilla_breakout_volume_trend_v1
-# Uses daily Camarilla pivot levels (H4/L4) as support/resistance on 4h chart.
-# Long when price breaks above H4 with volume confirmation (volume > 1.5x 20-period avg) AND 4h close > 20-period EMA (trend filter).
-# Short when price breaks below L4 with volume confirmation AND 4h close < 20-period EMA.
-# Exits when price returns to daily pivot point (PP) or when trend filter reverses.
-# Designed for moderate trade frequency (target: 20-50 trades/year) to balance signal quality and cost.
-# Works in trending markets via breakouts with trend confirmation and ranging markets via mean reversion to pivot.
+# Hypothesis: 4h_1d_camarilla_breakout_v2
+# Uses daily Camarilla pivot levels (H3/L3) as breakout triggers on 4h chart.
+# Long when price closes above H3 with volume > 1.3x 20-period average.
+# Short when price closes below L3 with volume > 1.3x 20-period average.
+# Exits when price returns to daily pivot point (PP) or touches opposite H3/L3 level.
+# Uses 1d trend filter: only take longs when 4h close > 200-period EMA on 1d,
+# only take shorts when 4h close < 200-period EMA on 1d.
+# Designed for low trade frequency (<50/year) with strong trend alignment.
+# Works in bull markets via breakouts with trend, in bear via mean reversion to pivot.
 
-name = "4h_1d_camarilla_breakout_volume_trend_v1"
+name = "4h_1d_camarilla_breakout_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,63 +27,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
+    # Get daily data for Camarilla pivot calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # Calculate daily Camarilla levels
-    # Based on previous day's OHLC
+    # Calculate daily OHLC for previous day's levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot point and Camarilla levels for each day
+    # Calculate pivot point and Camarilla levels (H3/L3 used for breakouts)
     pp = (high_1d + low_1d + close_1d) / 3.0
     range_1d = high_1d - low_1d
     
-    # Camarilla levels: H4 = PP + 1.1/2 * range, L4 = PP - 1.1/2 * range
-    h4 = pp + (1.1 / 2) * range_1d
-    l4 = pp - (1.1 / 2) * range_1d
+    # Camarilla H3 = PP + 1.1/4 * range, L3 = PP - 1.1/4 * range
+    h3 = pp + (1.1 / 4) * range_1d
+    l3 = pp - (1.1 / 4) * range_1d
     
-    # Align daily levels to 4h timeframe (daily values update after daily bar closes)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    # Align daily levels to 4h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
     
-    # Volume confirmation: volume > 1.5 * 20-period average (4h timeframe)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    # Daily 200 EMA for trend filter (only use longs in uptrend, shorts in downtrend)
+    close_1d_series = pd.Series(df_1d['close'])
+    ema_200_1d = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Trend filter: 20-period EMA on 4h close
-    close_series = pd.Series(close)
-    ema20 = close_series.ewm(span=20, min_periods=20, adjust=False).mean().values
-    trend_up = close > ema20
-    trend_down = close < ema20
+    # Volume confirmation: volume > 1.3 * 20-period average (4h timeframe)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):  # start after warmup
         # Skip if data not ready
-        if np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(pp_aligned[i]):
+        if np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or np.isnan(pp_aligned[i]) or np.isnan(ema_200_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Exit conditions: price returns to daily pivot point or trend filter reverses
-        if position == 1 and (close[i] <= pp_aligned[i] or not trend_up[i]):
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and (close[i] >= pp_aligned[i] or not trend_down[i]):
-            position = 0
-            signals[i] = 0.0
-        # Entry conditions with all filters
-        elif vol_confirm[i] and trend_up[i] and close[i] > h4_aligned[i] and position != 1:
+        # Require volume confirmation for new entries
+        if not vol_confirm[i]:
+            # Hold current position if volume filter fails
+            if position == 1:
+                signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Long conditions: price closes above H3 AND in uptrend (close > daily EMA200)
+        if close[i] > h3_aligned[i] and close[i] > ema_200_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        elif vol_confirm[i] and trend_down[i] and close[i] < l4_aligned[i] and position != -1:
+        # Short conditions: price closes below L3 AND in downtrend (close < daily EMA200)
+        elif close[i] < l3_aligned[i] and close[i] < ema_200_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
+        # Exit conditions: price returns to daily pivot (PP) or touches opposite level
+        elif position == 1 and (close[i] <= pp_aligned[i] or close[i] <= l3_aligned[i]):
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and (close[i] >= pp_aligned[i] or close[i] >= h3_aligned[i]):
+            position = 0
+            signals[i] = 0.0
         else:
             # Hold current position
             if position == 1:
