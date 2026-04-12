@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_keltner_channel_breakout_with_volume_and_adx
-# Uses daily Keltner Channel (ATR-based bands) on 4h chart.
-# Long when price breaks above upper KC with volume confirmation (volume > 1.5x 20-period avg) and ADX < 25 (range).
-# Short when price breaks below lower KC with volume confirmation and ADX < 25.
-# Exit when price returns to the 20-period EMA (mean reversion).
-# Designed for low trade frequency (target: 20-40 trades/year) to minimize fee drag.
-# Works in ranging markets via mean reversion and avoids false breakouts in trends.
+# Hypothesis: 12h_1d1w_camarilla_volume_trend
+# Uses daily and weekly Camarilla pivot levels on 12h chart.
+# Long when price breaks above weekly R4 with volume confirmation (volume > 1.5x 20-period avg) and daily trend up (close > EMA20).
+# Short when price breaks below weekly S4 with volume confirmation and daily trend down (close < EMA20).
+# Exits when price returns to weekly close (mean reversion).
+# Designed for low trade frequency (target: 12-37 trades/year) to minimize fee drift.
+# Works in both bull and bear via trend filter and avoids false breakouts in chop.
 
-name = "4h_1d_keltner_channel_breakout_with_volume_and_adx"
-timeframe = "4h"
+name = "12h_1d1w_camarilla_volume_trend"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,108 +25,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Keltner Channel and ADX calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for Camarilla pivot levels and trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly EMA20 for trend filter
+    close_1w = df_1w['close'].values
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # True Range for 1d
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with original length
+    # Calculate weekly Camarilla levels (based on previous week's OHLC)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # ATR(10) for Keltner Channel
-    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    # Shift by 1 to use previous week's data
+    high_1w_prev = np.roll(high_1w, 1)
+    low_1w_prev = np.roll(low_1w, 1)
+    close_1w_prev = np.roll(close_1w, 1)
     
-    # Keltner Channel: EMA(20) ± 2 * ATR(10)
-    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    kc_upper = ema_20 + 2 * atr
-    kc_lower = ema_20 - 2 * atr
-    kc_middle = ema_20  # exit level
+    # First value will be invalid due to roll, set to NaN
+    high_1w_prev[0] = np.nan
+    low_1w_prev[0] = np.nan
+    close_1w_prev[0] = np.nan
     
-    # ADX(14) for trend strength
-    # +DM and -DM
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[0.0], plus_dm])
-    minus_dm = np.concatenate([[0.0], minus_dm])
+    # Calculate Camarilla levels
+    camarilla_R4 = close_1w_prev + 1.5 * (high_1w_prev - low_1w_prev)
+    camarilla_S4 = close_1w_prev - 1.5 * (high_1w_prev - low_1w_prev)
+    # Exit level: previous week's close
+    camarilla_exit = close_1w_prev
     
-    # Smoothed values
-    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
-    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    # Align weekly Camarilla levels to 12h timeframe
+    camarilla_R4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_R4)
+    camarilla_S4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_S4)
+    camarilla_exit_aligned = align_htf_to_ltf(prices, df_1w, camarilla_exit)
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # DI values
-    plus_di = 100 * plus_dm_14 / tr_14
-    minus_di = 100 * minus_dm_14 / tr_14
+    # Get daily data for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # Volume confirmation: volume > 1.5 * 20-period average (daily timeframe)
+    volume_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_confirm_1d = volume_1d > (vol_ma_1d * 1.5)
     
-    # Align to 4h timeframe
-    kc_upper_aligned = align_htf_to_ltf(prices, df_1d, kc_upper)
-    kc_lower_aligned = align_htf_to_ltf(prices, df_1d, kc_lower)
-    kc_middle_aligned = align_htf_to_ltf(prices, df_1d, kc_middle)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume confirmation: volume > 1.5 * 20-period average (4h timeframe)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    # Align daily volume confirmation to 12h timeframe
+    vol_confirm_aligned = align_htf_to_ltf(prices, df_1d, vol_confirm_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):  # start after warmup
         # Skip if data not ready
-        if (np.isnan(kc_upper_aligned[i]) or np.isnan(kc_lower_aligned[i]) or 
-            np.isnan(kc_middle_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(camarilla_R4_aligned[i]) or np.isnan(camarilla_S4_aligned[i]) or 
+            np.isnan(camarilla_exit_aligned[i]) or np.isnan(ema20_1w_aligned[i]) or 
+            np.isnan(vol_confirm_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Range condition: ADX < 25 (non-trending market)
-        if adx_aligned[i] >= 25:
-            # Hold current position if trending
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Require volume confirmation for new entries
-        if not vol_confirm[i]:
-            # Hold current position if filter fails
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Long signal: price breaks above upper KC
-        if close[i] > kc_upper_aligned[i] and position != 1:
+        # Long signal: price breaks above weekly R4 with volume confirmation and uptrend
+        if (close[i] > camarilla_R4_aligned[i] and vol_confirm_aligned[i] and 
+            close[i] > ema20_1w_aligned[i] and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below lower KC
-        elif close[i] < kc_lower_aligned[i] and position != -1:
+        # Short signal: price breaks below weekly S4 with volume confirmation and downtrend
+        elif (close[i] < camarilla_S4_aligned[i] and vol_confirm_aligned[i] and 
+              close[i] < ema20_1w_aligned[i] and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit conditions: price returns to middle KC (EMA20)
-        elif position == 1 and close[i] <= kc_middle_aligned[i]:
+        # Exit conditions: price returns to previous week's close (mean reversion)
+        elif position == 1 and close[i] <= camarilla_exit_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] >= kc_middle_aligned[i]:
+        elif position == -1 and close[i] >= camarilla_exit_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
