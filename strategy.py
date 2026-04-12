@@ -8,89 +8,89 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1d Williams %R extreme + 1w EMA50 trend filter + volume confirmation
-    # Williams %R < -80 = oversold (long), > -20 = overbought (short)
-    # Only trade with weekly trend to avoid counter-trend whipsaws
-    # Volume spike (>2.0x 20-period average) confirms institutional participation
-    # Designed for very low frequency (target: 15-25/year) to minimize fee drag in 1d timeframe
-    # Works in bull/bear markets by only trading with the dominant weekly trend
+    # Hypothesis: 6h Williams %R extreme + 1d EMA200 trend filter + volume spike confirmation
+    # Williams %R < -80 = oversold (long), > -20 = overbought (short) on 6h
+    # Only trade in direction of 1d EMA200 to avoid counter-trend whipsaws
+    # Volume > 1.5x 20-period average confirms momentum
+    # Designed for low frequency (target: 12-25/year) to minimize fee drag in 6h timeframe
+    # Works in bull/bear markets by only trading with the dominant daily trend
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams %R calculation (primary timeframe)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Get 6h data for Williams %R calculation (primary timeframe)
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 14:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    volume_6h = df_6h['volume'].values
     
-    # Calculate Williams %R (14-period)
+    # Calculate Williams %R(14) on 6h
     # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
+    highest_high = pd.Series(high_6h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_6h).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close_6h) / (highest_high - lowest_low) * -100
     # Handle division by zero
     williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for EMA200 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    close_1d = df_1d['close'].values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Get 1d volume for confirmation
-    vol_ma_1d = np.full(len(df_1d), np.nan)
-    for i in range(20, len(df_1d)):
-        vol_ma_1d[i] = np.mean(volume_1d[i-20:i])
+    # Get 6h volume for confirmation
+    vol_ma_6h = np.full(len(df_6h), np.nan)
+    for i in range(20, len(df_6h)):
+        vol_ma_6h[i] = np.mean(volume_6h[i-20:i])
     
-    # Volume confirmation: volume > 2.0 * 20-period average (1d)
-    volume_spike_1d = volume_1d > (2.0 * vol_ma_1d)
+    # Volume confirmation: volume > 1.5 * 20-period average (6h)
+    volume_spike_6h = volume_6h > (1.5 * vol_ma_6h)
     
     # Align all indicators to LTF
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
+    williams_r_aligned = align_htf_to_ltf(prices, df_6h, williams_r)
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_6h, volume_spike_6h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or 
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or 
             np.isnan(volume_spike_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Williams %R conditions
+        # Williams %R extreme conditions
         oversold = williams_r_aligned[i] < -80
         overbought = williams_r_aligned[i] > -20
         
-        # 1w trend filter
-        bullish_trend = close[i] > ema50_1w_aligned[i]
-        bearish_trend = close[i] < ema50_1w_aligned[i]
+        # 1d trend filter
+        bullish_trend = close[i] > ema200_1d_aligned[i]
+        bearish_trend = close[i] < ema200_1d_aligned[i]
         
         # Entry logic: Extreme %R + trend alignment + volume confirmation
         long_entry = False
         short_entry = False
         
-        # Long: oversold (%R < -80) + bullish weekly trend + volume spike
+        # Long: oversold (%R < -80) + bullish daily trend + volume spike
         if oversold and bullish_trend:
             long_entry = volume_spike_aligned[i]
-        # Short: overbought (%R > -20) + bearish weekly trend + volume spike
+        # Short: overbought (%R > -20) + bearish daily trend + volume spike
         elif overbought and bearish_trend:
             short_entry = volume_spike_aligned[i]
         
-        # Exit logic: %R returns to neutral zone (-50) or trend reversal
-        long_exit = williams_r_aligned[i] > -50 or not bullish_trend
-        short_exit = williams_r_aligned[i] < -50 or not bearish_trend
+        # Exit logic: %R returns to neutral zone (-50) or trend changes
+        long_exit = (williams_r_aligned[i] > -50) or not bullish_trend
+        short_exit = (williams_r_aligned[i] < -50) or not bearish_trend
         
         if long_entry and position != 1:
             position = 1
@@ -115,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_williams_r_extreme_trend_volume_v1"
-timeframe = "1d"
+name = "6h_1d_williams_r_extreme_ema200_volume_v1"
+timeframe = "6h"
 leverage = 1.0
