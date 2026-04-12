@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-1d_1w_Weekly_Range_Breakout_v1
-Hypothesis: Price breaks above/below weekly high/low with volume confirmation.
-Weekly range breakouts capture momentum in both bull and bear markets.
-Volume filter ensures breakouts are genuine. Target 30-70 trades over 4 years.
+4h_1d_Camarilla_Trend_Filter_v1
+Hypothesis: Use daily trend from 1D close above/below EMA50 to filter 4H breakouts at Camarilla R4/S4 levels.
+Go long when 4H close breaks above daily R4 AND daily trend is up (close > EMA50).
+Go short when 4H close breaks below daily S4 AND daily trend is down (close < EMA50).
+Exit when price returns to daily midpoint (R4+S4)/2.
+Targets 20-40 trades per year to minimize fee drag. Works in bull/bear via trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Weekly_Range_Breakout_v1"
-timeframe = "1d"
+name = "4h_1d_Camarilla_Trend_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,46 +25,65 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Weekly data for range calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Daily data for trend and Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Weekly high/low (previous completed week)
-    weekly_high = df_1w['high'].shift(1).values
-    weekly_low = df_1w['low'].shift(1).values
+    # Daily EMA50 for trend filter
+    daily_close = df_1d['close'].values
+    ema50 = np.full(len(daily_close), np.nan)
+    if len(daily_close) >= 50:
+        alpha = 2 / (50 + 1)
+        ema50[0] = daily_close[0]
+        for i in range(1, len(daily_close)):
+            ema50[i] = alpha * daily_close[i] + (1 - alpha) * ema50[i-1]
     
-    # Align weekly high/low to daily
-    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Daily volume average (20-period)
-    volume_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        volume_ma[i] = np.mean(volume[i-20:i])
+    # Calculate Camarilla levels
+    range_ = prev_high - prev_low
+    camarilla_r4 = prev_close + range_ * 1.1 / 2
+    camarilla_s4 = prev_close - range_ * 1.1 / 2
+    
+    # Handle invalid ranges
+    valid_range = range_ > 0
+    camarilla_r4 = np.where(valid_range, camarilla_r4, np.nan)
+    camarilla_s4 = np.where(valid_range, camarilla_s4, np.nan)
+    
+    # Align to 4h timeframe
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any data invalid
-        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or
-            np.isnan(volume_ma[i])):
+        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or
+            np.isnan(ema50_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-day average
-        volume_confirm = volume[i] > 1.5 * volume_ma[i]
+        # Trend filter: daily close above/below EMA50
+        daily_close_price = df_1d['close'].values
+        daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close_price)
+        trend_up = daily_close_aligned[i] > ema50_aligned[i]
         
         # Breakout conditions
-        long_breakout = high[i] > weekly_high_aligned[i] and volume_confirm
-        short_breakout = low[i] < weekly_low_aligned[i] and volume_confirm
+        long_breakout = close[i] > camarilla_r4_aligned[i] and trend_up
+        short_breakout = close[i] < camarilla_s4_aligned[i] and not trend_up
         
-        # Exit conditions: return to opposite weekly boundary
-        long_exit = low[i] < weekly_low_aligned[i]
-        short_exit = high[i] > weekly_high_aligned[i]
+        # Exit conditions: return to Camarilla midpoint
+        camarilla_midpoint = (camarilla_r4_aligned[i] + camarilla_s4_aligned[i]) / 2
+        
+        long_exit = close[i] < camarilla_midpoint
+        short_exit = close[i] > camarilla_midpoint
         
         # Signal logic
         if long_breakout and position != 1:
