@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_camarilla_breakout_v36
-# Camarilla pivot levels from 1-day chart with volume confirmation and chop regime filter.
-# Works in bull markets by capturing breakouts above H4 resistance, and in bear markets
-# by shorting breakdowns below L4 support. Uses volume spike to confirm institutional
-# participation and chop filter to avoid false signals in ranging markets.
-# Target: 20-40 trades/year per symbol for low friction.
-name = "4h_1d_camarilla_breakout_v36"
-timeframe = "4h"
+# Hypothesis: 12h_1d_camarilla_breakout_v1
+# 12-hour timeframe strategy using daily Camarilla pivot levels with volume confirmation
+# and chop regime filter. Designed to capture breakouts in trending markets while avoiding
+# false signals in ranging conditions. Focuses on BTC/ETH with lower trade frequency
+# to minimize fee drag on the 12h timeframe. Target: 15-30 trades/year per symbol.
+name = "12h_1d_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,7 +22,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation
+    # Get 1d data for Camarilla calculation (called once before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -38,7 +37,7 @@ def generate_signals(prices):
     camarilla_h4 = close_prev + range_prev * 1.1 / 2
     camarilla_l4 = close_prev - range_prev * 1.1 / 2
     
-    # Align to 4h timeframe (already delayed by 1 day due to shift)
+    # Align to 12h timeframe (already delayed by 1 day due to shift)
     h4_level = align_htf_to_ltf(prices, df_1d, camarilla_h4)
     l4_level = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
@@ -48,12 +47,11 @@ def generate_signals(prices):
     
     # Chop regime filter: avoid choppy markets (CHOP > 61.8)
     # Calculate CHOP using 14-period ATR and highest/lowest
-    atr_period = 14
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
     lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
