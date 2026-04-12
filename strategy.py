@@ -1,73 +1,84 @@
 #!/usr/bin/env python3
 """
-6h_1d_Weekly_Pivot_Donchian_Breakout
-Hypothesis: 6s timeframe with weekly pivot levels (from Monday open) and daily Donchian breakout.
-Weekly pivots provide structural support/resistance that holds across market regimes.
-Donchian(20) breakout on daily timeframe filters for momentum in direction of weekly bias.
-Only takes longs when price above weekly pivot and breaks daily Donchian high,
-only shorts when below weekly pivot and breaks daily Donchian low.
-Designed for low turnover (target 15-35 trades/year) by requiring confluence of
-weekly structure and daily momentum breakout.
-Works in bull/bear markets by using weekly pivot as dynamic bias filter.
+4h_12h_TRIX_Volume_Spike_Crossover_v1
+Hypothesis: 4h timeframe with TRIX (1-period rate of change of triple EMA) crossover signals confirmed by volume spikes and 12h trend filter.
+TRIX > 0 indicates bullish momentum, TRIX < 0 indicates bearish momentum.
+Volume spike (2x average) confirms conviction.
+Only take signals aligned with 12h EMA(50) trend to avoid counter-trend trades.
+Designed for moderate trade frequency (target 20-50/year) with strong edge in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Weekly_Pivot_Donchian_Breakout"
-timeframe = "6h"
+name = "4h_12h_TRIX_Volume_Spike_Crossover_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for Donchian and weekly pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load 12h data ONCE before loop for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 60:
         return np.zeros(n)
     
-    # Calculate weekly pivot from Monday open of current week
-    # We'll approximate: weekly pivot = (weekly high + weekly low + weekly close) / 3
-    # For simplicity, use prior week's values to avoid look-ahead
-    weekly_high = df_1d['high'].rolling(window=5, min_periods=5).max().shift(5).values
-    weekly_low = df_1d['low'].rolling(window=5, min_periods=5).min().shift(5).values
-    weekly_close = df_1d['close'].shift(5).values
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
+    # Calculate TRIX (1-period ROC of triple EMA)
+    # EMA1
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
+    # EMA2 of EMA1
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    # EMA3 of EMA2
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    # TRIX = 1-period ROC of EMA3
+    trix = np.zeros_like(close)
+    trix[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100
     
-    # Calculate daily Donchian channels (20-period)
-    donchian_high = df_1d['high'].rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_low = df_1d['low'].rolling(window=20, min_periods=20).min().shift(1).values
+    # Calculate 12h EMA(50) for trend filter
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Align weekly pivot and daily Donchian to 6h timeframe
-    weekly_pivot_6h = align_htf_to_ltf(prices, df_1d, weekly_pivot)
-    donchian_high_6h = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_6h = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Volume average (20 period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if any required data is invalid
-        if (np.isnan(weekly_pivot_6h[i]) or np.isnan(donchian_high_6h[i]) or 
-            np.isnan(donchian_low_6h[i])):
+        if (np.isnan(trix[i]) or np.isnan(trix[i-1]) or 
+            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Entry conditions: Donchian breakout in direction of weekly pivot bias
-        long_entry = (close[i] > donchian_high_6h[i]) and (close[i] > weekly_pivot_6h[i])
-        short_entry = (close[i] < donchian_low_6h[i]) and (close[i] < weekly_pivot_6h[i])
+        # Volume spike: current volume > 2x average
+        volume_spike = volume[i] > vol_ma[i] * 2.0
         
-        # Exit conditions: return to opposite Donchian level or cross weekly pivot
-        long_exit = (close[i] < donchian_low_6h[i]) or (close[i] < weekly_pivot_6h[i])
-        short_exit = (close[i] > donchian_high_6h[i]) or (close[i] > weekly_pivot_6h[i])
+        # TRIX crossover signals
+        trix_cross_up = trix[i-1] <= 0 and trix[i] > 0
+        trix_cross_down = trix[i-1] >= 0 and trix[i] < 0
+        
+        # Trend filter: price above/below 12h EMA
+        above_ema = close[i] > ema_12h_aligned[i]
+        below_ema = close[i] < ema_12h_aligned[i]
+        
+        # Entry conditions: TRIX crossover with volume and trend alignment
+        long_entry = trix_cross_up and volume_spike and above_ema
+        short_entry = trix_cross_down and volume_spike and below_ema
+        
+        # Exit conditions: opposite TRIX crossover
+        long_exit = trix_cross_down
+        short_exit = trix_cross_up
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
