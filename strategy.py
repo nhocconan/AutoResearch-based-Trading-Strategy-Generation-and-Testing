@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-1d_1w_keltner_reversion_v1
-Hypothesis: Daily mean reversion at Keltner Channel extremes with weekly trend filter.
-Buy when price touches lower KC(20,2) in weekly uptrend, sell when touches upper KC in weekly downtrend.
-Uses volume confirmation to avoid false signals. Designed for low trade frequency (10-30/year).
-Works in bull/bear by aligning with weekly trend direction.
+12h_1d_keltner_volatility_breakout
+Hypothesis: 12-hour strategy using Keltner Channel breakouts with 1-day trend filter and volume confirmation.
+Works in bull/bear by requiring Keltner breakouts aligned with daily trend, using volatility to filter entries.
+Target: 12-30 trades/year (48-120 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
@@ -13,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,61 +20,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend and Keltner
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly EMA20 for trend and KC center
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    # Weekly ATR for KC width
-    tr1 = np.maximum(high_1w[1:] - low_1w[1:], np.abs(high_1w[1:] - close_1w[:-1]))
-    tr1 = np.maximum(tr1, np.abs(low_1w[1:] - close_1w[:-1]))
-    tr1 = np.concatenate([[np.nan], tr1])
-    atr_1w = pd.Series(tr1).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Daily EMA100 for trend filter
+    ema100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
+    ema100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema100_1d)
     
-    # Weekly Keltner Channels
-    upper_1w = ema20_1w + 2 * atr_1w
-    lower_1w = ema20_1w - 2 * atr_1w
+    # 12h Keltner Channel (20-period EMA, 2*ATR)
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align to daily
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
-    upper_1w_aligned = align_htf_to_ltf(prices, df_1w, upper_1w)
-    lower_1w_aligned = align_htf_to_ltf(prices, df_1w, lower_1w)
+    upper = ema20 + 2 * atr
+    lower = ema20 - 2 * atr
     
-    # Daily volume confirmation: volume > 1.5x 20-day average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: volume > 1.5x 50-period average
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema20_1w_aligned[i]) or np.isnan(upper_1w_aligned[i]) or 
-            np.isnan(lower_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema100_1d_aligned[i]) or np.isnan(ema20[i]) or 
+            np.isnan(upper[i]) or np.isnan(lower[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: price touches lower KC in weekly uptrend with volume
-        if (low[i] <= lower_1w_aligned[i] and close[i] > ema20_1w_aligned[i] and 
-            vol_confirm[i] and position != 1):
+        # Long entry: price above EMA100 (uptrend) AND breaks above upper Keltner with volume
+        if (close[i] > ema100_1d_aligned[i] and close[i] > upper[i] and vol_confirm[i] and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: price touches upper KC in weekly downtrend with volume
-        elif (high[i] >= upper_1w_aligned[i] and close[i] < ema20_1w_aligned[i] and 
-              vol_confirm[i] and position != -1):
+        # Short entry: price below EMA100 (downtrend) AND breaks below lower Keltner with volume
+        elif (close[i] < ema100_1d_aligned[i] and close[i] < lower[i] and vol_confirm[i] and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: price returns to weekly EMA20 or opposite KC touch
-        elif position == 1 and high[i] >= upper_1w_aligned[i]:
+        # Exit: reverse signal or price crosses back to EMA20
+        elif position == 1 and close[i] < ema20[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and low[i] <= lower_1w_aligned[i]:
+        elif position == -1 and close[i] > ema20[i]:
             position = 0
             signals[i] = 0.0
         else:
@@ -89,6 +82,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_keltner_reversion_v1"
-timeframe = "1d"
+name = "12h_1d_keltner_volatility_breakout"
+timeframe = "12h"
 leverage = 1.0
