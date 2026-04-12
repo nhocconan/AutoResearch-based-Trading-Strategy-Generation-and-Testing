@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-# 1d_1w_camarilla_breakout_volume_regime_v2
-# Hypothesis: Daily Camarilla breakout with weekly trend filter and volume confirmation.
-# Uses weekly EMA for trend direction to avoid counter-trend trades, volume to confirm breakout strength.
-# Target: 10-25 trades/year (40-100 total over 4 years) to minimize fee drift.
-# Works in bull/bear by aligning with higher timeframe trend and requiring volume confirmation.
+"""
+6h_1d_trix_volume_momentum
+Hypothesis: TRIX (15-period) captures smoothed momentum on 6h timeframe, 
+filtered by 1d volume spike (>2x 20-day average) to avoid false signals.
+TRIX > 0 with volume spike = long; TRIX < 0 with volume spike = short.
+Uses volume confirmation to enter only during high conviction moves.
+Works in bull/bear by requiring volume confirmation, avoiding chop.
+Target: 20-40 trades/year (80-160 total over 4 years).
+"""
 
-name = "1d_1w_camarilla_breakout_volume_regime_v2"
-timeframe = "1d"
+name = "6h_1d_trix_volume_momentum"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -19,86 +23,57 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    # Weekly EMA(20) for trend
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Get daily data for Camarilla levels
+    # Get daily data for TRIX and volume average
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Previous day's range for Camarilla calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    # TRIX: Triple EMA of 15-period ROC
+    # ROC(15) = (close / close.shift(15) - 1) * 100
+    roc = np.zeros_like(close_1d)
+    roc[15:] = (close_1d[15:] / close_1d[:-15] - 1) * 100
     
-    # Handle first bar
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
+    # Triple EMA of ROC
+    ema1 = pd.Series(roc).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    trix = ema3  # Already in percentage
     
-    # Calculate Camarilla levels (based on previous day)
-    range_ = prev_high - prev_low
-    # Resistance levels
-    r3 = prev_close + range_ * 1.1 / 2
-    r4 = prev_close + range_ * 1.1
-    # Support levels
-    s3 = prev_close - range_ * 1.1 / 2
-    s4 = prev_close - range_ * 1.1
+    # Volume spike: >2x 20-day average
+    vol_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_1d > (vol_ma * 2.0)
     
-    # Align Camarilla levels to daily timeframe (already aligned, but ensure proper handling)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Volume confirmation: volume > 1.3x 20-day average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.3)
+    # Align TRIX and volume spike to 6h timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if np.isnan(trix_aligned[i]) or np.isnan(vol_spike_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Determine trend from weekly EMA
-        uptrend = close[i] > ema_20_1w_aligned[i]
-        downtrend = close[i] < ema_20_1w_aligned[i]
-        
-        # Long entry: price breaks above R4, in uptrend, with volume confirmation
-        if (close[i] > r4_aligned[i] and uptrend and vol_confirm[i] and position != 1):
+        # Long entry: positive TRIX with volume spike
+        if trix_aligned[i] > 0 and vol_spike_aligned[i] > 0.5 and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short entry: price breaks below S4, in downtrend, with volume confirmation
-        elif (close[i] < s4_aligned[i] and downtrend and vol_confirm[i] and position != -1):
+        # Short entry: negative TRIX with volume spike
+        elif trix_aligned[i] < 0 and vol_spike_aligned[i] > 0.5 and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: reverse signal or price crosses back to opposite S3/R3
-        elif position == 1 and close[i] < s3_aligned[i]:
+        # Exit: TRIX crosses zero or volume spike ends
+        elif position == 1 and (trix_aligned[i] <= 0 or vol_spike_aligned[i] <= 0.5):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > r3_aligned[i]:
+        elif position == -1 and (trix_aligned[i] >= 0 or vol_spike_aligned[i] <= 0.5):
             position = 0
             signals[i] = 0.0
         else:
