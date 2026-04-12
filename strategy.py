@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_breakout_volume"
-timeframe = "1d"
+name = "4h_1d_keltner_volume_squeeze"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,56 +17,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    # Get 1d data for Keltner channels and volume filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla levels from previous week
-    # H3 = C + 1.1*(H-L)/4
-    # L3 = C - 1.1*(H-L)/4
-    # H4 = C + 1.1*(H-L)/2
-    # L4 = C - 1.1*(H-L)/2
-    camarilla_h3 = close_1w + 1.1 * (high_1w - low_1w) / 4
-    camarilla_l3 = close_1w - 1.1 * (high_1w - low_1w) / 4
-    camarilla_h4 = close_1w + 1.1 * (high_1w - low_1w) / 2
-    camarilla_l4 = close_1w - 1.1 * (high_1w - low_1w) / 2
+    # Keltner Channels (20-period, 2.0 ATR multiplier)
+    atr_period = 20
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
     
-    # Align to daily timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l4)
+    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    upper_keltner = ema_20 + 2.0 * atr
+    lower_keltner = ema_20 - 2.0 * atr
     
-    # Volume filter - 20-period average on daily data
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > vol_ma
+    # Volume filter: 20-period average on daily volume
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_strong = volume_1d > vol_ma_1d
+    
+    # Align to 4h timeframe
+    upper_keltner_aligned = align_htf_to_ltf(prices, df_1d, upper_keltner)
+    lower_keltner_aligned = align_htf_to_ltf(prices, df_1d, lower_keltner)
+    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
+    volume_strong_aligned = align_htf_to_ltf(prices, df_1d, volume_strong)
+    
+    # 4h price action for entry
+    # Calculate 4h ATR for stop loss
+    tr_4h1 = high[1:] - low[1:]
+    tr_4h2 = np.abs(high[1:] - close[:-1])
+    tr_4h3 = np.abs(low[1:] - close[:-1])
+    tr_4h = np.concatenate([[np.nan], np.maximum(tr_4h1, np.maximum(tr_4h2, tr_4h3))])
+    atr_4h = pd.Series(tr_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(200, n):
         # Skip if not ready
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
-            np.isnan(volume_ok[i])):
+        if (np.isnan(upper_keltner_aligned[i]) or np.isnan(lower_keltner_aligned[i]) or 
+            np.isnan(ema_20_aligned[i]) or np.isnan(volume_strong_aligned[i]) or 
+            np.isnan(atr_4h[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Camarilla breakout signals with volume confirmation
-        # Long: Price breaks above H4
-        long_signal = close[i] > camarilla_h4_aligned[i] and volume_ok[i]
-        # Short: Price breaks below L4
-        short_signal = close[i] < camarilla_l4_aligned[i] and volume_ok[i]
+        # Volume strong condition
+        vol_ok = volume_strong_aligned[i]
         
-        # Exit when price returns to H3/L3 levels
-        exit_long = close[i] < camarilla_h3_aligned[i]
-        exit_short = close[i] > camarilla_l3_aligned[i]
+        # Keltner squeeze breakout signals
+        # Long: Close breaks above upper Keltner band with volume
+        long_signal = close[i] > upper_keltner_aligned[i] and vol_ok
+        # Short: Close breaks below lower Keltner band with volume
+        short_signal = close[i] < lower_keltner_aligned[i] and vol_ok
+        
+        # Exit when price returns to middle (EMA20) - mean reversion tendency
+        exit_long = close[i] < ema_20_aligned[i]
+        exit_short = close[i] > ema_20_aligned[i]
         
         # Execute trades
         if long_signal and position != 1:
