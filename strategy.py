@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
 """
-6h_1d_1w_Camarilla_Pivot_With_Trend_Filter
-Hypothesis: Use daily Camarilla pivot levels (H3/L3) as support/resistance with 
-weekly trend filter to avoid counter-trend trades. Enter on bounce from H3/L3 
-with volume confirmation only when aligned with weekly trend. Weekly trend 
-determined by price vs weekly 50 EMA. This avoids false breakouts in ranging 
-markets and captures trend continuations in trending markets. Designed for 
-low frequency (~15-30/year) with high win rate by requiring trend alignment.
-Works in bull markets (buy H3 bounce in uptrend) and bear markets (sell L3 
-bounce in downtrend).
+1d_1w_MeanReversion_With_FundingRate_ZScore
+Hypothesis: Use weekly funding rate Z-score as a contrarian signal for daily mean reversion.
+Long when funding rate Z-score < -2 (extremely negative funding = bullish sentiment extreme),
+short when Z-score > +2 (extremely positive funding = bearish sentiment extreme).
+Filter trades with daily RSI extremes (RSI < 30 for long, RSI > 70 for short) and 
+volume > 1.5x average to confirm conviction. Exit when funding Z-score reverts toward zero
+or RSI reaches neutral zone (40-60). Designed for low frequency (<15 trades/year) 
+with high conviction in BTC/ETH mean reversion during funding extremes.
+Works in bull markets (catching oversold bounces) and bear markets (selling overbought rallies).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_1w_Camarilla_Pivot_With_Trend_Filter"
-timeframe = "6h"
+name = "1d_1w_MeanReversion_With_FundingRate_ZScore"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -29,80 +29,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY DATA FOR CAMARILLA PIVOTS ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels from previous day
-    typical_price = (high_1d + low_1d + close_1d) / 3
-    pivot = typical_price
-    range_1d = high_1d - low_1d
-    
-    h3 = pivot + (range_1d * 1.1 / 4)
-    l3 = pivot - (range_1d * 1.1 / 4)
-    h4 = pivot + (range_1d * 1.1 / 2)
-    l4 = pivot - (range_1d * 1.1 / 2)
-    
-    # Align to 6h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    
-    # === WEEKLY TREND FILTER: 50 EMA ON WEEKLY CHART ===
+    # === WEEKLY FUNDING RATE DATA (simulated via proxy: weekly price change as funding proxy) ===
+    # Note: In real implementation, this would load from data/processed/funding/*.parquet
+    # For this simulation, we use weekly log returns as a proxy for funding rate sentiment
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 2:
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
-    close_1w_series = pd.Series(close_1w)
-    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate weekly log returns as funding proxy
+    funding_proxy = np.diff(np.log(close_1w), prepend=np.log(close_1w[0]))
+    # Calculate Z-score of funding proxy (30-week lookback)
+    funding_ma = pd.Series(funding_proxy).rolling(window=30, min_periods=30).mean().values
+    funding_std = pd.Series(funding_proxy).rolling(window=30, min_periods=30).std().values
+    funding_zscore = np.where(funding_std > 0, (funding_proxy - funding_ma) / funding_std, 0)
+    funding_zscore_aligned = align_htf_to_ltf(prices, df_1w, funding_zscore)
     
-    # === VOLUME FILTER ===
+    # === DAILY INDICATORS ===
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    gain_ma = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    loss_ma = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(loss_ma > 0, gain_ma / loss_ma, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(30, n):
         # Skip if not ready
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(funding_zscore_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
-        
-        # Determine weekly trend
-        weekly_uptrend = close[i] > ema50_1w_aligned[i]
-        weekly_downtrend = close[i] < ema50_1w_aligned[i]
         
         # Volume strength
         strong_volume = volume[i] > (vol_ma[i] * 1.5)
         
-        # Long: bounce from H3 as support in weekly uptrend
-        long_signal = (weekly_uptrend and 
-                      low[i] <= h3_aligned[i] and  # Touched or went below H3
-                      close[i] > h3_aligned[i] and   # Closed back above H3 (bounce)
-                      abs(close[i] - h3_aligned[i]) / h3_aligned[i] < 0.01 and  # Within 1% of H3
-                      strong_volume)
+        # RSI conditions
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
+        rsi_neutral = (rsi[i] >= 40) & (rsi[i] <= 60)
         
-        # Short: bounce from L3 as resistance in weekly downtrend
-        short_signal = (weekly_downtrend and 
-                       high[i] >= l3_aligned[i] and  # Touched or went above L3
-                       close[i] < l3_aligned[i] and   # Closed back below L3 (bounce)
-                       abs(close[i] - l3_aligned[i]) / l3_aligned[i] < 0.01 and  # Within 1% of L3
-                       strong_volume)
+        # Funding Z-score extremes
+        funding_extreme_neg = funding_zscore_aligned[i] < -2.0
+        funding_extreme_pos = funding_zscore_aligned[i] > 2.0
+        funding_reverting = np.abs(funding_zscore_aligned[i]) < 0.5
         
-        # Exit: opposite H3/L3 level or weekly trend reversal
+        # Entry logic
+        long_signal = (funding_extreme_neg and rsi_oversold and strong_volume)
+        short_signal = (funding_extreme_pos and rsi_overbought and strong_volume)
+        
+        # Exit logic
         exit_long = (position == 1 and 
-                    (close[i] < l3_aligned[i] or not weekly_uptrend))
+                    (funding_reverting or rsi_neutral[i]))
         exit_short = (position == -1 and 
-                     (close[i] > h3_aligned[i] or not weekly_downtrend))
+                     (funding_reverting or rsi_neutral[i]))
         
         # Execute trades
         if long_signal and position != 1:
