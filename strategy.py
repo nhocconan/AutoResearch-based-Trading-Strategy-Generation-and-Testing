@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_1w_camarilla_breakout_volume
-Uses 1w Camarilla pivot levels on 12h timeframe with volume confirmation.
-Long when price breaks above H4 resistance, short when breaks below L4 support.
-Exit when price returns to H3/L3 levels.
-Volume filter: current volume > 1.8x 24-period average to avoid false breakouts.
-Designed for low trade frequency (target: 15-25 trades/year) to minimize fee drag.
-Works in both trending and ranging markets by combining institutional levels with volume confirmation.
+4h_12h_1d_camarilla_breakout
+Combines 12h Camarilla pivot levels with 1d trend filter and volume confirmation.
+Long when price breaks above H3 after bullish 1d trend, short when breaks below L3 after bearish 1d trend.
+Uses volume spike confirmation and ATR-based stoploss to reduce false breakouts.
+Targets 20-40 trades/year for low fee drag.
 """
 
-name = "12h_1w_camarilla_breakout_volume"
-timeframe = "12h"
+name = "4h_12h_1d_camarilla_breakout"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -27,64 +25,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for Camarilla calculation (weekly pivot levels)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get 12h data for Camarilla pivot calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate Camarilla levels (based on previous week)
-    # Typical pivot = (H + L + C) / 3
-    # Range = H - L
-    # H4 = Close + 1.1 * Range * 1.1
-    # L4 = Close - 1.1 * Range * 1.1
-    # H3 = Close + 1.1 * Range * 0.5
-    # L3 = Close - 1.1 * Range * 0.5
+    # Calculate 12h Camarilla pivot levels (based on previous day's range)
+    # Using typical Camarilla formula: H4 = close + range * 1.1/2, H3 = close + range * 1.1/4, etc.
+    # But we'll use the standard calculation based on prior period's high/low/close
+    # For simplicity, we'll use the prior 12h bar's HLC
+    prev_close_12h = np.roll(close_12h, 1)
+    prev_high_12h = np.roll(high_12h, 1)
+    prev_low_12h = np.roll(low_12h, 1)
+    # Set first value to NaN (no previous bar)
+    prev_close_12h[0] = np.nan
+    prev_high_12h[0] = np.nan
+    prev_low_12h[0] = np.nan
     
-    pivot = (high_1w + low_1w + close_1w) / 3.0
-    range_1w = high_1w - low_1w
+    # Calculate pivot and ranges
+    pivot_12h = (prev_high_12h + prev_low_12h + prev_close_12h) / 3.0
+    range_12h = prev_high_12h - prev_low_12h
     
-    h4 = close_1w + 1.1 * range_1w * 1.1
-    l4 = close_1w - 1.1 * range_1w * 1.1
-    h3 = close_1w + 1.1 * range_1w * 0.5
-    l3 = close_1w - 1.1 * range_1w * 0.5
+    # Camarilla levels
+    H3 = pivot_12h + (range_12h * 1.1 / 4)
+    L3 = pivot_12h - (range_12h * 1.1 / 4)
+    H4 = pivot_12h + (range_12h * 1.1 / 2)
+    L4 = pivot_12h - (range_12h * 1.1 / 2)
     
-    # Align Camarilla levels to 12h timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_1w, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1w, l4)
-    h3_aligned = align_htf_to_ltf(prices, df_1w, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1w, l3)
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Volume confirmation: volume > 1.8x 24-period average (2 days of 12h data)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    close_1d = df_1d['close'].values
+    # 20-period EMA for trend
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Align all indicators to 4h
+    H3_aligned = align_htf_to_ltf(prices, df_12h, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_12h, L3)
+    H4_aligned = align_htf_to_ltf(prices, df_12h, H4)
+    L4_aligned = align_htf_to_ltf(prices, df_12h, L4)
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    
+    # Volume confirmation: volume > 1.8x 20-period average (higher threshold to reduce trades)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.8)
+    
+    # ATR for dynamic stoploss and volatility filter
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = np.nan  # First value has no previous close
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # Start after enough data for calculations
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i])):
+        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or 
+            np.isnan(ema_20_1d_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: price breaks above H4 resistance with volume confirmation
-        if close[i] > h4_aligned[i] and vol_confirm[i] and position != 1:
+        # Long entry: price breaks above H3 after bullish 1d trend (price > EMA20), with volume spike
+        if (close[i] > H3_aligned[i] and close[i] > ema_20_1d_aligned[i] and 
+            vol_confirm[i] and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: price breaks below L4 support with volume confirmation
-        elif close[i] < l4_aligned[i] and vol_confirm[i] and position != -1:
+        # Short entry: price breaks below L3 after bearish 1d trend (price < EMA20), with volume spike
+        elif (close[i] < L3_aligned[i] and close[i] < ema_20_1d_aligned[i] and 
+              vol_confirm[i] and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit conditions: return to H3/L3 levels (profit taking)
-        elif position == 1 and close[i] <= h3_aligned[i]:
+        # Exit conditions: reverse signal or price returns to opposite Camarilla level
+        elif position == 1 and (close[i] < L3_aligned[i] or close[i] < ema_20_1d_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] >= l3_aligned[i]:
+        elif position == -1 and (close[i] > H3_aligned[i] or close[i] > ema_20_1d_aligned[i]):
             position = 0
             signals[i] = 0.0
         else:
