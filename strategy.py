@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-4h_1D_Chaikin_Money_Flow_Strategy
-Hypothesis: Chaikin Money Flow (CMF) on daily timeframe detects institutional accumulation/distribution.
-Long when CMF > 0.15 with price above 4h EMA50, short when CMF < -0.15 with price below EMA50.
-Uses volume-weighted money flow to capture smart money moves, effective in both bull (accumulation) and bear (distribution) markets.
-Low trade frequency (~25/year) reduces fee drag while capturing significant moves.
+4h_1D_Heikin_Ashi_Trend_Strategy
+Hypothesis: Heikin Ashi (HA) candles on daily timeframe filter noise and reveal true trend direction.
+Combined with 4h price action: long when HA close > HA open (bullish candle) and price breaks above 4h high of previous 3 candles,
+short when HA close < HA open (bearish candle) and price breaks below 4h low of previous 3 candles.
+Uses volume confirmation to avoid false breakouts. Designed for low trade frequency (~20-30/year) to minimize fee drag.
+Works in both bull (rides uptrends) and bear (captures downtrends) markets by following HA trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1D_Chaikin_Money_Flow_Strategy"
+name = "4h_1D_Heikin_Ashi_Trend_Strategy"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,37 +26,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY DATA FOR CHAIKIN MONEY FLOW ===
+    # === DAILY DATA FOR HEIKIN ASHI ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    open_1d = df_1d['open'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Money Flow Multiplier: ((Close - Low) - (High - Close)) / (High - Low)
-    # Avoid division by zero
-    hl_range = high_1d - low_1d
-    hl_range = np.where(hl_range == 0, 1, hl_range)  # Replace zeros with 1 to avoid div/0
-    mf_multiplier = ((close_1d - low_1d) - (high_1d - close_1d)) / hl_range
+    # Heikin Ashi calculations
+    ha_close = (open_1d + high_1d + low_1d + close_1d) / 4
+    ha_open = np.zeros_like(ha_close)
+    ha_open[0] = (open_1d[0] + close_1d[0]) / 2
+    for i in range(1, len(ha_open)):
+        ha_open[i] = (ha_open[i-1] + ha_close[i-1]) / 2
     
-    # Money Flow Volume
-    mf_volume = mf_multiplier * volume_1d
+    # HA trend: bullish when ha_close > ha_open, bearish when ha_close < ha_open
+    ha_bullish = ha_close > ha_open
+    ha_bearish = ha_close < ha_open
     
-    # Chaikin Money Flow (20-period)
-    mf_volume_sum = pd.Series(mf_volume).rolling(window=20, min_periods=20).sum().values
-    volume_sum = pd.Series(volume_1d).rolling(window=20, min_periods=20).sum().values
-    cmf = np.where(volume_sum != 0, mf_volume_sum / volume_sum, 0)
-    
-    # Align CMF to 4h timeframe (wait for daily bar to close)
-    cmf_aligned = align_htf_to_ltf(prices, df_1d, cmf)
+    # Align HA trend to 4h timeframe (wait for daily bar to close)
+    ha_bullish_aligned = align_htf_to_ltf(prices, df_1d, ha_bullish.astype(float))
+    ha_bearish_aligned = align_htf_to_ltf(prices, df_1d, ha_bearish.astype(float))
     
     # === 4H INDICATORS ===
-    # EMA50 for trend filter
-    close_series = pd.Series(close)
-    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # High and low of previous 3 candles for breakout levels
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    # Rolling max of high for last 3 periods (excluding current)
+    high_3bar_max = high_series.rolling(window=3, min_periods=1).max().shift(1).values
+    low_3bar_min = low_series.rolling(window=3, min_periods=1).min().shift(1).values
     
     # Volume confirmation (4h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -66,20 +68,21 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(cmf_aligned[i]) or np.isnan(ema50[i]) or 
+        if (np.isnan(ha_bullish_aligned[i]) or np.isnan(ha_bearish_aligned[i]) or 
+            np.isnan(high_3bar_max[i]) or np.isnan(low_3bar_min[i]) or 
             np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long setup: CMF positive (accumulation) + price above EMA50 + volume confirmation
-        long_setup = (cmf_aligned[i] > 0.15) and (close[i] > ema50[i]) and (vol_ratio[i] > 1.2)
+        # Long setup: Daily HA bullish + price breaks above 3-bar high + volume confirmation
+        long_setup = (ha_bullish_aligned[i] > 0.5) and (close[i] > high_3bar_max[i]) and (vol_ratio[i] > 1.3)
         
-        # Short setup: CMF negative (distribution) + price below EMA50 + volume confirmation
-        short_setup = (cmf_aligned[i] < -0.15) and (close[i] < ema50[i]) and (vol_ratio[i] > 1.2)
+        # Short setup: Daily HA bearish + price breaks below 3-bar low + volume confirmation
+        short_setup = (ha_bearish_aligned[i] > 0.5) and (close[i] < low_3bar_min[i]) and (vol_ratio[i] > 1.3)
         
-        # Exit when CMF crosses zero (change in money flow direction)
-        exit_long = cmf_aligned[i] < 0
-        exit_short = cmf_aligned[i] > 0
+        # Exit when daily HA trend changes
+        exit_long = ha_bearish_aligned[i] > 0.5  # HA turned bearish
+        exit_short = ha_bullish_aligned[i] > 0.5  # HA turned bullish
         
         # Execute trades
         if long_setup and position != 1:
