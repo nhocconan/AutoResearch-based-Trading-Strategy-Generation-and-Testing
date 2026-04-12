@@ -8,10 +8,10 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Camarilla pivot breakout with 1d trend filter and volume confirmation
-    # Buy when price breaks above Camarilla H3 level in uptrend (1d EMA50)
-    # Sell when price breaks below Camarilla L3 level in downtrend
-    # Volume > 1.3x 20-period MA confirms breakout strength
+    # Hypothesis: 1d Camarilla pivot breakout with 1w trend filter and volume confirmation
+    # Long when price breaks above H3 with volume > 1.5x 20-day average and 1w uptrend
+    # Short when price breaks below L3 with volume > 1.5x 20-day average and 1w downtrend
+    # Exit when price returns to pivot point (PP) or opposite Camarilla level
     # Discrete position sizing (0.25) to minimize fee churn. Target: 20-50 trades/year.
     
     close = prices['close'].values
@@ -19,47 +19,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d EMA(50) for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1w EMA(34) for trend filter
+    close_1w_series = pd.Series(close_1w)
+    ema_34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate Camarilla levels from previous 1d bar (need previous day's OHLC)
-    # We'll use the 1d data shifted by 1 to get previous completed day
-    close_1d_prev = np.roll(close_1d, 1)
-    high_1d_prev = np.roll(df_1d['high'].values, 1)
-    low_1d_prev = np.roll(df_1d['low'].values, 1)
+    # Calculate daily Camarilla levels using previous day's OHLC
+    # Camarilla levels: H4, H3, H2, H1, L1, L2, L3, L4
+    # PP = (H + L + C) / 3
+    # H3 = PP + (H - L) * 1.1 / 4
+    # L3 = PP - (H - L) * 1.1 / 4
     
-    # First bar: no previous day data
-    close_1d_prev[0] = close_1d[0]
-    high_1d_prev[0] = df_1d['high'].values[0]
-    low_1d_prev[0] = df_1d['low'].values[0]
+    # Shift to get previous day's OHLC
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
     
-    # Calculate Camarilla levels for each 1d bar
-    camarilla_h3 = np.full(len(df_1d), np.nan)
-    camarilla_l3 = np.full(len(df_1d), np.nan)
+    # First bar has no previous day
+    prev_high[0] = prev_low[0] = prev_close[0] = np.nan
     
-    for i in range(len(df_1d)):
-        if i == 0:
-            camarilla_h3[i] = close_1d_prev[i]  # fallback
-            camarilla_l3[i] = close_1d_prev[i]
-        else:
-            daily_range = high_1d_prev[i] - low_1d_prev[i]
-            camarilla_h3[i] = close_1d_prev[i] + daily_range * 1.1 / 4
-            camarilla_l3[i] = close_1d_prev[i] - daily_range * 1.1 / 4
+    pivot_point = (prev_high + prev_low + prev_close) / 3.0
+    high_low_range = prev_high - prev_low
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_h3 = pivot_point + (high_low_range * 1.1 / 4.0)
+    camarilla_l3 = pivot_point - (high_low_range * 1.1 / 4.0)
     
-    # Volume confirmation: current volume > 1.3x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
@@ -76,25 +68,27 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(pivot_point[i]) or np.isnan(camarilla_h3[i]) or 
+            np.isnan(camarilla_l3[i]) or np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend from 1d EMA(50)
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Determine trend from 1w EMA(34)
+        uptrend = close[i] > ema_34_1w_aligned[i]
+        downtrend = close[i] < ema_34_1w_aligned[i]
         
-        # Breakout conditions with volume confirmation
-        long_breakout = close[i] > camarilla_h3_aligned[i]
-        short_breakout = close[i] < camarilla_l3_aligned[i]
+        # Breakout conditions
+        breakout_above_h3 = close[i] > camarilla_h3[i]
+        breakout_below_l3 = close[i] < camarilla_l3[i]
         
-        long_entry = long_breakout and (vol_ratio[i] > 1.3) and uptrend
-        short_entry = short_breakout and (vol_ratio[i] > 1.3) and downtrend
+        # Entry conditions with volume confirmation
+        long_entry = breakout_above_h3 and (vol_ratio[i] > 1.5) and uptrend
+        short_entry = breakout_below_l3 and (vol_ratio[i] > 1.5) and downtrend
         
-        # Exit conditions: price returns to previous day's close (mean reversion)
-        long_exit = close[i] < camarilla_h3_aligned[i]  # price back below H3
-        short_exit = close[i] > camarilla_l3_aligned[i]  # price back above L3
+        # Exit conditions: price returns to pivot point
+        long_exit = close[i] < pivot_point[i]
+        short_exit = close[i] > pivot_point[i]
         
         if long_entry and position != 1:
             position = 1
@@ -119,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_camarilla_breakout_vol_trend_v1"
-timeframe = "4h"
+name = "1d_1w_camarilla_breakout_vol_trend_v1"
+timeframe = "1d"
 leverage = 1.0
