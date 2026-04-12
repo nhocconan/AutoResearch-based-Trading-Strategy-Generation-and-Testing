@@ -1,22 +1,24 @@
-# 12h_1d_4h_Camarilla_Pivot_Breakout_V1
-# Hypothesis: On 12h timeframe, trade breakouts from Camarilla pivot levels calculated from 1d candles.
-# Long when price breaks above H3 with volume confirmation and 4h uptrend (price > 4h EMA20).
-# Short when price breaks below L3 with volume confirmation and 4h downtrend (price < 4h EMA20).
-# Uses volume > 1.5x 20-period average for confirmation.
-# Designed for low trade frequency (15-35 trades/year) with strict entry conditions.
-# Works in bull markets via long breakouts and in bear markets via short breakdowns.
+#!/usr/bin/env python3
+"""
+4h_12h_Camarilla_Pivot_Breakout_With_Volume_and_Chop_Regime_v1
+Hypothesis: On 4h timeframe, buy when price breaks above Camarilla H3 level with volume spike in trending regime,
+sell when price breaks below L3 level with volume spike in trending regime. Uses 12h Camarilla pivot levels
+for structure and 12h Choppiness Index to filter ranging markets. Designed for 20-40 trades/year by requiring
+trending regime (CHOP < 38.2) and volume confirmation, avoiding false breakouts in sideways markets.
+Works in bull markets via long breakouts and in bear markets via short breakdowns.
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_4h_Camarilla_Pivot_Breakout_V1"
-timeframe = "12h"
+name = "4h_12h_Camarilla_Pivot_Breakout_With_Volume_and_Chop_Regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -25,80 +27,98 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load 12h data ONCE for Camarilla pivot levels and Choppiness Index
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous 1d candle
-    # H4 = C + 1.5*(H-L), H3 = C + 1.25*(H-L), H2 = C + 1.166*(H-L), H1 = C + 1.083*(H-L)
-    # L1 = C - 1.083*(H-L), L2 = C - 1.166*(H-L), L3 = C - 1.25*(H-L), L4 = C - 1.5*(H-L)
-    # where C = (H+L+CLOSE)/3 (typical price)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 12h Camarilla pivot levels (using previous 12h bar's OHLC)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Previous day's values (shift by 1 to avoid look-ahead)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan  # First value has no previous
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Camarilla levels: based on previous period's range
+    # H4 = close + 1.5*(high-low), H3 = close + 1.0*(high-low), H2 = close + 0.5*(high-low)
+    # L2 = close - 0.5*(high-low), L3 = close - 1.0*(high-low), L4 = close - 1.5*(high-low)
+    range_12h = high_12h - low_12h
+    camarilla_h3 = close_12h + 1.0 * range_12h  # H3 level
+    camarilla_l3 = close_12h - 1.0 * range_12h  # L3 level
     
-    # Calculate pivot levels for previous day
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
+    # Align Camarilla levels to 4h timeframe (wait for 12h bar to close)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l3)
     
-    h3 = pivot + 1.25 * range_hl
-    l3 = pivot - 1.25 * range_hl
+    # Calculate 12h Choppiness Index for regime filtering
+    # CHOP = 100 * log10(sum(ATR) / (max(high) - min(low))) / log10(period)
+    period = 14
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr2[0] = 0  # first value has no previous close
+    tr3[0] = 0
+    atr_12h = np.maximum(np.maximum(tr1, tr2), tr3)
     
-    # Align 1d Camarilla levels to 12h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    # Sum of ATR over period
+    atr_sum = np.zeros_like(atr_12h)
+    for i in range(len(atr_12h)):
+        if i < period:
+            atr_sum[i] = np.nan
+        else:
+            atr_sum[i] = np.sum(atr_12h[i-period+1:i+1])
     
-    # Load 4h data ONCE for EMA20 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
+    # Rolling max/high and min/low over period
+    max_high = np.zeros_like(high_12h)
+    min_low = np.zeros_like(low_12h)
+    for i in range(len(high_12h)):
+        if i < period:
+            max_high[i] = np.nan
+            min_low[i] = np.nan
+        else:
+            max_high[i] = np.max(high_12h[i-period+1:i+1])
+            min_low[i] = np.min(low_12h[i-period+1:i+1])
     
-    # Calculate 4h EMA20
-    close_4h = df_4h['close'].values
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    # Choppiness Index
+    chop_12h = np.zeros_like(close_12h)
+    for i in range(len(chop_12h)):
+        if np.isnan(atr_sum[i]) or np.isnan(max_high[i]) or np.isnan(min_low[i]) or max_high[i] == min_low[i]:
+            chop_12h[i] = np.nan
+        else:
+            chop_12h[i] = 100 * np.log10(atr_sum[i] / (max_high[i] - min_low[i])) / np.log10(period)
     
-    # Volume average (20 period) for spike detection
+    # Align Choppiness Index to 4h timeframe
+    chop_12h_aligned = align_htf_to_ltf(prices, df_12h, chop_12h)
+    
+    # Volume average (20 period) for spike detection on 4h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(ema_20_4h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(chop_12h_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
+        # Regime filter: trending market (CHOP < 38.2)
+        trending_regime = chop_12h_aligned[i] < 38.2
+        
+        # Volume spike: current volume > 2.0x average
+        volume_spike = volume[i] > vol_ma[i] * 2.0
+        
         # Breakout conditions
-        breakout_long = close[i] > h3_aligned[i]
-        breakout_short = close[i] < l3_aligned[i]
+        long_breakout = close[i] > camarilla_h3_aligned[i]
+        short_breakout = close[i] < camarilla_l3_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x average
-        volume_confirm = volume[i] > vol_ma[i] * 1.5
+        # Entry conditions: breakout + volume spike + trending regime
+        long_entry = long_breakout and volume_spike and trending_regime
+        short_entry = short_breakout and volume_spike and trending_regime
         
-        # Trend filter from 4h EMA20
-        uptrend = close[i] > ema_20_4h_aligned[i]
-        downtrend = close[i] < ema_20_4h_aligned[i]
-        
-        # Entry conditions
-        long_entry = breakout_long and volume_confirm and uptrend
-        short_entry = breakout_short and volume_confirm and downtrend
-        
-        # Exit conditions: price returns to pivot level or opposite breakout
-        pivot_level = (h3_aligned[i] + l3_aligned[i]) / 2
-        long_exit = close[i] < pivot_level
-        short_exit = close[i] > pivot_level
+        # Exit conditions: price returns to pivot zone (between H3 and L3) or opposite breakout
+        pivot_zone_entry = camarilla_l3_aligned[i] <= close[i] <= camarilla_h3_aligned[i]
+        long_exit = pivot_zone_entry or short_breakout
+        short_exit = pivot_zone_entry or long_breakout
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
