@@ -8,12 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Camarilla pivot breakout with 1d volume spike and chop regime filter
-    # Camarilla levels from 1d provide institutional support/resistance
-    # Volume spike confirms institutional participation
-    # Chop regime filter avoids whipsaws in ranging markets
-    # Works in bull/bear by fading extremes in range and following breakouts in trend
-    # Target: 12-37 trades/year per symbol.
+    # Hypothesis: 4h Donchian breakout with 1d ATR filter and volume confirmation
+    # Donchian(20) provides clear breakout levels that work in all regimes
+    # 1d ATR filter ensures we only trade when volatility is sufficient
+    # Volume confirmation avoids false breakouts
+    # Target: 20-50 trades/year per symbol.
     
     # Session filter: 8:00-20:00 UTC (avoid low volume Asian session)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -24,9 +23,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and volume context
+    # Get 1d data for ATR filter and volume context
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
@@ -34,133 +33,95 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Camarilla levels (using previous day's range)
-    camarilla_h4 = np.full(len(df_1d), np.nan)
-    camarilla_l4 = np.full(len(df_1d), np.nan)
-    camarilla_h3 = np.full(len(df_1d), np.nan)
-    camarilla_l3 = np.full(len(df_1d), np.nan)
-    camarilla_h2 = np.full(len(df_1d), np.nan)
-    camarilla_l2 = np.full(len(df_1d), np.nan)
-    camarilla_h1 = np.full(len(df_1d), np.nan)
-    camarilla_l1 = np.full(len(df_1d), np.nan)
-    camarilla_pivot = np.full(len(df_1d), np.nan)
-    
-    for i in range(1, len(df_1d)):
-        # Previous day's OHLC
-        phigh = high_1d[i-1]
-        plow = low_1d[i-1]
-        pclose = close_1d[i-1]
-        
-        # Pivot point
-        camarilla_pivot[i] = (phigh + plow + 2 * pclose) / 4
-        
-        # Range
-        rng = phigh - plow
-        
-        # Camarilla levels
-        camarilla_h4[i] = camarilla_pivot[i] + rng * 1.1 / 2
-        camarilla_l4[i] = camarilla_pivot[i] - rng * 1.1 / 2
-        camarilla_h3[i] = camarilla_pivot[i] + rng * 1.1 / 4
-        camarilla_l3[i] = camarilla_pivot[i] - rng * 1.1 / 4
-        camarilla_h2[i] = camarilla_pivot[i] + rng * 1.1 / 6
-        camarilla_l2[i] = camarilla_pivot[i] - rng * 1.1 / 6
-        camarilla_h1[i] = camarilla_pivot[i] + rng * 1.1 / 12
-        camarilla_l1[i] = camarilla_pivot[i] - rng * 1.1 / 12
-    
-    # Align 1d Camarilla levels to 12h timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    h2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h2)
-    l2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l2)
-    h1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h1)
-    l1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l1)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    
-    # 1d volume spike filter (current volume > 1.5 * 20-day average)
-    vol_ma_20_1d = np.full(len(df_1d), np.nan)
-    for i in range(19, len(df_1d)):
-        vol_ma_20_1d[i] = np.mean(volume_1d[i-19:i+1])
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    volume_spike = volume > 1.5 * vol_ma_20_1d_aligned
-    
-    # Chop regime filter (using 1d data)
-    # Chop > 61.8 = ranging (mean revert at Camarilla H3/L3)
-    # Chop < 38.2 = trending (follow breakouts at H4/L4)
+    # Calculate 1d ATR(14) for volatility filter
     atr_1d = np.full(len(df_1d), np.nan)
-    for i in range(14, len(df_1d)):
-        tr = np.max([
-            high_1d[i] - low_1d[i],
-            np.abs(high_1d[i] - close_1d[i-1]),
-            np.abs(low_1d[i] - close_1d[i-1])
-        ])
-        if i == 14:
-            atr_1d[i] = np.mean([high_1d[j] - low_1d[j] for j in range(i-13, i+1)])
+    tr_1d = np.full(len(df_1d), np.nan)
+    
+    for i in range(len(df_1d)):
+        if i == 0:
+            tr_1d[i] = high_1d[i] - low_1d[i]
         else:
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr) / 14
+            tr_1d[i] = max(
+                high_1d[i] - low_1d[i],
+                abs(high_1d[i] - close_1d[i-1]),
+                abs(low_1d[i] - close_1d[i-1])
+            )
     
-    # Calculate Chop (14-period)
-    sum_tr_14 = np.full(len(df_1d), np.nan)
-    max_min_range_14 = np.full(len(df_1d), np.nan)
-    chop = np.full(len(df_1d), 50.0)  # default neutral
+    # Calculate ATR using Wilder's smoothing
+    for i in range(len(df_1d)):
+        if i < 14:
+            atr_1d[i] = np.nan
+        elif i == 14:
+            atr_1d[i] = np.mean(tr_1d[0:15])
+        else:
+            atr_1d[i] = (atr_1d[i-1] * 13 + tr_1d[i]) / 14
     
-    for i in range(13, len(df_1d)):
-        # Sum of true range over 14 periods
-        tr_sum = 0
-        for j in range(i-13, i+1):
-            tr = np.max([
-                high_1d[j] - low_1d[j],
-                np.abs(high_1d[j] - close_1d[j-1]) if j > 0 else 0,
-                np.abs(low_1d[j] - close_1d[j-1]) if j > 0 else 0
-            ])
-            tr_sum += tr
-        sum_tr_14[i] = tr_sum
-        
-        # Max high - min low over 14 periods
-        max_high = np.max(high_1d[i-13:i+1])
-        min_low = np.min(low_1d[i-13:i+1])
-        max_min_range_14[i] = max_high - min_low
-        
-        if max_min_range_14[i] > 0:
-            chop[i] = 100 * np.log10(sum_tr_14[i] / max_min_range_14[i]) / np.log10(14)
+    # ATR ratio: current ATR / 20-day ATR average (volatility regime filter)
+    atr_ma_20 = np.full(len(df_1d), np.nan)
+    for i in range(19, len(df_1d)):
+        atr_ma_20[i] = np.mean(atr_1d[i-19:i+1])
     
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    atr_ratio = np.full(len(df_1d), np.nan)
+    for i in range(len(df_1d)):
+        if not np.isnan(atr_1d[i]) and not np.isnan(atr_ma_20[i]) and atr_ma_20[i] > 0:
+            atr_ratio[i] = atr_1d[i] / atr_ma_20[i]
+        else:
+            atr_ratio[i] = np.nan
+    
+    # Align 1d ATR ratio to 4h timeframe
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    
+    # Calculate 4h Donchian channels (20-period)
+    donchian_h = np.full(n, np.nan)
+    donchian_l = np.full(n, np.nan)
+    
+    for i in range(n):
+        if i < 19:
+            donchian_h[i] = np.nan
+            donchian_l[i] = np.nan
+        else:
+            donchian_h[i] = np.max(high[i-19:i+1])
+            donchian_l[i] = np.min(low[i-19:i+1])
+    
+    # 4h volume spike filter (current volume > 1.5 * 20-period average)
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(19, n):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    
+    volume_spike = np.full(n, False)
+    for i in range(n):
+        if not np.isnan(vol_ma_20[i]) and vol_ma_20[i] > 0:
+            volume_spike[i] = volume[i] > 1.5 * vol_ma_20[i]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(20, n):
         if not in_session[i]:
             signals[i] = 0.0
             continue
         
         # Skip if data not ready
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(volume_spike[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(donchian_h[i]) or np.isnan(donchian_l[i]) or 
+            np.isnan(atr_ratio_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Regime-based logic
-        if chop_aligned[i] > 61.8:  # Ranging market - mean revert at H3/L3
-            # Long near L3, short near H3
-            long_entry = close[i] <= l3_aligned[i] and volume_spike[i]
-            short_entry = close[i] >= h3_aligned[i] and volume_spike[i]
-            long_exit = close[i] >= pivot_aligned[i]
-            short_exit = close[i] <= pivot_aligned[i]
-        else:  # Trending market - follow breakouts at H4/L4
-            # Breakout entries
-            long_entry = close[i] > h4_aligned[i] and volume_spike[i]
-            short_entry = close[i] < l4_aligned[i] and volume_spike[i]
-            # Exit on opposite test of H4/L4 or volume dropout
-            long_exit = close[i] < l4_aligned[i] or (not volume_spike[i])
-            short_exit = close[i] > h4_aligned[i] or (not volume_spike[i])
+        # Only trade when volatility is sufficient (ATR ratio > 0.8) and not excessive (< 2.0)
+        vol_filter = (atr_ratio_aligned[i] > 0.8) and (atr_ratio_aligned[i] < 2.0)
         
-        if long_entry and position != 1:
+        # Breakout logic with volume confirmation
+        long_breakout = close[i] > donchian_h[i] and volume_spike[i] and vol_filter
+        short_breakout = close[i] < donchian_l[i] and volume_spike[i] and vol_filter
+        
+        # Exit on opposite Donchian test or volume dropout
+        long_exit = close[i] < donchian_l[i] or (not volume_spike[i])
+        short_exit = close[i] > donchian_h[i] or (not volume_spike[i])
+        
+        if long_breakout and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_entry and position != -1:
+        elif short_breakout and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
@@ -180,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_camarilla_breakout_vol_chop_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_breakout_atr_vol_filter_v1"
+timeframe = "4h"
 leverage = 1.0
