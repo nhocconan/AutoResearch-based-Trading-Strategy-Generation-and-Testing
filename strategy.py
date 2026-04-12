@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volatility_filter_v3"
-timeframe = "4h"
+name = "12h_1d_camarilla_breakout_volatility_filter_v4"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -37,7 +37,7 @@ def generate_signals(prices):
     atr_ma_20 = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
     atr_ratio = atr_1d / atr_ma_20
     
-    # Align ATR ratio to 4h timeframe
+    # Align ATR ratio to 12h timeframe
     atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
     # Calculate previous day's close for volatility-based position sizing
@@ -62,11 +62,11 @@ def generate_signals(prices):
         camarilla_high[i] = C + ((H - L) * 1.1 / 2)
         camarilla_low[i] = C - ((H - L) * 1.1 / 2)
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
     camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
     
-    # Volume filter: current volume > 20-period average (on 4h data)
+    # Volume filter: current volume > 20-period average (on 12h data)
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
@@ -74,7 +74,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # warmup
+    for i in range(40, n):  # warmup
         # Skip if not ready
         if (np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]) or 
             np.isnan(volume_ok[i]) or np.isnan(position_size[i])):
