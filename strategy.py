@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
 """
-1d_1w_KAMA_Trend_With_RSI_v1
-Hypothesis: Use weekly trend via KAMA on weekly data, enter on daily pullbacks confirmed by RSI.
-KAMA adapts to market noise, providing reliable trend direction. RSI identifies overbought/oversold
-levels within the trend for entries. Works in bull (buy pullbacks in uptrend) and bear (sell rallies in downtrend).
-Target: 20-50 trades over 4 years (5-12/year) to minimize fee drag.
+6h_1d_1w_MultiTF_Trend_Momentum_v1
+Hypothesis: Combine 1d trend (EMA200), 6h momentum (RSI pullback), and 1w momentum (RSI>50) for high-probability entries.
+Works in bull by buying dips above EMA200, works in bear by shorting rallies below EMA200 when weekly momentum turns bearish.
+Targets 15-30 trades/year to minimize fee drag. Uses 6h timeframe for optimal balance of signal quality and frequency.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_KAMA_Trend_With_RSI_v1"
-timeframe = "1d"
+name = "6h_1d_1w_MultiTF_Trend_Momentum_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     # Price arrays
@@ -25,57 +24,74 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Weekly data for KAMA trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Daily data for EMA200 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # Calculate KAMA on weekly close
-    close_1w = df_1w['close'].values
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_1w, lag=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close_1w)), axis=1)  # 10-period volatility
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
-    # KAMA calculation
-    kama = np.zeros_like(close_1w)
-    kama[0] = close_1w[0]
-    for i in range(1, len(close_1w)):
-        kama[i] = kama[i-1] + sc[i] * (close_1w[i] - kama[i-1])
+    # Weekly data for momentum filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
+        return np.zeros(n)
     
-    # Align KAMA to daily timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1w, kama)
+    # Calculate daily EMA200
+    close_1d = pd.Series(df_1d['close'])
+    ema200_1d = close_1d.ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Daily RSI (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    # Calculate weekly RSI(14)
+    close_1w = pd.Series(df_1w['close'])
+    delta_1w = close_1w.diff()
+    gain_1w = delta_1w.where(delta_1w > 0, 0)
+    loss_1w = (-delta_1w).where(delta_1w < 0, 0)
+    avg_gain_1w = gain_1w.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss_1w = loss_1w.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs_1w = avg_gain_1w / avg_loss_1w.replace(0, np.nan)
+    rsi_1w = 100 - (100 / (1 + rs_1w))
+    rsi_1w = rsi_1w.fillna(50).values  # neutral when undefined
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    
+    # Calculate 6h RSI(14) for entry timing
+    close_series = pd.Series(close)
+    delta = close_series.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = (-delta).where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
     rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(200, n):
         # Skip if any data invalid
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi[i])):
+        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(rsi_1w_aligned[i]) or 
+            np.isnan(rsi[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter: price relative to weekly KAMA
-        bullish = close[i] > kama_aligned[i]
-        bearish = close[i] < kama_aligned[i]
+        # Determine trend from daily EMA200
+        above_ema200 = close[i] > ema200_1d_aligned[i]
+        below_ema200 = close[i] < ema200_1d_aligned[i]
         
-        # Entry conditions: RSI extremes in direction of trend
-        long_setup = bullish and rsi[i] < 30  # Oversold in uptrend
-        short_setup = bearish and rsi[i] > 70  # Overbought in downtrend
+        # Weekly momentum filter
+        weekly_bullish = rsi_1w_aligned[i] > 50
+        weekly_bearish = rsi_1w_aligned[i] < 50
         
-        # Exit conditions: RSI returns to neutral zone
-        long_exit = rsi[i] >= 50
-        short_exit = rsi[i] <= 50
+        # 6h RSI for entry timing (pullbacks in trend direction)
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
+        
+        # Long setup: price above daily EMA200, weekly bullish, and 6h RSI oversold
+        long_setup = above_ema200 and weekly_bullish and rsi_oversold
+        # Short setup: price below daily EMA200, weekly bearish, and 6h RSI overbought
+        short_setup = below_ema200 and weekly_bearish and rsi_overbought
+        
+        # Exit when RSI returns to neutral zone (40-60) or trend fails
+        long_exit = (rsi[i] >= 40) or (not above_ema200)
+        short_exit = (rsi[i] <= 60) or (not below_ema200)
         
         # Signal logic
         if long_setup and position != 1:
