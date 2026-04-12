@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-6h_1d_cci_ema_hybrid
-Uses 1d EMA for trend direction and 6h CCI for momentum entries.
-Long when 1d EMA200 uptrend + 6h CCI crosses above -100 (momentum shift).
-Short when 1d EMA200 downtrend + 6h CCI crosses below +100.
-Exit when CCI crosses back toward zero or EMA trend weakens.
-Designed for low trade frequency (target: 10-25 trades/year) with clear trend-momentum alignment.
-Works in bull (follow EMA uptrend) and bear (fade rallies in downtrend).
+12h_1w_camarilla_breakout_volume
+Uses 1w Camarilla pivot levels on 12h timeframe with volume confirmation.
+Long when price breaks above H4 resistance, short when breaks below L4 support.
+Exit when price returns to H3/L3 levels.
+Volume filter: current volume > 1.8x 24-period average to avoid false breakouts.
+Designed for low trade frequency (target: 15-25 trades/year) to minimize fee drag.
+Works in both trending and ranging markets by combining institutional levels with volume confirmation.
 """
 
-name = "6h_1d_cci_ema_hybrid"
-timeframe = "6h"
+name = "12h_1w_camarilla_breakout_volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,55 +25,66 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w data for Camarilla calculation (weekly pivot levels)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # EMA200 on 1d for trend filter
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Calculate Camarilla levels (based on previous week)
+    # Typical pivot = (H + L + C) / 3
+    # Range = H - L
+    # H4 = Close + 1.1 * Range * 1.1
+    # L4 = Close - 1.1 * Range * 1.1
+    # H3 = Close + 1.1 * Range * 0.5
+    # L3 = Close - 1.1 * Range * 0.5
     
-    # EMA50 on 1d for trend strength (optional filter)
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    pivot = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
     
-    # CCI(20) on 6h for momentum
-    tp = (high + low + close) / 3.0  # typical price
-    sma_tp = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
-    mad = pd.Series(tp).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
-    cci = (tp - sma_tp) / (0.015 * mad)
+    h4 = close_1w + 1.1 * range_1w * 1.1
+    l4 = close_1w - 1.1 * range_1w * 1.1
+    h3 = close_1w + 1.1 * range_1w * 0.5
+    l3 = close_1w - 1.1 * range_1w * 0.5
+    
+    # Align Camarilla levels to 12h timeframe
+    h4_aligned = align_htf_to_ltf(prices, df_1w, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1w, l4)
+    h3_aligned = align_htf_to_ltf(prices, df_1w, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1w, l3)
+    
+    # Volume confirmation: volume > 1.8x 24-period average (2 days of 12h data)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_confirm = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(30, n):  # Start after enough data for calculations
         # Skip if data not ready
-        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(cci[i])):
+        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
+            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend from 1d EMA
-        uptrend = close_1d[i // 24] > ema200_1d[i // 24] if i // 24 < len(close_1d) else False
-        downtrend = close_1d[i // 24] < ema200_1d[i // 24] if i // 24 < len(close_1d) else False
-        
-        # Long: uptrend + CCI crosses above -100 (bullish momentum)
-        if uptrend and cci[i] > -100 and cci[i-1] <= -100 and position != 1:
+        # Long entry: price breaks above H4 resistance with volume confirmation
+        if close[i] > h4_aligned[i] and vol_confirm[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: downtrend + CCI crosses below +100 (bearish momentum)
-        elif downtrend and cci[i] < 100 and cci[i-1] >= 100 and position != -1:
+        # Short entry: price breaks below L4 support with volume confirmation
+        elif close[i] < l4_aligned[i] and vol_confirm[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: CCI crosses back toward zero or trend weakens
-        elif position == 1 and (cci[i] < 0 or close_1d[i // 24] < ema200_1d[i // 24]):
+        # Exit conditions: return to H3/L3 levels (profit taking)
+        elif position == 1 and close[i] <= h3_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (cci[i] > 0 or close_1d[i // 24] > ema200_1d[i // 24]):
+        elif position == -1 and close[i] >= l3_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
