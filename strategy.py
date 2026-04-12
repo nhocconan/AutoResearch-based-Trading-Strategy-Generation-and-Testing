@@ -8,100 +8,102 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1d KAMA trend filter with 1w Williams %R mean reversion and volume confirmation
-    # KAMA adapts to market efficiency - trending when ER high, mean-reverting when ER low
-    # 1w Williams %R < -80 = oversold (long bias), > -20 = overbought (short bias) in 1w context
-    # Volume > 1.3x 20-period MA confirms institutional participation
-    # Discrete position sizing (0.25) to minimize fee churn. Target: 15-25 trades/year.
+    # Hypothesis: 6h Elder Ray + 12h ADX regime filter
+    # Bull Power = High - EMA13(close), Bear Power = EMA13(close) - Low
+    # Long when Bull Power > 0 AND Bear Power < 0 AND 12h ADX > 25 (strong trend)
+    # Short when Bear Power > 0 AND Bull Power < 0 AND 12h ADX > 25
+    # Uses discrete position sizing (0.25) to minimize fee churn. Target: 12-37 trades/year.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1w data for Williams %R
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    # Get 12h data for ADX regime filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:  # Need enough for ADX calculation
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 1w Williams %R (14-period)
-    highest_14_1w = np.full(len(close_1w), np.nan)
-    lowest_14_1w = np.full(len(close_1w), np.nan)
+    # Calculate 12h ADX(14)
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[np.nan], tr])  # Align with original indices
+        
+        # Directional Movement
+        up_move = high[1:] - high[:-1]
+        down_move = low[:-1] - low[1:]
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        plus_dm = np.concatenate([[0.0], plus_dm])
+        minus_dm = np.concatenate([[0.0], minus_dm])
+        
+        # Smoothed values using Wilder's smoothing (EMA with alpha=1/period)
+        def wilders_smoothing(data, period):
+            alpha = 1.0 / period
+            result = np.full_like(data, np.nan)
+            # First value is simple average
+            if len(data) >= period:
+                result[period-1] = np.nanmean(data[:period])
+            # Subsequent values
+            for i in range(period, len(data)):
+                if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                    result[i] = (1 - alpha) * result[i-1] + alpha * data[i]
+            return result
+        
+        atr = wilders_smoothing(tr, period)
+        plus_dm_smooth = wilders_smoothing(plus_dm, period)
+        minus_dm_smooth = wilders_smoothing(minus_dm, period)
+        
+        # Avoid division by zero
+        plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
+        minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
+        
+        dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+        adx = wilders_smoothing(dx, period)
+        return adx
     
-    for i in range(14, len(close_1w)):
-        highest_14_1w[i] = np.max(high_1w[i-14:i])
-        lowest_14_1w[i] = np.min(low_1w[i-14:i])
+    adx_12h = calculate_adx(high_12h, low_12h, close_12h, 14)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
     
-    williams_r_1w = np.full(len(close_1w), np.nan)
-    for i in range(14, len(close_1w)):
-        if highest_14_1w[i] != lowest_14_1w[i]:
-            williams_r_1w[i] = (highest_14_1w[i] - close_1w[i]) / (highest_14_1w[i] - lowest_14_1w[i]) * -100
-        else:
-            williams_r_1w[i] = -50.0
-    
-    williams_r_1w_aligned = align_htf_to_ltf(prices, df_1w, williams_r_1w)
-    
-    # KAMA (Adaptive Moving Average) on 1d close
-    # Efficiency Ratio (ER) = |net change| / sum(|changes|)
-    # Smoothing Constants: fastest SC=2/(2+1)=0.667, slowest SC=2/(30+1)=0.0645
+    # Calculate EMA13 for Elder Ray on 6h
     close_series = pd.Series(close)
-    change = abs(close_series.diff(1))
-    volatility = change.rolling(window=10, min_periods=1).sum()
-    net_change = abs(close_series.diff(10))
-    er = np.where(volatility > 0, net_change / volatility, 0)
+    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Smoothing constant
-    sc = (er * (0.667 - 0.0645) + 0.0645) ** 2
-    kama = np.full(n, np.nan)
-    kama[0] = close[0]
-    
-    for i in range(1, n):
-        if not np.isnan(sc.iloc[i]):
-            kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    
-    # Volume confirmation: current volume > 1.3x 20-period average
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma_20[i] = np.mean(volume[i-20:i])
-    
-    vol_ratio = np.full(n, np.nan)
-    for i in range(20, n):
-        if vol_ma_20[i] > 0:
-            vol_ratio[i] = volume[i] / vol_ma_20[i]
-        else:
-            vol_ratio[i] = 1.0
+    # Elder Ray components
+    bull_power = high - ema13  # Bull Power = High - EMA13
+    bear_power = ema13 - low   # Bear Power = EMA13 - Low
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(kama[i]) or np.isnan(williams_r_1w_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(adx_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend from KAMA (price above/below KAMA)
-        uptrend = close[i] > kama[i]
-        downtrend = close[i] < kama[i]
+        # Regime filter: 12h ADX > 25 indicates strong trend
+        strong_trend = adx_12h_aligned[i] > 25
         
-        # 1w Williams %R mean reversion conditions
-        oversold = williams_r_1w_aligned[i] < -80
-        overbought = williams_r_1w_aligned[i] > -20
+        # Elder Ray signals
+        bull_positive = bull_power[i] > 0
+        bear_positive = bear_power[i] > 0
         
-        # Entry conditions with volume confirmation
-        long_entry = oversold and (vol_ratio[i] > 1.3) and uptrend
-        short_entry = overbought and (vol_ratio[i] > 1.3) and downtrend
+        # Entry conditions
+        long_entry = bull_positive and not bear_positive and strong_trend
+        short_entry = bear_positive and not bull_positive and strong_trend
         
-        # Exit conditions: Williams %R returns to midpoint (-50)
-        long_exit = williams_r_1w_aligned[i] > -50
-        short_exit = williams_r_1w_aligned[i] < -50
+        # Exit conditions: when Elder Ray signals reverse or trend weakens
+        long_exit = not bull_positive or bear_positive or not strong_trend
+        short_exit = not bear_positive or bull_positive or not strong_trend
         
         if long_entry and position != 1:
             position = 1
@@ -126,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_kama_williams_r_mean_reversion_vol_v1"
-timeframe = "1d"
+name = "6h_12h_elder_ray_adx_regime_v1"
+timeframe = "6h"
 leverage = 1.0
