@@ -5,12 +5,12 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
-    # Hypothesis: 6h Camarilla H4/L4 breakout with 1d EMA200 trend filter and volume confirmation
-    # Uses daily Camarilla levels (H4/L4 for breakouts) and daily EMA200 for trend
-    # Volume spike (>2.0x 50-period average) confirms institutional participation
+    # Hypothesis: 12h Camarilla H4/L4 breakout with 1d EMA50 trend filter and volume confirmation
+    # Uses daily Camarilla levels (H4/L4 for breakouts) and daily EMA50 for trend
+    # Volume spike (>1.8x 100-period average) confirms institutional participation
     # Designed for low trade frequency (target: 15-30/year) to minimize fee drag
     # Trend filter works in bull/bear markets; breakout structure captures momentum
     
@@ -19,9 +19,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot levels and EMA200
+    # Get 1d data for Camarilla pivot levels and EMA50
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
@@ -44,33 +44,33 @@ def generate_signals(prices):
         camarilla_h4_1d[i] = pivot_val + range_val * 1.1 / 2.0  # H4
         camarilla_l4_1d[i] = pivot_val - range_val * 1.1 / 2.0  # L4
     
-    # Calculate 1d EMA200 for trend filter
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align HTF indicators to 6h timeframe
+    # Align HTF indicators to 12h timeframe
     camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4_1d)
     camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4_1d)
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Volume confirmation: volume > 2.0 * 50-period average (6h)
+    # Volume confirmation: volume > 1.8 * 100-period average (12h)
     vol_ma = np.full(n, np.nan)
-    for i in range(50, n):
-        vol_ma[i] = np.mean(volume[i-50:i])
-    volume_spike = volume > (2.0 * vol_ma)
+    for i in range(100, n):
+        vol_ma[i] = np.mean(volume[i-100:i])
+    volume_spike = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if data not ready
-        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(camarilla_h4_aligned[i]) or 
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(camarilla_h4_aligned[i]) or 
             np.isnan(camarilla_l4_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Determine 1d trend
-        bullish_trend = close[i] > ema200_1d_aligned[i]
-        bearish_trend = close[i] < ema200_1d_aligned[i]
+        bullish_trend = close[i] > ema50_1d_aligned[i]
+        bearish_trend = close[i] < ema50_1d_aligned[i]
         
         # Entry logic: Camarilla breakout with volume and trend filter
         long_entry = False
@@ -110,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_camarilla_h4l4_ema200_volume_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_h4l4_ema50_volume_v1"
+timeframe = "12h"
 leverage = 1.0
