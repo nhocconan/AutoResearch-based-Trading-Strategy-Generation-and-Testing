@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v1"
-timeframe = "12h"
+name = "4h_12h_camarilla_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,50 +17,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data for Camarilla pivot calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 10:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Camarilla levels from previous day
-    # Pivot = (H+L+C)/3
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Calculate Camarilla pivot levels from previous 12h bar
+    # Pivot = (H + L + C) / 3
+    # Resistance levels: R1 = C + (H-L)*1.1/12, R2 = C + (H-L)*1.1/6, R3 = C + (H-L)*1.1/4, R4 = C + (H-L)*1.1/2
+    # Support levels: S1 = C - (H-L)*1.1/12, S2 = C - (H-L)*1.1/6, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
+    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
+    range_12h = high_12h - low_12h
+    r4_12h = close_12h + range_12h * 1.1 / 2.0
+    r3_12h = close_12h + range_12h * 1.1 / 4.0
+    s3_12h = close_12h - range_12h * 1.1 / 4.0
+    s4_12h = close_12h - range_12h * 1.1 / 2.0
     
-    # Resistance and support levels
-    r4 = close_1d + range_1d * 1.500
-    r3 = close_1d + range_1d * 1.250
-    r2 = close_1d + range_1d * 1.166
-    r1 = close_1d + range_1d * 1.083
-    s1 = close_1d - range_1d * 1.083
-    s2 = close_1d - range_1d * 1.166
-    s3 = close_1d - range_1d * 1.250
-    s4 = close_1d - range_1d * 1.500
+    # Align Camarilla levels to 4h timeframe
+    pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
+    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
+    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
     
-    # Align Camarilla levels to 12h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Get 1w data for trend filter (EMA 50)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Volume filter - 20-period average on 12h data
+    # Volume filter - 20-period average on 4h data
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
@@ -70,24 +52,19 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(r4_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(volume_ok[i])):
+        if (np.isnan(pivot_12h_aligned[i]) or np.isnan(r3_12h_aligned[i]) or 
+            np.isnan(s3_12h_aligned[i]) or np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend from 1w EMA
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
+        # Long when price touches or breaks above S3 support with volume
+        # Short when price touches or breaks below R3 resistance with volume
+        long_signal = close[i] <= s3_12h_aligned[i] and volume_ok[i]
+        short_signal = close[i] >= r3_12h_aligned[i] and volume_ok[i]
         
-        # Breakout signals with volume confirmation
-        # Long: break above R3 (strong resistance becomes support)
-        long_signal = close[i] > r3_aligned[i] and uptrend and volume_ok[i]
-        # Short: break below S3 (strong support becomes resistance)
-        short_signal = close[i] < s3_aligned[i] and downtrend and volume_ok[i]
-        
-        # Exit when price returns to pivot area
-        exit_long = close[i] < pivot[i]
-        exit_short = close[i] > pivot[i]
+        # Exit when price returns to pivot level
+        exit_long = close[i] >= pivot_12h_aligned[i]
+        exit_short = close[i] <= pivot_12h_aligned[i]
         
         # Execute trades
         if long_signal and position != 1:
