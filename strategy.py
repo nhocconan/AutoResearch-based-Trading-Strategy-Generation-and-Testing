@@ -8,65 +8,33 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Camarilla pivot breakout with 1d volume spike + chop regime filter
-    # Uses 1d Camarilla levels (H3/L3) for structure: long above H3, short below L3
+    # Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter + volume confirmation
+    # Uses 1w EMA50 for trend filter: only take breakouts in direction of 1w trend
     # Volume confirmation: volume > 2.0 * 20-period average to filter false breakouts
-    # Chop regime: only trade when market is trending (CHOP < 38.2) to avoid whipsaws in ranging markets
-    # Discrete sizing 0.25 to minimize fee churn. Target: 20-30 trades/year per symbol.
+    # Discrete sizing 0.25 to minimize fee churn. Target: 15-25 trades/year per symbol.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and chop calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d Camarilla levels (H3, L3) - using previous day's range
-    camarilla_h3 = np.full(len(close_1d), np.nan)
-    camarilla_l3 = np.full(len(close_1d), np.nan)
-    for i in range(1, len(close_1d)):
-        # Calculate based on previous day's high-low-close
-        phigh = high_1d[i-1]
-        plow = low_1d[i-1]
-        pclose = close_1d[i-1]
-        range_val = phigh - plow
-        camarilla_h3[i] = pclose + range_val * 1.1 / 4
-        camarilla_l3[i] = pclose - range_val * 1.1 / 4
+    # Calculate 1w EMA50 for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Calculate 1d Choppiness Index (CHOP) for regime filter
-    # CHOP = 100 * log10(sum(ATR(14)) / log10(highest_high - lowest_low)) / log10(14)
-    atr_1d = np.full(len(close_1d), np.nan)
-    tr_1d = np.zeros(len(close_1d))
-    for i in range(1, len(close_1d)):
-        hl = high_1d[i] - low_1d[i]
-        hc = np.abs(high_1d[i] - close_1d[i-1])
-        lc = np.abs(low_1d[i] - close_1d[i-1])
-        tr_1d[i] = max(hl, hc, lc)
-    
-    for i in range(14, len(close_1d)):
-        atr_1d[i] = np.mean(tr_1d[i-13:i+1])
-    
-    chop_1d = np.full(len(close_1d), np.nan)
-    for i in range(14, len(close_1d)):
-        highest_high = np.max(high_1d[i-13:i+1])
-        lowest_low = np.min(low_1d[i-13:i+1])
-        sum_atr = np.sum(atr_1d[i-13:i+1])
-        if highest_high != lowest_low:
-            chop_1d[i] = 100 * np.log10(sum_atr) / np.log10(14) / np.log10(highest_high - lowest_low)
-        else:
-            chop_1d[i] = 0
-    
-    # Align HTF indicators to LTF
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    # Calculate 1d Donchian channels (20-period)
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    for i in range(20, n):
+        donchian_high[i] = np.max(high[i-20:i])
+        donchian_low[i] = np.min(low[i-20:i])
     
     # Volume confirmation: volume > 2.0 * 20-period average
     vol_ma = np.full(n, np.nan)
@@ -79,27 +47,29 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(chop_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade when market is trending (CHOP < 38.2)
-        is_trending = chop_1d_aligned[i] < 38.2
+        # Determine 1w trend
+        bullish_trend = close[i] > ema50_1w_aligned[i]
+        bearish_trend = close[i] < ema50_1w_aligned[i]
         
-        # Entry logic: Camarilla breakout with volume and regime filter
+        # Entry logic: Donchian breakout with volume and trend filter
         long_entry = False
         short_entry = False
         
-        if is_trending:
-            # Long breakout: price breaks above Camarilla H3 with volume spike
-            long_entry = (close[i] > camarilla_h3_aligned[i]) and volume_spike[i]
-            # Short breakout: price breaks below Camarilla L3 with volume spike
-            short_entry = (close[i] < camarilla_l3_aligned[i]) and volume_spike[i]
+        # Long breakout: price breaks above Donchian high in bullish trend
+        if bullish_trend:
+            long_entry = (close[i] > donchian_high[i]) and volume_spike[i]
+        # Short breakout: price breaks below Donchian low in bearish trend
+        elif bearish_trend:
+            short_entry = (close[i] < donchian_low[i]) and volume_spike[i]
         
-        # Exit logic: opposite Camarilla level or chop regime shift to ranging
-        long_exit = (not is_trending) or (close[i] < camarilla_l3_aligned[i])
-        short_exit = (not is_trending) or (close[i] > camarilla_h3_aligned[i])
+        # Exit logic: opposite Donchian level or trend reversal
+        long_exit = (bearish_trend and close[i] < donchian_low[i]) or (not bullish_trend and not bearish_trend)
+        short_exit = (bullish_trend and close[i] > donchian_high[i]) or (not bullish_trend and not bearish_trend)
         
         if long_entry and position != 1:
             position = 1
@@ -124,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_camarilla_breakout_volume_chop_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_breakout_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
