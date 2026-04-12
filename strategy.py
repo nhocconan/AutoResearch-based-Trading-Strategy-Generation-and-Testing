@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_camarilla_breakout_v1"
-timeframe = "1h"
+name = "12h_1d_donchian_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,73 +17,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Camarilla levels
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 10:
-        return np.zeros(n)
-    
-    # Calculate Camarilla levels on daily data for better stability
+    # Get 1d data for Donchian channel calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Camarilla levels: H4/L4 (resistance/support)
-    # H4 = Close + 1.1/2 * (High - Low)
-    # L4 = Close - 1.1/2 * (High - Low)
-    camarilla_h4 = prev_close + 1.1/2 * (prev_high - prev_low)
-    camarilla_l4 = prev_close - 1.1/2 * (prev_high - prev_low)
+    # Calculate Donchian channels (20-day high/low) on daily data
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align Camarilla levels to 1h timeframe
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # Align Donchian levels to 12h timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     
-    # Volume filter - 24-period average (1 day on 1h)
+    # Get 1w data for trend filter (EMA 50)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Volume filter - 20-period average on 12h data
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=24, min_periods=24).mean().values
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
-    
-    # Session filter: 08:00-20:00 UTC
-    hours = prices.index.hour
-    session_ok = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(24, n):  # Start after volume MA warmup
+    for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
-            np.isnan(volume_ok[i])):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_ok[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Skip outside session
-        if not session_ok[i]:
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
-            continue
+        # Trend from 1w EMA
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
-        # Breakout signals with volume confirmation
-        # Long: price breaks above H4 resistance
-        long_signal = close[i] > camarilla_h4_aligned[i] and volume_ok[i]
-        # Short: price breaks below L4 support
-        short_signal = close[i] < camarilla_l4_aligned[i] and volume_ok[i]
+        # Donchian breakout signals with volume confirmation
+        # Long: price breaks above 20-day high in uptrend
+        long_signal = close[i] > high_20_aligned[i] and uptrend and volume_ok[i]
+        # Short: price breaks below 20-day low in downtrend
+        short_signal = close[i] < low_20_aligned[i] and downtrend and volume_ok[i]
         
-        # Exit when price returns to midpoint (mean reversion)
-        midpoint = (camarilla_h4_aligned[i] + camarilla_l4_aligned[i]) / 2
-        exit_long = close[i] < midpoint and position == 1
-        exit_short = close[i] > midpoint and position == -1
+        # Exit when price crosses back through the opposite Donchian level
+        exit_long = close[i] < low_20_aligned[i]
+        exit_short = close[i] > high_20_aligned[i]
         
         # Execute trades
         if long_signal and position != 1:
             position = 1
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif short_signal and position != -1:
             position = -1
-            signals[i] = -0.20
+            signals[i] = -0.25
         elif exit_long and position == 1:
             position = 0
             signals[i] = 0.0
@@ -93,9 +87,9 @@ def generate_signals(prices):
         else:
             # Hold position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
