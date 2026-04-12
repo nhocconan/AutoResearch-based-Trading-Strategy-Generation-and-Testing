@@ -8,10 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian breakout with 1d trend filter and volume confirmation
-    # Donchian breakout captures trends, 1d EMA filter avoids counter-trend trades
-    # Volume > 1.3x 20-period MA confirms breakout strength
-    # Discrete position sizing (0.25) to minimize fee churn. Target: 12-37 trades/year.
+    # Hypothesis: 4h Donchian(20) breakout with 1d trend filter (EMA34) and volume confirmation
+    # Long: price breaks above Donchian high + above 1d EMA34 + volume > 1.5x MA
+    # Short: price breaks below Donchian low + below 1d EMA34 + volume > 1.5x MA
+    # Exit: opposite Donchian breakout or volume < 0.8x MA
+    # Discrete sizing 0.25 to minimize fee churn. Target: 20-50 trades/year.
     
     close = prices['close'].values
     high = prices['high'].values
@@ -30,7 +31,7 @@ def generate_signals(prices):
     ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Donchian Channel (20-period) on 12h
+    # Donchian channels (20-period) on 4h
     highest_20 = np.full(n, np.nan)
     lowest_20 = np.full(n, np.nan)
     
@@ -38,7 +39,7 @@ def generate_signals(prices):
         highest_20[i] = np.max(high[i-20:i])
         lowest_20[i] = np.min(low[i-20:i])
     
-    # Volume confirmation: current volume > 1.3x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
@@ -68,13 +69,17 @@ def generate_signals(prices):
         breakout_up = close[i] > highest_20[i]
         breakout_down = close[i] < lowest_20[i]
         
-        # Entry conditions with volume confirmation
-        long_entry = breakout_up and (vol_ratio[i] > 1.3) and uptrend
-        short_entry = breakout_down and (vol_ratio[i] > 1.3) and downtrend
+        # Volume confirmation
+        vol_confirm = vol_ratio[i] > 1.5
+        vol_weak = vol_ratio[i] < 0.8
         
-        # Exit conditions: opposite Donchian break
-        long_exit = close[i] < lowest_20[i]
-        short_exit = close[i] > highest_20[i]
+        # Entry conditions
+        long_entry = breakout_up and uptrend and vol_confirm
+        short_entry = breakout_down and downtrend and vol_confirm
+        
+        # Exit conditions
+        long_exit = breakout_down or vol_weak
+        short_exit = breakout_up or vol_weak
         
         if long_entry and position != 1:
             position = 1
@@ -99,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_donchian_breakout_trend_vol_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_breakout_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
