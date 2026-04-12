@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_1d_camarilla_breakout_volume
-Uses Camarilla pivot levels from daily timeframe to identify key support/resistance.
-Breakouts above R4 or below S4 with volume confirmation indicate strong momentum.
-Fade trades at R3/S3 when price shows rejection signals.
-Combines trend following and mean reversion for robust performance in bull/bear markets.
+4h_12h_volume_breakout_retest
+Breakout strategy: On 12h, detect range via Bollinger Band squeeze; on 4h, enter on breakout with volume.
+Entry only when price retests breakout level after breakout (reduces false breakouts).
+Uses volume confirmation and ATR-based stop.
+Target: 20-40 trades/year to minimize fee drag.
 """
 
-name = "6h_1d_camarilla_breakout_volume"
-timeframe = "6h"
+name = "4h_12h_volume_breakout_retest"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,100 +25,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data for Bollinger Bands
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # Using close of previous day as base (standard Camarilla)
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_12h = df_12h['close'].values
     
-    # Previous day's values (shifted by 1 to avoid look-ahead)
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    # First day will have invalid data, handled by checks later
+    # Bollinger Bands (20, 2) on 12h
+    bb_length = 20
+    bb_mult = 2.0
     
-    # Camarilla calculations
-    range_ = prev_high - prev_low
-    # Avoid division by zero
-    range_ = np.where(range_ == 0, 1e-10, range_)
+    basis = pd.Series(close_12h).rolling(window=bb_length, min_periods=bb_length).mean().values
+    dev = bb_mult * pd.Series(close_12h).rolling(window=bb_length, min_periods=bb_length).std().values
+    upper = basis + dev
+    lower = basis - dev
     
-    # Camarilla levels
-    r4 = prev_close + range_ * 1.1 / 2
-    r3 = prev_close + range_ * 1.1 / 4
-    s3 = prev_close - range_ * 1.1 / 4
-    s4 = prev_close - range_ * 1.1 / 2
+    # Squeeze detection: bandwidth below 20-period lowest
+    bandwidth = (upper - lower) / basis
+    bandwidth_smoothed = pd.Series(bandwidth).rolling(window=5, min_periods=5).mean().values
+    bandwidth_lowest = pd.Series(bandwidth_smoothed).rolling(window=20, min_periods=20).min().values
+    squeeze = bandwidth_smoothed <= bandwidth_lowest
     
-    # Align Camarilla levels to 6h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Align to 4h
+    upper_aligned = align_htf_to_ltf(prices, df_12h, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_12h, lower)
+    basis_aligned = align_htf_to_ltf(prices, df_12h, basis)
+    squeeze_aligned = align_htf_to_ltf(prices, df_12h, squeeze)
     
-    # Volume confirmation: volume > 1.3x 20-period average
+    # Volume confirmation on 4h: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.3)
+    vol_confirm = volume > (vol_ma * 1.5)
     
-    # Price rejection signals at R3/S3 (wick rejection)
-    # Bearish rejection at R3: long upper wick
-    upper_wick = high - np.maximum(close, open_) if 'open_' in locals() else high - close
-    open_ = prices['open'].values
-    upper_wick = high - np.maximum(close, open_)
-    lower_wick = np.minimum(close, open_) - low
+    # Track breakout levels and retest
+    breakout_level_long = np.full(n, np.nan)
+    breakout_level_short = np.full(n, np.nan)
+    breakout_active_long = np.zeros(n, dtype=bool)
+    breakout_active_short = np.zeros(n, dtype=bool)
     
-    # Rejection at R3: close below open and long upper wick
-    rejection_r3 = (close < open_) & (upper_wick > 2 * (open_ - close))
-    # Rejection at S3: close above open and long lower wick
-    rejection_s3 = (close > open_) & (lower_wick > 2 * (close - open_))
+    for i in range(1, n):
+        if not np.isnan(upper_aligned[i]) and not np.isnan(lower_aligned[i]):
+            # Detect new breakouts
+            if squeeze_aligned[i-1] and not squeeze_aligned[i]:
+                if close[i] > upper_aligned[i]:
+                    breakout_level_long[i] = upper_aligned[i]
+                    breakout_active_long[i] = True
+                elif close[i] < lower_aligned[i]:
+                    breakout_level_short[i] = lower_aligned[i]
+                    breakout_active_short[i] = True
+            # Carry over active breakouts
+            if breakout_active_long[i-1]:
+                breakout_active_long[i] = True
+                breakout_level_long[i] = breakout_level_long[i-1]
+            if breakout_active_short[i-1]:
+                breakout_active_short[i] = True
+                breakout_level_short[i] = breakout_level_short[i-1]
+            # Deactivate if price moves too far from breakout level
+            if breakout_active_long[i] and close[i] < breakout_level_long[i] * 0.98:
+                breakout_active_long[i] = False
+            if breakout_active_short[i] and close[i] > breakout_level_short[i] * 1.02:
+                breakout_active_short[i] = False
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        # Skip if data not ready
-        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(basis_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long breakout: price breaks above R4 with volume
-        if close[i] > r4_aligned[i] and vol_confirm[i] and position != 1:
-            position = 1
-            signals[i] = 0.25
-        # Short breakdown: price breaks below S4 with volume
-        elif close[i] < s4_aligned[i] and vol_confirm[i] and position != -1:
-            position = -1
-            signals[i] = -0.25
-        # Fade long at S3 rejection: price shows bullish rejection at support
-        elif close[i] <= s3_aligned[i] and rejection_s3[i] and position != 1:
-            position = 1
-            signals[i] = 0.20
-        # Fade short at R3 rejection: price shows bearish rejection at resistance
-        elif close[i] >= r3_aligned[i] and rejection_r3[i] and position != -1:
-            position = -1
-            signals[i] = -0.20
-        # Exit conditions: return to midpoint or opposite rejection
-        elif position == 1:
-            # Exit long if price returns to midpoint or shows rejection at R3
-            midpoint = (r4_aligned[i] + s4_aligned[i]) / 2
-            if close[i] <= midpoint or rejection_r3[i]:
-                position = 0
-                signals[i] = 0.0
-            else:
+        # Long entry: retest of breakout level after volume confirmation
+        if breakout_active_long[i] and not breakout_active_long[i-1]:
+            if close[i] >= breakout_level_long[i] * 0.995 and vol_confirm[i] and position != 1:
+                position = 1
                 signals[i] = 0.25
-        elif position == -1:
-            # Exit short if price returns to midpoint or shows rejection at S3
-            midpoint = (r4_aligned[i] + s4_aligned[i]) / 2
-            if close[i] >= midpoint or rejection_s3[i]:
-                position = 0
-                signals[i] = 0.0
-            else:
+        # Short entry: retest of breakout level after volume confirmation
+        elif breakout_active_short[i] and not breakout_active_short[i-1]:
+            if close[i] <= breakout_level_short[i] * 1.005 and vol_confirm[i] and position != -1:
+                position = -1
                 signals[i] = -0.25
-        else:
+        # Exit when price returns to middle band
+        elif position == 1 and close[i] <= basis_aligned[i]:
+            position = 0
             signals[i] = 0.0
+        elif position == -1 and close[i] >= basis_aligned[i]:
+            position = 0
+            signals[i] = 0.0
+        else:
+            # Hold position
+            if position == 1:
+                signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.0
     
     return signals
