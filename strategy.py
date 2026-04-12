@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_ema_trend_v1"
-timeframe = "1d"
+name = "4h_1d_camarilla_breakout_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,24 +17,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    # Get 1d data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 21-period EMA on 1w data
-    close_1w_series = pd.Series(close_1w)
-    ema_21_1w = close_1w_series.ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Calculate Camarilla pivot levels from 1d data
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
     
-    # Calculate 9 and 21 period EMA on 1d data
-    close_series = pd.Series(close)
-    ema_9 = close_series.ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema_21 = close_series.ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Camarilla levels (using standard multipliers)
+    h3 = pivot + (range_1d * 1.1 / 4)   # Resistance 3
+    l3 = pivot - (range_1d * 1.1 / 4)   # Support 3
     
-    # Volume filter - 20-period average
+    # Align Camarilla levels to 4h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    
+    # Volume filter - 20-period average on 4h data
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
@@ -42,29 +47,21 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(ema_21_1w_aligned[i]) or np.isnan(ema_9[i]) or 
-            np.isnan(ema_21[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+            np.isnan(pivot_aligned[i]) or np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter: price above/below weekly EMA21
-        uptrend = close[i] > ema_21_1w_aligned[i]
-        downtrend = close[i] < ema_21_1w_aligned[i]
+        # Long: price breaks above H3 with volume confirmation
+        long_signal = close[i] > h3_aligned[i] and volume_ok[i]
+        # Short: price breaks below L3 with volume confirmation
+        short_signal = close[i] < l3_aligned[i] and volume_ok[i]
         
-        # EMA cross signals
-        ema_cross_up = ema_9[i] > ema_21[i] and ema_9[i-1] <= ema_21[i-1]
-        ema_cross_down = ema_9[i] < ema_21[i] and ema_9[i-1] >= ema_21[i-1]
-        
-        # Long: EMA cross up in uptrend with volume
-        long_signal = ema_cross_up and uptrend and volume_ok[i]
-        # Short: EMA cross down in downtrend with volume
-        short_signal = ema_cross_down and downtrend and volume_ok[i]
-        
-        # Exit on opposite EMA cross
-        exit_long = ema_cross_down
-        exit_short = ema_cross_up
+        # Exit when price returns to pivot
+        exit_long = close[i] < pivot_aligned[i]
+        exit_short = close[i] > pivot_aligned[i]
         
         # Execute trades
         if long_signal and position != 1:
