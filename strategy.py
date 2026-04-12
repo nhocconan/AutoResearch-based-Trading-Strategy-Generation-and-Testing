@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for context
+    # Get daily data for context (1d)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -21,84 +21,109 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
     
-    # Get weekly data for context
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Calculate daily Williams Alligator components
+    # Jaw (blue): 13-period SMA, shifted 8 bars forward
+    # Teeth (red): 8-period SMA, shifted 5 bars forward
+    # Lips (green): 5-period SMA, shifted 3 bars forward
+    close_1d_series = pd.Series(close_1d)
+    jaw_1d = close_1d_series.rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth_1d = close_1d_series.rolling(window=8, min_periods=8).mean().shift(5).values
+    lips_1d = close_1d_series.rolling(window=5, min_periods=5).mean().shift(3).values
     
-    close_1w = df_1w['close'].values
+    # Align Alligator lines to 6h timeframe
+    jaw_1d_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
+    teeth_1d_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
+    lips_1d_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
     
-    # Calculate weekly EMA(10) for long-term trend
-    close_1w_series = pd.Series(close_1w)
-    ema_10_1w = close_1w_series.ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Calculate daily ADX for trend strength
+    # Calculate True Range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = tr2[0] = tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Calculate daily Donchian(20) channels
-    high_20_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate Directional Movement
+    up_move = np.diff(high_1d, prepend=np.nan)
+    down_move = -np.diff(low_1d, prepend=np.nan)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    plus_dm[0] = minus_dm[0] = 0
     
-    # Calculate daily ATR(14) for volatility filter
-    tr1_d = np.abs(high_1d - low_1d)
-    tr2_d = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3_d = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1_d[0] = tr2_d[0] = tr3_d[0] = np.nan
-    tr_d = np.maximum(tr1_d, np.maximum(tr2_d, tr3_d))
-    atr_1d = np.full(len(df_1d), np.nan)
-    for i in range(14, len(df_1d)):
-        atr_1d[i] = np.mean(tr_d[i-14:i+1])
+    # Smooth TR and DM with Wilder's smoothing (using EMA as approximation)
+    tr_period = 14
+    tr_smooth = np.full(len(tr), np.nan)
+    plus_dm_smooth = np.full(len(tr), np.nan)
+    minus_dm_smooth = np.full(len(tr), np.nan)
     
-    # Calculate daily volume moving average
-    vol_s_1d = pd.Series(volume_1d)
-    vol_ma_20_1d = vol_s_1d.rolling(window=20, min_periods=20).mean().values
+    # Initial values
+    if len(tr) >= tr_period:
+        tr_smooth[tr_period-1] = np.nansum(tr[1:tr_period+1])
+        plus_dm_smooth[tr_period-1] = np.nansum(plus_dm[1:tr_period+1])
+        minus_dm_smooth[tr_period-1] = np.nansum(minus_dm[1:tr_period+1])
     
-    # Align daily indicators to 1d timeframe (no alignment needed for same timeframe)
-    high_20_1d_aligned = high_20_1d
-    low_20_1d_aligned = low_20_1d
-    atr_1d_aligned = atr_1d
-    vol_ma_20_1d_aligned = vol_ma_20_1d
+    # Wilder smoothing
+    for i in range(tr_period, len(tr)):
+        if not np.isnan(tr_smooth[i-1]):
+            tr_smooth[i] = tr_smooth[i-1] - (tr_smooth[i-1] / tr_period) + tr[i]
+            plus_dm_smooth[i] = plus_dm_smooth[i-1] - (plus_dm_smooth[i-1] / tr_period) + plus_dm[i]
+            minus_dm_smooth[i] = minus_dm_smooth[i-1] - (minus_dm_smooth[i-1] / tr_period) + minus_dm[i]
     
-    # Align weekly EMA to 1d timeframe
-    ema_10_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_10_1w)
+    # Calculate DI and DX
+    plus_di = np.full(len(tr), np.nan)
+    minus_di = np.full(len(tr), np.nan)
+    dx = np.full(len(tr), np.nan)
+    
+    for i in range(tr_period, len(tr)):
+        if not np.isnan(tr_smooth[i]) and tr_smooth[i] != 0:
+            plus_di[i] = 100 * (plus_dm_smooth[i] / tr_smooth[i])
+            minus_di[i] = 100 * (minus_dm_smooth[i] / tr_smooth[i])
+            if plus_di[i] + minus_di[i] != 0:
+                dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+    
+    # Calculate ADX (smoothed DX)
+    adx_period = 14
+    adx = np.full(len(tr), np.nan)
+    
+    if len(dx) >= 2 * adx_period:
+        # Initial ADX value
+        valid_dx = dx[adx_period:2*adx_period]
+        if not np.all(np.isnan(valid_dx)):
+            adx[2*adx_period-1] = np.nanmean(valid_dx)
+        
+        # Smooth ADX
+        for i in range(2*adx_period, len(tr)):
+            if not np.isnan(adx[i-1]) and not np.isnan(dx[i]):
+                adx[i] = (adx[i-1] * (adx_period - 1) + dx[i]) / adx_period
+    
+    # Align ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(200, n):
         # Skip if data not ready
-        if (np.isnan(ema_10_1w_aligned[i]) or np.isnan(high_20_1d_aligned[i]) or 
-            np.isnan(low_20_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i])):
+        if (np.isnan(jaw_1d_aligned[i]) or np.isnan(teeth_1d_aligned[i]) or 
+            np.isnan(lips_1d_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5 * 20-period daily volume MA
-        vol_filter = volume[i] > 1.5 * vol_ma_20_1d_aligned[i]
+        # Williams Alligator conditions: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
+        alligator_uptrend = lips_1d_aligned[i] > teeth_1d_aligned[i] > jaw_1d_aligned[i]
+        alligator_downtrend = lips_1d_aligned[i] < teeth_1d_aligned[i] < jaw_1d_aligned[i]
         
-        # Volatility filter: daily ATR > 0.3 * its 20-period MA (avoid low volatility)
-        atr_ma_20_1d = np.full(len(df_1d), np.nan)
-        for j in range(34, len(df_1d)):  # 14 + 19 for 20-period MA
-            if not np.isnan(np.mean(atr_1d[j-19:j+1])):
-                atr_ma_20_1d[j] = np.mean(atr_1d[j-19:j+1])
-        atr_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_20_1d)
-        vol_filter_volatility = (not np.isnan(atr_ma_20_1d_aligned[i]) and 
-                                atr_1d_aligned[i] > 0.3 * atr_ma_20_1d_aligned[i])
+        # ADX filter: trend strength > 25
+        strong_trend = adx_aligned[i] > 25
         
-        # Donchian breakout conditions
-        long_breakout = close[i] > high_20_1d_aligned[i]
-        short_breakout = close[i] < low_20_1d_aligned[i]
+        # Entry conditions
+        long_entry = alligator_uptrend and strong_trend
+        short_entry = alligator_downtrend and strong_trend
         
-        # Trend filter: weekly EMA10 direction
-        weekly_uptrend = close[i] > ema_10_1w_aligned[i]
-        weekly_downtrend = close[i] < ema_10_1w_aligned[i]
-        
-        # Entry conditions: breakout + trend + volume + volatility filter
-        long_entry = long_breakout and weekly_uptrend and vol_filter and vol_filter_volatility
-        short_entry = short_breakout and weekly_downtrend and vol_filter and vol_filter_volatility
-        
-        # Exit conditions: opposite breakout or trend reversal
-        long_exit = (close[i] < low_20_1d_aligned[i]) or (not weekly_uptrend)
-        short_exit = (close[i] > high_20_1d_aligned[i]) or (not weekly_downtrend)
+        # Exit conditions: trend weakens or Alligator reverses
+        long_exit = not (alligator_uptrend and strong_trend)
+        short_exit = not (alligator_downtrend and strong_trend)
         
         if long_entry and position != 1:
             position = 1
@@ -123,6 +148,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_donchian_breakout_ema10_vol_filter_v1"
-timeframe = "1d"
+name = "6h_1d_alligator_adx_trend_v1"
+timeframe = "6h"
 leverage = 1.0
