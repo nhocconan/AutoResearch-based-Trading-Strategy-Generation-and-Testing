@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
 """
-4h_1d_camarilla_breakout_v19
-Hypothesis: Daily Camarilla H3/L3 breakouts with 4h EMA20 trend filter and volume spike confirmation.
-Works in both bull and bear markets by following strong directional moves while avoiding whipsaws.
-Target: 75-200 total trades over 4 years (19-50/year).
+4h_1d_Camarilla_Pullback_v1
+Hypothesis: Enter on pullbacks to key daily pivot levels (H3/L3) in the direction of the 4h trend.
+Long: Price pulls back to H3 in uptrend (4h close > EMA20) with volume > 1.5x average.
+Short: Price pulls back to L3 in downtrend (4h close < EMA20) with volume > 1.5x average.
+Exit on trend reversal or price reaching H4/L4. Position size 0.25 to balance risk and reward.
+Designed to capture continuation moves in both bull and bear markets with fewer trades.
+Target: 20-50 total trades over 4 years (5-12.5/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v19"
+name = "4h_1d_Camarilla_Pullback_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -55,52 +58,45 @@ def generate_signals(prices):
     l4_4h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
     # === 4-HOUR TREND FILTER ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
+    close_4h = df_1d['close'].values  # Use daily close for EMA to avoid look-ahead
+    ema20_1d = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_4h = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
-    close_4h = df_4h['close'].values
-    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_4h_4h = ema20_4h  # Same timeframe, no alignment needed
-    
-    # === VOLUME SURGE FILTER ===
+    # === VOLUME FILTER ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(h3_4h[i]) or np.isnan(l3_4h[i]) or np.isnan(ema20_4h_4h[i]) or 
+        if (np.isnan(h3_4h[i]) or np.isnan(l3_4h[i]) or np.isnan(ema20_4h[i]) or 
             np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Get current 4h close (already aligned since we're in 4h timeframe)
-        close_4h_val = close_4h[i // 16] if i >= 16 else np.nan  # Only use closed 4h bars
-        if np.isnan(close_4h_val):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
-            continue
-            
-        trend_up = close_4h_val > ema20_4h_4h[i // 16]
-        trend_down = close_4h_val < ema20_4h_4h[i // 16]
+        # Determine 4h trend using daily EMA (aligned)
+        trend_up = close[i] > ema20_4h[i]
+        trend_down = close[i] < ema20_4h[i]
         
-        # Long: break above H3 in uptrend with volume surge
+        # Long: pullback to H3 in uptrend with volume confirmation
         long_signal = (trend_up and 
-                      close[i] > h3_4h[i] * 1.001 and  # Break above H3
-                      vol_ratio[i] > 2.0)
+                      close[i] <= h3_4h[i] * 1.005 and  # Near H3 (allow small overshoot)
+                      close[i] >= h3_4h[i] * 0.995 and
+                      vol_ratio[i] > 1.5)
         
-        # Short: break below L3 in downtrend with volume surge
+        # Short: pullback to L3 in downtrend with volume confirmation
         short_signal = (trend_down and 
-                       close[i] < l3_4h[i] * 0.999 and  # Break below L3
-                       vol_ratio[i] > 2.0)
+                       close[i] <= l3_4h[i] * 1.005 and  # Near L3
+                       close[i] >= l3_4h[i] * 0.995 and
+                       vol_ratio[i] > 1.5)
         
-        # Exit: trend reversal or retracement to H4/L4
+        # Exit: trend reversal or reaching H4/L4
         exit_long = (position == 1 and 
-                    (not trend_up or close[i] <= h4_4h[i]))
+                    (not trend_up or close[i] >= h4_4h[i]))
         exit_short = (position == -1 and 
-                     (not trend_down or close[i] >= l4_4h[i]))
+                     (not trend_down or close[i] <= l4_4h[i]))
         
         # Execute trades
         if long_signal and position != 1:
