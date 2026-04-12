@@ -8,12 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1d Camarilla pivot breakout with 1w volume confirmation and ADX trend filter
-    # Camarilla levels from 1d provide institutional support/resistance for daily entries
-    # 1w volume spike confirms institutional participation across the week
-    # ADX filter ensures we only trade in trending markets (ADX > 25) to avoid whipsaws
-    # Works in bull/bear by following institutional breakouts with volume confirmation
-    # Target: 20-50 trades/year per symbol.
+    # Hypothesis: 6h Elder Ray + 12h ADX regime filter
+    # Elder Ray (Bull/Bear power) measures trend strength via EMA13
+    # ADX > 25 confirms trending regime for continuation trades
+    # Works in bull/bear by only taking trades in strong trends
+    # Target: 12-30 trades/year per symbol.
     
     # Session filter: 8:00-20:00 UTC (avoid low volume Asian session)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -24,128 +23,97 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 12h data for Elder Ray and ADX
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate 1d Camarilla levels (using previous day's range)
-    camarilla_h4 = np.full(len(df_1d), np.nan)
-    camarilla_l4 = np.full(len(df_1d), np.nan)
-    camarilla_h3 = np.full(len(df_1d), np.nan)
-    camarilla_l3 = np.full(len(df_1d), np.nan)
-    camarilla_pivot = np.full(len(df_1d), np.nan)
+    # Calculate EMA13 for Elder Ray
+    def ema(values, span):
+        result = np.full_like(values, np.nan, dtype=np.float64)
+        if len(values) < span:
+            return result
+        multiplier = 2 / (span + 1)
+        result[span-1] = np.mean(values[:span])
+        for i in range(span, len(values)):
+            result[i] = (values[i] - result[i-1]) * multiplier + result[i-1]
+        return result
     
-    for i in range(1, len(df_1d)):
-        # Previous day's OHLC
-        phigh = high_1d[i-1]
-        plow = low_1d[i-1]
-        pclose = close_1d[i-1]
+    ema13_12h = ema(close_12h, 13)
+    
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power_12h = high_12h - ema13_12h
+    bear_power_12h = low_12h - ema13_12h
+    
+    # Calculate ADX (14-period)
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr = np.full(len(high), np.nan)
+        for i in range(len(high)):
+            if i == 0:
+                tr[i] = high[i] - low[i]
+            else:
+                tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
         
-        # Pivot point
-        camarilla_pivot[i] = (phigh + plow + 2 * pclose) / 4
+        # Directional Movement
+        plus_dm = np.full(len(high), np.nan)
+        minus_dm = np.full(len(high), np.nan)
+        for i in range(1, len(high)):
+            up_move = high[i] - high[i-1]
+            down_move = low[i-1] - low[i]
+            if up_move > down_move and up_move > 0:
+                plus_dm[i] = up_move
+            else:
+                plus_dm[i] = 0
+            if down_move > up_move and down_move > 0:
+                minus_dm[i] = down_move
+            else:
+                minus_dm[i] = 0
         
-        # Range
-        rng = phigh - plow
+        # Smoothed TR, Plus_DM, Minus_DM (using Wilder's smoothing)
+        def wilder_smooth(values, period):
+            result = np.full_like(values, np.nan)
+            if len(values) < period:
+                return result
+            result[period-1] = np.nansum(values[:period])
+            for i in range(period, len(values)):
+                result[i] = result[i-1] - (result[i-1] / period) + values[i]
+            return result
         
-        # Camarilla levels
-        camarilla_h4[i] = camarilla_pivot[i] + rng * 1.1 / 2
-        camarilla_l4[i] = camarilla_pivot[i] - rng * 1.1 / 2
-        camarilla_h3[i] = camarilla_pivot[i] + rng * 1.1 / 4
-        camarilla_l3[i] = camarilla_pivot[i] - rng * 1.1 / 4
+        tr_smooth = wilder_smooth(tr, period)
+        plus_dm_smooth = wilder_smooth(plus_dm, period)
+        minus_dm_smooth = wilder_smooth(minus_dm, period)
+        
+        # Directional Indicators
+        plus_di = np.full(len(high), np.nan)
+        minus_di = np.full(len(high), np.nan)
+        for i in range(len(high)):
+            if not np.isnan(tr_smooth[i]) and tr_smooth[i] != 0:
+                plus_di[i] = (plus_dm_smooth[i] / tr_smooth[i]) * 100
+                minus_di[i] = (minus_dm_smooth[i] / tr_smooth[i]) * 100
+        
+        # DX and ADX
+        dx = np.full(len(high), np.nan)
+        for i in range(len(high)):
+            if not np.isnan(plus_di[i]) and not np.isnan(minus_di[i]):
+                di_sum = plus_di[i] + minus_di[i]
+                if di_sum != 0:
+                    dx[i] = abs(plus_di[i] - minus_di[i]) / di_sum * 100
+        
+        # ADX is smoothed DX
+        adx = wilder_smooth(dx, period)
+        return adx
     
-    # Align 1d Camarilla levels to 1d timeframe (same timeframe, so direct alignment)
-    # Since we're on 1d timeframe, we can use the values directly with proper shift
-    h4_aligned = np.roll(camarilla_h4, 1)
-    l4_aligned = np.roll(camarilla_l4, 1)
-    h3_aligned = np.roll(camarilla_h3, 1)
-    l3_aligned = np.roll(camarilla_l3, 1)
-    pivot_aligned = np.roll(camarilla_pivot, 1)
-    # Set first value to nan as there's no previous day
-    h4_aligned[0] = np.nan
-    l4_aligned[0] = np.nan
-    h3_aligned[0] = np.nan
-    l3_aligned[0] = np.nan
-    pivot_aligned[0] = np.nan
+    adx_12h = calculate_adx(high_12h, low_12h, close_12h, 14)
     
-    # Get 1w data for volume confirmation and ADX
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    volume_1w = df_1w['volume'].values
-    
-    # 1w volume spike filter (current volume > 2.0 * 20-week average)
-    vol_ma_20_1w = np.full(len(df_1w), np.nan)
-    for i in range(19, len(df_1w)):
-        vol_ma_20_1w[i] = np.mean(volume_1w[i-19:i+1])
-    vol_ma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20_1w)
-    volume_spike = volume > 2.0 * vol_ma_20_1w_aligned
-    
-    # 1w ADX calculation (14-period)
-    # True Range
-    tr_1w = np.full(len(df_1w), np.nan)
-    for i in range(1, len(df_1w)):
-        tr_1w[i] = np.max([
-            high_1w[i] - low_1w[i],
-            np.abs(high_1w[i] - close_1w[i-1]),
-            np.abs(low_1w[i] - close_1w[i-1])
-        ])
-    
-    # Directional Movement
-    dm_plus_1w = np.full(len(df_1w), np.nan)
-    dm_minus_1w = np.full(len(df_1w), np.nan)
-    for i in range(1, len(df_1w)):
-        up_move = high_1w[i] - high_1w[i-1]
-        down_move = low_1w[i-1] - low_1w[i]
-        dm_plus_1w[i] = up_move if up_move > down_move and up_move > 0 else 0
-        dm_minus_1w[i] = down_move if down_move > up_move and down_move > 0 else 0
-    
-    # Smoothed TR, DM+ and DM- (Wilder's smoothing)
-    atr_1w = np.full(len(df_1w), np.nan)
-    dm_plus_smooth_1w = np.full(len(df_1w), np.nan)
-    dm_minus_smooth_1w = np.full(len(df_1w), np.nan)
-    
-    # Initial values (first 14 periods)
-    for i in range(14, len(df_1w)):
-        if i == 14:
-            atr_1w[i] = np.sum(tr_1w[1:15])
-            dm_plus_smooth_1w[i] = np.sum(dm_plus_1w[1:15])
-            dm_minus_smooth_1w[i] = np.sum(dm_minus_1w[1:15])
-        else:
-            atr_1w[i] = atr_1w[i-1] - (atr_1w[i-1] / 14) + tr_1w[i]
-            dm_plus_smooth_1w[i] = dm_plus_smooth_1w[i-1] - (dm_plus_smooth_1w[i-1] / 14) + dm_plus_1w[i]
-            dm_minus_smooth_1w[i] = dm_minus_smooth_1w[i-1] - (dm_minus_smooth_1w[i-1] / 14) + dm_minus_1w[i]
-    
-    # Directional Indicators
-    di_plus_1w = np.full(len(df_1w), np.nan)
-    di_minus_1w = np.full(len(df_1w), np.nan)
-    dx_1w = np.full(len(df_1w), np.nan)
-    
-    for i in range(14, len(df_1w)):
-        if atr_1w[i] > 0:
-            di_plus_1w[i] = 100 * dm_plus_smooth_1w[i] / atr_1w[i]
-            di_minus_1w[i] = 100 * dm_minus_smooth_1w[i] / atr_1w[i]
-            if di_plus_1w[i] + di_minus_1w[i] > 0:
-                dx_1w[i] = 100 * np.abs(di_plus_1w[i] - di_minus_1w[i]) / (di_plus_1w[i] + di_minus_1w[i])
-    
-    # ADX (smoothed DX)
-    adx_1w = np.full(len(df_1w), np.nan)
-    for i in range(28, len(df_1w)):  # 14 + 14 for smoothing
-        if i == 28:
-            adx_1w[i] = np.mean(dx_1w[15:29])
-        else:
-            adx_1w[i] = (adx_1w[i-1] * 13 + dx_1w[i]) / 14
-    
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    # Align 12h indicators to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_12h, bull_power_12h)
+    bear_power_aligned = align_htf_to_ltf(prices, df_12h, bear_power_12h)
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -156,50 +124,49 @@ def generate_signals(prices):
             continue
         
         # Skip if data not ready
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(pivot_aligned[i]) or np.isnan(volume_spike[i]) or 
-            np.isnan(adx_1w_aligned[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Only trade when ADX > 25 (trending market)
-        if adx_1w_aligned[i] > 25:
-            # Breakout entries with volume confirmation
-            long_entry = close[i] > h4_aligned[i] and volume_spike[i]
-            short_entry = close[i] < l4_aligned[i] and volume_spike[i]
-            
-            # Exit when price returns to pivot level or volume drops
-            long_exit = close[i] < pivot_aligned[i] or (not volume_spike[i])
-            short_exit = close[i] > pivot_aligned[i] or (not volume_spike[i])
-            
-            if long_entry and position != 1:
-                position = 1
-                signals[i] = 0.25
-            elif short_entry and position != -1:
-                position = -1
-                signals[i] = -0.25
-            elif position == 1 and long_exit:
-                position = 0
-                signals[i] = 0.0
-            elif position == -1 and short_exit:
-                position = 0
-                signals[i] = 0.0
-            else:
-                # Hold current position
-                if position == 1:
-                    signals[i] = 0.25
-                elif position == -1:
-                    signals[i] = -0.25
-                else:
-                    signals[i] = 0.0
-        else:
-            # In ranging market (ADX <= 25), stay flat
+        # Regime filter: only trade when ADX > 25 (strong trend)
+        if adx_aligned[i] <= 25:
+            # No trend - stay flat
+            signals[i] = 0.0
+            position = 0
+            continue
+        
+        # Elder Ray logic in trending regime
+        # Long when Bull Power > 0 and rising
+        # Short when Bear Power < 0 and falling
+        long_entry = bull_power_aligned[i] > 0 and (i == 100 or bull_power_aligned[i] > bull_power_aligned[i-1])
+        short_entry = bear_power_aligned[i] < 0 and (i == 100 or bear_power_aligned[i] < bear_power_aligned[i-1])
+        long_exit = bull_power_aligned[i] <= 0
+        short_exit = bear_power_aligned[i] >= 0
+        
+        if long_entry and position != 1:
+            position = 1
+            signals[i] = 0.25
+        elif short_entry and position != -1:
+            position = -1
+            signals[i] = -0.25
+        elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
+        elif position == -1 and short_exit:
+            position = 0
+            signals[i] = 0.0
+        else:
+            # Hold current position
+            if position == 1:
+                signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.0
     
     return signals
 
-name = "1d_1w_camarilla_breakout_vol_adx_v1"
-timeframe = "1d"
+name = "6h_12h_elder_ray_adx_regime_v1"
+timeframe = "6h"
 leverage = 1.0
