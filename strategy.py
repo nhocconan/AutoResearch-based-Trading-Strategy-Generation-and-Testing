@@ -3,21 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h_1d_camarilla_breakout_v1
-# Uses daily high/low to calculate daily Camarilla levels for the next 12h period.
-# Buys when price breaks above daily H3 with volume confirmation.
-# Shorts when price breaks below daily L3 with volume confirmation.
-# Uses ADX > 25 to filter for strong trends, avoiding false signals in weak trends or ranges.
-# Designed for low trade frequency (target: 12-37 trades/year) to minimize fee drag.
-# Works in bull markets (breakouts continuation) and bear markets (breakdowns continuation).
+# Hypothesis: 4h_1d_camarilla_breakout_v2
+# Uses daily Camarilla levels (H3/L3) with volume confirmation and ADX filter.
+# Reduces trade frequency by requiring BOTH volume spike AND strong trend (ADX>25).
+# Entry: Close breaks H3/L3 with volume>2x20MA and ADX>25.
+# Exit: Close reverses back below/above L3/H3.
+# Position size: 0.25 (25% of capital) to limit drawdown.
+# Works in bull (breakouts continuation) and bear (breakdowns continuation).
+# Target: 20-50 trades/year to avoid fee drag.
 
-name = "12h_1d_camarilla_breakout_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -40,11 +41,11 @@ def generate_signals(prices):
     camarilla_h3 = close_prev + range_prev * 1.1 / 4
     camarilla_l3 = close_prev - range_prev * 1.1 / 4
     
-    # Align to 12h timeframe (daily levels update only after daily bar closes)
+    # Align to 4h timeframe (daily levels update only after daily bar closes)
     h3_level = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     l3_level = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Volume confirmation: volume > 2.0 * 20-period average (12h timeframe)
+    # Volume confirmation: volume > 2.0 * 20-period average (4h timeframe)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 2.0)
     
@@ -85,13 +86,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # start after warmup
+    for i in range(60, n):  # start after warmup
         # Skip if levels not ready
         if np.isnan(h3_level[i]) or np.isnan(l3_level[i]) or np.isnan(adx_filter[i]):
             signals[i] = 0.0
             continue
         
-        # Require both volume and strong trend filters
+        # Require BOTH volume and strong trend filters
         if not (vol_confirm[i] and adx_filter[i]):
             # Hold current position if filters fail
             if position == 1:
