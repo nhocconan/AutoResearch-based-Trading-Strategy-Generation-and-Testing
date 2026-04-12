@@ -1,15 +1,15 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 """
-1d_1w_Aziz_Breakout_v1
-Hypothesis: On daily timeframe, enter long when price breaks above weekly resistance with volume confirmation, enter short when breaks below weekly support. Uses weekly timeframe for structure and volume filter to avoid false breakouts. Targets 10-25 trades per year by requiring strong breakouts at weekly extremes.
+6h_1d_Pivot_Bounce_With_Volume_Filter
+Hypothesis: On 6h timeframe, enter long when price retraces to daily pivot support (S1) with volume confirmation (>1.3x average), enter short when price retraces to daily pivot resistance (R1). Uses daily pivot levels for mean-reversion in ranging markets and volume filter to avoid false signals. Designed for 20-40 trades per year by requiring confluence of price at key levels and volume surge.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Aziz_Breakout_v1"
-timeframe = "1d"
+name = "6h_1d_Pivot_Bounce_With_Volume_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,35 +22,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === WEEKLY INDICATORS: Support/Resistance levels ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # === DAILY PIVOT LEVELS ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly range and key levels
-    range_1w = high_1w - low_1w
-    # Weekly resistance: previous week high + 0.382 * range (Fibonacci)
-    resistance = high_1w + 0.382 * range_1w
-    # Weekly support: previous week low - 0.382 * range (Fibonacci)
-    support = low_1w - 0.382 * range_1w
+    # Daily pivot calculation
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Align to daily timeframe
-    resistance_aligned = align_htf_to_ltf(prices, df_1w, resistance)
-    support_aligned = align_htf_to_ltf(prices, df_1w, support)
+    # Support and resistance levels
+    r1 = pivot + range_1d * 0.382  # R1
+    s1 = pivot - range_1d * 0.382  # S1
+    r2 = pivot + range_1d * 0.618  # R2
+    s2 = pivot - range_1d * 0.618  # S2
     
-    # Volume average (20-period) for confirmation
+    # Align to 6h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    
+    # Volume average (24-period for 6h = ~6 days) for confirmation
     vol_avg = np.zeros(n)
     vol_sum = 0.0
     vol_count = 0
     for i in range(n):
         vol_sum += volume[i]
         vol_count += 1
-        if i >= 20:
-            vol_sum -= volume[i-20]
+        if i >= 24:
+            vol_sum -= volume[i-24]
             vol_count -= 1
         if vol_count > 0:
             vol_avg[i] = vol_sum / vol_count
@@ -62,27 +67,27 @@ def generate_signals(prices):
     
     for i in range(50, n):  # start after warmup
         # Skip if indicators not available
-        if (np.isnan(resistance_aligned[i]) or np.isnan(support_aligned[i]) or 
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or 
             vol_avg[i] == 0.0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Breakout conditions with volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_avg[i]
-        long_breakout = (close[i] > resistance_aligned[i]) and vol_confirm
-        short_breakout = (close[i] < support_aligned[i]) and vol_confirm
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.3 * vol_avg[i]
         
-        # Exit conditions: reversal back to midpoint of weekly range
-        midpoint = (high_1w + low_1w) / 2
-        midpoint_aligned = align_htf_to_ltf(prices, df_1w, midpoint)
+        # Mean reversion entries at S1/R1 with volume
+        long_setup = (close[i] <= s1_aligned[i]) and vol_confirm
+        short_setup = (close[i] >= r1_aligned[i]) and vol_confirm
         
-        exit_long = close[i] < midpoint_aligned[i]
-        exit_short = close[i] > midpoint_aligned[i]
+        # Exit at opposite S2/R2 levels (stronger support/resistance)
+        exit_long = close[i] >= s2_aligned[i]
+        exit_short = close[i] <= r2_aligned[i]
         
-        if long_breakout and position != 1:
+        if long_setup and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_breakout and position != -1:
+        elif short_setup and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
