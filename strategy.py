@@ -3,82 +3,72 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_keltner_channel_breakout_v2"
-timeframe = "12h"
+# Hypothesis: 6h Williams %R + 1d MACD filter for mean reversion in range-bound markets
+# Uses oversold/overbought conditions on 6s with trend filter from daily MACD
+# Targets 20-40 trades/year by requiring confluence of momentum extreme and trend alignment
+# Works in bull/bear by fading extremes only when higher timeframe trend supports mean reversion
+
+name = "6h_1d_williamsr_macd_meanrev"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for Keltner Channel
+    # Williams %R on 6h (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid division by zero
+    
+    # MACD on 1d (12,26,9)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 35:  # need enough for slow EMA
         return np.zeros(n)
-    
-    # Keltner Channel components (20-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_fast = pd.Series(close_1d).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema_slow = pd.Series(close_1d).ewm(span=26, adjust=False, min_periods=26).mean().values
+    macd_line = ema_fast - ema_slow
+    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
+    macd_hist = macd_line - signal_line
     
-    # Calculate ATR(20) for 1d
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    # Align 1d MACD to 6s
+    macd_hist_aligned = align_htf_to_ltf(prices, df_1d, macd_hist)
     
-    # Middle line: EMA(20) of close
-    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Upper and lower bands
-    keltner_upper = ema_20 + 2 * atr_20
-    keltner_lower = ema_20 - 2 * atr_20
-    
-    # Align to 12h timeframe
-    keltner_upper_aligned = align_htf_to_ltf(prices, df_1d, keltner_upper)
-    keltner_lower_aligned = align_htf_to_ltf(prices, df_1d, keltner_lower)
-    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
-    
-    # Volume confirmation: current volume > 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > vol_ma
-    
-    # Choppiness filter: avoid high volatility periods
-    # Use 14-period ATR relative to price range
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    price_range = pd.Series(high_1d - low_1d).rolling(window=14, min_periods=14).mean().values
-    chop = np.where(price_range > 0, atr_14 / price_range * 100, 50)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    chop_filter = chop_aligned < 61.8  # Not too choppy
+    # Williams %R levels for entry
+    wr_oversold = -80  # buy when below -80
+    wr_overbought = -20  # sell when above -20
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(14, n):  # start after Williams %R warmup
         # Skip if not ready
-        if (np.isnan(keltner_upper_aligned[i]) or np.isnan(keltner_lower_aligned[i]) or
-            np.isnan(ema_20_aligned[i]) or np.isnan(chop_aligned[i])):
+        if np.isnan(williams_r[i]) or np.isnan(macd_hist_aligned[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Breakout conditions
-        breakout_up = close[i] > keltner_upper_aligned[i]
-        breakout_down = close[i] < keltner_lower_aligned[i]
+        # Mean reversion conditions
+        wr_buy = williams_r[i] < wr_oversold  # oversold
+        wr_sell = williams_r[i] > wr_overbought  # overbought
         
-        # Entry signals with filters
-        long_signal = breakout_up and volume_filter[i] and chop_filter[i]
-        short_signal = breakout_down and volume_filter[i] and chop_filter[i]
+        # MACD histogram filter: fade against the short-term momentum
+        # In ranging markets, MACD histogram near zero; we fade extremes when momentum is weakening
+        macd_weakening = abs(macd_hist_aligned[i]) < 0.1 * np.std(macd_hist_aligned[max(0, i-50):i+1]) if i >= 50 else True
         
-        # Exit when price crosses middle line (mean reversion)
-        exit_long = close[i] < ema_20_aligned[i]
-        exit_short = close[i] > ema_20_aligned[i]
+        # Entry signals: fade extremes when momentum is weakening
+        long_signal = wr_buy and macd_weakening
+        short_signal = wr_sell and macd_weakening
+        
+        # Exit when Williams %R returns to neutral zone
+        exit_long = williams_r[i] > -50
+        exit_short = williams_r[i] < -50
         
         # Execute trades
         if long_signal and position != 1:
