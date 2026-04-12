@@ -5,124 +5,92 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1d Camarilla pivot levels from 1w + volume confirmation + chop regime filter
-    # In trending regime (1w CHOP < 38.2): breakout long/short at Camarilla H3/L3 levels
-    # In ranging regime (1w CHOP > 61.8): mean reversion at H4/L4 levels
-    # Uses discrete sizing 0.25 to minimize fee churn. Target: 7-25 trades/year.
+    # Hypothesis: 6h Camarilla pivot breakout with 1d trend filter + volume confirmation
+    # Uses 1d Camarilla levels (calculated from prior 1d bar) for breakout/continuation
+    # 1d EMA50 trend filter: only take breakouts in direction of daily trend
+    # Volume confirmation: volume > 2.0 * 20-period average to filter false breakouts
+    # Discrete sizing 0.25 to minimize fee churn. Target: 15-25 trades/year per symbol.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for regime filter and pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for Camarilla pivots and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 1w Choppiness Index (CHOP) - uses True Range and ATR
-    def calculate_chop(high, low, close, period=14):
-        n = len(high)
-        tr = np.zeros(n)
-        atr = np.zeros(n)
-        
-        for i in range(1, n):
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Wilder's smoothing for ATR
-        atr[period] = np.mean(tr[1:period+1])
-        for i in range(period+1, n):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        
-        chop = np.full(n, np.nan)
-        for i in range(period, n):
-            # Sum of true range over period
-            tr_sum = np.sum(tr[i-period+1:i+1])
-            # Highest high and lowest low over period
-            hh = np.max(high[i-period+1:i+1])
-            ll = np.min(low[i-period+1:i+1])
-            if hh > ll and atr[i] > 0:
-                chop[i] = 100 * np.log10(tr_sum / (hh - ll)) / np.log10(period)
-        
-        return chop
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    chop_1w = calculate_chop(high_1w, low_1w, close_1w, 14)
-    chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w)
+    # Calculate 1d Camarilla levels (based on prior 1d bar's range)
+    # Camarilla: H4 = close + 1.1*(high-low)/2, L4 = close - 1.1*(high-low)/2
+    # H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4
+    # H2 = close + 1.1*(high-low)/6, L2 = close - 1.1*(high-low)/6
+    # H1 = close + 1.1*(high-low)/12, L1 = close - 1.1*(high-low)/12
+    camarilla_h4 = np.full(len(close_1d), np.nan)
+    camarilla_l4 = np.full(len(close_1d), np.nan)
+    camarilla_h3 = np.full(len(close_1d), np.nan)
+    camarilla_l3 = np.full(len(close_1d), np.nan)
     
-    # Calculate 1w Camarilla pivot levels (based on previous week's OHLC)
-    # Camarilla levels: H4, H3, H2, H1, L1, L2, L3, L4
-    # H4 = close + 1.5 * (high - low)
-    # H3 = close + 1.125 * (high - low)
-    # H2 = close + 0.75 * (high - low)
-    # H1 = close + 0.5 * (high - low)
-    # L1 = close - 0.5 * (high - low)
-    # L2 = close - 0.75 * (high - low)
-    # L3 = close - 1.125 * (high - low)
-    # L4 = close - 1.5 * (high - low)
+    for i in range(1, len(close_1d)):
+        daily_range = high_1d[i-1] - low_1d[i-1]
+        if daily_range > 0:
+            camarilla_h4[i] = close_1d[i-1] + 1.1 * daily_range / 2
+            camarilla_l4[i] = close_1d[i-1] - 1.1 * daily_range / 2
+            camarilla_h3[i] = close_1d[i-1] + 1.1 * daily_range / 4
+            camarilla_l3[i] = close_1d[i-1] - 1.1 * daily_range / 4
     
-    # We need to shift by 1 week to avoid look-ahead (use previous week's data)
-    high_1w_shifted = np.roll(high_1w, 1)  # Previous week's high
-    low_1w_shifted = np.roll(low_1w, 1)    # Previous week's low
-    close_1w_shifted = np.roll(close_1w, 1) # Previous week's close
-    # Set first value to NaN (no previous week)
-    high_1w_shifted[0] = np.nan
-    low_1w_shifted[0] = np.nan
-    close_1w_shifted[0] = np.nan
+    # Align Camarilla levels to 6h timeframe
+    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Calculate Camarilla levels based on previous week
-    camarilla_h4 = close_1w_shifted + 1.5 * (high_1w_shifted - low_1w_shifted)
-    camarilla_h3 = close_1w_shifted + 1.125 * (high_1w_shifted - low_1w_shifted)
-    camarilla_l3 = close_1w_shifted - 1.125 * (high_1w_shifted - low_1w_shifted)
-    camarilla_l4 = close_1w_shifted - 1.5 * (high_1w_shifted - low_1w_shifted)
-    
-    # Align Camarilla levels to 1d timeframe
-    h4_1d = align_htf_to_ltf(prices, df_1w, camarilla_h4)
-    h3_1d = align_htf_to_ltf(prices, df_1w, camarilla_h3)
-    l3_1d = align_htf_to_ltf(prices, df_1w, camarilla_l3)
-    l4_1d = align_htf_to_ltf(prices, df_1w, camarilla_l4)
-    
-    # Volume confirmation: volume > 1.3 * 20-period average
+    # Volume confirmation: volume > 2.0 * 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (1.3 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(chop_1w_aligned[i]) or np.isnan(h4_1d[i]) or np.isnan(h3_1d[i]) or 
-            np.isnan(l3_1d[i]) or np.isnan(l4_1d[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(h4_aligned[i]) or 
+            np.isnan(l4_aligned[i]) or np.isnan(h3_aligned[i]) or 
+            np.isnan(l3_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        chop = chop_1w_aligned[i]
-        ranging = chop > 61.8
-        trending = chop < 38.2
+        # Determine 1d trend
+        bullish_trend = close[i] > ema50_1d_aligned[i]
+        bearish_trend = close[i] < ema50_1d_aligned[i]
         
+        # Entry logic: Camarilla breakout with volume and trend filter
         long_entry = False
         short_entry = False
         
-        if trending:
-            # Trending regime: breakout at H3/L3 levels
-            long_entry = (close[i] > h3_1d[i-1]) and volume_spike[i]
-            short_entry = (close[i] < l3_1d[i-1]) and volume_spike[i]
-        elif ranging:
-            # Ranging regime: mean reversion at H4/L4 levels
-            long_entry = (close[i] < l4_1d[i]) and volume_spike[i]  # Oversold bounce
-            short_entry = (close[i] > h4_1d[i]) and volume_spike[i]  # Overbought rejection
+        # Long breakout: price breaks above H3/H4 in bullish trend
+        if bullish_trend:
+            long_entry = ((close[i] > h3_aligned[i-1]) or (close[i] > h4_aligned[i-1])) and volume_spike[i]
+        # Short breakout: price breaks below L3/L4 in bearish trend
+        elif bearish_trend:
+            short_entry = ((close[i] < l3_aligned[i-1]) or (close[i] < l4_aligned[i-1])) and volume_spike[i]
         
-        # Exit logic: opposite signal or regime change
-        long_exit = (short_entry and position == 1) or (ranging and chop > 50 and position == 1)
-        short_exit = (long_entry and position == -1) or (ranging and chop > 50 and position == -1)
+        # Exit logic: opposite Camarilla level or trend reversal
+        long_exit = (bearish_trend and close[i] < l3_aligned[i]) or (not bullish_trend and not bearish_trend)
+        short_exit = (bullish_trend and close[i] > h3_aligned[i]) or (not bullish_trend and not bearish_trend)
         
         if long_entry and position != 1:
             position = 1
@@ -147,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_camarilla_chop_volume_v1"
-timeframe = "1d"
+name = "6h_1d_camarilla_breakout_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
