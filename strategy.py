@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """
-4h_1d_Pullback_To_EMA21_with_Volume_Spice
-Hypothesis: Buy pullbacks to EMA21 in uptrends (EMA21 > EMA50) and sell pullbacks in downtrends (EMA21 < EMA50). Use volume spike (1.5x 20-period average) for entry confirmation and 1-day ADX > 25 to ensure trending market. Exit when price crosses EMA8 or ADX drops below 20. Designed for 20-35 trades/year with clear trend-following logic that works in bull (continuations) and bear (mean reversion within trend) markets.
+12h_1w_Wick_Pattern_Reversal_v1
+Hypothesis: Price rejection at weekly support/resistance triggers reversals in ranging markets. 
+Long when price closes above weekly low with bullish engulfing candle and volume spike.
+Short when price closes below weekly high with bearish engulfing candle and volume spike.
+Use 1-day ADX < 20 to filter for ranging markets and avoid false signals in trends.
+Works in bull markets (buy dips at weekly support) and bear markets (sell rallies at weekly resistance).
+Target: 25-35 trades/year with low frequency and high win rate.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Pullback_To_EMA21_with_Volume_Spice"
-timeframe = "4h"
+name = "12h_1w_Wick_Pattern_Reversal_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,8 +26,26 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
     
-    # === DAILY DATA FOR ADX TREND FILTER ===
+    # === WEEKLY DATA FOR SUPPORT/RESISTANCE LEVELS ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Weekly high and low (support/resistance levels)
+    weekly_high = high_1w
+    weekly_low = low_1w
+    
+    # Align weekly levels to 12h timeframe
+    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
+    
+    # === DAILY DATA FOR RANGE FILTER ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -31,7 +54,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ADX (14-period)
+    # Calculate ADX (14-period) for ranging market filter
     plus_dm = np.zeros_like(high_1d)
     minus_dm = np.zeros_like(low_1d)
     tr = np.zeros_like(high_1d)
@@ -63,59 +86,45 @@ def generate_signals(prices):
     dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
     adx = wilders_smooth(dx, period)
     
-    # Align ADX to 4h timeframe
+    # Align ADX to 12h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # === 4H INDICATORS ===
-    # EMA21, EMA50, EMA8
-    close_series = pd.Series(close)
-    ema21 = close_series.ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema8 = close_series.ewm(span=8, adjust=False, min_periods=8).mean().values
+    # === 12H PATTERN DETECTION ===
+    # Bullish engulfing: current green candle engulfs previous red candle
+    bullish_engulfing = (close > open_price) & (open_price <= np.roll(close, 1)) & (close >= np.roll(open_price, 1)) & (np.roll(close, 1) < np.roll(open_price, 1))
     
-    # Volume filter
+    # Bearish engulfing: current red candle engulfs previous green candle
+    bearish_engulfing = (close < open_price) & (open_price >= np.roll(close, 1)) & (close <= np.roll(open_price, 1)) & (np.roll(close, 1) > np.roll(open_price, 1))
+    
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(60, n):
         # Skip if not ready
-        if (np.isnan(ema21[i]) or np.isnan(ema50[i]) or np.isnan(ema8[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter: ADX > 25 indicates strong trend
-        trending = adx_aligned[i] > 25
+        # Range filter: ADX < 20 indicates ranging market (avoid trends)
+        ranging = adx_aligned[i] < 20
         
-        # Volume spike
-        volume_spike = volume[i] > (vol_ma[i] * 1.5)
+        # Long setup: price near weekly low + bullish engulfing + volume spike
+        near_weekly_low = close[i] <= weekly_low_aligned[i] * 1.01  # within 1% above weekly low
+        long_signal = near_weekly_low and bullish_engulfing[i] and volume_spike[i] and ranging
         
-        # Uptrend: EMA21 > EMA50
-        uptrend = ema21[i] > ema50[i]
-        # Downtrend: EMA21 < EMA50
-        downtrend = ema21[i] < ema50[i]
+        # Short setup: price near weekly high + bearish engulfing + volume spike
+        near_weekly_high = close[i] >= weekly_high_aligned[i] * 0.99  # within 1% below weekly high
+        short_signal = near_weekly_high and bearish_engulfing[i] and volume_spike[i] and ranging
         
-        # Long: pullback to EMA21 in uptrend with volume spike
-        long_signal = (close[i] <= ema21[i] * 1.005 and  # within 0.5% above EMA21
-                      close[i] >= ema21[i] * 0.995 and   # within 0.5% below EMA21
-                      uptrend and 
-                      volume_spike and 
-                      trending)
-        
-        # Short: pullback to EMA21 in downtrend with volume spike
-        short_signal = (close[i] <= ema21[i] * 1.005 and 
-                       close[i] >= ema21[i] * 0.995 and
-                       downtrend and 
-                       volume_spike and 
-                       trending)
-        
-        # Exit: price crosses EMA8 or trend weakens
-        exit_long = (position == 1 and 
-                    (close[i] < ema8[i] or adx_aligned[i] < 20))
-        exit_short = (position == -1 and 
-                     (close[i] > ema8[i] or adx_aligned[i] < 20))
+        # Exit: price moves to middle of weekly range or trend emerges
+        weekly_mid = (weekly_high_aligned[i] + weekly_low_aligned[i]) / 2
+        exit_long = (position == 1 and (close[i] >= weekly_mid or adx_aligned[i] >= 25))
+        exit_short = (position == -1 and (close[i] <= weekly_mid or adx_aligned[i] >= 25))
         
         # Execute trades
         if long_signal and position != 1:
