@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_1d_Camarilla_Breakout_Volume_Regime_v3"
+name = "12h_1w_1d_Camarilla_Breakout_Volume_Regime_v4"
 timeframe = "12h"
 leverage = 1.0
 
@@ -40,24 +40,26 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Map each 12h bar to previous day's OHLC
-    pivots_high = np.full(n, np.nan)
-    pivots_low = np.full(n, np.nan)
-    pivots_close = np.full(n, np.nan)
+    # Map each 12h bar to previous day's OHLC using pandas merge (vectorized)
+    # Convert to datetime for merge
+    prices_dt = pd.to_datetime(prices['open_time'])
+    df_1d_dt = pd.to_datetime(df_1d['open_time'])
     
-    for i in range(n):
-        current_time = pd.Timestamp(prices.iloc[i]['open_time'])
-        prev_date = current_time.date() - pd.Timedelta(days=1)
-        
-        # Find previous day in daily data
-        for j in range(len(df_1d)):
-            if pd.Timestamp(df_1d.iloc[j]['open_time']).date() == prev_date:
-                pivots_high[i] = high_1d[j]
-                pivots_low[i] = low_1d[j]
-                pivots_close[i] = close_1d[j]
-                break
+    # Previous day's date for each 12h bar
+    prev_day = prices_dt - pd.Timedelta(days=1)
     
-    # Calculate Camarilla H4 and L4 levels (stronger breakout levels)
+    # Create DataFrames for merge
+    df_prev = pd.DataFrame({'date': prev_day.dt.date, 'idx': np.arange(n)})
+    df_1d_date = pd.DataFrame({'date': df_1d_dt.dt.date, 
+                               'high': high_1d, 'low': low_1d, 'close': close_1d})
+    
+    # Merge to get previous day's OHLC
+    merged = df_prev.merge(df_1d_date, on='date', how='left')
+    pivots_high = merged['high'].values
+    pivots_low = merged['low'].values
+    pivots_close = merged['close'].values
+    
+    # Calculate Camarilla H4 and L4 levels
     H4 = pivots_close + (pivots_high - pivots_low) * 1.1 / 2
     L4 = pivots_close - (pivots_high - pivots_low) * 1.1 / 2
     
@@ -100,7 +102,7 @@ def generate_signals(prices):
         above_week_ema = close[i] > ema_1w_aligned[i]
         below_week_ema = close[i] < ema_1w_aligned[i]
         
-        # Chop regime: Chop > 50 = ranging (mean revert), Chop < 50 = trending
+        # Chop regime: Chop < 50 = trending (trend follow), Chop > 50 = ranging (mean revert)
         chop_low = chop_aligned[i] < 50
         
         # Volume confirmation: current volume > weekly average
