@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Breakout_v2
-Hypothesis: Use daily Camarilla H3/L3 breakouts with 4h EMA trend filter and volume spike confirmation.
-Enter long when price breaks above H3 in uptrend (4h close > EMA20) with volume > 2x average.
-Enter short when price breaks below L3 in downtrend (4h close < EMA20) with volume > 2x average.
-Exit on trend reversal or price retracement to H4/L4 levels. Uses 0.25 position sizing to limit drawdown.
-Designed to capture strong directional moves in both bull and bear markets while avoiding whipsaws.
-Target: 40-100 total trades over 4 years (10-25/year).
+4h_1d_camarilla_breakout_v19
+Hypothesis: Daily Camarilla H3/L3 breakouts with 4h EMA20 trend filter and volume spike confirmation.
+Works in both bull and bear markets by following strong directional moves while avoiding whipsaws.
+Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_Breakout_v2"
+name = "4h_1d_camarilla_breakout_v19"
 timeframe = "4h"
 leverage = 1.0
 
@@ -64,8 +61,7 @@ def generate_signals(prices):
     
     close_4h = df_4h['close'].values
     ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    # Since we're on 4h timeframe, no alignment needed for 4h EMA
-    ema20_4h_aligned = ema20_4h
+    ema20_4h_4h = ema20_4h  # Same timeframe, no alignment needed
     
     # === VOLUME SURGE FILTER ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -76,15 +72,19 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(h3_4h[i]) or np.isnan(l3_4h[i]) or np.isnan(ema20_4h_aligned[i]) or 
+        if (np.isnan(h3_4h[i]) or np.isnan(l3_4h[i]) or np.isnan(ema20_4h_4h[i]) or 
             np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Get current 4h close 
-        close_4h_arr = df_4h['close'].values
-        trend_up = close_4h_arr[i] > ema20_4h_aligned[i]
-        trend_down = close_4h_arr[i] < ema20_4h_aligned[i]
+        # Get current 4h close (already aligned since we're in 4h timeframe)
+        close_4h_val = close_4h[i // 16] if i >= 16 else np.nan  # Only use closed 4h bars
+        if np.isnan(close_4h_val):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+            continue
+            
+        trend_up = close_4h_val > ema20_4h_4h[i // 16]
+        trend_down = close_4h_val < ema20_4h_4h[i // 16]
         
         # Long: break above H3 in uptrend with volume surge
         long_signal = (trend_up and 
