@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_1d_cci_fade_v1"
-timeframe = "6h"
+name = "4h_1d_keltner_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,34 +17,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for CCI calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Calculate CCI(20) on 12h data
-    tp_12h = (high_12h + low_12h + close_12h) / 3.0
-    sma_tp = pd.Series(tp_12h).rolling(window=20, min_periods=20).mean().values
-    mad = pd.Series(tp_12h).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
-    cci_12h = (tp_12h - sma_tp) / (0.015 * mad)
-    
-    # Align CCI to 6h timeframe
-    cci_12h_aligned = align_htf_to_ltf(prices, df_12h, cci_12h)
-    
-    # Get 1d data for trend filter (EMA50)
+    # Get 1d data for Keltner calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume filter - 20-period average on 6h data
+    # Calculate ATR(20) on daily data
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period TR is just high-low
+    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate EMA(20) of typical price on daily data
+    typical_price = (high_1d + low_1d + close_1d) / 3.0
+    ema_tp = pd.Series(typical_price).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Keltner channels: EMA(TP) ± 2 * ATR
+    keltner_upper = ema_tp + 2.0 * atr_20
+    keltner_lower = ema_tp - 2.0 * atr_20
+    
+    # Align Keltner channels to 4h timeframe
+    keltner_upper_aligned = align_htf_to_ltf(prices, df_1d, keltner_upper)
+    keltner_lower_aligned = align_htf_to_ltf(prices, df_1d, keltner_lower)
+    
+    # Volume filter - 20-period average on 4h data
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
@@ -52,26 +54,23 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if not ready
-        if (np.isnan(cci_12h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+        if (np.isnan(keltner_upper_aligned[i]) or np.isnan(keltner_lower_aligned[i]) or 
             np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend from 1d EMA
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Breakout signals with volume confirmation
+        # Long: price breaks above upper Keltner channel
+        long_signal = close[i] > keltner_upper_aligned[i] and volume_ok[i]
+        # Short: price breaks below lower Keltner channel
+        short_signal = close[i] < keltner_lower_aligned[i] and volume_ok[i]
         
-        # CCI fade strategy: mean reversion at extremes
-        # Long: CCI < -100 (oversold) in uptrend with volume
-        long_signal = cci_12h_aligned[i] < -100 and uptrend and volume_ok[i]
-        # Short: CCI > 100 (overbought) in downtrend with volume
-        short_signal = cci_12h_aligned[i] > 100 and downtrend and volume_ok[i]
-        
-        # Exit when CCI returns to neutral zone
-        exit_long = cci_12h_aligned[i] > -50
-        exit_short = cci_12h_aligned[i] < 50
+        # Exit when price returns to middle (EMA of typical price)
+        ema_tp_aligned = align_htf_to_ltf(prices, df_1d, ema_tp)
+        exit_long = close[i] < ema_tp_aligned[i]
+        exit_short = close[i] > ema_tp_aligned[i]
         
         # Execute trades
         if long_signal and position != 1:
