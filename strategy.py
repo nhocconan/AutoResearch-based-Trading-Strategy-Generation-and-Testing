@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_camarilla_breakout_v1"
-timeframe = "1h"
+name = "6h_1w_camarilla_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,74 +17,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation (HF direction)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    # Get weekly data for Camarilla pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate daily Camarilla pivot levels
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Calculate Camarilla pivot levels from weekly data
+    pivot = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
     
-    # Camarilla levels (H3 and L3)
-    h3 = pivot + (range_1d * 1.1 / 4)
-    l3 = pivot - (range_1d * 1.1 / 4)
+    # Camarilla levels (using standard multipliers)
+    h3 = pivot + (range_1w * 1.1 / 4)   # Resistance 3
+    l3 = pivot - (range_1w * 1.1 / 4)   # Support 3
+    h4 = pivot + (range_1w * 1.1 / 2)   # Resistance 4
+    l4 = pivot - (range_1w * 1.1 / 2)   # Support 4
     
-    # Align to 1h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    # Align Camarilla levels to 6h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1w, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1w, l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1w, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1w, l4)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
     
-    # Volume filter - 24-period average on 1h data
+    # Volume filter - 20-period average on 6h data
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=24, min_periods=24).mean().values
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
     
-    # Session filter: 08:00-20:00 UTC
-    hours = prices.index.hour
-    session_ok = (hours >= 8) & (hours <= 20)
+    # ADX for trend strength filter (14-period)
+    high_low = high - low
+    high_close = np.abs(high - np.roll(close, 1))
+    low_close = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    tr[0] = high_low[0]
+    
+    # Calculate +DI and -DI
+    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), np.maximum(high - np.roll(high, 1), 0), 0)
+    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), np.maximum(np.roll(low, 1) - low, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
+    
+    tr_ma = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / tr_ma
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / tr_ma
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Strong trend filter: ADX > 25
+    trend_strong = adx > 25
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if not ready
         if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(pivot_aligned[i]) or np.isnan(volume_ok[i]) or
-            np.isnan(session_ok[i])):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+            np.isnan(volume_ok[i]) or np.isnan(trend_strong[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Only trade during session
-        if not session_ok[i]:
-            if position == 1:
-                signals[i] = 0.20
-            elif position == -1:
-                signals[i] = -0.20
-            else:
-                signals[i] = 0.0
-            continue
+        # Long: price breaks above H4 with volume confirmation and strong trend
+        long_signal = close[i] > h4_aligned[i] and volume_ok[i] and trend_strong[i]
+        # Short: price breaks below L4 with volume confirmation and strong trend
+        short_signal = close[i] < l4_aligned[i] and volume_ok[i] and trend_strong[i]
         
-        # Long: price breaks above H3 with volume confirmation
-        long_signal = close[i] > h3_aligned[i] and volume_ok[i]
-        # Short: price breaks below L3 with volume confirmation
-        short_signal = close[i] < l3_aligned[i] and volume_ok[i]
-        
-        # Exit when price returns to daily pivot
+        # Exit when price returns to pivot
         exit_long = close[i] < pivot_aligned[i]
         exit_short = close[i] > pivot_aligned[i]
         
         # Execute trades
         if long_signal and position != 1:
             position = 1
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif short_signal and position != -1:
             position = -1
-            signals[i] = -0.20
+            signals[i] = -0.25
         elif exit_long and position == 1:
             position = 0
             signals[i] = 0.0
@@ -94,9 +105,9 @@ def generate_signals(prices):
         else:
             # Hold position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
