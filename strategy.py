@@ -13,47 +13,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot points
+    # Get weekly data for Donchian channel
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate weekly pivot points using previous week's data
+    # Calculate weekly Donchian channel (20-period high/low)
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
     
-    prev_high = np.roll(high_1w, 1)
-    prev_low = np.roll(low_1w, 1)
-    prev_close = np.roll(close_1w, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Use pandas rolling for proper min_periods handling
+    high_series = pd.Series(high_1w)
+    low_series = pd.Series(low_1w)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Weekly pivot point
-    weekly_pivot = (prev_high + prev_low + prev_close) / 3
+    # Align Donchian levels to daily timeframe
+    donchian_high_daily = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_daily = align_htf_to_ltf(prices, df_1w, donchian_low)
     
-    # Align weekly pivot to 6h timeframe
-    weekly_pivot_6h = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-    
-    # Calculate 6h RSI(14) for momentum
-    delta = np.diff(close, prepend=np.nan)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    gain_ma = np.full(n, np.nan)
-    loss_ma = np.full(n, np.nan)
-    gain_series = pd.Series(gain)
-    loss_series = pd.Series(loss)
-    gain_ma_values = gain_series.ewm(span=14, adjust=False, min_periods=14).mean().values
-    loss_ma_values = loss_series.ewm(span=14, adjust=False, min_periods=14).mean().values
-    gain_ma[:] = gain_ma_values
-    loss_ma[:] = loss_ma_values
-    
-    rs = gain_ma / loss_ma
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume filter: 20-period EMA
+    # Volume filter: 20-day EMA
     vol_ema = np.full(n, np.nan)
     vol_series = pd.Series(volume)
     vol_ema_values = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -64,21 +43,24 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(weekly_pivot_6h[i]) or np.isnan(rsi[i]) or 
+        if (np.isnan(donchian_high_daily[i]) or np.isnan(donchian_low_daily[i]) or 
             np.isnan(vol_ema[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.3x EMA
-        volume_filter = volume[i] > vol_ema[i] * 1.3
+        # Volume filter: current volume > 1.5x EMA
+        volume_filter = volume[i] > vol_ema[i] * 1.5
         
-        # Entry conditions: RSI extreme + price near weekly pivot (mean reversion)
-        long_entry = (rsi[i] < 30) and (close[i] <= weekly_pivot_6h[i] * 1.02) and volume_filter
-        short_entry = (rsi[i] > 70) and (close[i] >= weekly_pivot_6h[i] * 0.98) and volume_filter
+        # Entry conditions: Donchian breakout with volume confirmation
+        long_breakout = close[i] > donchian_high_daily[i]
+        short_breakout = close[i] < donchian_low_daily[i]
         
-        # Exit conditions: RSI returns to neutral zone
-        long_exit = rsi[i] > 50
-        short_exit = rsi[i] < 50
+        long_entry = long_breakout and volume_filter
+        short_entry = short_breakout and volume_filter
+        
+        # Exit conditions: Opposite Donchian level touch
+        long_exit = close[i] < donchian_low_daily[i]
+        short_exit = close[i] > donchian_high_daily[i]
         
         if long_entry and position != 1:
             position = 1
@@ -103,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_rsi_pivot_mean_reversion_vol_filter_v1"
-timeframe = "6h"
+name = "1d_1w_donchian_breakout_volume_filter_v1"
+timeframe = "1d"
 leverage = 1.0
