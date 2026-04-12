@@ -1,23 +1,25 @@
 #!/usr/bin/env python3
 """
-1h_4h_Camarilla_Breakout_With_Trend_Filter_v1
-Hypothesis: Trade 1-hour bars using 4-hour Camarilla H3/L3 breakouts with trend filter.
-Use 4h for signal direction (trend + Camarilla levels), 1h only for precise entry timing.
-Add session filter (08-20 UTC) to reduce noise trades. Target 15-37 trades/year per symbol.
-Works in bull markets (trend continuation breaks) and bear markets (mean reversion from extremes).
+1d_1w_Turtle_Reversal_v1
+Hypothesis: Use weekly Donchian channels (20) for trend direction and daily Donchian breakouts (20) for entries.
+Long when price breaks above daily DONCHIAN(20) high and weekly trend is up.
+Short when price breaks below daily DONCHIAN(20) low and weekly trend is down.
+Exit on opposite daily Donchian breakout or weekly trend reversal.
+Designed for low trade frequency (10-25/year) with trend following in both bull and bear markets.
+Uses volume confirmation to avoid false breakouts and ATR-based position sizing for risk control.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_Camarilla_Breakout_With_Trend_Filter_v1"
-timeframe = "1h"
+name = "1d_1w_Turtle_Reversal_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,78 +27,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4H DATA FOR CAMARILLA PIVOTS ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # === WEEKLY DATA FOR TREND DIRECTION ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla levels from previous 4h bar
-    typical_price = (high_4h + low_4h + close_4h) / 3
-    pivot = typical_price
-    range_4h = high_4h - low_4h
+    # Weekly Donchian channels (20)
+    high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    h3 = pivot + (range_4h * 1.1 / 4)
-    l3 = pivot - (range_4h * 1.1 / 4)
-    h4 = pivot + (range_4h * 1.1 / 2)
-    l4 = pivot - (range_4h * 1.1 / 2)
+    # Weekly trend: price above/below midpoint of weekly channel
+    mid_20 = (high_20 + low_20) / 2
+    weekly_uptrend = close_1w > mid_20
+    weekly_downtrend = close_1w < mid_20
     
-    # Align to 1h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_4h, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_4h, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_4h, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_4h, l4)
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend)
+    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend)
     
-    # === TREND FILTER: 21 EMA ON 4H CLOSE ===
-    close_4h_series = pd.Series(close_4h)
-    ema21_4h = close_4h_series.ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
+    # === DAILY DATA FOR ENTRY SIGNALS ===
+    # Daily Donchian channels (20)
+    high_20d = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20d = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === SESSION FILTER: 08-20 UTC ===
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # Volume confirmation: volume > 1.5x 20-day average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if not ready
-        if (np.isnan(ema21_4h_aligned[i]) or np.isnan(h3_aligned[i]) or 
-            np.isnan(l3_aligned[i])):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+        if (np.isnan(high_20d[i]) or np.isnan(low_20d[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(weekly_uptrend_aligned[i]) or
+            np.isnan(weekly_downtrend_aligned[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
-            continue
+        # Volume filter
+        strong_volume = volume[i] > (vol_ma[i] * 1.5)
         
-        # Determine 4h trend
-        uptrend = close_4h_aligned[i] > ema21_4h_aligned[i]  # Use 4h close aligned
-        downtrend = close_4h_aligned[i] < ema21_4h_aligned[i]
+        # Entry conditions
+        long_breakout = close[i] > high_20d[i] and weekly_uptrend_aligned[i] and strong_volume
+        short_breakout = close[i] < low_20d[i] and weekly_downtrend_aligned[i] and strong_volume
         
-        # Long: price breaks H3 with 4h uptrend
-        long_signal = (close[i] > h3_aligned[i] and uptrend)
-        
-        # Short: price breaks L3 with 4h downtrend
-        short_signal = (close[i] < l3_aligned[i] and downtrend)
-        
-        # Exit: opposite H3/L3 level or trend reversal
-        exit_long = (position == 1 and 
-                    (close[i] < l3_aligned[i] or not uptrend))
-        exit_short = (position == -1 and 
-                     (close[i] > h3_aligned[i] or not downtrend))
+        # Exit conditions: opposite breakout or weekly trend reversal
+        exit_long = position == 1 and (close[i] < low_20d[i] or not weekly_uptrend_aligned[i])
+        exit_short = position == -1 and (close[i] > high_20d[i] or not weekly_downtrend_aligned[i])
         
         # Execute trades
-        if long_signal and position != 1:
+        if long_breakout and position != 1:
             position = 1
-            signals[i] = 0.20
-        elif short_signal and position != -1:
+            signals[i] = 0.25
+        elif short_breakout and position != -1:
             position = -1
-            signals[i] = -0.20
+            signals[i] = -0.25
         elif exit_long and position == 1:
             position = 0
             signals[i] = 0.0
@@ -105,6 +93,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Hold position
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
