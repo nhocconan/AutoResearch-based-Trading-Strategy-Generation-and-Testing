@@ -8,11 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with 1d volume spike and chop regime filter
-    # Donchian provides objective price channels for breakouts
-    # Volume spike confirms institutional participation
-    # Chop regime filter avoids whipsaws in ranging markets
-    # Works in bull/bear by fading extremes in range (chop high) and following breakouts in trend (chop low)
+    # Hypothesis: 1d Camarilla pivot breakout with 1w volume confirmation and ADX trend filter
+    # Camarilla levels from 1d provide institutional support/resistance for daily entries
+    # 1w volume spike confirms institutional participation across the week
+    # ADX filter ensures we only trade in trending markets (ADX > 25) to avoid whipsaws
+    # Works in bull/bear by following institutional breakouts with volume confirmation
     # Target: 20-50 trades/year per symbol.
     
     # Session filter: 8:00-20:00 UTC (avoid low volume Asian session)
@@ -24,9 +24,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels, volume context, and chop
+    # Get 1d data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
@@ -34,69 +34,118 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Donchian channels (20-period)
-    donchian_h = np.full(len(df_1d), np.nan)
-    donchian_l = np.full(len(df_1d), np.nan)
-    donchian_m = np.full(len(df_1d), np.nan)
+    # Calculate 1d Camarilla levels (using previous day's range)
+    camarilla_h4 = np.full(len(df_1d), np.nan)
+    camarilla_l4 = np.full(len(df_1d), np.nan)
+    camarilla_h3 = np.full(len(df_1d), np.nan)
+    camarilla_l3 = np.full(len(df_1d), np.nan)
+    camarilla_pivot = np.full(len(df_1d), np.nan)
     
-    for i in range(19, len(df_1d)):
-        donchian_h[i] = np.max(high_1d[i-19:i+1])
-        donchian_l[i] = np.min(low_1d[i-19:i+1])
-        donchian_m[i] = (donchian_h[i] + donchian_l[i]) / 2
+    for i in range(1, len(df_1d)):
+        # Previous day's OHLC
+        phigh = high_1d[i-1]
+        plow = low_1d[i-1]
+        pclose = close_1d[i-1]
+        
+        # Pivot point
+        camarilla_pivot[i] = (phigh + plow + 2 * pclose) / 4
+        
+        # Range
+        rng = phigh - plow
+        
+        # Camarilla levels
+        camarilla_h4[i] = camarilla_pivot[i] + rng * 1.1 / 2
+        camarilla_l4[i] = camarilla_pivot[i] - rng * 1.1 / 2
+        camarilla_h3[i] = camarilla_pivot[i] + rng * 1.1 / 4
+        camarilla_l3[i] = camarilla_pivot[i] - rng * 1.1 / 4
     
-    # Align 1d Donchian channels to 4h timeframe
-    donchian_h_aligned = align_htf_to_ltf(prices, df_1d, donchian_h)
-    donchian_l_aligned = align_htf_to_ltf(prices, df_1d, donchian_l)
-    donchian_m_aligned = align_htf_to_ltf(prices, df_1d, donchian_m)
+    # Align 1d Camarilla levels to 1d timeframe (same timeframe, so direct alignment)
+    # Since we're on 1d timeframe, we can use the values directly with proper shift
+    h4_aligned = np.roll(camarilla_h4, 1)
+    l4_aligned = np.roll(camarilla_l4, 1)
+    h3_aligned = np.roll(camarilla_h3, 1)
+    l3_aligned = np.roll(camarilla_l3, 1)
+    pivot_aligned = np.roll(camarilla_pivot, 1)
+    # Set first value to nan as there's no previous day
+    h4_aligned[0] = np.nan
+    l4_aligned[0] = np.nan
+    h3_aligned[0] = np.nan
+    l3_aligned[0] = np.nan
+    pivot_aligned[0] = np.nan
     
-    # 1d volume spike filter (current volume > 1.8 * 20-day average)
-    vol_ma_20_1d = np.full(len(df_1d), np.nan)
-    for i in range(19, len(df_1d)):
-        vol_ma_20_1d[i] = np.mean(volume_1d[i-19:i+1])
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    volume_spike = volume > 1.8 * vol_ma_20_1d_aligned
+    # Get 1w data for volume confirmation and ADX
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
     
-    # Chop regime filter (using 1d data)
-    # Chop > 61.8 = ranging (mean revert at Donchian middle)
-    # Chop < 38.2 = trending (follow breakouts at Donchian H/L)
-    atr_1d = np.full(len(df_1d), np.nan)
-    for i in range(14, len(df_1d)):
-        tr = np.max([
-            high_1d[i] - low_1d[i],
-            np.abs(high_1d[i] - close_1d[i-1]),
-            np.abs(low_1d[i] - close_1d[i-1])
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    volume_1w = df_1w['volume'].values
+    
+    # 1w volume spike filter (current volume > 2.0 * 20-week average)
+    vol_ma_20_1w = np.full(len(df_1w), np.nan)
+    for i in range(19, len(df_1w)):
+        vol_ma_20_1w[i] = np.mean(volume_1w[i-19:i+1])
+    vol_ma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20_1w)
+    volume_spike = volume > 2.0 * vol_ma_20_1w_aligned
+    
+    # 1w ADX calculation (14-period)
+    # True Range
+    tr_1w = np.full(len(df_1w), np.nan)
+    for i in range(1, len(df_1w)):
+        tr_1w[i] = np.max([
+            high_1w[i] - low_1w[i],
+            np.abs(high_1w[i] - close_1w[i-1]),
+            np.abs(low_1w[i] - close_1w[i-1])
         ])
+    
+    # Directional Movement
+    dm_plus_1w = np.full(len(df_1w), np.nan)
+    dm_minus_1w = np.full(len(df_1w), np.nan)
+    for i in range(1, len(df_1w)):
+        up_move = high_1w[i] - high_1w[i-1]
+        down_move = low_1w[i-1] - low_1w[i]
+        dm_plus_1w[i] = up_move if up_move > down_move and up_move > 0 else 0
+        dm_minus_1w[i] = down_move if down_move > up_move and down_move > 0 else 0
+    
+    # Smoothed TR, DM+ and DM- (Wilder's smoothing)
+    atr_1w = np.full(len(df_1w), np.nan)
+    dm_plus_smooth_1w = np.full(len(df_1w), np.nan)
+    dm_minus_smooth_1w = np.full(len(df_1w), np.nan)
+    
+    # Initial values (first 14 periods)
+    for i in range(14, len(df_1w)):
         if i == 14:
-            atr_1d[i] = np.mean([high_1d[j] - low_1d[j] for j in range(i-13, i+1)])
+            atr_1w[i] = np.sum(tr_1w[1:15])
+            dm_plus_smooth_1w[i] = np.sum(dm_plus_1w[1:15])
+            dm_minus_smooth_1w[i] = np.sum(dm_minus_1w[1:15])
         else:
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr) / 14
+            atr_1w[i] = atr_1w[i-1] - (atr_1w[i-1] / 14) + tr_1w[i]
+            dm_plus_smooth_1w[i] = dm_plus_smooth_1w[i-1] - (dm_plus_smooth_1w[i-1] / 14) + dm_plus_1w[i]
+            dm_minus_smooth_1w[i] = dm_minus_smooth_1w[i-1] - (dm_minus_smooth_1w[i-1] / 14) + dm_minus_1w[i]
     
-    # Calculate Chop (14-period)
-    sum_tr_14 = np.full(len(df_1d), np.nan)
-    max_min_range_14 = np.full(len(df_1d), np.nan)
-    chop = np.full(len(df_1d), 50.0)  # default neutral
+    # Directional Indicators
+    di_plus_1w = np.full(len(df_1w), np.nan)
+    di_minus_1w = np.full(len(df_1w), np.nan)
+    dx_1w = np.full(len(df_1w), np.nan)
     
-    for i in range(13, len(df_1d)):
-        # Sum of true range over 14 periods
-        tr_sum = 0
-        for j in range(i-13, i+1):
-            tr = np.max([
-                high_1d[j] - low_1d[j],
-                np.abs(high_1d[j] - close_1d[j-1]) if j > 0 else 0,
-                np.abs(low_1d[j] - close_1d[j-1]) if j > 0 else 0
-            ])
-            tr_sum += tr
-        sum_tr_14[i] = tr_sum
-        
-        # Max high - min low over 14 periods
-        max_high = np.max(high_1d[i-13:i+1])
-        min_low = np.min(low_1d[i-13:i+1])
-        max_min_range_14[i] = max_high - min_low
-        
-        if max_min_range_14[i] > 0:
-            chop[i] = 100 * np.log10(sum_tr_14[i] / max_min_range_14[i]) / np.log10(14)
+    for i in range(14, len(df_1w)):
+        if atr_1w[i] > 0:
+            di_plus_1w[i] = 100 * dm_plus_smooth_1w[i] / atr_1w[i]
+            di_minus_1w[i] = 100 * dm_minus_smooth_1w[i] / atr_1w[i]
+            if di_plus_1w[i] + di_minus_1w[i] > 0:
+                dx_1w[i] = 100 * np.abs(di_plus_1w[i] - di_minus_1w[i]) / (di_plus_1w[i] + di_minus_1w[i])
     
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # ADX (smoothed DX)
+    adx_1w = np.full(len(df_1w), np.nan)
+    for i in range(28, len(df_1w)):  # 14 + 14 for smoothing
+        if i == 28:
+            adx_1w[i] = np.mean(dx_1w[15:29])
+        else:
+            adx_1w[i] = (adx_1w[i-1] * 13 + dx_1w[i]) / 14
+    
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -107,50 +156,50 @@ def generate_signals(prices):
             continue
         
         # Skip if data not ready
-        if (np.isnan(donchian_h_aligned[i]) or np.isnan(donchian_l_aligned[i]) or 
-            np.isnan(donchian_m_aligned[i]) or np.isnan(volume_spike[i]) or 
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
+            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+            np.isnan(pivot_aligned[i]) or np.isnan(volume_spike[i]) or 
+            np.isnan(adx_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Regime-based logic
-        if chop_aligned[i] > 61.8:  # Ranging market - mean revert at Donchian middle
-            # Long near lower band, short near upper band
-            long_entry = close[i] <= donchian_l_aligned[i] and volume_spike[i]
-            short_entry = close[i] >= donchian_h_aligned[i] and volume_spike[i]
-            long_exit = close[i] >= donchian_m_aligned[i]
-            short_exit = close[i] <= donchian_m_aligned[i]
-        else:  # Trending market - follow breakouts at Donchian H/L
-            # Breakout entries
-            long_entry = close[i] > donchian_h_aligned[i] and volume_spike[i]
-            short_entry = close[i] < donchian_l_aligned[i] and volume_spike[i]
-            # Exit on opposite test of Donchian bands or volume dropout
-            long_exit = close[i] < donchian_l_aligned[i] or (not volume_spike[i])
-            short_exit = close[i] > donchian_h_aligned[i] or (not volume_spike[i])
-        
-        if long_entry and position != 1:
-            position = 1
-            signals[i] = 0.25
-        elif short_entry and position != -1:
-            position = -1
-            signals[i] = -0.25
-        elif position == 1 and long_exit:
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and short_exit:
-            position = 0
-            signals[i] = 0.0
-        else:
-            # Hold current position
-            if position == 1:
+        # Only trade when ADX > 25 (trending market)
+        if adx_1w_aligned[i] > 25:
+            # Breakout entries with volume confirmation
+            long_entry = close[i] > h4_aligned[i] and volume_spike[i]
+            short_entry = close[i] < l4_aligned[i] and volume_spike[i]
+            
+            # Exit when price returns to pivot level or volume drops
+            long_exit = close[i] < pivot_aligned[i] or (not volume_spike[i])
+            short_exit = close[i] > pivot_aligned[i] or (not volume_spike[i])
+            
+            if long_entry and position != 1:
+                position = 1
                 signals[i] = 0.25
-            elif position == -1:
+            elif short_entry and position != -1:
+                position = -1
                 signals[i] = -0.25
-            else:
+            elif position == 1 and long_exit:
+                position = 0
                 signals[i] = 0.0
+            elif position == -1 and short_exit:
+                position = 0
+                signals[i] = 0.0
+            else:
+                # Hold current position
+                if position == 1:
+                    signals[i] = 0.25
+                elif position == -1:
+                    signals[i] = -0.25
+                else:
+                    signals[i] = 0.0
+        else:
+            # In ranging market (ADX <= 25), stay flat
+            position = 0
+            signals[i] = 0.0
     
     return signals
 
-name = "4h_1d_donchian_breakout_vol_chop_v2"
-timeframe = "4h"
+name = "1d_1w_camarilla_breakout_vol_adx_v1"
+timeframe = "1d"
 leverage = 1.0
