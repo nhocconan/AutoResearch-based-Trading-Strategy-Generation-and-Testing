@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_camarilla_pivot_breakout_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,36 +17,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data once
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from weekly high/low/close
-    # Using previous week's data (already available in df_1w)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate Camarilla levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate pivot and Camarilla levels
-    pivot = (high_1w + low_1w + close_1w) / 3
-    range_1w = high_1w - low_1w
+    # Previous day's values for Camarilla calculation
+    phigh = np.roll(high_1d, 1)
+    plow = np.roll(low_1d, 1)
+    pclose = np.roll(close_1d, 1)
+    phigh[0] = high_1d[0]  # fill first value
+    plow[0] = low_1d[0]
+    pclose[0] = close_1d[0]
     
     # Camarilla levels
-    r4 = close_1w + range_1w * 1.500
-    r3 = close_1w + range_1w * 1.250
-    r2 = close_1w + range_1w * 1.166
-    r1 = close_1w + range_1w * 1.083
-    s1 = close_1w - range_1w * 1.083
-    s2 = close_1w - range_1w * 1.166
-    s3 = close_1w - range_1w * 1.250
-    s4 = close_1w - range_1w * 1.500
+    range_1d = phigh - plow
+    camarilla_h4 = pclose + 1.1 * range_1d / 2  # H4 (resistance)
+    camarilla_l4 = pclose - 1.1 * range_1d / 2  # L4 (support)
+    camarilla_h3 = pclose + 1.1 * range_1d / 4  # H3
+    camarilla_l3 = pclose - 1.1 * range_1d / 4  # L3
     
-    # Align Camarilla levels to 6h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
+    # Align to 12h
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
     # Volume filter: current volume > 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -55,39 +55,37 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # warmup for volume MA
+    for i in range(30, n):  # warmup
         # Skip if not ready
-        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i])):
+        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
+            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Breakout conditions
-        breakout_long = close[i] > r4_aligned[i]  # Break above R4
-        breakout_short = close[i] < s4_aligned[i]  # Break below S4
+        breakout_up = close[i] > camarilla_h4_aligned[i]
+        breakout_down = close[i] < camarilla_l4_aligned[i]
         
-        # Fade conditions (mean reversion at extreme levels)
-        fade_long = close[i] < s3_aligned[i] and close[i] > s4_aligned[i]  # Between S3 and S4
-        fade_short = close[i] > r3_aligned[i] and close[i] < r4_aligned[i]  # Between R3 and R4
+        # Mean reversion at H3/L3
+        revert_up = close[i] < camarilla_l3_aligned[i]  # Oversold bounce
+        revert_down = close[i] > camarilla_h3_aligned[i]  # Overbought reversal
         
         # Volume confirmation
         vol_ok = volume_ok[i]
         
-        # Exit conditions: return to pivot or opposite extreme
-        exit_long = close[i] < pivot[i] or close[i] > r3_aligned[i]
-        exit_short = close[i] > pivot[i] or close[i] < s3_aligned[i]
+        # Entry signals
+        long_signal = breakout_up and vol_ok
+        short_signal = breakout_down and vol_ok
+        
+        # Exit signals
+        exit_long = revert_down and vol_ok  # Exit long on overbought reversal
+        exit_short = revert_up and vol_ok   # Exit short on oversold bounce
         
         # Execute trades
-        if breakout_long and vol_ok and position != 1:
+        if long_signal and position != 1:
             position = 1
             signals[i] = 0.25
-        elif fade_long and vol_ok and position != 1:
-            position = 1
-            signals[i] = 0.25
-        elif breakout_short and vol_ok and position != -1:
-            position = -1
-            signals[i] = -0.25
-        elif fade_short and vol_ok and position != -1:
+        elif short_signal and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
