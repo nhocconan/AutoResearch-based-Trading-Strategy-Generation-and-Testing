@@ -8,11 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian(20) breakout with 1d volume spike and chop regime filter
-    # Donchian channels from 1d provide clear breakout levels
-    # Volume spike confirms institutional participation
-    # Chop regime filter avoids whipsaws in ranging markets
-    # Works in bull/bear by fading extremes in range and following breakouts in trend
+    # Hypothesis: 12h Williams %R reversal with 1d volume spike and chop regime filter
+    # Williams %R identifies overbought/oversold conditions for mean reversion
+    # Volume spike confirms institutional participation at extremes
+    # Chop regime filter ensures mean reversion only in ranging markets
+    # Works in bull/bear by fading extremes in range and avoiding false signals in trends
     # Target: 12-37 trades/year per symbol.
     
     # Session filter: 8:00-20:00 UTC (avoid low volume Asian session)
@@ -24,9 +24,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels and volume context
+    # Get 1d data for Williams %R and volume context
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
@@ -34,20 +34,21 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Donchian channels (20-period)
-    donchian_h = np.full(len(df_1d), np.nan)
-    donchian_l = np.full(len(df_1d), np.nan)
-    donchian_m = np.full(len(df_1d), np.nan)
+    # Calculate 1d Williams %R (14-period)
+    williams_r = np.full(len(df_1d), np.nan)
+    highest_high = np.full(len(df_1d), np.nan)
+    lowest_low = np.full(len(df_1d), np.nan)
     
-    for i in range(19, len(df_1d)):
-        donchian_h[i] = np.max(high_1d[i-19:i+1])
-        donchian_l[i] = np.min(low_1d[i-19:i+1])
-        donchian_m[i] = (donchian_h[i] + donchian_l[i]) / 2
+    for i in range(13, len(df_1d)):
+        highest_high[i] = np.max(high_1d[i-13:i+1])
+        lowest_low[i] = np.min(low_1d[i-13:i+1])
+        if highest_high[i] != lowest_low[i]:
+            williams_r[i] = (highest_high[i] - close_1d[i]) / (highest_high[i] - lowest_low[i]) * -100
+        else:
+            williams_r[i] = -50  # neutral when no range
     
-    # Align 1d Donchian channels to 12h timeframe
-    h_aligned = align_htf_to_ltf(prices, df_1d, donchian_h)
-    l_aligned = align_htf_to_ltf(prices, df_1d, donchian_l)
-    m_aligned = align_htf_to_ltf(prices, df_1d, donchian_m)
+    # Align 1d Williams %R to 12h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
     # 1d volume spike filter (current volume > 1.5 * 20-day average)
     vol_ma_20_1d = np.full(len(df_1d), np.nan)
@@ -57,8 +58,8 @@ def generate_signals(prices):
     volume_spike = volume > 1.5 * vol_ma_20_1d_aligned
     
     # Chop regime filter (using 1d data)
-    # Chop > 61.8 = ranging (mean revert at Donchian mid)
-    # Chop < 38.2 = trending (follow breakouts at H/L)
+    # Chop > 61.8 = ranging (mean revert at extremes)
+    # Chop < 38.2 = trending (avoid mean reversion in strong trends)
     atr_1d = np.full(len(df_1d), np.nan)
     for i in range(14, len(df_1d)):
         tr = np.max([
@@ -107,25 +108,23 @@ def generate_signals(prices):
             continue
         
         # Skip if data not ready
-        if (np.isnan(h_aligned[i]) or np.isnan(l_aligned[i]) or 
-            np.isnan(m_aligned[i]) or np.isnan(volume_spike[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(volume_spike[i]) or np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Regime-based logic
-        if chop_aligned[i] > 61.8:  # Ranging market - mean revert at Donchian mid
-            # Long near lower band, short near upper band
-            long_entry = close[i] <= l_aligned[i] and volume_spike[i]
-            short_entry = close[i] >= h_aligned[i] and volume_spike[i]
-            long_exit = close[i] >= m_aligned[i]
-            short_exit = close[i] <= m_aligned[i]
-        else:  # Trending market - follow breakouts at H/L
-            # Breakout entries
-            long_entry = close[i] > h_aligned[i] and volume_spike[i]
-            short_entry = close[i] < l_aligned[i] and volume_spike[i]
-            # Exit on opposite test of H/L or volume dropout
-            long_exit = close[i] < l_aligned[i] or (not volume_spike[i])
-            short_exit = close[i] > h_aligned[i] or (not volume_spike[i])
+        # Only trade in ranging markets (Chop > 61.8)
+        if chop_aligned[i] > 61.8:
+            # Williams %R extremes for mean reversion
+            long_entry = williams_r_aligned[i] <= -80 and volume_spike[i]  # oversold
+            short_entry = williams_r_aligned[i] >= -20 and volume_spike[i]  # overbought
+            long_exit = williams_r_aligned[i] >= -50  # exit at midpoint
+            short_exit = williams_r_aligned[i] <= -50  # exit at midpoint
+        else:
+            # In trending markets, stay flat to avoid whipsaws
+            long_entry = False
+            short_entry = False
+            long_exit = True
+            short_exit = True
         
         if long_entry and position != 1:
             position = 1
@@ -150,6 +149,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_donchian_breakout_vol_chop_v1"
+name = "12h_1d_williamsr_vol_chop_v1"
 timeframe = "12h"
 leverage = 1.0
