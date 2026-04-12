@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla breakout with 1d volume spike and ADX trend filter
-# Works in bull/bear: breakouts capture trends, volume confirms institutional interest,
-# ADX filter avoids whipsaws in ranging markets. Target: 20-40 trades/year.
-name = "4h_1d_camarilla_breakout_adx_v1"
+# Hypothesis: 4h Donchian breakout with 1d volume confirmation and ATR filter
+# Captures breakouts in trending markets, volume confirms institutional interest,
+# ATR filter avoids false breakouts in low volatility. Target: 20-40 trades/year.
+name = "4h_1d_donchian_breakout_volume_atr_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -20,102 +20,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and volume
+    # Get 1d data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Previous 1d bar data (avoid look-ahead)
-    high_1d_prev = df_1d['high'].shift(1).values
-    low_1d_prev = df_1d['low'].shift(1).values
-    close_1d_prev = df_1d['close'].shift(1).values
-    
-    # Calculate 1d Camarilla H3/L3 levels
-    pivot_prev = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-    range_1d_prev = high_1d_prev - low_1d_prev
-    h3_prev = pivot_prev + (range_1d_prev * 1.1 / 4)
-    l3_prev = pivot_prev - (range_1d_prev * 1.1 / 4)
-    
-    # Align to 4h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3_prev)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3_prev)
-    
-    # 1d volume spike: volume > 2.5x 20-day average (stricter to reduce trades)
+    # 1d volume spike: volume > 2.0x 20-day average (moderate to balance trades)
     vol_ma_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
-    vol_spike = df_1d['volume'] > (vol_ma_1d * 2.5)
+    vol_spike = df_1d['volume'] > (vol_ma_1d * 2.0)
     vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
     
-    # ADX trend filter on 4h (avoid ranging markets)
-    # Calculate True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = high[0] - low[0]
-    tr2[0] = np.abs(high[0] - close[0])
-    tr3[0] = np.abs(low[0] - close[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # 4h Donchian channels (20-period)
+    donchian_len = 20
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
     
-    # Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    for i in range(donchian_len - 1, n):
+        upper[i] = np.max(high[i-donchian_len+1:i+1])
+        lower[i] = np.min(low[i-donchian_len+1:i+1])
     
-    # Smooth with Wilder's smoothing (alpha = 1/period)
-    period = 14
-    alpha = 1.0 / period
+    # 4h ATR for volatility filter (14-period)
+    atr_len = 14
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
     atr = np.zeros(n)
-    dm_plus_smooth = np.zeros(n)
-    dm_minus_smooth = np.zeros(n)
+    atr[atr_len-1] = np.mean(tr[:atr_len])
+    for i in range(atr_len, n):
+        atr[i] = (atr[i-1] * (atr_len - 1) + tr[i]) / atr_len
     
-    # Initial values
-    atr[period-1] = np.mean(tr[:period])
-    dm_plus_smooth[period-1] = np.mean(dm_plus[:period])
-    dm_minus_smooth[period-1] = np.mean(dm_minus[:period])
-    
-    # Wilder smoothing
-    for i in range(period, n):
-        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
-        dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period - 1) + dm_plus[i]) / period
-        dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period - 1) + dm_minus[i]) / period
-    
-    # DI and DX
-    di_plus = np.where(atr != 0, dm_plus_smooth / atr * 100, 0)
-    di_minus = np.where(atr != 0, dm_minus_smooth / atr * 100, 0)
-    dx = np.where((di_plus + di_minus) != 0, 
-                  np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
-    
-    # ADX: smoothed DX
-    adx = np.zeros(n)
-    adx[2*period-1] = np.mean(dx[period-1:2*period-1])
-    for i in range(2*period, n):
-        adx[i] = (adx[i-1] * (period - 1) + dx[i]) / period
-    
-    # ADX filter: trend present when ADX > 25
-    adx_filter = adx > 25
+    # ATR filter: only trade when volatility is above average
+    atr_ma = np.zeros(n)
+    atr_ma[atr_len-1] = np.mean(atr[:atr_len])
+    for i in range(atr_len, n):
+        atr_ma[i] = (atr_ma[i-1] * (atr_len - 1) + atr[i]) / atr_len
+    atr_filter = atr > (atr_ma * 0.8)  # trade when ATR > 80% of its MA
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(vol_spike_aligned[i]) or np.isnan(adx_filter[i])):
+    for i in range(max(donchian_len, atr_len), n):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(vol_spike_aligned[i]) or np.isnan(atr_filter[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: break above H3 with volume spike and ADX trend filter
-        long_signal = close[i] > h3_aligned[i] and vol_spike_aligned[i] and adx_filter[i]
-        # Short: break below L3 with volume spike and ADX filter
-        short_signal = close[i] < l3_aligned[i] and vol_spike_aligned[i] and adx_filter[i]
+        # Long: break above upper Donchian with volume spike and sufficient volatility
+        long_signal = close[i] > upper[i] and vol_spike_aligned[i] and atr_filter[i]
+        # Short: break below lower Donchian with volume spike and sufficient volatility
+        short_signal = close[i] < lower[i] and vol_spike_aligned[i] and atr_filter[i]
         
-        # Exit when price returns to pivot level
-        pivot_prev_val = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_prev_val)
-        exit_long = close[i] < pivot_aligned[i]
-        exit_short = close[i] > pivot_aligned[i]
+        # Exit when price returns to middle of Donchian channel
+        middle = (upper[i] + lower[i]) / 2.0
+        exit_long = close[i] < middle
+        exit_short = close[i] > middle
         
         if long_signal and position != 1:
             position = 1
