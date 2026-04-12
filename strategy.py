@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
 """
-6h_1d_Pivot_Reversal_v1
-Hypothesis: Fade at extreme daily pivot levels (R3/S3) with volume confirmation on 6h timeframe.
-Works in bull markets by shorting overextended rallies and in bear markets by buying panic dips.
-Uses 6h for execution and 1d pivots for structure, targeting low trade frequency (<30/year) to minimize fee drag.
+12h_1d_Stochastic_Bollinger_Trend_v1
+Hypothesis: 12h StochRSI + Bollinger Bands with 1d ADX trend filter. 
+StochRSI identifies overbought/oversold extremes within Bollinger Bands for mean reversion.
+ADX filter ensures we only trade in trending markets to avoid whipsaws in ranging conditions.
+Designed for low trade frequency (12-37/year) with clear entry/exit rules to minimize fee drag.
+Works in both bull and bear markets by trading pullbacks in established trends.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Pivot_Reversal_v1"
-timeframe = "6h"
+name = "12h_1d_Stochastic_Bollinger_Trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -25,64 +27,145 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
+    # Load daily data ONCE before loop for ADX filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate daily pivot points (standard formula)
-    # P = (H + L + C) / 3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Bollinger Bands (20, 2) on 12h close
+    bb_length = 20
+    bb_mult = 2.0
+    basis = np.zeros(n)
+    dev = np.zeros(n)
+    upper = np.zeros(n)
+    lower = np.zeros(n)
     
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
-    r3 = high_1d + 2 * (pivot - low_1d)
-    s3 = low_1d - 2 * (high_1d - pivot)
+    # Simple moving average for basis
+    for i in range(bb_length - 1, n):
+        basis[i] = np.mean(close[i - bb_length + 1:i + 1])
     
-    # Align pivot levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Standard deviation for bands
+    for i in range(bb_length - 1, n):
+        dev[i] = np.std(close[i - bb_length + 1:i + 1])
     
-    # Calculate volume ratio (current vs 20-period average)
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 0)
+    upper = basis + bb_mult * dev
+    lower = basis - bb_mult * dev
+    
+    # Calculate StochRSI (14, 14, 3, 3) on 12h close
+    rsi_length = 14
+    stoch_length = 14
+    k_smooth = 3
+    d_smooth = 3
+    
+    # RSI calculation
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    avg_gain[rsi_length] = np.mean(gain[1:rsi_length + 1])
+    avg_loss[rsi_length] = np.mean(loss[1:rsi_length + 1])
+    
+    for i in range(rsi_length + 1, n):
+        avg_gain[i] = (avg_gain[i - 1] * (rsi_length - 1) + gain[i]) / rsi_length
+        avg_loss[i] = (avg_loss[i - 1] * (rsi_length - 1) + loss[i]) / rsi_length
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Stochastic of RSI
+    stoch_rsi = np.zeros(n)
+    for i in range(stoch_length - 1, n):
+        min_rsi = np.min(rsi[i - stoch_length + 1:i + 1])
+        max_rsi = np.max(rsi[i - stoch_length + 1:i + 1])
+        if max_rsi - min_rsi != 0:
+            stoch_rsi[i] = (rsi[i] - min_rsi) / (max_rsi - min_rsi) * 100
+        else:
+            stoch_rsi[i] = 50.0
+    
+    # Smooth K and D
+    k = np.zeros(n)
+    d = np.zeros(n)
+    for i in range(k_smooth - 1, n):
+        k[i] = np.mean(stoch_rsi[i - k_smooth + 1:i + 1])
+    for i in range(d_smooth - 1, n):
+        d[i] = np.mean(k[i - d_smooth + 1:i + 1])
+    
+    # Calculate ADX (14) on daily data for trend strength
+    # True Range
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Directional Movement
+    dm_plus = np.where((df_1d['high'] - df_1d['high'].shift(1)) > (df_1d['low'].shift(1) - df_1d['low']),
+                       np.maximum(df_1d['high'] - df_1d['high'].shift(1), 0), 0)
+    dm_minus = np.where((df_1d['low'].shift(1) - df_1d['low']) > (df_1d['high'] - df_1d['high'].shift(1)),
+                        np.maximum(df_1d['low'].shift(1) - df_1d['low'], 0), 0)
+    
+    # Smoothed values
+    tr_period = 14
+    atr = np.zeros(len(df_1d))
+    dm_plus_smooth = np.zeros(len(df_1d))
+    dm_minus_smooth = np.zeros(len(df_1d))
+    
+    # Initial values
+    atr[tr_period] = np.mean(tr[:tr_period + 1])
+    dm_plus_smooth[tr_period] = np.mean(dm_plus[:tr_period + 1])
+    dm_minus_smooth[tr_period] = np.mean(dm_minus[:tr_period + 1])
+    
+    # Wilder's smoothing
+    for i in range(tr_period + 1, len(df_1d)):
+        atr[i] = (atr[i - 1] * (tr_period - 1) + tr[i]) / tr_period
+        dm_plus_smooth[i] = (dm_plus_smooth[i - 1] * (tr_period - 1) + dm_plus[i]) / tr_period
+        dm_minus_smooth[i] = (dm_minus_smooth[i - 1] * (tr_period - 1) + dm_minus[i]) / tr_period
+    
+    # Directional Indicators
+    plus_di = np.where(atr != 0, dm_plus_smooth / atr * 100, 0)
+    minus_di = np.where(atr != 0, dm_minus_smooth / atr * 100, 0)
+    
+    # DX and ADX
+    dx = np.where((plus_di + minus_di) != 0, np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
+    adx = np.zeros(len(df_1d))
+    adx[tr_period * 2 - 1] = np.mean(dx[:tr_period * 2])
+    
+    for i in range(tr_period * 2, len(df_1d)):
+        adx[i] = (adx[i - 1] * (tr_period - 1) + dx[i]) / tr_period
+    
+    # Align ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after volume MA warmup
+    for i in range(50, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(d[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(upper[i]) or np.isnan(lower[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Extreme level touches with volume confirmation
-        # Long when price touches S3 with above-average volume (panic dip)
-        touch_s3 = low[i] <= s3_aligned[i] * 1.001  # Allow small buffer
-        vol_confirm_long = vol_ratio[i] > 1.5
+        # Trend filter: ADX > 25 indicates trending market
+        trending_market = adx_aligned[i] > 25
         
-        # Short when price touches R3 with above-average volume (overextended rally)
-        touch_r3 = high[i] >= r3_aligned[i] * 0.999  # Allow small buffer
-        vol_confirm_short = vol_ratio[i] > 1.5
+        # StochRSI signals: oversold < 20, overbought > 80
+        stoch_oversold = d[i] < 20
+        stoch_overbought = d[i] > 80
         
-        # Entry conditions
-        long_entry = touch_s3 and vol_confirm_long
-        short_entry = touch_r3 and vol_confirm_short
+        # Bollinger Band position
+        price_above_upper = close[i] > upper[i]
+        price_below_lower = close[i] < lower[i]
+        price_in_bands = lower[i] <= close[i] <= upper[i]
         
-        # Exit conditions: price moves back toward pivot or opposite extreme touch
-        long_exit = (high[i] >= pivot[i] * 0.999) or touch_r3
-        short_exit = (low[i] <= pivot[i] * 1.001) or touch_s3
+        # Entry conditions: StochRSI extreme + price at Bollinger Band + trend
+        long_entry = stoch_oversold and price_below_lower and trending_market
+        short_entry = stoch_overbought and price_above_upper and trending_market
+        
+        # Exit conditions: StochRSI returns to middle or trend weakens
+        long_exit = (d[i] > 50 or adx_aligned[i] < 20)
+        short_exit = (d[i] < 50 or adx_aligned[i] < 20)
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
