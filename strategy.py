@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_breakout_volume"
-timeframe = "1d"
+name = "12h_1d_camarilla_volume_regime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,29 +17,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for Camarilla levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Daily data for Camarilla levels and volume
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    vol_1d = df_1d['volume'].values
     
-    # Align weekly data to daily bars
-    pivots_high = align_htf_to_ltf(prices, df_1w, high_1w)
-    pivots_low = align_htf_to_ltf(prices, df_1w, low_1w)
-    pivots_close = align_htf_to_ltf(prices, df_1w, close_1w)
+    # Map each 12h bar to previous day's OHLC using daily data
+    pivots_high = np.full(n, np.nan)
+    pivots_low = np.full(n, np.nan)
+    pivots_close = np.full(n, np.nan)
+    pivots_volume = np.full(n, np.nan)
+    
+    for i in range(n):
+        current_time = pd.Timestamp(prices.iloc[i]['open_time'])
+        prev_date = current_time.date() - pd.Timedelta(days=1)
+        
+        # Find previous day in daily data
+        for j in range(len(df_1d)):
+            if pd.Timestamp(df_1d.iloc[j]['open_time']).date() == prev_date:
+                pivots_high[i] = high_1d[j]
+                pivots_low[i] = low_1d[j]
+                pivots_close[i] = close_1d[j]
+                pivots_volume[i] = vol_1d[j]
+                break
     
     # Calculate Camarilla H3 and L3 levels (entry levels)
     H3 = pivots_close + (pivots_high - pivots_low) * 1.1 / 4
     L3 = pivots_close - (pivots_high - pivots_low) * 1.1 / 4
     
-    # Volume confirmation: current volume > 1.5x 20-day average
-    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    strong_volume = volume > (vol_ma * 1.5)
+    # Daily volume confirmation (using aligned volume)
+    vol_ma_1d = pd.Series(pivots_volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    strong_volume = volume > vol_ma_1d
     
-    # Chop index on daily for regime filter
+    # Chop index on 12h for regime filter (using True Range)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
