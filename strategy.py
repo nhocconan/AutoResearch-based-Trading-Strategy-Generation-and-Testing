@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-4h_1d_Vortex_Trend_v1
-Hypothesis: Combine 1-day Vortex Indicator for trend direction with 4-hour price action for entry timing.
-Long when VI+ > VI- (bullish trend) and price closes above 4h EMA(21); short when VI- > VI+ (bearish trend) and price closes below 4h EMA(21).
-Add volume confirmation: require current volume > 1.5x 20-period average volume.
-Uses discrete position sizing (0.25) to limit risk and reduce churn. Targets 20-40 trades/year to minimize fee drag.
-Works in bull (follow trend) and bear (follow trend) as Vortex adapts to changing momentum.
+4h_1d_KAMA_Trend_v1
+Hypothesis: Use daily KAMA direction as primary trend filter on 4H timeframe.
+Enter long when 4H price crosses above KAMA and daily trend is up; short when price crosses below KAMA and daily trend is down.
+Use RSI(14) to avoid overbought/oversold extremes (RSI<70 for long, RSI>30 for short).
+Target 20-40 trades per year to minimize fee drag. Works in bull (follow trend) and bear (fade extremes in downtrend via RSI filter).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Vortex_Trend_v1"
+name = "4h_1d_KAMA_Trend_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -21,88 +20,78 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Price and volume arrays
+    # Price arrays
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Daily data for Vortex trend filter
+    # Daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Daily high/low/close for Vortex
-    d_high = df_1d['high'].values
-    d_low = df_1d['low'].values
-    d_close = df_1d['close'].values
+    # Calculate KAMA on daily close
+    def kama(close, length=10, fast=2, slow=30):
+        if len(close) < length:
+            return np.full(len(close), np.nan)
+        dir = np.abs(close - np.roll(close, length))
+        vol = np.sum(np.abs(np.diff(close, n=1)), axis=0) if len(close) > 1 else 0
+        er = np.where(vol != 0, dir / vol, 0)
+        sc = np.power(er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1), 2)
+        kama = np.full(len(close), np.nan)
+        kama[0] = close[0]
+        for i in range(1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    # True Range (TR) for Vortex
-    tr = np.maximum(d_high - d_low,
-                    np.maximum(np.abs(d_high - np.roll(d_close, 1)),
-                               np.absolute(np.abs(d_low - np.roll(d_close, 1)))))
-    tr[0] = d_high[0] - d_low[0]  # first TR
+    daily_close = df_1d['close'].values
+    kama_daily = kama(daily_close, 10, 2, 30)
+    kama_daily_aligned = align_htf_to_ltf(prices, df_1d, kama_daily)
     
-    # Vortex Indicator components
-    vm_plus = np.abs(d_high - np.roll(d_low, 1))
-    vm_minus = np.abs(d_low - np.roll(d_high, 1))
+    # Calculate RSI(14) on 4H
+    def rsi(close, length=14):
+        if len(close) < length + 1:
+            return np.full(len(close), np.nan)
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.zeros_like(close)
+        avg_loss = np.zeros_like(close)
+        avg_gain[length] = np.mean(gain[:length])
+        avg_loss[length] = np.mean(loss[:length])
+        for i in range(length + 1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (length-1) + gain[i-1]) / length
+            avg_loss[i] = (avg_loss[i-1] * (length-1) + loss[i-1]) / length
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+        rsi_vals = np.zeros_like(close)
+        rsi_vals[:] = 100 - (100 / (1 + rs))
+        rsi_vals[:length] = np.nan
+        return rsi_vals
     
-    # Sum over 14 periods
-    tr14 = np.zeros_like(tr)
-    vm_plus14 = np.zeros_like(vm_plus)
-    vm_minus14 = np.zeros_like(vm_minus)
-    
-    for i in range(len(tr)):
-        if i < 14:
-            tr14[i] = np.nan
-            vm_plus14[i] = np.nan
-            vm_minus14[i] = np.nan
-        else:
-            tr14[i] = np.sum(tr[i-13:i+1])
-            vm_plus14[i] = np.sum(vm_plus[i-13:i+1])
-            vm_minus14[i] = np.sum(vm_minus[i-13:i+1])
-    
-    vi_plus = vm_plus14 / tr14
-    vi_minus = vm_minus14 / tr14
-    
-    # Align Vortex to 4h
-    vi_plus_aligned = align_htf_to_ltf(prices, df_1d, vi_plus)
-    vi_minus_aligned = align_htf_to_ltf(prices, df_1d, vi_minus)
-    
-    # 4h EMA(21) for entry filter
-    close_s = pd.Series(close)
-    ema21 = close_s.ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # 4h volume average (20-period) for confirmation
-    vol_s = pd.Series(volume)
-    vol_avg20 = vol_s.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_avg20)
+    rsi_vals = rsi(close, 14)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(21, n):
+    for i in range(30, n):
         # Skip if any data invalid
-        if (np.isnan(vi_plus_aligned[i]) or np.isnan(vi_minus_aligned[i]) or 
-            np.isnan(ema21[i]) or np.isnan(volume_confirm[i])):
+        if np.isnan(rsi_vals[i]) or np.isnan(kama_daily_aligned[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend direction from Vortex
-        bullish_trend = vi_plus_aligned[i] > vi_minus_aligned[i]
-        bearish_trend = vi_minus_aligned[i] > vi_plus_aligned[i]
+        # Price relative to daily KAMA
+        price_above_kama = close[i] > kama_daily_aligned[i]
+        price_below_kama = close[i] < kama_daily_aligned[i]
         
-        # Price relative to EMA
-        price_above_ema = close[i] > ema21[i]
-        price_below_ema = close[i] < ema21[i]
+        # RSI filters to avoid extremes
+        rsi_not_overbought = rsi_vals[i] < 70
+        rsi_not_oversold = rsi_vals[i] > 30
         
         # Entry logic
-        long_entry = bullish_trend and price_above_ema and volume_confirm[i]
-        short_entry = bearish_trend and price_below_ema and volume_confirm[i]
+        long_entry = price_above_kama and rsi_not_overbought
+        short_entry = price_below_kama and rsi_not_oversold
         
-        # Exit logic: trend reversal
-        long_exit = not bullish_trend
-        short_exit = not bearish_trend
+        # Exit logic: reverse signal
+        long_exit = price_below_kama
+        short_exit = price_above_kama
         
         # Signal logic
         if long_entry and position != 1:
@@ -121,5 +110,3 @@ def generate_signals(prices):
             signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
- 
-EOF
