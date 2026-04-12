@@ -1,17 +1,17 @@
-# The hypothesis: 12h_1d_camarilla_breakout_v1
-# Uses Camarilla pivot levels from the daily chart with volume confirmation and a chop regime filter.
-# The strategy trades breakouts above H4 (resistance) and breakdowns below L4 (support).
-# It is designed to work in both bull and bear markets by capturing institutional moves
-# confirmed by volume, while avoiding choppy conditions that cause false breakouts.
-# Target: 12-37 trades per year (50-150 total over 4 years) to minimize fee drag.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v1"
-timeframe = "12h"
+# Hypothesis: 4h_12h_camarilla_volume_trend_v1
+# Combines 12h Camarilla pivot levels with 4h volume confirmation and trend filter.
+# Uses 12h trend direction (EMA50) to align with higher timeframe momentum.
+# In bull markets: long when price > 12h EMA50 and breaks above H4.
+# In bear markets: short when price < 12h EMA50 and breaks below L4.
+# Volume confirmation ensures institutional participation.
+# Target: 25-40 trades/year per symbol for low friction and high win rate.
+name = "4h_12h_camarilla_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,7 +24,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation (called ONCE before loop)
+    # Get 12h data for trend and Camarilla calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
+    
+    # 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Get 1d data for Camarilla levels (standard practice)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -38,7 +48,7 @@ def generate_signals(prices):
     camarilla_h4 = close_prev + range_prev * 1.1 / 2
     camarilla_l4 = close_prev - range_prev * 1.1 / 2
     
-    # Align to 12h timeframe (already delayed by 1 day due to shift)
+    # Align Camarilla levels to 4h timeframe
     h4_level = align_htf_to_ltf(prices, df_1d, camarilla_h4)
     l4_level = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
@@ -46,31 +56,17 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
-    # Chop regime filter: avoid choppy markets (CHOP > 61.8)
-    # Calculate True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10((highest_high - lowest_low) / (atr * np.sqrt(14))) / np.log10(14)
-    chop_filter = chop < 61.8  # trending market
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # start after warmup
+    for i in range(50, n):  # start after warmup for EMA50
         # Skip if levels not ready
-        if np.isnan(h4_level[i]) or np.isnan(l4_level[i]):
+        if np.isnan(h4_level[i]) or np.isnan(l4_level[i]) or np.isnan(ema_50_12h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Check volume and chop filters
-        if not (vol_confirm[i] and chop_filter[i]):
-            # Hold current position if filters fail
+        # Skip if volume confirmation fails
+        if not vol_confirm[i]:
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -79,15 +75,19 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above H4 with volume
-        if close[i] > h4_level[i] and position != 1:
+        # Long signal: price > 12h EMA50 (bullish trend) and breaks above H4
+        if close[i] > ema_50_12h_aligned[i] and close[i] > h4_level[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below L4 with volume
-        elif close[i] < l4_level[i] and position != -1:
+        # Short signal: price < 12h EMA50 (bearish trend) and breaks below L4
+        elif close[i] < ema_50_12h_aligned[i] and close[i] < l4_level[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: opposite breakout
+        # Exit conditions: trend reversal or opposite breakout
+        elif (close[i] < ema_50_12h_aligned[i] and position == 1) or \
+             (close[i] > ema_50_12h_aligned[i] and position == -1):
+            position = 0
+            signals[i] = 0.0
         elif close[i] < l4_level[i] and position == 1:
             position = 0
             signals[i] = 0.0
