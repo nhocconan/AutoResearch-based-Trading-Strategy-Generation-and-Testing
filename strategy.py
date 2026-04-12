@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_keltner_breakout_v1"
-timeframe = "1d"
+name = "6h_1d_trix_volume_regime_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,58 +17,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for ATR and EMA
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for TRIX and volume filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate ATR(10) on weekly data
-    tr1 = high_1w[1:] - low_1w[:-1]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1w = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Calculate TRIX(12) on daily data: triple EMA of % change
+    roc = np.diff(close_1d) / close_1d[:-1]
+    roc = np.concatenate([[np.nan], roc])  # align with original length
     
-    # Calculate EMA(20) on weekly data
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema1 = pd.Series(roc).ewm(span=12, adjust=False, min_periods=12).mean()
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean()
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean()
+    trix = ema3.values * 100  # scale for readability
     
-    # Keltner Channel: EMA(20) ± ATR(10) * 2.0
-    upper_keltner = ema_20_1w + 2.0 * atr_1w
-    lower_keltner = ema_20_1w - 2.0 * atr_1w
+    # Align TRIX to 6h timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
     
-    # Align to daily timeframe
-    upper_keltner_aligned = align_htf_to_ltf(prices, df_1w, upper_keltner)
-    lower_keltner_aligned = align_htf_to_ltf(prices, df_1w, lower_keltner)
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Volume filter: current 6h volume > 20-period average of 1d volume
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    volume_ok = volume > vol_ma_1d_aligned
     
-    # Volume filter - 20-day average
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > vol_ma
+    # Trend filter: price above/below 50-period EMA on 6h
+    close_series = pd.Series(close)
+    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend = close > ema_50
+    downtrend = close < ema_50
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(upper_keltner_aligned[i]) or np.isnan(lower_keltner_aligned[i]) or 
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(trix_aligned[i]) or np.isnan(volume_ok[i]) or 
+            np.isnan(ema_50[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Breakout signals with volume confirmation
-        # Long: Close breaks above upper Keltner
-        long_signal = close[i] > upper_keltner_aligned[i] and volume_ok[i]
-        # Short: Close breaks below lower Keltner
-        short_signal = close[i] < lower_keltner_aligned[i] and volume_ok[i]
+        # TRIX signals with volume confirmation
+        # Long: TRIX rising (>0) in uptrend with volume
+        long_signal = trix_aligned[i] > 0 and uptrend[i] and volume_ok[i]
+        # Short: TRIX falling (<0) in downtrend with volume
+        short_signal = trix_aligned[i] < 0 and downtrend[i] and volume_ok[i]
         
-        # Exit when price crosses back through EMA(20)
-        exit_long = close[i] < ema_20_1w_aligned[i]
-        exit_short = close[i] > ema_20_1w_aligned[i]
+        # Exit when TRIX reverses
+        exit_long = trix_aligned[i] < 0
+        exit_short = trix_aligned[i] > 0
         
         # Execute trades
         if long_signal and position != 1:
