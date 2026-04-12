@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-6h_1w_Donchian_Breakout_v1
-Hypothesis: On 6h timeframe, breakouts of weekly Donchian channels (20-period) with volume confirmation
-capture trending moves in both bull and bear markets. Weekly trend filter ensures alignment with higher
-timeframe direction. Volume filter avoids false breakouts. Designed for low trade frequency (15-30/year)
-by requiring weekly alignment and volume surge.
+12h_1d_Camarilla_Breakout_Trend_v1
+Hypothesis: On 12h timeframe, break above daily H3 in uptrend or below daily L3 in downtrend.
+Uses daily Camarilla levels and daily trend filter (price vs SMA50) for entry. Exits at opposite
+L3/H3 levels. Designed for low trade frequency with strong trend alignment. Works in bull via
+breakouts above H3, in bear via breakouts below L3. Uses 1d timeframe for HTF.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_Donchian_Breakout_v1"
-timeframe = "6h"
+name = "12h_1d_Camarilla_Breakout_Trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,30 +25,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === WEEKLY DATA ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # === DAILY DATA ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly Donchian channels (20-period)
-    high_max = np.full(len(high_1w), np.nan)
-    low_min = np.full(len(low_1w), np.nan)
-    for i in range(20, len(high_1w)):
-        high_max[i] = np.max(high_1w[i-20:i])
-        low_min[i] = np.min(low_1w[i-20:i])
-    
-    # Weekly trend: price above/below 50-period SMA
-    close_s = pd.Series(close_1w)
+    # Daily SMA50 for trend filter
+    close_s = pd.Series(close_1d)
     sma50 = close_s.rolling(window=50, min_periods=50).mean().values
     
-    # Align to 6h
-    high_max_aligned = align_htf_to_ltf(prices, df_1w, high_max)
-    low_min_aligned = align_htf_to_ltf(prices, df_1w, low_min)
-    sma50_aligned = align_htf_to_ltf(prices, df_1w, sma50)
+    # Previous day's close for Camarilla calculation
+    prev_close = np.roll(close_1d, 1)
+    prev_close[0] = close_1d[0]  # first day uses its own close
+    
+    # Daily range
+    range_1d = high_1d - low_1d
+    
+    # Camarilla levels based on previous day
+    h3 = prev_close + (range_1d * 1.1 / 4)
+    l3 = prev_close - (range_1d * 1.1 / 4)
+    h4 = prev_close + (range_1d * 1.1)
+    l4 = prev_close - (range_1d * 1.1)
+    
+    # Align to 12h
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    sma50_aligned = align_htf_to_ltf(prices, df_1d, sma50)
     
     # Volume average (20-period for confirmation)
     vol_avg = np.zeros(n)
@@ -65,31 +73,31 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(high_max_aligned[i]) or np.isnan(low_min_aligned[i]) or 
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
             np.isnan(sma50_aligned[i]) or vol_avg[i] == 0.0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: at least 1.5x average
-        vol_confirm = volume[i] > 1.5 * vol_avg[i]
+        # Volume confirmation: at least 1.3x average
+        vol_confirm = volume[i] > 1.3 * vol_avg[i]
         
-        # Trend filter: price above/below 50-period SMA
-        uptrend = close[i] > sma50_aligned[i]
+        # Trend filter: price above/below SMA50 (using aligned)
+        price_vs_sma = close[i] > sma50_aligned[i]
         
-        # Breakout entries: long breakout above weekly high in uptrend, short breakdown below weekly low in downtrend
-        long_breakout = (close[i] > high_max_aligned[i]) and uptrend and vol_confirm
-        short_breakout = (close[i] < low_min_aligned[i]) and (not uptrend) and vol_confirm
+        # Breakout entries: long break above H3 in uptrend, short break below L3 in downtrend
+        long_setup = (close[i] >= h3_aligned[i]) and price_vs_sma and vol_confirm
+        short_setup = (close[i] <= l3_aligned[i]) and (not price_vs_sma) and vol_confirm
         
-        # Exit on opposite Donchian band touch
-        exit_long = close[i] < low_min_aligned[i]
-        exit_short = close[i] > high_max_aligned[i]
+        # Exit at opposite level
+        exit_long = close[i] <= l3_aligned[i]
+        exit_short = close[i] >= h3_aligned[i]
         
-        if long_breakout and position != 1:
+        if long_setup and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_breakout and position != -1:
+        elif short_setup and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
