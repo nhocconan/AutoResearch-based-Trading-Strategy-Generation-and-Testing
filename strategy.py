@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_12h_trix_volume_regime_v1
-Hypothesis: TRIX (Triple Exponential Average) with volume confirmation and chop regime filter on 4h timeframe.
-TRIX filters out insignificant cycles and highlights sustained momentum. Works in bull/bear markets by
-using volume to confirm breakouts and chop regime to avoid whipsaws in ranging conditions.
-Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag.
+6h_1d_keltner_breakout_trend
+Hypothesis: 6-hour Keltner breakout with 1-day trend filter (EMA50) and volume confirmation.
+In bull markets: buy breakouts above upper Keltner band in uptrend.
+In bear markets: sell breakdowns below lower Keltner band in downtrend.
+Uses volatility-adjusted bands (ATR-based) to avoid false signals in low volatility.
+Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
 """
 
-name = "4h_12h_trix_volume_regime_v1"
-timeframe = "4h"
+name = "6h_1d_keltner_breakout_trend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,38 +26,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for TRIX and chop regime
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get daily data for EMA trend and ATR
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate TRIX (15-period triple EMA)
-    ema1 = pd.Series(close_12h).ewm(span=15, adjust=False).mean()
-    ema2 = ema1.ewm(span=15, adjust=False).mean()
-    ema3 = ema2.ewm(span=15, adjust=False).mean()
-    trix = 100 * (ema3.pct_change())
-    trix_signal = trix.ewm(span=9, adjust=False).mean()
-    trix_hist = trix - trix_signal
-    trix_values = trix_hist.values
+    # 1-day EMA50 for trend filter
+    ema50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Chopiness Index (14-period) for regime filter
-    tr1 = np.abs(high_12h - low_12h)
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    # ATR(14) for Keltner bands
+    tr1 = np.abs(np.subtract(high_1d, low_1d))
+    tr2 = np.abs(np.subtract(high_1d, np.roll(close_1d, 1)))
+    tr3 = np.abs(np.subtract(low_1d, np.roll(close_1d, 1)))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum()
-    max_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max()
-    min_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min()
-    chop = 100 * np.log10(atr_sum / (max_high - min_low)) / np.log10(14)
-    chop_values = chop.values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align TRIX histogram and Chop to 4h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_12h, trix_values)
-    chop_aligned = align_htf_to_ltf(prices, df_12h, chop_values)
+    # Keltner bands (20-period EMA ± 2*ATR)
+    keltner_mid = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    keltner_upper = keltner_mid + 2 * atr
+    keltner_lower = keltner_mid - 2 * atr
+    
+    # Align indicators to 6h timeframe
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50)
+    keltner_upper_aligned = align_htf_to_ltf(prices, df_1d, keltner_upper)
+    keltner_lower_aligned = align_htf_to_ltf(prices, df_1d, keltner_lower)
     
     # Volume confirmation: volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -67,25 +64,30 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(trix_aligned[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(ema50_aligned[i]) or np.isnan(keltner_upper_aligned[i]) or 
+            np.isnan(keltner_lower_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: TRIX histogram crosses above zero with volume and in trending regime (chop < 61.8)
-        if (trix_aligned[i] > 0 and trix_aligned[i-1] <= 0 and vol_confirm[i] and 
-            chop_aligned[i] < 61.8 and position != 1):
+        # Long entry: price above upper Keltner band, uptrend (price > EMA50), volume confirmation
+        if (close[i] > keltner_upper_aligned[i] and 
+            close[i] > ema50_aligned[i] and 
+            vol_confirm[i] and 
+            position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: TRIX histogram crosses below zero with volume and in trending regime (chop < 61.8)
-        elif (trix_aligned[i] < 0 and trix_aligned[i-1] >= 0 and vol_confirm[i] and 
-              chop_aligned[i] < 61.8 and position != -1):
+        # Short entry: price below lower Keltner band, downtrend (price < EMA50), volume confirmation
+        elif (close[i] < keltner_lower_aligned[i] and 
+              close[i] < ema50_aligned[i] and 
+              vol_confirm[i] and 
+              position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: TRIX histogram crosses zero in opposite direction or chop > 61.8 (ranging market)
-        elif position == 1 and (trix_aligned[i] < 0 or chop_aligned[i] > 61.8):
+        # Exit: trend reversal or volatility collapse
+        elif position == 1 and (close[i] < ema50_aligned[i] or atr[i] < 0.5 * atr[i-1] if i > 0 else False):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (trix_aligned[i] > 0 or chop_aligned[i] > 61.8):
+        elif position == -1 and (close[i] > ema50_aligned[i] or atr[i] < 0.5 * atr[i-1] if i > 0 else False):
             position = 0
             signals[i] = 0.0
         else:
