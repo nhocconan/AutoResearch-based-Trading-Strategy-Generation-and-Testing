@@ -3,15 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_cci_reversal_v1
-# Commodity Channel Index (CCI) reversal strategy on 4h with 1d trend filter.
-# In bull markets: buy when CCI crosses above -100 from oversold, in 1d uptrend.
-# In bear markets: sell when CCI crosses below +100 from overbought, in 1d downtrend.
-# Uses 1d EMA50 as trend filter to avoid counter-trend trades.
-# Volume confirmation required to avoid false signals.
-# Target: 20-40 trades/year per symbol for low friction.
-name = "4h_1d_cci_reversal_v1"
-timeframe = "4h"
+# Hypothesis: 6h_1w_fractal_breakout_v1
+# William's fractals on weekly chart to identify key reversal points.
+# Breakouts above weekly bearish fractal (resistance) or below weekly bullish fractal (support)
+# with volume confirmation. Works in both bull and bear markets by trading breakouts
+# from significant weekly levels. Target: 15-30 trades/year per symbol.
+name = "6h_1w_fractal_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,33 +22,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for fractal calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate Williams fractals (5-bar pattern)
+    high_vals = df_1w['high'].values
+    low_vals = df_1w['low'].values
     
-    # Calculate CCI(20) on 4h
-    typical_price = (high + low + close) / 3.0
-    ma_tp = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
-    mad = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
-    # Avoid division by zero
-    mad = np.where(mad == 0, 1e-10, mad)
-    cci = (typical_price - ma_tp) / (0.015 * mad)
+    bearish_fractal = np.full(len(high_vals), np.nan)
+    bullish_fractal = np.full(len(low_vals), np.nan)
     
-    # Volume confirmation: volume > 1.3 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n-3] < high[n-2] and high[n+1] < high[n]
+    for i in range(2, len(high_vals) - 2):
+        if (high_vals[i-2] < high_vals[i-1] and 
+            high_vals[i] < high_vals[i-1] and
+            high_vals[i-3] < high_vals[i-1] and
+            high_vals[i+1] < high_vals[i-1]):
+            bearish_fractal[i-1] = high_vals[i-1]
+    
+    # Bullish fractal: low[n-2] > low[n-1] < low[n] and low[n-3] > low[n-2] and low[n+1] > low[n]
+    for i in range(2, len(low_vals) - 2):
+        if (low_vals[i-2] > low_vals[i-1] and 
+            low_vals[i] > low_vals[i-1] and
+            low_vals[i-3] > low_vals[i-1] and
+            low_vals[i+1] > low_vals[i-1]):
+            bullish_fractal[i-1] = low_vals[i-1]
+    
+    # Align fractals to 6h timeframe with 2-bar delay for confirmation
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bullish_fractal, additional_delay_bars=2)
+    
+    # Volume confirmation: volume > 1.3 * 50-period average
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     vol_confirm = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # start after warmup
-        # Skip if indicators not ready
-        if np.isnan(cci[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_confirm[i]):
+    for i in range(50, n):  # start after warmup
+        # Skip if fractal levels not ready
+        if np.isnan(bearish_fractal_aligned[i]) and np.isnan(bullish_fractal_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -65,19 +78,19 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: CCI crosses above -100 from oversold AND 1d uptrend (price > EMA50)
-        if cci[i] > -100 and cci[i-1] <= -100 and close[i] > ema50_1d_aligned[i] and position != 1:
+        # Long signal: price breaks above weekly bearish fractal (resistance)
+        if not np.isnan(bearish_fractal_aligned[i]) and close[i] > bearish_fractal_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: CCI crosses below +100 from overbought AND 1d downtrend (price < EMA50)
-        elif cci[i] < 100 and cci[i-1] >= 100 and close[i] < ema50_1d_aligned[i] and position != -1:
+        # Short signal: price breaks below weekly bullish fractal (support)
+        elif not np.isnan(bullish_fractal_aligned[i]) and close[i] < bullish_fractal_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: opposite CCI cross
-        elif cci[i] < -100 and cci[i-1] >= -100 and position == 1:
+        # Exit conditions: opposite breakout
+        elif not np.isnan(bullish_fractal_aligned[i]) and close[i] > bullish_fractal_aligned[i] and position == 1:
             position = 0
             signals[i] = 0.0
-        elif cci[i] > 100 and cci[i-1] <= 100 and position == -1:
+        elif not np.isnan(bearish_fractal_aligned[i]) and close[i] < bearish_fractal_aligned[i] and position == -1:
             position = 0
             signals[i] = 0.0
         else:
