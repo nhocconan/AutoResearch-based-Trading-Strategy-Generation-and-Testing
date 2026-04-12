@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v29"
-timeframe = "4h"
+name = "1d_1w_camarilla_breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,29 +17,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation (call ONCE)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    # Get weekly data for Camarilla pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla pivot levels from 1d data
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Calculate Camarilla pivot levels from weekly data
+    pivot = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
     
     # Camarilla levels (using standard multipliers)
-    h3 = pivot + (range_1d * 1.1 / 4)   # Resistance 3
-    l3 = pivot - (range_1d * 1.1 / 4)   # Support 3
+    h3 = pivot + (range_1w * 1.1 / 4)   # Resistance 3
+    l3 = pivot - (range_1w * 1.1 / 4)   # Support 3
     
-    # Align Camarilla levels to 4h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    # Align Camarilla levels to daily timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1w, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1w, l3)
     
-    # Volume filter - 20-period average on 4h data
+    # Volume filter - 20-period average on daily data
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
@@ -69,7 +68,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if not ready
         if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
             np.isnan(volume_ok[i]) or np.isnan(trend_strong[i])):
@@ -82,6 +81,7 @@ def generate_signals(prices):
         short_signal = close[i] < l3_aligned[i] and volume_ok[i] and trend_strong[i]
         
         # Exit when price returns to pivot
+        pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
         exit_long = close[i] < pivot_aligned[i]
         exit_short = close[i] > pivot_aligned[i]
         
