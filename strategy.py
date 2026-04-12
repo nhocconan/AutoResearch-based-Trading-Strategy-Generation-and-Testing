@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v31"
-timeframe = "4h"
+name = "6h_1d_elder_ray_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,58 +17,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and volume
+    # Get 1d data for Elder Ray and EMA200
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # Previous 1d bar data (avoid look-ahead)
-    high_1d_prev = df_1d['high'].shift(1).values
-    low_1d_prev = df_1d['low'].shift(1).values
-    close_1d_prev = df_1d['close'].shift(1).values
-    volume_1d = df_1d['volume'].values
+    # Calculate 13-period EMA for Elder Ray (standard setting)
+    close_1d = df_1d['close'].values
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate 1d Camarilla H4/L4 levels (stronger breakout levels)
-    pivot_prev = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-    range_1d_prev = high_1d_prev - low_1d_prev
-    h4_prev = pivot_prev + (range_1d_prev * 1.1 / 2)
-    l4_prev = pivot_prev - (range_1d_prev * 1.1 / 2)
+    # Calculate Elder Ray components
+    bull_power_1d = high['high'] - ema13_1d  # High - EMA13
+    bear_power_1d = low['low'] - ema13_1d    # Low - EMA13
     
-    # Align to 4h timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4_prev)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4_prev)
+    # Calculate 200-period EMA for trend filter (on daily)
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # 1d volume spike: volume > 2x 20-day average
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_1d > (vol_ma_1d * 2.0)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
+    # Align to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
     signals = np.zeros(n)
     position = 0
     
-    for i in range(100, n):
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
-            np.isnan(vol_spike_aligned[i])):
-            signals[i] = 0.0 if position == 0 else (0.30 if position == 1 else -0.30)
+    for i in range(50, n):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(ema200_aligned[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: break above H4 with volume spike
-        long_signal = close[i] > h4_aligned[i] and vol_spike_aligned[i]
-        # Short: break below L4 with volume spike
-        short_signal = close[i] < l4_aligned[i] and vol_spike_aligned[i]
+        # Long: Bull Power > 0 and price above EMA200
+        long_signal = bull_power_aligned[i] > 0 and close[i] > ema200_aligned[i]
+        # Short: Bear Power < 0 and price below EMA200
+        short_signal = bear_power_aligned[i] < 0 and close[i] < ema200_aligned[i]
         
-        # Exit when price returns to pivot level
-        pivot_prev_val = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_prev_val)
-        exit_long = close[i] < pivot_aligned[i]
-        exit_short = close[i] > pivot_aligned[i]
+        # Exit when power changes sign (mean reversion)
+        exit_long = bull_power_aligned[i] <= 0
+        exit_short = bear_power_aligned[i] >= 0
         
         if long_signal and position != 1:
             position = 1
-            signals[i] = 0.30
+            signals[i] = 0.25
         elif short_signal and position != -1:
             position = -1
-            signals[i] = -0.30
+            signals[i] = -0.25
         elif exit_long and position == 1:
             position = 0
             signals[i] = 0.0
@@ -77,9 +70,9 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             if position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
