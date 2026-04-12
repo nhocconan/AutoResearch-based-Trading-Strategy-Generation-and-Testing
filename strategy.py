@@ -1,23 +1,18 @@
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+# 12h_1d_camarilla_breakout_v3
+# Hypothesis: Use 12h candles with daily Camarilla levels for mean-reversion in range-bound markets.
+# In 2025 BTC/ETH are expected to trade in ranges, not strong trends.
+# Buys near daily L3 (support) and sells near daily H3 (resistance) on 12h timeframe.
+# Uses 12h RSI(14) < 30 for long entry and > 70 for short entry to avoid chasing momentum.
+# Volume confirmation: 12h volume > 1.5x 20-period average to confirm interest at levels.
+# Target: 15-35 trades/year to minimize fee drag in ranging markets.
 
-# Hypothesis: 1h_4h_dema_cross_v1
-# Uses 4h DEMA crossover for trend direction (21/55) and 1h for entry timing.
-# Enters long when 4h DEMA21 > DEMA55 and price crosses above 1h VWAP.
-# Enters short when 4h DEMA21 < DEMA55 and price crosses below 1h VWAP.
-# Includes session filter (08-20 UTC) to reduce noise.
-# Designed for low trade frequency (target: 15-37/year) to minimize fee drag.
-# Works in bull markets (trend following) and bear markets (trend following with filters).
-
-name = "1h_4h_dema_cross_v1"
-timeframe = "1h"
+name = "12h_1d_camarilla_breakout_v3"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,68 +20,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for DEMA calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 55:
+    # Get daily data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate DEMA on 4h close
-    close_4h = df_4h['close'].values
-    ema1_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema2_4h = pd.Series(close_4h).ewm(span=55, adjust=False, min_periods=55).mean().values
-    # DEMA = 2*EMA - EMA(EMA)
-    ema_of_ema1_4h = pd.Series(ema1_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_of_ema2_4h = pd.Series(ema2_4h).ewm(span=55, adjust=False, min_periods=55).mean().values
-    dema21_4h = 2 * ema1_4h - ema_of_ema1_4h
-    dema55_4h = 2 * ema2_4h - ema_of_ema2_4h
+    # Calculate Camarilla levels from previous day
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
     
-    # Align 4h DEMA to 1h timeframe (wait for 4h bar close)
-    dema21_4h_aligned = align_htf_to_ltf(prices, df_4h, dema21_4h)
-    dema55_4h_aligned = align_htf_to_ltf(prices, df_4h, dema55_4h)
+    # Camarilla formulas
+    range_prev = high_prev - low_prev
+    camarilla_h3 = close_prev + range_prev * 1.1 / 4
+    camarilla_l3 = close_prev - range_prev * 1.1 / 4
     
-    # 1h VWAP for entry timing
-    typical_price = (high + low + close) / 3.0
-    vwap_num = pd.Series(typical_price * volume).rolling(window=20, min_periods=20).sum().values
-    vwap_den = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
-    vwap = np.where(vwap_den != 0, vwap_num / vwap_den, 0.0)
+    # Align to 12h timeframe (daily levels update only after daily bar closes)
+    h3_level = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_level = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Volume confirmation: volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma * 1.5)
+    
+    # RSI(14) for momentum filter
+    def rsi(close_prices, period=14):
+        delta = np.diff(close_prices)
+        up = np.where(delta > 0, delta, 0)
+        down = np.where(delta < 0, -delta, 0)
+        gain = np.zeros_like(close_prices)
+        loss = np.zeros_like(close_prices)
+        if len(close_prices) < period:
+            return np.full_like(close_prices, 50.0)
+        gain[period] = np.mean(up[:period])
+        loss[period] = np.mean(down[:period])
+        for i in range(period+1, len(close_prices)):
+            gain[i] = (gain[i-1] * (period-1) + up[i-1]) / period
+            loss[i] = (loss[i-1] * (period-1) + down[i-1]) / period
+        rs = np.where(loss != 0, gain / loss, 100)
+        rsi_vals = 100 - (100 / (1 + rs))
+        rsi_vals[:period] = 50.0
+        return rsi_vals
+    
+    rsi_vals = rsi(close, 14)
+    rsi_oversold = rsi_vals < 30
+    rsi_overbought = rsi_vals > 70
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(55, n):
-        # Skip if not in session or data not ready
-        if not session_filter[i] or np.isnan(dema21_4h_aligned[i]) or np.isnan(dema55_4h_aligned[i]) or np.isnan(vwap[i]):
+    for i in range(20, n):
+        # Skip if levels not ready
+        if np.isnan(h3_level[i]) or np.isnan(l3_level[i]):
             signals[i] = 0.0
             continue
         
-        # Trend filter: 4h DEMA21 > DEMA55 for long, < for short
-        trend_long = dema21_4h_aligned[i] > dema55_4h_aligned[i]
-        trend_short = dema21_4h_aligned[i] < dema55_4h_aligned[i]
-        
-        # Entry signals: price crosses VWAP in direction of 4h trend
-        if trend_long and close[i] > vwap[i] and close[i-1] <= vwap[i-1] and position != 1:
-            position = 1
-            signals[i] = 0.20
-        elif trend_short and close[i] < vwap[i] and close[i-1] >= vwap[i-1] and position != -1:
-            position = -1
-            signals[i] = -0.20
-        # Exit signals: price crosses VWAP against trend or trend reversal
-        elif (close[i] < vwap[i] and close[i-1] >= vwap[i-1]) or (not trend_long and position == 1):
-            position = 0
-            signals[i] = 0.0
-        elif (close[i] > vwap[i] and close[i-1] <= vwap[i-1]) or (not trend_short and position == -1):
-            position = 0
-            signals[i] = 0.0
-        else:
-            # Hold position
+        # Long setup: near L3 support with oversold RSI and volume
+        if (close[i] <= l3_level[i] * 1.02) and rsi_oversold[i] and vol_confirm[i]:
+            if position != 1:
+                position = 1
+                signals[i] = 0.25
+            else:
+                signals[i] = 0.25
+        # Short setup: near H3 resistance with overbought RSI and volume
+        elif (close[i] >= h3_level[i] * 0.98) and rsi_overbought[i] and vol_confirm[i]:
+            if position != -1:
+                position = -1
+                signals[i] = -0.25
+            else:
+                signals[i] = -0.25
+        # Exit: price moves back toward middle of range
+        elif abs(close[i] - (h3_level[i] + l3_level[i])/2) < (h3_level[i] - l3_level[i]) * 0.1:
             if position == 1:
-                signals[i] = 0.20
+                position = 0
+                signals[i] = 0.0
             elif position == -1:
-                signals[i] = -0.20
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
+        # Hold current position
+        else:
+            if position == 1:
+                signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
