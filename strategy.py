@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h_12h_camarilla_breakout_v1
-# Uses 12h Camarilla pivot levels as dynamic support/resistance on 6h chart.
-# Long when price breaks above 12h H4 with volume confirmation (volume > 1.5x 20-period avg).
-# Short when price breaks below 12h L4 with volume confirmation.
-# Exits when price returns to 12h pivot point (PP).
-# Designed for low trade frequency (target: 12-37 trades/year) to minimize fee drag.
-# Works in trending markets via breakouts and ranging markets via mean reversion to pivot.
-# Tested on 6h timeframe with 12h HTF for pivot calculation.
+# Hypothesis: 4h_1d_camarilla_breakout_volume_trend_v1
+# Uses daily Camarilla pivot levels (H4/L4) as support/resistance on 4h chart.
+# Long when price breaks above H4 with volume confirmation (volume > 1.5x 20-period avg) AND 4h close > 20-period EMA (trend filter).
+# Short when price breaks below L4 with volume confirmation AND 4h close < 20-period EMA.
+# Exits when price returns to daily pivot point (PP) or when trend filter reverses.
+# Designed for moderate trade frequency (target: 20-50 trades/year) to balance signal quality and cost.
+# Works in trending markets via breakouts with trend confirmation and ranging markets via mean reversion to pivot.
 
-name = "6h_12h_camarilla_breakout_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,32 +25,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla pivot calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get daily data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 12h Camarilla levels based on previous 12h bar's OHLC
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate daily Camarilla levels
+    # Based on previous day's OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate pivot point and Camarilla levels for each 12h bar
-    pp = (high_12h + low_12h + close_12h) / 3.0
-    range_12h = high_12h - low_12h
+    # Calculate pivot point and Camarilla levels for each day
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
     
     # Camarilla levels: H4 = PP + 1.1/2 * range, L4 = PP - 1.1/2 * range
-    h4 = pp + (1.1 / 2) * range_12h
-    l4 = pp - (1.1 / 2) * range_12h
+    h4 = pp + (1.1 / 2) * range_1d
+    l4 = pp - (1.1 / 2) * range_1d
     
-    # Align 12h levels to 6h timeframe (12h values update after 12h bar closes)
-    h4_aligned = align_htf_to_ltf(prices, df_12h, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_12h, l4)
-    pp_aligned = align_htf_to_ltf(prices, df_12h, pp)
+    # Align daily levels to 4h timeframe (daily values update after daily bar closes)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
     
-    # Volume confirmation: volume > 1.5 * 20-period average (6h timeframe)
+    # Volume confirmation: volume > 1.5 * 20-period average (4h timeframe)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
+    
+    # Trend filter: 20-period EMA on 4h close
+    close_series = pd.Series(close)
+    ema20 = close_series.ewm(span=20, min_periods=20, adjust=False).mean().values
+    trend_up = close > ema20
+    trend_down = close < ema20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -62,32 +68,20 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Require volume confirmation for new entries
-        if not vol_confirm[i]:
-            # Hold current position if volume filter fails
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Long signal: price breaks above 12h H4
-        if close[i] > h4_aligned[i] and position != 1:
+        # Exit conditions: price returns to daily pivot point or trend filter reverses
+        if position == 1 and (close[i] <= pp_aligned[i] or not trend_up[i]):
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and (close[i] >= pp_aligned[i] or not trend_down[i]):
+            position = 0
+            signals[i] = 0.0
+        # Entry conditions with all filters
+        elif vol_confirm[i] and trend_up[i] and close[i] > h4_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below 12h L4
-        elif close[i] < l4_aligned[i] and position != -1:
+        elif vol_confirm[i] and trend_down[i] and close[i] < l4_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: price returns to 12h pivot point (mean reversion)
-        elif position == 1 and close[i] <= pp_aligned[i]:
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and close[i] >= pp_aligned[i]:
-            position = 0
-            signals[i] = 0.0
         else:
             # Hold current position
             if position == 1:
