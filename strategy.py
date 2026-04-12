@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-6h_1d_Aggressive_Momentum_Breakout
-Hypothesis: Aggressive breakout above 6h Donchian(20) high/low with volume confirmation,
-filtered by 1d RSI trend filter (RSI>50 for long, RSI<50 for short). Uses tight stops
-via time-based exit (max 3 bars) to limit whipsaw in sideways markets. Designed for
-low-frequency, high-conviction trades in both bull and bear regimes.
+12h_1d_Camarilla_Breakout_Enhanced
+Hypothesis: Combines daily Camarilla pivot breakouts with 12h trend filter and volume confirmation.
+Uses tighter breakout criteria (H4/L4 instead of H3/L3) and adds ADX trend strength filter to reduce false signals.
+Designed for low-frequency, high-quality trades in both bull and bear markets by filtering for strong trends.
+Target: 15-25 trades/year to minimize fee drag while capturing significant moves.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Aggressive_Momentum_Breakout"
-timeframe = "6h"
+name = "12h_1d_Camarilla_Breakout_Enhanced"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,24 +25,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 6H DONCHIAN(20) CHANNEL ===
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # === 1D RSI(14) TREND FILTER ===
+    # === DAILY CAMARILLA PIVOT CALCULATION ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
+    # Calculate Camarilla levels for each day
+    H3 = np.zeros(len(df_1d))
+    L3 = np.zeros(len(df_1d))
+    H4 = np.zeros(len(df_1d))
+    L4 = np.zeros(len(df_1d))
+    
+    for i in range(len(df_1d)):
+        range_ = high_1d[i] - low_1d[i]
+        if range_ <= 0:
+            H3[i] = H4[i] = L3[i] = L4[i] = close_1d[i]
+        else:
+            H3[i] = close_1d[i] + range_ * 1.1 / 4
+            L3[i] = close_1d[i] - range_ * 1.1 / 4
+            H4[i] = close_1d[i] + range_ * 1.1 / 2
+            L4[i] = close_1d[i] - range_ * 1.1 / 2
+    
+    # Align Camarilla levels to 12h timeframe
+    H3_12h = align_htf_to_ltf(prices, df_1d, H3)
+    L3_12h = align_htf_to_ltf(prices, df_1d, L3)
+    H4_12h = align_htf_to_ltf(prices, df_1d, H4)
+    L4_12h = align_htf_to_ltf(prices, df_1d, L4)
+    
+    # === 12h TREND FILTER (ADX) ===
+    # Calculate ADX for trend strength
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    tr = np.zeros(n)
+    
+    for i in range(1, n):
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
+        
+        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
+        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
+        
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    # Smooth the values
+    def smooth_wilder(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        result[period-1] = np.nansum(arr[1:period+1])
+        for i in range(period, len(arr)):
+            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
+    
+    period = 14
+    tr_smooth = smooth_wilder(tr, period)
+    plus_di = 100 * smooth_wilder(plus_dm, period) / tr_smooth
+    minus_di = 100 * smooth_wilder(minus_dm, period) / tr_smooth
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = smooth_wilder(dx, period)
     
     # === VOLUME CONFIRMATION ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -50,44 +94,40 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    bars_since_entry = 0
     
-    for i in range(20, n):
-        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
-            np.isnan(rsi_1d_aligned[i]) or np.isnan(vol_ratio[i])):
+    for i in range(100, n):
+        # Skip if not ready
+        if (np.isnan(H4_12h[i]) or np.isnan(L4_12h[i]) or 
+            np.isnan(adx[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
-            if position != 0:
-                bars_since_entry += 1
             continue
         
-        # Entry conditions
-        long_breakout = (close[i] > high_max[i]) and (vol_ratio[i] > 1.8) and (rsi_1d_aligned[i] > 50)
-        short_breakout = (close[i] < low_min[i]) and (vol_ratio[i] > 1.8) and (rsi_1d_aligned[i] < 50)
+        # Breakout conditions with tighter criteria
+        # Long: Price breaks above H4 with volume + strong trend (ADX > 25)
+        long_breakout = (close[i] > H4_12h[i]) and (vol_ratio[i] > 2.0) and (adx[i] > 25)
         
-        # Time-based exit: max 3 bars (18 hours)
-        time_exit = bars_since_entry >= 3
+        # Short: Price breaks below L4 with volume + strong trend (ADX > 25)
+        short_breakout = (close[i] < L4_12h[i]) and (vol_ratio[i] > 2.0) and (adx[i] > 25)
         
-        # Reverse signals for aggressive re-entry
-        reverse_long = (position == -1) and long_breakout
-        reverse_short = (position == 1) and short_breakout
+        # Exit: Price returns to opposite H3/L3 level or trend weakens
+        exit_long = (position == 1) and ((close[i] < L3_12h[i]) or (adx[i] < 20))
+        exit_short = (position == -1) and ((close[i] > H3_12h[i]) or (adx[i] < 20))
         
         # Execute trades
-        if (long_breakout or reverse_long) and position != 1:
+        if long_breakout and position != 1:
             position = 1
-            bars_since_entry = 0
             signals[i] = 0.25
-        elif (short_breakout or reverse_short) and position != -1:
+        elif short_breakout and position != -1:
             position = -1
-            bars_since_entry = 0
             signals[i] = -0.25
-        elif time_exit and position != 0:
+        elif exit_long and position == 1:
             position = 0
-            bars_since_entry = 0
+            signals[i] = 0.0
+        elif exit_short and position == -1:
+            position = 0
             signals[i] = 0.0
         else:
             # Hold position
             signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
-            if position != 0:
-                bars_since_entry += 1
     
     return signals
