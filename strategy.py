@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_volume_only
-# Hypothesis: 4-hour Camarilla breakout with volume confirmation (no ATR filter) to reduce trade frequency and focus on high-probability breaks.
-# Works in bull/bear by using volatility-adjusted breakouts from prior day and volume confirmation to avoid false signals.
+# 4h_1d_trix_volume_chop
+# Hypothesis: 4-hour TRIX (12-period) with volume confirmation and Choppiness index regime filter.
+# TRIX filters noise and captures momentum shifts. Volume confirms breakout strength.
+# Chop filter avoids trend-following in ranging markets (Chop > 61.8) and avoids mean-reversion in strong trends (Chop < 38.2).
+# Works in bull/bear by adapting to regime: trend-following when Chop < 38.2, mean-reversion when Chop > 61.8.
 # Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
 
-name = "4h_1d_camarilla_breakout_volume_only"
+name = "4h_1d_trix_volume_chop"
 timeframe = "4h"
 leverage = 1.0
 
@@ -14,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,70 +24,110 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation
+    # Get daily data for TRIX and Choppiness
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's range
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    # TRIX: triple EMA of log returns
+    # Step 1: EMA1 of close
+    ema1 = pd.Series(close_1d).ewm(span=12, adjust=False, min_periods=12).mean()
+    # Step 2: EMA2 of EMA1
+    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
+    # Step 3: EMA3 of EMA2
+    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
+    # TRIX = (EMA3 - prev EMA3) / prev EMA3 * 100
+    trix_raw = (ema3 - ema3.shift(1)) / ema3.shift(1) * 100
+    trix = trix_raw.fillna(0).values
     
-    # Camarilla levels (based on previous day)
-    range_ = prev_high - prev_low
-    # Resistance levels
-    r3 = prev_close + range_ * 1.1 / 2
-    r4 = prev_close + range_ * 1.1
-    # Support levels
-    s3 = prev_close - range_ * 1.1 / 2
-    s4 = prev_close - range_ * 1.1
+    # Choppiness Index (14-period)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum()
+    # Highest high and lowest low over 14 periods
+    hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max()
+    ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min()
+    chop = 100 * np.log10(atr_sum / (hh - ll)) / np.log10(14)
+    chop = chop.fillna(50).values  # neutral when undefined
     
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Align TRIX and Chop to 4h timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    vol_confirm = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i])):
+        if (np.isnan(trix_aligned[i]) or np.isnan(chop_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: close breaks above R4 with volume confirmation
-        if (close[i] > r4_aligned[i] and vol_confirm[i] and position != 1):
-            position = 1
-            signals[i] = 0.25
-        # Short entry: close breaks below S4 with volume confirmation
-        elif (close[i] < s4_aligned[i] and vol_confirm[i] and position != -1):
-            position = -1
-            signals[i] = -0.25
-        # Exit: reverse signal or close crosses back to opposite S3/R3
-        elif position == 1 and close[i] < s3_aligned[i]:
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and close[i] > r3_aligned[i]:
-            position = 0
-            signals[i] = 0.0
-        else:
-            # Hold current position
-            if position == 1:
+        # Regime-based logic
+        if chop_aligned[i] < 38.2:  # Trending regime
+            # Trend following: TRIX momentum
+            if trix_aligned[i] > 0.1 and vol_confirm[i] and position != 1:
+                position = 1
                 signals[i] = 0.25
-            elif position == -1:
+            elif trix_aligned[i] < -0.1 and vol_confirm[i] and position != -1:
+                position = -1
                 signals[i] = -0.25
+            # Exit on TRIX reversal
+            elif position == 1 and trix_aligned[i] < 0:
+                position = 0
+                signals[i] = 0.0
+            elif position == -1 and trix_aligned[i] > 0:
+                position = 0
+                signals[i] = 0.0
+            else:
+                # Hold position
+                if position == 1:
+                    signals[i] = 0.25
+                elif position == -1:
+                    signals[i] = -0.25
+                else:
+                    signals[i] = 0.0
+                    
+        elif chop_aligned[i] > 61.8:  # Ranging regime
+            # Mean reversion: TRIX extreme
+            if trix_aligned[i] < -0.2 and vol_confirm[i] and position != 1:
+                position = 1
+                signals[i] = 0.25
+            elif trix_aligned[i] > 0.2 and vol_confirm[i] and position != -1:
+                position = -1
+                signals[i] = -0.25
+            # Exit on TRIX return to zero
+            elif position == 1 and trix_aligned[i] > -0.05:
+                position = 0
+                signals[i] = 0.0
+            elif position == -1 and trix_aligned[i] < 0.05:
+                position = 0
+                signals[i] = 0.0
+            else:
+                # Hold position
+                if position == 1:
+                    signals[i] = 0.25
+                elif position == -1:
+                    signals[i] = -0.25
+                else:
+                    signals[i] = 0.0
+        else:  # Neutral regime (38.2 <= Chop <= 61.8)
+            # No position in uncertain regime
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
             else:
                 signals[i] = 0.0
     
