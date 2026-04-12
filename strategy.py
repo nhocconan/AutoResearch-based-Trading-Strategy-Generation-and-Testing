@@ -23,7 +23,25 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 14-period ATR on daily timeframe
+    # Calculate daily RSI(14) for momentum
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.full(len(close_1d), np.nan)
+    avg_loss = np.full(len(close_1d), np.nan)
+    for i in range(14, len(close_1d)):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[0:15])
+            avg_loss[i] = np.mean(loss[0:15])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi_1d = 100 - (100 / (1 + rs))
+    
+    # Calculate daily ATR(14) for volatility filter
     tr1 = np.abs(high_1d - low_1d)
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
@@ -31,95 +49,79 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_1d = np.full(len(df_1d), np.nan)
     for i in range(14, len(df_1d)):
-        atr_1d[i] = np.nanmean(tr[i-14:i+1])
+        atr_1d[i] = np.mean(tr[i-14:i+1])
     
-    # Calculate 20-period high and low for Donchian channel (daily)
-    high_20 = np.full(len(df_1d), np.nan)
-    low_20 = np.full(len(df_1d), np.nan)
-    for i in range(19, len(df_1d)):
-        high_20[i] = np.max(high_1d[i-19:i+1])
-        low_20[i] = np.min(low_1d[i-19:i+1])
+    # Calculate daily SMA(20) for trend filter
+    sma_20_1d = np.full(len(close_1d), np.nan)
+    for i in range(19, len(close_1d)):
+        sma_20_1d[i] = np.mean(close_1d[i-19:i+1])
     
-    # Calculate 10-period SMA on daily close
-    sma_10 = np.full(len(df_1d), np.nan)
-    for i in range(9, len(df_1d)):
-        sma_10[i] = np.mean(close_1d[i-9:i+1])
-    
-    # Calculate weekly data for trend filter
+    # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
     
-    # Calculate 50-period SMA on weekly close for trend filter
-    sma_50w = np.full(len(df_1w), np.nan)
-    for i in range(49, len(df_1w)):
-        sma_50w[i] = np.mean(close_1w[i-49:i+1])
+    # Calculate weekly SMA(10) for trend filter
+    sma_10_1w = np.full(len(close_1w), np.nan)
+    for i in range(9, len(close_1w)):
+        sma_10_1w[i] = np.mean(close_1w[i-9:i+1])
     
     # Align daily indicators to 6h timeframe
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
-    sma_10_aligned = align_htf_to_ltf(prices, df_1d, sma_10)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_20_1d)
     
     # Align weekly SMA to 6h timeframe
-    sma_50w_aligned = align_htf_to_ltf(prices, df_1w, sma_50w)
+    sma_10_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_10_1w)
     
-    # Calculate 6-period RSI for momentum filter (6h)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.full(n, np.nan)
-    avg_loss = np.full(n, np.nan)
-    for i in range(6, n):
-        if i == 6:
-            avg_gain[i] = np.mean(gain[0:7])
-            avg_loss[i] = np.mean(loss[0:7])
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 5 + gain[i]) / 6
-            avg_loss[i] = (avg_loss[i-1] * 5 + loss[i]) / 6
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate 6h ATR(14) for position sizing
+    tr1_h = np.abs(high - low)
+    tr2_h = np.abs(high - np.roll(close, 1))
+    tr3_h = np.abs(low - np.roll(close, 1))
+    tr1_h[0] = tr2_h[0] = tr3_h[0] = np.nan
+    tr_h = np.maximum(tr1_h, np.maximum(tr2_h, tr3_h))
+    atr_6h = np.full(n, np.nan)
+    for i in range(14, n):
+        atr_6h[i] = np.mean(tr_h[i-14:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
-            np.isnan(sma_10_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(sma_50w_aligned[i]) or np.isnan(rsi[i])):
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(sma_20_1d_aligned[i]) or np.isnan(sma_10_1w_aligned[i]) or 
+            np.isnan(atr_6h[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: ATR > 0.5 * ATR MA (avoid low volatility choppy periods)
-        atr_ma = np.full(n, np.nan)
-        for j in range(29, n):
-            atr_ma[j] = np.nanmean(atr_1d_aligned[j-29:j+1])
-        vol_filter = atr_1d_aligned[i] > 0.5 * atr_ma[i] if not np.isnan(atr_ma[i]) else False
+        # Volatility filter: daily ATR > 0.5 * 20-period ATR MA (avoid low volatility)
+        atr_ma_20 = np.full(n, np.nan)
+        for j in range(33, n):  # 14 + 19 for 20-period MA
+            atr_ma_20[j] = np.mean(atr_1d_aligned[j-19:j+1]) if not np.isnan(np.mean(atr_1d_aligned[j-19:j+1])) else np.nan
+        vol_filter = atr_1d_aligned[i] > 0.5 * atr_ma_20[i] if not np.isnan(atr_ma_20[i]) else False
         
-        # Momentum filter: RSI between 30 and 70 (avoid extremes)
-        mom_filter = (rsi[i] >= 30) and (rsi[i] <= 70)
+        # Momentum filter: daily RSI between 35 and 65 (avoid extremes)
+        mom_filter = (rsi_1d_aligned[i] >= 35) and (rsi_1d_aligned[i] <= 65)
         
-        # Trend filter: price above/below weekly SMA50
-        uptrend = close[i] > sma_50w_aligned[i]
-        downtrend = close[i] < sma_50w_aligned[i]
+        # Trend filter: price above/both weekly SMA10 AND daily SMA20
+        uptrend = (close[i] > sma_10_1w_aligned[i]) and (close[i] > sma_20_1d_aligned[i])
+        downtrend = (close[i] < sma_10_1w_aligned[i]) and (close[i] < sma_20_1d_aligned[i])
         
-        # Entry conditions: Donchian breakout with filters
-        long_breakout = (close[i] > high_20_aligned[i]) and vol_filter and mom_filter and uptrend
-        short_breakout = (close[i] < low_20_aligned[i]) and vol_filter and mom_filter and downtrend
+        # Entry conditions: RSI mean reversion with trend filter
+        long_entry = (rsi_1d_aligned[i] < 40) and vol_filter and mom_filter and uptrend
+        short_entry = (rsi_1d_aligned[i] > 60) and vol_filter and mom_filter and downtrend
         
-        # Exit conditions: opposite Donchian break
-        long_exit = close[i] < low_20_aligned[i]
-        short_exit = close[i] > high_20_aligned[i]
+        # Exit conditions: RSI crosses back to 50
+        long_exit = rsi_1d_aligned[i] > 50
+        short_exit = rsi_1d_aligned[i] < 50
         
-        if long_breakout and position != 1:
+        if long_entry and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_breakout and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
@@ -139,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_1w_donchian_trend_filter_v1"
+name = "6h_1d_1w_rsi_trend_filter_v1"
 timeframe = "6h"
 leverage = 1.0
