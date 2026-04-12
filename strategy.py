@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend context and signal generation
+    # Get 1d data for trend context
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -40,9 +40,26 @@ def generate_signals(prices):
     for i in range(14, len(df_1d)):
         atr_1d[i] = np.mean(tr[i-14:i+1])
     
+    # Calculate 1d RSI(14) for mean reversion signals
+    delta = np.diff(close_1d, prepend=np.nan)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.full(len(delta), np.nan)
+    avg_loss = np.full(len(delta), np.nan)
+    for i in range(14, len(delta)):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[1:15])
+            avg_loss[i] = np.mean(loss[1:15])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_1d = 100 - (100 / (1 + rs))
+    
     # Align 1d indicators to 4h timeframe
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -53,7 +70,8 @@ def generate_signals(prices):
             continue
         
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_1d_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(rsi_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -70,11 +88,17 @@ def generate_signals(prices):
         uptrend = close[i] > ema_50_1d_aligned[i]
         downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Entry conditions: EMA50 trend + volatility filter
-        long_entry = uptrend and vol_filter
-        short_entry = downtrend and vol_filter
+        # Mean reversion signals: RSI extremes
+        rsi_oversold = rsi_1d_aligned[i] < 30
+        rsi_overbought = rsi_1d_aligned[i] > 70
         
-        # Exit conditions: opposite EMA50 cross or volatility drop
+        # Entry conditions: 
+        # Long: uptrend + volatility filter + RSI oversold
+        # Short: downtrend + volatility filter + RSI overbought
+        long_entry = uptrend and vol_filter and rsi_oversold
+        short_entry = downtrend and vol_filter and rsi_overbought
+        
+        # Exit conditions: opposite trend or volatility drop
         long_exit = (not uptrend) or (not vol_filter)
         short_exit = (not downtrend) or (not vol_filter)
         
@@ -101,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_ema50_vol_filter_v1"
+name = "4h_1d_ema50_rsi_mean_reversion_v1"
 timeframe = "4h"
 leverage = 1.0
