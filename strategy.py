@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v27"
-timeframe = "4h"
+name = "1d_1w_rsi_ma_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,76 +17,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1w = df_1w['close'].values
+    ma_20_1w = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
+    ma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ma_20_1w)
+    
+    # Get daily data for RSI
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    
     close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Calculate Camarilla pivot levels (using previous day's data)
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_hl = high_1d - low_1d
-    
-    # Resistance levels (R1-R4)
-    r1 = close_1d + (range_hl * 1.0833)
-    r2 = close_1d + (range_hl * 1.1666)
-    r3 = close_1d + (range_hl * 1.2500)
-    r4 = close_1d + (range_hl * 1.5000)
-    
-    # Support levels (S1-S4)
-    s1 = close_1d - (range_hl * 1.0833)
-    s2 = close_1d - (range_hl * 1.1666)
-    s3 = close_1d - (range_hl * 1.2500)
-    s4 = close_1d - (range_hl * 1.5000)
-    
-    # Align Camarilla levels to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Volume filter - 24-period average on 4h data (1 day of 4h bars)
+    # Volume filter - 20-day average
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=24, min_periods=24).mean().values
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
-    
-    # Donchian channel (20-period) for trend filter
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    upper_donchian = high_series.rolling(window=20, min_periods=20).max().values
-    lower_donchian = low_series.rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(upper_donchian[i]) or np.isnan(lower_donchian[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(ma_20_1w_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long conditions: price breaks above S3 with volume and above Donchian lower
-        long_signal = (close[i] > s3_aligned[i] and 
-                      volume_ok[i] and 
-                      close[i] > lower_donchian[i])
+        # Trend from weekly MA
+        price_above_ma = close[i] > ma_20_1w_aligned[i]
+        price_below_ma = close[i] < ma_20_1w_aligned[i]
         
-        # Short conditions: price breaks below R3 with volume and below Donchian upper
-        short_signal = (close[i] < r3_aligned[i] and 
-                       volume_ok[i] and 
-                       close[i] < upper_donchian[i])
+        # RSI conditions
+        rsi_oversold = rsi_1d_aligned[i] < 30
+        rsi_overbought = rsi_1d_aligned[i] > 70
         
-        # Exit conditions: reverse back through S1/R1
-        exit_long = close[i] < s1_aligned[i]
-        exit_short = close[i] > r1_aligned[i]
+        # Entry signals
+        long_signal = price_above_ma and rsi_oversold and volume_ok[i]
+        short_signal = price_below_ma and rsi_overbought and volume_ok[i]
+        
+        # Exit signals
+        exit_long = price_below_ma or rsi_1d_aligned[i] > 50
+        exit_short = price_above_ma or rsi_1d_aligned[i] < 50
         
         # Execute trades
         if long_signal and position != 1:
