@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h_1d_weekly_pivot_bounce_v1
-# Uses weekly pivot levels from 1-week chart as dynamic support/resistance.
-# In bull markets: buy bounces off weekly support (S1, S2) with 6h momentum confirmation.
-# In bear markets: sell bounces off weekly resistance (R1, R2) with 6m momentum confirmation.
-# Uses 6h RSI(2) for short-term mean reversion entries and weekly trend filter (price vs weekly pivot).
-# Target: 20-30 trades/year per symbol with high win rate via institutional levels.
-name = "6h_1d_weekly_pivot_bounce_v1"
-timeframe = "6h"
+# Hypothesis: 4h_1d_ema_retracement_v1
+# In trending markets, price often retraces to EMA(21) on 1d chart before continuing.
+# This strategy enters long when price pulls back to EMA(21) on 1d during uptrend (EMA(50) > EMA(200)),
+# and short when price rallies to EMA(21) during downtrend (EMA(50) < EMA(200)).
+# Uses volume confirmation and volatility filter (ATR) to avoid false signals.
+# Designed for low trade frequency (~25-40/year) with high win rate in trends.
+name = "4h_1d_ema_retracement_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,84 +21,90 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for EMA calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly pivot points from previous week
-    high_prev = df_1w['high'].shift(1).values
-    low_prev = df_1w['low'].shift(1).values
-    close_prev = df_1w['close'].shift(1).values
+    # Calculate EMAs on 1d
+    close_1d = df_1d['close'].values
+    ema21 = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Standard pivot point calculation
-    pivot = (high_prev + low_prev + close_prev) / 3
-    r1 = 2 * pivot - low_prev
-    s1 = 2 * pivot - high_prev
-    r2 = pivot + (high_prev - low_prev)
-    s2 = pivot - (high_prev - low_prev)
+    # Align EMAs to 4h timeframe
+    ema21_4h = align_htf_to_ltf(prices, df_1d, ema21)
+    ema50_4h = align_htf_to_ltf(prices, df_1d, ema50)
+    ema200_4h = align_htf_to_ltf(prices, df_1d, ema200)
     
-    # Align to 6h timeframe (already delayed by 1 week due to shift)
-    r1_level = align_htf_to_ltf(prices, df_1w, r1)
-    r2_level = align_htf_to_ltf(prices, df_1w, r2)
-    s1_level = align_htf_to_ltf(prices, df_1w, s1)
-    s2_level = align_htf_to_ltf(prices, df_1w, s2)
-    pivot_level = align_htf_to_ltf(prices, df_1w, pivot)
+    # Volume confirmation: volume > 1.3 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma * 1.3)
     
-    # 6h RSI(2) for short-term mean reversion signals
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Use Wilder's smoothing (equivalent to RMA)
-    alpha = 1.0 / 2
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[0] = gain[0]
-    avg_loss[0] = loss[0]
-    
-    for i in range(1, len(gain)):
-        avg_gain[i] = alpha * gain[i] + (1 - alpha) * avg_gain[i-1]
-        avg_loss[i] = alpha * loss[i] + (1 - alpha) * avg_loss[i-1]
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Volatility filter: avoid extremely low volatility (ATR < 0.5 * 50-period avg ATR)
+    # True range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    vol_filter = atr > (atr_ma * 0.5)  # sufficient volatility
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(2, n):  # start after RSI warmup
-        # Skip if levels not ready
-        if np.isnan(r1_level[i]) or np.isnan(s1_level[i]):
+    for i in range(50, n):  # start after warmup
+        # Skip if EMAs not ready
+        if np.isnan(ema21_4h[i]) or np.isnan(ema50_4h[i]) or np.isnan(ema200_4h[i]):
             signals[i] = 0.0
             continue
         
-        # Determine weekly trend: price above/below weekly pivot
-        weekly_uptrend = close[i] > pivot_level[i]
+        # Check filters
+        if not (vol_confirm[i] and vol_filter[i]):
+            # Hold current position if filters fail
+            if position == 1:
+                signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.0
+            continue
         
-        # Long setup: price near weekly support in uptrend with RSI oversold
-        near_support = (close[i] <= s1_level[i] * 1.005) or (close[i] <= s2_level[i] * 1.005)
-        rsi_oversold = rsi[i] < 20
+        # Determine trend based on EMA50 vs EMA200
+        uptrend = ema50_4h[i] > ema200_4h[i]
+        downtrend = ema50_4h[i] < ema200_4h[i]
         
-        if weekly_uptrend and near_support and rsi_oversold and position != 1:
-            position = 1
-            signals[i] = 0.25
-        
-        # Short setup: price near weekly resistance in downtrend with RSI overbought
-        elif not weekly_uptrend:
-            near_resistance = (close[i] >= r1_level[i] * 0.995) or (close[i] >= r2_level[i] * 0.995)
-            rsi_overbought = rsi[i] > 80
-            
-            if near_resistance and rsi_overbought and position != -1:
+        # Long setup: uptrend + price near EMA21 (within 0.5*ATR)
+        if uptrend and position != 1:
+            if abs(close[i] - ema21_4h[i]) <= (0.5 * atr[i]):
+                position = 1
+                signals[i] = 0.25
+            else:
+                # Hold flat or reverse
+                if position == 1:
+                    signals[i] = 0.25
+                elif position == -1:
+                    signals[i] = -0.25
+                else:
+                    signals[i] = 0.0
+        # Short setup: downtrend + price near EMA21 (within 0.5*ATR)
+        elif downtrend and position != -1:
+            if abs(close[i] - ema21_4h[i]) <= (0.5 * atr[i]):
                 position = -1
                 signals[i] = -0.25
-        
-        # Exit conditions: RSI returns to neutral or opposite signal
-        elif position == 1 and (rsi[i] > 60 or close[i] >= pivot_level[i]):
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and (rsi[i] < 40 or close[i] <= pivot_level[i]):
+            else:
+                # Hold flat or reverse
+                if position == 1:
+                    signals[i] = 0.25
+                elif position == -1:
+                    signals[i] = -0.25
+                else:
+                    signals[i] = 0.0
+        # Exit: trend reversal
+        elif (uptrend and position == -1) or (downtrend and position == 1):
             position = 0
             signals[i] = 0.0
         else:
