@@ -3,22 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h_1d_1w_camarilla_breakout_v3
-# Uses weekly and daily pivot levels as dynamic support/resistance on 12h chart.
-# Long when price breaks above daily H4 with volume confirmation (>1.5x 20-period avg) and weekly trend alignment (price > weekly P).
-# Short when price breaks below daily L4 with volume confirmation and weekly trend alignment (price < weekly P).
-# Exits when price returns to daily pivot point (mean reversion).
-# Designed for low trade frequency (target: 15-30 trades/year) to minimize fee drag.
-# Works in trending markets via breakouts and in ranging markets via mean reversion to pivot.
-# Uses 12h timeframe to balance signal frequency and noise reduction.
+# Hypothesis: 4h_1w_1d_adaptive_volatility_breakout_v1
+# Uses 1-week ATR for volatility regime and 1-day Donchian breakout with volume confirmation.
+# Long when price breaks above 1-day Donchian upper band in low volatility regime (ATR < 20-day ATR median).
+# Short when price breaks below 1-day Donchian lower band in low volatility regime.
+# Exits when price returns to 1-day Donchian middle band.
+# Designed for low trade frequency (target: 20-30 trades/year) to minimize fee drag.
+# Works in both trending and ranging markets by adapting to volatility regimes.
 
-name = "12h_1d_1w_camarilla_breakout_v3"
-timeframe = "12h"
+name = "4h_1w_1d_adaptive_volatility_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,57 +25,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for ATR calculation (volatility regime)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate daily Camarilla levels (based on previous day's OHLC)
+    # Calculate weekly ATR (14-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # True Range for weekly
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1[0] = 0  # First value has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # ATR(14) weekly
+    atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
+    
+    # Get daily data for Donchian channels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # Calculate Donchian channels (20-period) on daily
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot point and Camarilla levels for each day
-    pp_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Donchian upper and lower bands (20-period)
+    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high + donch_low) / 2.0
     
-    # Camarilla levels: H4 = PP + 1.1/2 * range, L4 = PP - 1.1/2 * range
-    h4_1d = pp_1d + (1.1 / 2) * range_1d
-    l4_1d = pp_1d - (1.1 / 2) * range_1d
+    # Align weekly ATR to 4h timeframe
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # Align daily Donchian channels to 4h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    donch_mid_aligned = align_htf_to_ltf(prices, df_1d, donch_mid)
     
-    # Calculate weekly pivot point (based on previous week's OHLC)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    pp_1w = (high_1w + low_1w + close_1w) / 3.0
+    # Volatility regime: low volatility when current ATR < 50th percentile of ATR
+    # Use 20-period rolling median of ATR for regime detection
+    atr_median = pd.Series(atr_1w_aligned).rolling(window=20, min_periods=20).median().values
+    low_vol_regime = atr_1w_aligned < atr_median
     
-    # Align daily levels to 12h timeframe
-    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
-    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
-    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    pp_1w_aligned = align_htf_to_ltf(prices, df_1w, pp_1w)
-    
-    # Volume confirmation: volume > 1.5 * 20-period average (12h timeframe)
+    # Volume confirmation: volume > 1.3 * 20-period average (4h timeframe)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    vol_confirm = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # start after warmup
+    for i in range(100, n):  # start after warmup
         # Skip if data not ready
-        if np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]) or np.isnan(pp_1d_aligned[i]) or np.isnan(pp_1w_aligned[i]):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(donch_mid_aligned[i]) or np.isnan(atr_1w_aligned[i]) or 
+            np.isnan(atr_median[i])):
             signals[i] = 0.0
             continue
         
-        # Require volume confirmation and weekly trend alignment for new entries
-        if not vol_confirm[i]:
-            # Hold current position if volume filter fails
+        # Low volatility regime and volume confirmation required for new entries
+        if not (low_vol_regime[i] and vol_confirm[i]):
+            # Hold current position if filters fail
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -85,19 +101,19 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above daily H4 AND price above weekly pivot (uptrend)
-        if close[i] > h4_1d_aligned[i] and close[i] > pp_1w_aligned[i] and position != 1:
+        # Long signal: price breaks above Donchian upper band in low volatility
+        if close[i] > donch_high_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below daily L4 AND price below weekly pivot (downtrend)
-        elif close[i] < l4_1d_aligned[i] and close[i] < pp_1w_aligned[i] and position != -1:
+        # Short signal: price breaks below Donchian lower band in low volatility
+        elif close[i] < donch_low_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: price returns to daily pivot point (mean reversion)
-        elif position == 1 and close[i] <= pp_1d_aligned[i]:
+        # Exit conditions: price returns to Donchian middle band (mean reversion)
+        elif position == 1 and close[i] <= donch_mid_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] >= pp_1d_aligned[i]:
+        elif position == -1 and close[i] >= donch_mid_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
