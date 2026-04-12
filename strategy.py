@@ -13,15 +13,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend and volatility (HTF = 1d)
+    # Get daily data for trend context and volume analysis
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily ATR(14) for volatility regime
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
+    
+    # Calculate daily EMA(21) for trend
+    close_1d_series = pd.Series(close_1d)
+    ema_21_1d = close_1d_series.ewm(span=21, adjust=False, min_periods=21).mean().values
+    
+    # Calculate daily ATR(14) for volatility
     tr1 = np.abs(high_1d - low_1d)
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
@@ -31,56 +37,60 @@ def generate_signals(prices):
     for i in range(14, len(df_1d)):
         atr_1d[i] = np.mean(tr[i-14:i+1])
     
-    # Calculate daily EMA(50) for trend
-    close_1d_series = pd.Series(close_1d)
-    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align daily indicators to 6h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # Calculate 6h ATR(14) for position sizing
-    tr1_6h = np.abs(high - low)
-    tr2_6h = np.abs(high - np.roll(close, 1))
-    tr3_6h = np.abs(low - np.roll(close, 1))
-    tr1_6h[0] = tr2_6h[0] = tr3_6h[0] = np.nan
-    tr_6h = np.maximum(tr1_6h, np.maximum(tr2_6h, tr3_6h))
-    atr_6h = np.full(n, np.nan)
-    for i in range(14, n):
-        atr_6h[i] = np.mean(tr_6h[i-14:i+1])
-    
-    # Calculate 6h volume moving average
-    vol_s = pd.Series(volume)
+    # Calculate daily volume moving average
+    vol_s = pd.Series(volume_1d)
     vol_ma_20 = vol_s.rolling(window=20, min_periods=20).mean().values
+    
+    # Align daily indicators to 12h timeframe
+    ema_21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    
+    # Calculate 12h ATR(14) for position sizing and volatility
+    tr1_h = np.abs(high - low)
+    tr2_h = np.abs(high - np.roll(close, 1))
+    tr3_h = np.abs(low - np.roll(close, 1))
+    tr1_h[0] = tr2_h[0] = tr3_h[0] = np.nan
+    tr_h = np.maximum(tr1_h, np.maximum(tr2_h, tr3_h))
+    atr_12h = np.full(n, np.nan)
+    for i in range(14, n):
+        atr_12h[i] = np.mean(tr_h[i-14:i+1])
+    
+    # Calculate 12h volume moving average
+    vol_s_h = pd.Series(volume)
+    vol_ma_20_h = vol_s_h.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(atr_6h[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_21_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(vol_ma_20_aligned[i]) or np.isnan(atr_12h[i]) or np.isnan(vol_ma_20_h[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility regime: high volatility when 6h ATR > daily ATR
-        vol_regime = atr_6h[i] > atr_1d_aligned[i]
+        # Volatility filter: ATR > 0.5 * ATR MA(10) to avoid low volatility
+        atr_ma_10 = np.full(n, np.nan)
+        for j in range(23, n):  # 14 + 9 for 10-period MA
+            if not np.isnan(np.mean(atr_12h[j-9:j+1])):
+                atr_ma_10[j] = np.mean(atr_12h[j-9:j+1])
+        vol_filter = atr_12h[i] > 0.5 * atr_ma_10[i] if not np.isnan(atr_ma_10[i]) else False
         
-        # Trend filter: price relative to daily EMA50
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Volume filter: volume > 1.5 * 20-period MA
+        vol_spike = volume[i] > 1.5 * vol_ma_20_h[i]
         
-        # Volume filter: volume > 1.3 * 20-period MA
-        vol_spike = volume[i] > 1.3 * vol_ma_20[i]
+        # Trend filter: price relative to daily EMA21
+        uptrend = close[i] > ema_21_1d_aligned[i]
+        downtrend = close[i] < ema_21_1d_aligned[i]
         
-        # Entry conditions: trend + volume spike + volatility regime
-        long_entry = uptrend and vol_spike and vol_regime
-        short_entry = downtrend and vol_spike and vol_regime
+        # Entry conditions: price above/below daily EMA with volatility and volume filters
+        long_entry = uptrend and vol_filter and vol_spike
+        short_entry = downtrend and vol_filter and vol_spike
         
-        # Exit conditions: trend reversal or volatility collapse
-        trend_reversal = (position == 1 and close[i] < ema_50_1d_aligned[i]) or \
-                         (position == -1 and close[i] > ema_50_1d_aligned[i])
-        vol_collapse = atr_6h[i] < 0.7 * atr_1d_aligned[i]
+        # Exit conditions: price crosses back to daily EMA21
+        long_exit = close[i] < ema_21_1d_aligned[i]
+        short_exit = close[i] > ema_21_1d_aligned[i]
         
         if long_entry and position != 1:
             position = 1
@@ -88,10 +98,10 @@ def generate_signals(prices):
         elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
-        elif position == 1 and (trend_reversal or vol_collapse):
+        elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (trend_reversal or vol_collapse):
+        elif position == -1 and short_exit:
             position = 0
             signals[i] = 0.0
         else:
@@ -105,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_ema50_vol_regime_vol_spike"
-timeframe = "6h"
+name = "12h_1d_ema21_trend_vol_vol_filter"
+timeframe = "12h"
 leverage = 1.0
