@@ -8,77 +8,92 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1d Donchian(20) breakout with 1w ATR volatility filter
-    # Works in bull/bear by capturing breakouts only when volatility is expanding
-    # (avoids false breakouts in chop). 1w ATR filter ensures we only trade
-    # during high volatility regimes, reducing whipsaws in ranging markets.
-    # Target: 7-25 trades/year per symbol (30-100 total over 4 years).
+    # Hypothesis: 6h Elder Ray + ADX regime filter
+    # Elder Ray measures bull/bear power via EMA13
+    # ADX > 25 indicates trending market (avoid chop)
+    # Long: Bull Power > 0 AND Bear Power < 0 AND ADX > 25
+    # Short: Bull Power < 0 AND Bear Power > 0 AND ADX > 25
+    # Works in bull/bear by only taking strong directional moves
+    # Target: 12-37 trades/year per symbol.
+    
+    # Session filter: 8:00-20:00 UTC (avoid low volume Asian session)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for context (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # EMA13 for Elder Ray
+    close_s = pd.Series(close)
+    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    volume_1w = df_1w['volume'].values
+    # Bull Power = High - EMA13
+    bull_power = high - ema13
+    # Bear Power = Low - EMA13
+    bear_power = low - ema13
     
-    # 1w ATR(14) for volatility filter and stop
-    tr1 = np.abs(high_1w - low_1w)
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    # ADX(14) calculation
+    # True Range
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
     tr1[0] = tr2[0] = tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1w = np.full(len(df_1w), np.nan)
-    for i in range(14, len(df_1w)):
-        atr_1w[i] = np.mean(tr[i-14:i+1])
     
-    # Align 1w ATR to 1d timeframe
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    # +DM and -DM
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = down_move[0] = np.nan
     
-    # 1d Donchian(20) for breakout signals
-    donch_high = np.full(n, np.nan)
-    donch_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donch_high[i] = np.max(high[i-20:i])
-        donch_low[i] = np.min(low[i-20:i])
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(data[0:period])
+        # Subsequent values: prev * (1 - 1/period) + current * (1/period)
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                result[i] = result[i-1] * (1 - 1/period) + data[i] * (1/period)
+            else:
+                result[i] = np.nan
+        return result
+    
+    atr = wilder_smooth(tr, 14)
+    plus_di = 100 * wilder_smooth(plus_dm, 14) / atr
+    minus_di = 100 * wilder_smooth(minus_dm, 14) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilder_smooth(dx, 14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
-        # Skip if data not ready
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(atr_1w_aligned[i])):
+        if not in_session[i]:
             signals[i] = 0.0
             continue
         
-        # Volatility filter: current ATR > 0.4 * its 20-period average
-        atr_ma_20_1w = np.full(len(df_1w), np.nan)
-        for j in range(33, len(df_1w)):
-            if not np.isnan(np.mean(atr_1w[j-19:j+1])):
-                atr_ma_20_1w[j] = np.mean(atr_1w[j-19:j+1])
-        atr_ma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_ma_20_1w)
-        vol_filter = (not np.isnan(atr_ma_20_1w_aligned[i]) and 
-                     atr_1w_aligned[i] > 0.4 * atr_ma_20_1w_aligned[i])
+        # Skip if data not ready
+        if (np.isnan(adx[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+            signals[i] = 0.0
+            continue
         
-        # Breakout conditions
-        breakout_long = close[i] > donch_high[i]
-        breakout_short = close[i] < donch_low[i]
+        # Regime filter: ADX > 25 indicates trending market
+        strong_trend = adx[i] > 25
         
         # Entry conditions
-        long_entry = breakout_long and vol_filter
-        short_entry = breakout_short and vol_filter
+        long_entry = (bull_power[i] > 0) and (bear_power[i] < 0) and strong_trend
+        short_entry = (bull_power[i] < 0) and (bear_power[i] > 0) and strong_trend
         
-        # Exit conditions: opposite breakout or volatility collapse
-        long_exit = (close[i] < donch_low[i]) or (not vol_filter)
-        short_exit = (close[i] > donch_high[i]) or (not vol_filter)
+        # Exit conditions: trend weakening or power reversal
+        long_exit = (adx[i] < 20) or (bull_power[i] < 0) or (bear_power[i] > 0)
+        short_exit = (adx[i] < 20) or (bull_power[i] > 0) or (bear_power[i] < 0)
         
         if long_entry and position != 1:
             position = 1
@@ -103,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_donchian_breakout_vol_filter_v1"
-timeframe = "1d"
+name = "6h_elder_ray_adx_regime_v1"
+timeframe = "6h"
 leverage = 1.0
