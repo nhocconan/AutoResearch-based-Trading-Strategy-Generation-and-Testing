@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_12h_1d_Camarilla_Pullback_With_Flow
-Hypothesis: Pullback to Camarilla pivot levels (H3/L3) on 1-day data with 12h trend filter and volume surge confirmation.
-Long when price pulls back to L3 in uptrend (12h close > 12h EMA20) with volume spike; short when pulls back to H3 in downtrend.
-Uses Camarilla levels from daily timeframe for institutional-grade support/resistance.
-Designed for 6h timeframe to capture mean-reversion bounces in both bull and bear markets.
+12h_1d_Camarilla_Breakout_With_Flow
+Hypothesis: Breakout above H3 or below L3 of daily Camarilla levels with 12-hour trend alignment and volume confirmation. 
+Long when price breaks above H3 with 12h uptrend and volume surge; short when breaks below L3 with 12h downtrend and volume surge.
+Uses 12-hour timeframe for signal generation with daily Camarilla levels for institutional support/resistance.
+Designed to capture momentum moves in both bull and bear markets with controlled trade frequency.
 Target: 50-150 total trades over 4 years (12-37/year).
 """
 
@@ -12,8 +12,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_1d_Camarilla_Pullback_With_Flow"
-timeframe = "6h"
+name = "12h_1d_Camarilla_Breakout_With_Flow"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -52,21 +52,15 @@ def generate_signals(prices):
         camarilla_h4[i] = close_1d[i] + range_val * 1.1 / 4
         camarilla_l4[i] = close_1d[i] - range_val * 1.1 / 4
     
-    # Align Camarilla levels to 6h timeframe
-    h3_6h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_6h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    h4_6h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_6h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # Align Camarilla levels to 12h timeframe
+    h3_12h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_12h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    h4_12h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_12h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
     # === 12-HOUR TREND FILTER ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    # Calculate EMA20 of 12-hour close
-    ema20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_12h_6h = align_htf_to_ltf(prices, df_12h, ema20_12h)
+    # Calculate EMA25 of 12-hour close for trend
+    ema25_12h = pd.Series(close).ewm(span=25, adjust=False, min_periods=25).mean().values
     
     # === VOLUME SURGE FILTER ===
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
@@ -75,40 +69,32 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(25, n):
         # Skip if not ready
-        if (np.isnan(h3_6h[i]) or np.isnan(l3_6h[i]) or np.isnan(ema20_12h_6h[i]) or 
+        if (np.isnan(h3_12h[i]) or np.isnan(l3_12h[i]) or np.isnan(ema25_12h[i]) or 
             np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine 12h trend: up if close > EMA20, down if close < EMA20
-        # Get current 12h close aligned to 6h
-        if len(df_12h) >= 2:
-            close_12h_arr = df_12h['close'].values
-            close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h_arr)
-            trend_up = close_12h_aligned[i] > ema20_12h_6h[i]
-            trend_down = close_12h_aligned[i] < ema20_12h_6h[i]
-        else:
-            trend_up = trend_down = False
+        # Determine 12h trend: up if close > EMA25, down if close < EMA25
+        trend_up = close[i] > ema25_12h[i]
+        trend_down = close[i] < ema25_12h[i]
         
-        # Long: pullback to L3 in uptrend with volume surge
+        # Long: breakout above H3 in uptrend with volume surge
         long_signal = (trend_up and 
-                      close[i] <= l3_6h[i] * 1.005 and  # Allow small tolerance
-                      close[i] >= l4_6h[i] * 0.995 and  # But above L4 to avoid breakdown
+                      close[i] > h3_12h[i] and 
                       vol_ratio[i] > 1.8)
         
-        # Short: pullback to H3 in downtrend with volume surge
+        # Short: breakout below L3 in downtrend with volume surge
         short_signal = (trend_down and 
-                       close[i] >= h3_6h[i] * 0.995 and  # Allow small tolerance
-                       close[i] <= h4_6h[i] * 1.005 and  # But below H4 to avoid breakout
+                       close[i] < l3_12h[i] and 
                        vol_ratio[i] > 1.8)
         
-        # Exit conditions: reversal of trend or price moves past H4/L4
+        # Exit conditions: reversal of trend or price moves back to opposite H3/L3 level
         exit_long = (position == 1 and 
-                    (not trend_up or close[i] >= h4_6h[i]))
+                    (not trend_up or close[i] < l3_12h[i]))
         exit_short = (position == -1 and 
-                     (not trend_down or close[i] <= l4_6h[i]))
+                     (not trend_down or close[i] > h3_12h[i]))
         
         # Execute trades
         if long_signal and position != 1:
