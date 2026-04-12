@@ -1,17 +1,50 @@
 #!/usr/bin/env python3
-# 6h_1d_ichimoku_trend_v1
-# Hypothesis: 6-hour strategy using 1-day Ichimoku cloud for trend direction and price
-# position relative to cloud for entries, with TK cross confirmation. Works in bull/bear
-# by using cloud as dynamic support/resistance and requiring price to be outside cloud
-# with TK cross alignment. Target: 50-150 total trades over 4 years.
+"""
+12h_1w_hma_adx_volume_v1
+Hypothesis: 12-hour strategy using weekly HMA21 for trend direction and ADX for trend strength, with volume confirmation on breakouts.
+Works in bull/bear by requiring strong trend (ADX > 25) and alignment with weekly HMA21, avoiding choppy markets.
+Targets 15-30 trades per year (60-120 total over 4 years) to minimize fee drag.
+"""
 
-name = "6h_1d_ichimoku_trend_v1"
-timeframe = "6h"
+name = "12h_1w_hma_adx_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_hma(arr, period):
+    """Hull Moving Average"""
+    if len(arr) < period:
+        return np.full_like(arr, np.nan)
+    half = period // 2
+    sqrt = int(np.sqrt(period))
+    wma2 = pd.Series(arr).ewm(span=half, adjust=False, min_periods=half).mean()
+    wma1 = pd.Series(arr).ewm(span=period, adjust=False, min_periods=period).mean()
+    raw = 2 * wma2 - wma1
+    hma = pd.Series(raw).ewm(span=sqrt, adjust=False, min_periods=sqrt).mean()
+    return hma.values
+
+def calculate_adx(high, low, close, period=14):
+    """Average Directional Index"""
+    if len(high) < period + 1:
+        return np.full_like(high, np.nan)
+    plus_dm = np.zeros_like(high)
+    minus_dm = np.zeros_like(high)
+    tr = np.zeros_like(high)
+    
+    for i in range(1, len(high)):
+        plus_dm[i] = max(high[i] - high[i-1], 0) if high[i] - high[i-1] > low[i-1] - low[i] else 0
+        minus_dm[i] = max(low[i-1] - low[i], 0) if low[i-1] - low[i] > high[i] - high[i-1] else 0
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean() / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean() / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    return adx.values
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,71 +54,54 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for Ichimoku
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    # Get weekly data for trend and ADX
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2
+    # Weekly HMA21 for trend direction
+    hma21_1w = calculate_hma(close_1w, 21)
+    hma21_1w_aligned = align_htf_to_ltf(prices, df_1w, hma21_1w)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2
+    # Weekly ADX for trend strength
+    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_span_b = (period52_high + period52_low) / 2
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
-    
-    # Determine cloud top and bottom
-    cloud_top = np.maximum(senkou_span_a_aligned, senkou_span_b_aligned)
-    cloud_bottom = np.minimum(senkou_span_a_aligned, senkou_span_b_aligned)
-    
-    # TK Cross: Tenkan-sen crosses above/below Kijun-sen
-    tk_cross_above = tenkan_sen_aligned > kijun_sen_aligned
-    tk_cross_below = tenkan_sen_aligned < kijun_sen_aligned
+    # Volume confirmation: volume > 2.0x 50-period average
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    vol_confirm = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or
-            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i])):
+        if (np.isnan(hma21_1w_aligned[i]) or np.isnan(adx_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: price above cloud AND TK cross bullish
-        if (close[i] > cloud_top[i] and tk_cross_above[i] and position != 1):
+        # Strong trend filter: ADX > 25
+        strong_trend = adx_1w_aligned[i] > 25
+        
+        # Long entry: price above HMA21 (uptrend) + strong trend + volume
+        if (close[i] > hma21_1w_aligned[i] and strong_trend and vol_confirm[i] and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: price below cloud AND TK cross bearish
-        elif (close[i] < cloud_bottom[i] and tk_cross_below[i] and position != -1):
+        # Short entry: price below HMA21 (downtrend) + strong trend + volume
+        elif (close[i] < hma21_1w_aligned[i] and strong_trend and vol_confirm[i] and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: price re-enters cloud
-        elif position == 1 and close[i] <= cloud_top[i]:
+        # Exit: trend weakness or price crosses back to opposite side of HMA
+        elif position == 1 and (close[i] < hma21_1w_aligned[i] or adx_1w_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] >= cloud_bottom[i]:
+        elif position == -1 and (close[i] > hma21_1w_aligned[i] or adx_1w_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
         else:
