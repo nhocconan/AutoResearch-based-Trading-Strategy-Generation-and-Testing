@@ -1,119 +1,94 @@
 #!/usr/bin/env python3
 """
-6h_1d_Ichimoku_Cloud_Breakout
-Hypothesis: Ichimoku Cloud from daily timeframe provides dynamic support/resistance.
-Tenkan/Kijun cross on 6h with price above/below daily cloud filters false breakouts.
-Works in bull (cloud acts as support) and bear (cloud acts as resistance) by using cloud color.
-Low trade frequency via cloud filter reduces whipsaw.
+1h_4h_1d_Camarilla_Pullback_Volume
+Hypothesis: In 1h timeframe, buy pullbacks to 4h EMA20 during 1d uptrend with volume confirmation, sell rallies to 4h EMA20 during 1d downtrend.
+Uses 1d trend filter to avoid counter-trend trades, 4h EMA20 as dynamic support/resistance, and volume spike for entry confirmation.
+Session filter (08-20 UTC) reduces noise. Low trade frequency (~20-40/year) minimizes fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Ichimoku_Cloud_Breakout"
-timeframe = "6h"
+name = "1h_4h_1d_Camarilla_Pullback_Volume"
+timeframe = "1h"
 leverage = 1.0
-
-def calculate_ichimoku(high, low, close):
-    """Calculate Ichimoku components: tenkan, senkouA, senkouB"""
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2.0
-    
-    # Senkou Span A: (Tenkan + Kijun)/2 plotted 26 periods ahead
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2.0
-    senkou_a = (tenkan + kijun) / 2.0
-    
-    # Senkou Span B: (52-period high + low)/2 plotted 26 periods ahead
-    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = (period52_high + period52_low) / 2.0
-    
-    return tenkan, senkou_a, senkou_b
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # === DAILY ICHIMOKU FOR CLOUD AND TREND ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    # === 4H EMA20 FOR DYNAMIC SUPPORT/RESISTANCE ===
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_4h = df_4h['close'].values
+    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    
+    # === 1D TREND FILTER (EMA50) ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
     close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    tenkan_1d, senkou_a_1d, senkou_b_1d = calculate_ichimoku(high_1d, low_1d, close_1d)
-    
-    # Align Ichimoku components to 6h (wait for daily bar to close)
-    tenkan_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d)
-    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
-    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
-    
-    # Cloud top and bottom
-    cloud_top = np.maximum(senkou_a_1d_aligned, senkou_b_1d_aligned)
-    cloud_bottom = np.minimum(senkou_a_1d_aligned, senkou_b_1d_aligned)
-    # Cloud color: green if senkouA > senkouB (bullish), red otherwise
-    cloud_green = senkou_a_1d_aligned > senkou_b_1d_aligned
-    
-    # === 6H TENKAN/KIJUN CROSS ===
-    # Calculate Tenkan and Kijun on 6h data
-    period9_high_6h = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low_6h = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan_6h = (period9_high_6h + period9_low_6h) / 2.0
-    
-    period26_high_6h = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low_6h = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun_6h = (period26_high_6h + period26_low_6h) / 2.0
-    
-    # TK cross signals
-    tk_cross_up = (tenkan_6h > kijun_6h) & (np.roll(tenkan_6h, 1) <= np.roll(kijun_6h, 1))
-    tk_cross_down = (tenkan_6h < kijun_6h) & (np.roll(tenkan_6h, 1) >= np.roll(kijun_6h, 1))
-    
-    # === VOLUME FILTER ===
+    # === VOLUME CONFIRMATION (1H) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
+    
+    # === SESSION FILTER: 08-20 UTC ===
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or 
-            np.isnan(tk_cross_up[i]) or np.isnan(tk_cross_down[i]) or
-            np.isnan(vol_ratio[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+        if (np.isnan(ema20_4h_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(vol_ratio[i]) or np.isnan(hours[i])):
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
-        # Long: TK cross up + price above cloud + cloud bullish + volume
-        long_signal = tk_cross_up[i] and (close[i] > cloud_top[i]) and cloud_green[i] and (vol_ratio[i] > 1.5)
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
         
-        # Short: TK cross down + price below cloud + cloud bearish + volume
-        short_signal = tk_cross_down[i] and (close[i] < cloud_bottom[i]) and (not cloud_green[i]) and (vol_ratio[i] > 1.5)
+        if not in_session:
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+            continue
         
-        # Exit when TK cross reverses or price enters cloud
-        exit_long = (tk_cross_down[i] and position == 1) or (close[i] < cloud_top[i] and close[i] > cloud_bottom[i] and position == 1)
-        exit_short = (tk_cross_up[i] and position == -1) or (close[i] < cloud_top[i] and close[i] > cloud_bottom[i] and position == -1)
+        # Long: price pulls back to 4h EMA20 during 1d uptrend with volume spike
+        long_signal = (close[i] >= ema20_4h_aligned[i] * 0.998) and \
+                      (close[i] <= ema20_4h_aligned[i] * 1.002) and \
+                      (close[i] > ema50_1d_aligned[i]) and \
+                      (vol_ratio[i] > 1.8)
+        
+        # Short: price rallies to 4h EMA20 during 1d downtrend with volume spike
+        short_signal = (close[i] <= ema20_4h_aligned[i] * 1.002) and \
+                       (close[i] >= ema20_4h_aligned[i] * 0.998) and \
+                       (close[i] < ema50_1d_aligned[i]) and \
+                       (vol_ratio[i] > 1.8)
+        
+        # Exit when price moves 0.6% away from EMA20 (avoid whipsaw)
+        exit_long = close[i] > ema20_4h_aligned[i] * 1.006 and position == 1
+        exit_short = close[i] < ema20_4h_aligned[i] * 0.994 and position == -1
         
         # Execute trades
         if long_signal and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif short_signal and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.20
         elif exit_long and position == 1:
             position = 0
             signals[i] = 0.0
@@ -122,6 +97,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Hold position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
