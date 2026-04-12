@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-6h_1w_Volume_Weighted_Average_Price_VWAP_Breakout
-Hypothesis: 6h timeframe with weekly VWAP bands and volume confirmation. Weekly VWAP acts as dynamic support/resistance.
-Breakouts above/below VWAP ± 2*weekly ATR with volume > 1.5x average trigger entries. Works in bull/bear markets by
-using volatility-adjusted bands and volume confirmation to filter false breakouts. Targets 15-35 trades/year.
+1d_1w_Camarilla_Pivot_Breakout_Volume_Trend_v1
+Hypothesis: Daily timeframe with weekly CAMARILLA pivot levels, volume confirmation, and weekly EMA trend filter.
+Designed for 10-30 trades/year by requiring breakouts of weekly H3/L3 levels with volume > 1.3x average
+and price aligned with weekly EMA trend. Works in bull/bear markets by only taking trend-aligned breakouts.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_Volume_Weighted_Average_Price_VWAP_Breakout"
-timeframe = "6h"
+name = "1d_1w_Camarilla_Pivot_Breakout_Volume_Trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -25,40 +25,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for VWAP and ATR
+    # Load weekly data ONCE before loop for CAMARILLA pivots and EMA
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate weekly VWAP (volume-weighted average price)
-    # VWAP = sum(price * volume) / sum(volume) over the week
-    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
-    vwap_numerator = (typical_price * df_1w['volume']).cumsum()
-    vwap_denominator = df_1w['volume'].cumsum()
-    vwap = (vwap_numerator / vwap_denominator).values
+    # Calculate CAMARILLA levels from previous week
+    prev_close = df_1w['close'].shift(1).values
+    prev_high = df_1w['high'].shift(1).values
+    prev_low = df_1w['low'].shift(1).values
     
-    # Calculate weekly ATR (14 period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate pivot and ranges
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
+    
+    # CAMARILLA levels (H3/L3 for entry, H4/L4 for exit)
+    H3 = pivot + range_hl * 1.1 / 4
+    L3 = pivot - range_hl * 1.1 / 4
+    H4 = pivot + range_hl * 1.1 / 2
+    L4 = pivot - range_hl * 1.1 / 2
+    
+    # Align to daily timeframe
+    H3_daily = align_htf_to_ltf(prices, df_1w, H3)
+    L3_daily = align_htf_to_ltf(prices, df_1w, L3)
+    H4_daily = align_htf_to_ltf(prices, df_1w, H4)
+    L4_daily = align_htf_to_ltf(prices, df_1w, L4)
+    
+    # Calculate weekly EMA (21 period) for trend filter
     close_1w = df_1w['close'].values
-    
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr1[0] = high_1w[0] - low_1w[0]  # first period
-    tr2[0] = high_1w[0] - close_1w[0]
-    tr3[0] = low_1w[0] - close_1w[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate VWAP bands: VWAP ± 2 * ATR
-    vwap_upper = vwap + 2.0 * atr_1w
-    vwap_lower = vwap - 2.0 * atr_1w
-    
-    # Align to 6h timeframe
-    vwap_6h = align_htf_to_ltf(prices, df_1w, vwap)
-    vwap_upper_6h = align_htf_to_ltf(prices, df_1w, vwap_upper)
-    vwap_lower_6h = align_htf_to_ltf(prices, df_1w, vwap_lower)
+    ema_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_1w_daily = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Volume average (20 period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -68,21 +64,25 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(vwap_6h[i]) or np.isnan(vwap_upper_6h[i]) or 
-            np.isnan(vwap_lower_6h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(H3_daily[i]) or np.isnan(L3_daily[i]) or 
+            np.isnan(ema_1w_daily[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume spike: current volume > 1.5x average
-        volume_spike = volume[i] > vol_ma[i] * 1.5
+        # Volume spike: current volume > 1.3x average (stricter for lower frequency)
+        volume_spike = volume[i] > vol_ma[i] * 1.3
         
-        # Entry conditions: breakout of VWAP bands with volume
-        long_entry = (close[i] > vwap_upper_6h[i]) and volume_spike
-        short_entry = (close[i] < vwap_lower_6h[i]) and volume_spike
+        # Trend filter: price above/below weekly EMA
+        above_ema = close[i] > ema_1w_daily[i]
+        below_ema = close[i] < ema_1w_daily[i]
         
-        # Exit conditions: return to VWAP level
-        long_exit = close[i] < vwap_6h[i]
-        short_exit = close[i] > vwap_6h[i]
+        # Entry conditions: breakout of H3/L3 with volume and trend
+        long_entry = (close[i] > H3_daily[i]) and volume_spike and above_ema
+        short_entry = (close[i] < L3_daily[i]) and volume_spike and below_ema
+        
+        # Exit conditions: return to H4/L4 levels or trend reversal
+        long_exit = (close[i] < H4_daily[i]) or (close[i] < ema_1w_daily[i])
+        short_exit = (close[i] > L4_daily[i]) or (close[i] > ema_1w_daily[i])
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
