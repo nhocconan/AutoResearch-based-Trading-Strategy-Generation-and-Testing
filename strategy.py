@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
-"""
-1h_4h_1d_RSI_Momentum_Confluence_v1
-Hypothesis: In 1h timeframe, use 4h RSI(14) for trend direction (long when >55, short when <45) and 1d RSI(14) for regime filter (avoid counter-trend in strong trends). Enter on 1h RSI pullback to 50 with volume confirmation (>1.5x 20-period average). Designed for 15-35 trades/year per symbol with low turnover to minimize fee drag. Works in bull (momentum continuations) and bear (mean reversion within trend) markets.
-"""
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_RSI_Momentum_Confluence_v1"
-timeframe = "1h"
+name = "12h_1w_Camarilla_Breakout_Volume_Regime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,104 +17,129 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4H DATA FOR TREND DIRECTION (RSI) ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # === 1W DATA FOR TREND ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    close_1w = df_1w['close'].values
+    # Weekly EMA(13) for trend
+    ema_1w = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Calculate 4h RSI (14-period)
-    delta = np.diff(close_4h, prepend=close_4h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # === 1W VOLUME REGIME ===
+    vol_1w = df_1w['volume'].values
+    vol_ma_1w = pd.Series(vol_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
     
-    def wilders_rsi(gain, loss, period=14):
-        avg_gain = np.full_like(gain, np.nan)
-        avg_loss = np.full_like(loss, np.nan)
-        if len(gain) < period:
-            return np.full_like(gain, 50.0)
-        avg_gain[period-1] = np.mean(gain[:period])
-        avg_loss[period-1] = np.mean(loss[:period])
-        for i in range(period, len(gain)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+    # === 12H DATA FOR CHOPPINESS INDEX ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
     
-    rsi_4h = wilders_rsi(gain, loss, 14)
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # === 1D DATA FOR REGIME FILTER (RSI) ===
+    # True Range for Chop Index
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # ATR(14)
+    atr_12h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Sum of true range over 14 periods
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Chop Index: 100 * log10(tr_sum / (atr * 14)) / log10(14)
+    chop_raw = 100 * np.log10(tr_sum / (atr_12h * 14)) / np.log10(14)
+    chop = np.where(tr_sum > 0, chop_raw, 50)  # neutral when invalid
+    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
+    
+    # === 12H VOLUME FOR CONFIRMATION ===
+    vol_12h = df_12h['volume'].values
+    vol_ma_12h = pd.Series(vol_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
+    
+    # === 12H CAMARILLA LEVELS FROM PREVIOUS DAY ===
+    # Get daily OHLC
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    delta_1d = np.diff(close_1d, prepend=close_1d[0])
-    gain_1d = np.where(delta_1d > 0, delta_1d, 0)
-    loss_1d = np.where(delta_1d < 0, -delta_1d, 0)
+    # Map each 12h bar to previous day's OHLC
+    pivots_high = np.full(n, np.nan)
+    pivots_low = np.full(n, np.nan)
+    pivots_close = np.full(n, np.nan)
     
-    rsi_1d = wilders_rsi(gain_1d, loss_1d, 14)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    for i in range(n):
+        current_time = pd.Timestamp(prices.iloc[i]['open_time'])
+        prev_date = current_time.date() - pd.Timedelta(days=1)
+        
+        # Find previous day in daily data
+        for j in range(len(df_1d)):
+            if pd.Timestamp(df_1d.iloc[j]['open_time']).date() == prev_date:
+                pivots_high[i] = high_1d[j]
+                pivots_low[i] = low_1d[j]
+                pivots_close[i] = close_1d[j]
+                break
     
-    # === VOLUME FILTER (1H) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate Camarilla H3 and L3 levels
+    H3 = pivots_close + (pivots_high - pivots_low) * 1.1 / 4
+    L3 = pivots_close - (pivots_high - pivots_low) * 1.1 / 4
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(rsi_4h_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(chop_aligned[i]) or 
+            np.isnan(vol_ma_12h_aligned[i]) or np.isnan(H3[i]) or 
+            np.isnan(L3[i]) or np.isnan(pivots_close[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend direction from 4h RSI
-        bullish_trend = rsi_4h_aligned[i] > 55
-        bearish_trend = rsi_4h_aligned[i] < 45
+        # Regime filters
+        # Trend: price above/below weekly EMA
+        above_week_ema = close[i] > ema_1w_aligned[i]
+        below_week_ema = close[i] < ema_1w_aligned[i]
         
-        # Regime filter from 1d RSI (avoid extreme counter-trend)
-        not_overbought = rsi_1d_aligned[i] < 70  # Avoid shorting in strong bull
-        not_oversold = rsi_1d_aligned[i] > 30    # Avoid longing in strong bear
+        # Chop regime: Chop > 50 = ranging (mean revert), Chop < 50 = trending
+        chop_high = chop_aligned[i] > 50
+        chop_low = chop_aligned[i] < 50
         
-        # Volume confirmation
-        strong_volume = volume[i] > (vol_ma[i] * 1.5)
+        # Volume confirmation: current volume > 20-period average
+        strong_volume = volume[i] > vol_ma_12h_aligned[i]
         
-        # Entry conditions: 1h RSI pullback to 50 with volume
-        # We approximate 1h RSI(50) when price is near short-term equilibrium
-        # Use price crossing above/below VWAP-like condition: close > open for bull, close < open for bear
-        bullish_momentum = close[i] > prices['open'].iloc[i]
-        bearish_momentum = close[i] < prices['open'].iloc[i]
-        
-        # Long: bullish 4h trend, not overbought 1d, bullish 1h momentum, volume
-        long_signal = (bullish_trend and 
-                      not_overbought and 
-                      bullish_momentum and 
+        # Long: price breaks above H3 in trending/up market with volume
+        long_signal = (close[i] > H3[i] and 
+                      above_week_ema and 
+                      chop_low and 
                       strong_volume)
         
-        # Short: bearish 4h trend, not oversold 1d, bearish 1h momentum, volume
-        short_signal = (bearish_trend and 
-                       not_oversold and 
-                       bearish_momentum and 
+        # Short: price breaks below L3 in trending/down market with volume
+        short_signal = (close[i] < L3[i] and 
+                       below_week_ema and 
+                       chop_low and 
                        strong_volume)
         
-        # Exit: opposite momentum or RSI extreme
+        # Exit: chop increases (range) or price returns to pivot
         exit_long = (position == 1 and 
-                    (not bullish_momentum or rsi_4h_aligned[i] >= 70))
+                    (chop_aligned[i] > 60 or close[i] < pivots_close[i]))
         exit_short = (position == -1 and 
-                     (not bearish_momentum or rsi_4h_aligned[i] <= 30))
+                     (chop_aligned[i] > 60 or close[i] > pivots_close[i]))
         
         # Execute trades
         if long_signal and position != 1:
             position = 1
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif short_signal and position != -1:
             position = -1
-            signals[i] = -0.20
+            signals[i] = -0.25
         elif exit_long and position == 1:
             position = 0
             signals[i] = 0.0
@@ -127,6 +148,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Hold position
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
