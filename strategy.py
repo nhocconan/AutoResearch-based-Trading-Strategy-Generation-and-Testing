@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Trend_V2
-Hypothesis: On 12h timeframe, buy when price touches L3 in daily uptrend, sell when price touches H3 in daily downtrend.
-Uses daily SMA100 for trend filter and volume spike (2x average) for confirmation. Exits at opposite H3/L3 levels.
-Designed for low trade frequency by requiring trend alignment and specific price levels. Works in bull via long at L3,
-in bear via short at H3. Targets 12-37 trades/year on 12h timeframe.
+4h_1d_Camarilla_TrendBreakout_v2
+Hypothesis: Breakout above H3 or below L3 with volume confirmation and daily trend filter.
+Trades only when price breaks key daily levels with volume, using daily trend to avoid false breakouts.
+Designed for low frequency: one condition per direction, volume filter, and trend alignment.
+Works in bull via buying strength, in bear via selling weakness.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_Trend_V2"
-timeframe = "12h"
+name = "4h_1d_Camarilla_TrendBreakout_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,13 +34,13 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Daily SMA100 for trend filter
+    # Daily SMA50 for trend filter
     close_s = pd.Series(close_1d)
-    sma100 = close_s.rolling(window=100, min_periods=100).mean().values
+    sma50 = close_s.rolling(window=50, min_periods=50).mean().values
     
     # Previous day's close for Camarilla calculation
     prev_close = np.roll(close_1d, 1)
-    prev_close[0] = close_1d[0]  # first day uses its own close
+    prev_close[0] = close_1d[0]
     
     # Daily range
     range_1d = high_1d - low_1d
@@ -51,53 +51,54 @@ def generate_signals(prices):
     h4 = prev_close + (range_1d * 1.1)
     l4 = prev_close - (range_1d * 1.1)
     
-    # Align to 12h
+    # Align to 4h
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
     l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    sma100_aligned = align_htf_to_ltf(prices, df_1d, sma100)
+    sma50_aligned = align_htf_to_ltf(prices, df_1d, sma50)
     
-    # Volume average (30-period for confirmation)
+    # Volume average (20-period for confirmation)
     vol_avg = np.zeros(n)
     vol_sum = 0.0
     vol_count = 0
     for i in range(n):
         vol_sum += volume[i]
         vol_count += 1
-        if i >= 30:
-            vol_sum -= volume[i-30]
+        if i >= 20:
+            vol_sum -= volume[i-20]
             vol_count -= 1
         vol_avg[i] = vol_sum / vol_count if vol_count > 0 else 0.0
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if not ready
         if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(sma100_aligned[i]) or vol_avg[i] == 0.0):
+            np.isnan(sma50_aligned[i]) or vol_avg[i] == 0.0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: at least 2x average
-        vol_confirm = volume[i] > 2.0 * vol_avg[i]
+        # Volume confirmation: at least 1.5x average
+        vol_confirm = volume[i] > 1.5 * vol_avg[i]
         
-        # Trend filter: price above/below SMA100
-        price_vs_sma = close[i] > sma100_aligned[i]
+        # Trend filter: price above/below SMA50
+        price_above_sma = close[i] > sma50_aligned[i]
+        price_below_sma = close[i] < sma50_aligned[i]
         
-        # Entry conditions: price at L3 in uptrend, or at H3 in downtrend
-        long_setup = (close[i] <= l3_aligned[i] * 1.002) and price_vs_sma and vol_confirm  # 0.2% buffer
-        short_setup = (close[i] >= h3_aligned[i] * 0.998) and not price_vs_sma and vol_confirm
+        # Breakout entries: long on H3 break in uptrend, short on L3 break in downtrend
+        long_breakout = (close[i] > h3_aligned[i]) and price_above_sma and vol_confirm
+        short_breakout = (close[i] < l3_aligned[i]) and price_below_sma and vol_confirm
         
-        # Exit at opposite level
-        exit_long = close[i] >= h3_aligned[i]
-        exit_short = close[i] <= l3_aligned[i]
+        # Exit at opposite H3/L3 level
+        exit_long = close[i] < l3_aligned[i]
+        exit_short = close[i] > h3_aligned[i]
         
-        if long_setup and position != 1:
+        if long_breakout and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_setup and position != -1:
+        elif short_breakout and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
