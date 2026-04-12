@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 6h_12h_ichimoku_trend_follow
-# Hypothesis: 6-hour Ichimoku trend following with 12-hour cloud filter
-# Uses Ichimoku TK cross on 6h for entry/exit, filtered by 12h cloud (price above/below cloud)
-# Works in bull/bear by requiring price to be on correct side of higher timeframe cloud
-# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag
+# 12h_1d_camarilla_breakout_with_volume_atr
+# Hypothesis: 12-hour Camarilla breakout with volume confirmation and ATR volatility filter
+# Works in bull/bear by using volatility-adjusted breakouts and volume confirmation to avoid false signals.
+# Target: 15-35 trades/year (60-140 total over 4 years) to minimize fee drift.
 
-name = "6h_12h_ichimoku_trend_follow"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_with_volume_atr"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -18,75 +17,78 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get 12h data for Ichimoku and cloud filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 60:
+    # Get daily data for Camarilla and ATR calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high_12h).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_12h).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
+    # Previous day's range
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high_12h).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_12h).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
+    # Camarilla levels (based on previous day)
+    range_ = prev_high - prev_low
+    # Resistance levels
+    r3 = prev_close + range_ * 1.1 / 2
+    r4 = prev_close + range_ * 1.1
+    # Support levels
+    s3 = prev_close - range_ * 1.1 / 2
+    s4 = prev_close - range_ * 1.1
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = ((tenkan + kijun) / 2)
+    # ATR for volatility filter (14-day ATR)
+    tr1 = np.abs(np.subtract(high_1d, low_1d))
+    tr2 = np.abs(np.subtract(high_1d, np.roll(close_1d, 1)))
+    tr3 = np.abs(np.subtract(low_1d, np.roll(close_1d, 1)))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high_12h).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_12h).rolling(window=52, min_periods=52).min().values
-    senkou_b = ((period52_high + period52_low) / 2)
+    # Align Camarilla levels and ATR to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
-    # Align Ichimoku components to 6h timeframe
-    tenkan_aligned = align_htf_to_ltf(prices, df_12h, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, df_12h, kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_12h, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_12h, senkou_b)
-    
-    # Determine cloud boundaries (Senkou Span A/B)
-    # Cloud top = max(Senkou A, Senkou B)
-    # Cloud bottom = min(Senkou A, Senkou B)
-    cloud_top = np.maximum(senkou_a_aligned, senkou_b_aligned)
-    cloud_bottom = np.minimum(senkou_a_aligned, senkou_b_aligned)
+    # Volume confirmation: volume > 1.5x 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):  # Start after Ichimoku warmup
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
-            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: TK cross bullish AND price above cloud
-        if (tenkan_aligned[i] > kijun_aligned[i] and 
-            close[i] > cloud_top[i] and position != 1):
+        # Long entry: close breaks above R4 with volume and volatility filter
+        if (close[i] > r4_aligned[i] and vol_confirm[i] and 
+            atr_aligned[i] > 0 and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: TK cross bearish AND price below cloud
-        elif (tenkan_aligned[i] < kijun_aligned[i] and 
-              close[i] < cloud_bottom[i] and position != -1):
+        # Short entry: close breaks below S4 with volume and volatility filter
+        elif (close[i] < s4_aligned[i] and vol_confirm[i] and 
+              atr_aligned[i] > 0 and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: TK cross reverses OR price crosses cloud
-        elif position == 1 and (tenkan_aligned[i] < kijun_aligned[i] or close[i] < cloud_bottom[i]):
+        # Exit: reverse signal or close crosses back to opposite S3/R3
+        elif position == 1 and close[i] < s3_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (tenkan_aligned[i] > kijun_aligned[i] or close[i] > cloud_top[i]):
+        elif position == -1 and close[i] > r3_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
