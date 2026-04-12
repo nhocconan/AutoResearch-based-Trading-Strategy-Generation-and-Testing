@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_1d_1w_Camarilla_Breakout_Volume_Regime_v1
-Hypothesis: On 4h timeframe, enter long when price breaks above daily Camarilla R3 with volume confirmation and weekly chop regime favors trending, enter short when price breaks below daily Camarilla S3 with volume confirmation and weekly chop regime favors trending. Uses daily Camarilla levels for structure, weekly chop for regime filter, and volume filter for institutional participation. Target: 20-50 trades per year per symbol (80-200 over 4 years).
+4h_1d_1w_Camarilla_Breakout_Volume_Regime_v2
+Hypothesis: On 4h timeframe, enter long when price breaks above daily Camarilla R3 with volume confirmation and weekly chop regime favors trending, enter short when price breaks below daily Camarilla S3 with volume confirmation and weekly chop regime favors trending. Uses daily Camarilla levels for structure, weekly chop for regime filter, and volume filter for institutional participation. Optimized for fewer trades (<50/year) and better risk-adjusted returns.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_1w_Camarilla_Breakout_Volume_Regime_v1"
+name = "4h_1d_1w_Camarilla_Breakout_Volume_Regime_v2"
 timeframe = "4h"
 leverage = 1.0
 
