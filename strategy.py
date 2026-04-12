@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4d_rsi_volatility_filter_v1"
-timeframe = "1h"
+name = "6h_1w_camarilla_pivot_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,65 +17,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Hour index for session filter (08-20 UTC)
-    hours = prices.index.hour
-    
-    # Daily RSI(14) for trend bias
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for Camarilla pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
     
-    # RSI(14) on daily
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14 = 100 - (100 / (1 + rs))
-    rsi_14 = rsi_14.values
+    # Calculate Camarilla levels from weekly high/low/close
+    # Using previous week's data (already available in df_1w)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Align daily RSI to 1h
-    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
+    # Calculate pivot and Camarilla levels
+    pivot = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
     
-    # 1h volatility filter: ATR(24) > 20-period SMA of ATR
-    tr = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1]))
-    tr = np.concatenate([[np.nan], tr])
-    atr = pd.Series(tr).rolling(window=24, min_periods=24).mean()
-    atr_ma = atr.rolling(window=20, min_periods=20).mean()
-    vol_filter = atr > atr_ma
+    # Camarilla levels
+    r4 = close_1w + range_1w * 1.500
+    r3 = close_1w + range_1w * 1.250
+    r2 = close_1w + range_1w * 1.166
+    r1 = close_1w + range_1w * 1.083
+    s1 = close_1w - range_1w * 1.083
+    s2 = close_1w - range_1w * 1.166
+    s3 = close_1w - range_1w * 1.250
+    s4 = close_1w - range_1w * 1.500
+    
+    # Align Camarilla levels to 6h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
+    
+    # Volume filter: current volume > 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ok = volume > vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # warmup for indicators
-        # Session filter: 08-20 UTC
-        if not (8 <= hours[i] <= 20):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
-            continue
-        
+    for i in range(50, n):  # warmup for volume MA
         # Skip if not ready
-        if (np.isnan(rsi_14_aligned[i]) or np.isnan(vol_filter[i])):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: daily RSI < 40 (oversold) + volatility filter
-        # Short: daily RSI > 60 (overbought) + volatility filter
-        long_signal = rsi_14_aligned[i] < 40 and vol_filter[i]
-        short_signal = rsi_14_aligned[i] > 60 and vol_filter[i]
+        # Breakout conditions
+        breakout_long = close[i] > r4_aligned[i]  # Break above R4
+        breakout_short = close[i] < s4_aligned[i]  # Break below S4
         
-        # Exit when RSI returns to neutral zone (40-60)
-        exit_long = rsi_14_aligned[i] >= 50
-        exit_short = rsi_14_aligned[i] <= 50
+        # Fade conditions (mean reversion at extreme levels)
+        fade_long = close[i] < s3_aligned[i] and close[i] > s4_aligned[i]  # Between S3 and S4
+        fade_short = close[i] > r3_aligned[i] and close[i] < r4_aligned[i]  # Between R3 and R4
+        
+        # Volume confirmation
+        vol_ok = volume_ok[i]
+        
+        # Exit conditions: return to pivot or opposite extreme
+        exit_long = close[i] < pivot[i] or close[i] > r3_aligned[i]
+        exit_short = close[i] > pivot[i] or close[i] < s3_aligned[i]
         
         # Execute trades
-        if long_signal and position != 1:
+        if breakout_long and vol_ok and position != 1:
             position = 1
-            signals[i] = 0.20
-        elif short_signal and position != -1:
+            signals[i] = 0.25
+        elif fade_long and vol_ok and position != 1:
+            position = 1
+            signals[i] = 0.25
+        elif breakout_short and vol_ok and position != -1:
             position = -1
-            signals[i] = -0.20
+            signals[i] = -0.25
+        elif fade_short and vol_ok and position != -1:
+            position = -1
+            signals[i] = -0.25
         elif exit_long and position == 1:
             position = 0
             signals[i] = 0.0
@@ -84,6 +98,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Hold position
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
