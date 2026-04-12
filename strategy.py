@@ -8,11 +8,7 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Primary timeframe: 4h
-    # Session filter: 8:00-20:00 UTC (avoid low volume Asian session)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
+    # Primary timeframe: 6h
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -37,38 +33,34 @@ def generate_signals(prices):
     for i in range(14, len(df_1d)):
         atr_1d[i] = np.mean(tr[i-14:i+1])
     
-    # Align 1d ATR to 4h timeframe
+    # Align 1d ATR to 6h timeframe
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # 4h Donchian(20) for breakout signals
+    # 6h Donchian(20) for breakout signals
     donch_high = np.full(n, np.nan)
     donch_low = np.full(n, np.nan)
     for i in range(20, n):
         donch_high[i] = np.max(high[i-20:i])
         donch_low[i] = np.min(low[i-20:i])
     
+    # 1d ATR-based volatility filter
+    atr_ma_20_1d = np.full(len(df_1d), np.nan)
+    for j in range(34, len(df_1d)):
+        if not np.isnan(np.mean(atr_1d[j-19:j+1])):
+            atr_ma_20_1d[j] = np.mean(atr_1d[j-19:j+1])
+    atr_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_20_1d)
+    vol_filter = (not np.isnan(atr_ma_20_1d_aligned[i]) and 
+                 atr_1d_aligned[i] > 0.3 * atr_ma_20_1d_aligned[i])
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-        
         # Skip if data not ready
         if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
             np.isnan(atr_1d_aligned[i])):
             signals[i] = 0.0
             continue
-        
-        # Volatility filter: current ATR > 0.3 * its 20-period average
-        atr_ma_20_1d = np.full(len(df_1d), np.nan)
-        for j in range(34, len(df_1d)):
-            if not np.isnan(np.mean(atr_1d[j-19:j+1])):
-                atr_ma_20_1d[j] = np.mean(atr_1d[j-19:j+1])
-        atr_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_20_1d)
-        vol_filter = (not np.isnan(atr_ma_20_1d_aligned[i]) and 
-                     atr_1d_aligned[i] > 0.3 * atr_ma_20_1d_aligned[i])
         
         # Breakout conditions
         breakout_long = close[i] > donch_high[i]
@@ -105,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_breakout_vol_filter_v2"
-timeframe = "4h"
+name = "6h_1d_donchian_breakout_vol_filter_v1"
+timeframe = "6h"
 leverage = 1.0
