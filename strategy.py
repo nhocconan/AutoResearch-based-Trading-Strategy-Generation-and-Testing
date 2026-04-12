@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-6h_1d_1w_Camarilla_Pivot_Breakout_Trend_v1
-Hypothesis: Uses daily and weekly pivot levels for breakout entries with volume confirmation and 6h EMA trend filter.
-Focus on high-probability breakouts in trending markets, targeting 12-30 trades/year per symbol.
-Designed to work in both bull and bear markets by filtering entries with trend and volume.
+4h_1d_Combined_RSI_CCI_Momentum_v1
+Hypothesis: Combines daily RSI and CCI with 4h momentum to capture trend reversals in both bull and bear markets.
+Uses RSI<30 and CCI<-100 for long entries, RSI>70 and CCI>100 for short entries, with volume confirmation.
+Designed for lower trade frequency (target: 20-30 trades/year) by requiring multiple confluence factors.
+Works in bull markets by catching pullbacks and in bear markets by selling rallies.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_1w_Camarilla_Pivot_Breakout_Trend_v1"
-timeframe = "6h"
+name = "4h_1d_Combined_RSI_CCI_Momentum_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,67 +26,69 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily and weekly data ONCE before loop
+    # Load 1d data ONCE before loop for RSI and CCI
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 2 or len(df_1w) < 2:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate 6h EMA50 for trend filter
-    ema_50_6h = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 4h RSI(14) for momentum filter
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_4h = 100 - (100 / (1 + rs))
+    rsi_4h = rsi_4h.fillna(50).values  # Neutral when undefined
     
     # Volume filter: 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate daily Camarilla levels
+    # Calculate daily RSI(14)
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    camarilla_r3_1d = close_1d + 1.1 * (high_1d - low_1d)
-    camarilla_s3_1d = close_1d - 1.1 * (high_1d - low_1d)
+    delta_1d = pd.Series(close_1d).diff()
+    gain_1d = delta_1d.clip(lower=0)
+    loss_1d = -delta_1d.clip(upper=0)
+    avg_gain_1d = gain_1d.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss_1d = loss_1d.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs_1d = avg_gain_1d / avg_loss_1d
+    rsi_1d = 100 - (100 / (1 + rs_1d))
+    rsi_1d = rsi_1d.fillna(50).values
     
-    # Calculate weekly Camarilla levels
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    camarilla_r3_1w = close_1w + 1.1 * (high_1w - low_1w)
-    camarilla_s3_1w = close_1w - 1.1 * (high_1w - low_1w)
+    # Calculate daily CCI(20)
+    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    tp_ma_20 = typical_price_1d.rolling(window=20, min_periods=20).mean()
+    tp_std_20 = typical_price_1d.rolling(window=20, min_periods=20).std()
+    cci_1d = (typical_price_1d - tp_ma_20) / (0.015 * tp_std_20)
+    cci_1d = cci_1d.fillna(0).values
     
-    # Align Camarilla levels to 6h timeframe (wait for close of daily/weekly bar)
-    camarilla_r3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
-    camarilla_s3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
-    camarilla_r3_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3_1w)
-    camarilla_s3_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3_1w)
+    # Align daily indicators to 4h timeframe (wait for daily close)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    cci_1d_aligned = align_htf_to_ltf(prices, df_1d, cci_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_6h[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(camarilla_r3_1d_aligned[i]) or np.isnan(camarilla_s3_1d_aligned[i]) or
-            np.isnan(camarilla_r3_1w_aligned[i]) or np.isnan(camarilla_s3_1w_aligned[i])):
+        if (np.isnan(rsi_4h[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(rsi_1d_aligned[i]) or np.isnan(cci_1d_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Volume confirmation: current volume > 1.3x 20-period average
         volume_filter = volume[i] > 1.3 * vol_ma_20[i]
         
-        # Trend filter: price above/below 6h EMA50
-        uptrend = close[i] > ema_50_6h[i]
-        downtrend = close[i] < ema_50_6h[i]
+        # Momentum filter: 4h RSI not in extreme territory (avoid chasing)
+        momentum_filter = (rsi_4h[i] > 30) and (rsi_4h[i] < 70)
         
-        # Breakout conditions: price must break both daily and weekly levels
-        breakout_up = close[i] > camarilla_r3_1d_aligned[i] and close[i] > camarilla_r3_1w_aligned[i]
-        breakdown_down = close[i] < camarilla_s3_1d_aligned[i] and close[i] < camarilla_s3_1w_aligned[i]
+        # Entry conditions: daily RSI and CCI extremes
+        long_entry = (rsi_1d_aligned[i] < 30) and (cci_1d_aligned[i] < -100) and volume_filter and momentum_filter
+        short_entry = (rsi_1d_aligned[i] > 70) and (cci_1d_aligned[i] > 100) and volume_filter and momentum_filter
         
-        # Entry conditions: only trade in direction of 6h trend
-        long_entry = breakout_up and volume_filter and uptrend
-        short_entry = breakdown_down and volume_filter and downtrend
-        
-        # Exit conditions: return to opposite level or trend reversal
-        long_exit = (close[i] < camarilla_s3_1d_aligned[i] and close[i] < camarilla_s3_1w_aligned[i]) or (not uptrend)
-        short_exit = (close[i] > camarilla_r3_1d_aligned[i] and close[i] > camarilla_r3_1w_aligned[i]) or (not downtrend)
+        # Exit conditions: return to neutral levels
+        long_exit = (rsi_1d_aligned[i] > 50) or (cci_1d_aligned[i] > 0)
+        short_exit = (rsi_1d_aligned[i] < 50) or (cci_1d_aligned[i] < 0)
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
