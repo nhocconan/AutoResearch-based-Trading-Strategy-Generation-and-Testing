@@ -1,25 +1,24 @@
 #!/usr/bin/env python3
 """
-6h_12h_1d_Donchian_EMA_Vol_Filter
-Hypothesis: Use 12h Donchian breakout with 1d EMA trend filter and volume confirmation on 6h timeframe.
-Enter long when price breaks above 12h Donchian upper (20) in uptrend (1d close > EMA50) with volume > 1.5x average.
-Enter short when price breaks below 12h Donchian lower (20) in downtrend (1d close < EMA50) with volume > 1.5x average.
-Exit on trend reversal or price retracement to Donchian middle. Uses 0.25 position sizing.
-Designed to capture strong directional moves in both bull and bear markets while avoiding whipsaws.
-Target: 50-150 total trades over 4 years (12-37/year) on 6h timeframe.
+4h_1d_1w_Camarilla_Breakout_Trend
+Hypothesis: Use weekly (W1) market regime to filter daily (D1) Camarilla H3/L3 breakouts on 4h timeframe.
+In bull regime (price above weekly EMA40), only take longs at D1 H3 breakouts with volume confirmation.
+In bear regime (price below weekly EMA40), only take shorts at D1 L3 breakdowns with volume confirmation.
+In range regime (price near weekly EMA40), stand flat. This avoids counter-trend trades and reduces whipsaws.
+Target: 50-120 total trades over 4 years (12-30/year) on 4h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_1d_Donchian_EMA_Vol_Filter"
-timeframe = "6h"
+name = "4h_1d_1w_Camarilla_Breakout_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,64 +26,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12H DONCHIAN CHANNEL (20) ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # === WEEKLY REGIME FILTER ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 40:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    close_1w = df_1w['close'].values
+    ema40_1w = pd.Series(close_1w).ewm(span=40, adjust=False, min_periods=40).mean().values
+    ema40_1w_4h = align_htf_to_ltf(prices, df_1w, ema40_1w)
     
-    # Calculate Donchian channels
-    donchian_upper = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donchian_middle = (donchian_upper + donchian_lower) / 2
-    
-    # Align to 6h timeframe
-    upper_6h = align_htf_to_ltf(prices, df_12h, donchian_upper)
-    lower_6h = align_htf_to_ltf(prices, df_12h, donchian_lower)
-    middle_6h = align_htf_to_ltf(prices, df_12h, donchian_middle)
-    
-    # === 1D EMA TREND FILTER ===
+    # === DAILY CAMARILLA LEVELS ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_6h = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # === VOLUME FILTER ===
+    camarilla_h3 = np.full(len(close_1d), np.nan)
+    camarilla_l3 = np.full(len(close_1d), np.nan)
+    camarilla_h4 = np.full(len(close_1d), np.nan)
+    camarilla_l4 = np.full(len(close_1d), np.nan)
+    
+    for i in range(len(close_1d)):
+        if np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(close_1d[i]):
+            continue
+        range_val = high_1d[i] - low_1d[i]
+        camarilla_h3[i] = close_1d[i] + range_val * 1.1 / 6
+        camarilla_l3[i] = close_1d[i] - range_val * 1.1 / 6
+        camarilla_h4[i] = close_1d[i] + range_val * 1.1 / 4
+        camarilla_l4[i] = close_1d[i] - range_val * 1.1 / 4
+    
+    h3_4h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_4h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    h4_4h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_4h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    
+    # === VOLUME SURGE FILTER ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(200, n):
         # Skip if not ready
-        if (np.isnan(upper_6h[i]) or np.isnan(lower_6h[i]) or np.isnan(middle_6h[i]) or 
-            np.isnan(ema50_6h[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(h3_4h[i]) or np.isnan(l3_4h[i]) or np.isnan(ema40_1w_4h[i]) or 
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: break above upper in uptrend with volume filter
-        long_signal = (close[i] > upper_6h[i] and 
-                      close[i] > ema50_6h[i] and  # Use current 6h close vs 1d EMA (aligned)
-                      vol_ratio[i] > 1.5)
+        price_above_weekly_ema = close[i] > ema40_1w_4h[i]
+        price_below_weekly_ema = close[i] < ema40_1w_4h[i]
         
-        # Short: break below lower in downtrend with volume filter
-        short_signal = (close[i] < lower_6h[i] and 
-                       close[i] < ema50_6h[i] and  # Use current 6h close vs 1d EMA (aligned)
-                       vol_ratio[i] > 1.5)
+        # Long: price above weekly EMA40 (bull regime) + break above daily H3 + volume surge
+        long_signal = (price_above_weekly_ema and 
+                      close[i] > h3_4h[i] * 1.001 and 
+                      vol_ratio[i] > 1.8)
         
-        # Exit: trend reversal or retracement to middle
-        exit_long = (position == 1 and 
-                    (close[i] <= ema50_6h[i] or  # Trend reversed
-                     close[i] <= middle_6h[i]))
-        exit_short = (position == -1 and 
-                     (close[i] >= ema50_6h[i] or  # Trend reversed
-                      close[i] >= middle_6h[i]))
+        # Short: price below weekly EMA40 (bear regime) + break below daily L3 + volume surge
+        short_signal = (price_below_weekly_ema and 
+                       close[i] < l3_4h[i] * 0.999 and 
+                       vol_ratio[i] > 1.8)
+        
+        # Exit: price crosses back through weekly EMA40 (regime change)
+        exit_long = (position == 1 and close[i] <= ema40_1w_4h[i])
+        exit_short = (position == -1 and close[i] >= ema40_1w_4h[i])
         
         # Execute trades
         if long_signal and position != 1:
