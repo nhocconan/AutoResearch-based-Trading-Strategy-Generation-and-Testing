@@ -8,49 +8,51 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h TRIX zero-line crossover with 1d EMA200 trend filter and volume confirmation
-    # TRIX (15,9,9) captures momentum with reduced whipsaw vs MACD
-    # Long when TRIX crosses above zero AND price > 1d EMA200 (bullish regime)
-    # Short when TRIX crosses below zero AND price < 1d EMA200 (bearish regime)
-    # Volume spike (>2.0x 30-period average) confirms institutional participation
+    # Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation
+    # Uses 12h for trend direction (medium-term trend), 4h for precise entry timing
+    # Volume spike (>1.5x 20-period average) confirms institutional participation
     # Session filter (08-20 UTC) reduces low-liquidity noise trades
-    # Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag
+    # Donchian channels provide clear breakout levels with defined risk
+    # Target: 19-50 trades/year (75-200 total over 4 years) to minimize fee drag
+    # Only trades with the dominant 12h trend to avoid counter-trend whipsaws
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA200 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    # Get 12h data for Donchian calculation and trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate TRIX on 12h close: TRIX = EMA(EMA(EMA(close, 15), 9), 9)
-    # First EMA(15)
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
-    # Second EMA(9)
-    ema2 = pd.Series(ema1).ewm(span=9, adjust=False, min_periods=9).mean().values
-    # Third EMA(9) = TRIX
-    trix = pd.Series(ema2).ewm(span=9, adjust=False, min_periods=9).mean().values
+    # Calculate Donchian channels (20-period) on 12h timeframe
+    # Upper = max(high_12h over last 20 periods)
+    # Lower = min(low_12h over last 20 periods)
+    donchian_upper = np.full(len(high_12h), np.nan)
+    donchian_lower = np.full(len(low_12h), np.nan)
+    for i in range(20, len(high_12h)):
+        donchian_upper[i] = np.max(high_12h[i-20:i])
+        donchian_lower[i] = np.min(low_12h[i-20:i])
     
-    # Calculate 1d EMA200 for trend filter
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Get 12h EMA50 for trend filter
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 12h volume confirmation (>2.0x 30-period average)
-    vol_ma_12h = np.full(n, np.nan)
-    for i in range(30, n):
-        vol_ma_12h[i] = np.mean(volume[i-30:i])
-    volume_spike_12h = volume > (2.0 * vol_ma_12h)
+    # Get 4h volume for confirmation (>1.5x 20-period average)
+    vol_ma_4h = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma_4h[i] = np.mean(volume[i-20:i])
+    volume_spike_4h = volume > (1.5 * vol_ma_4h)
     
-    # Align all indicators to LTF (12h)
-    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)  # TRIX is 12h indicator, no alignment needed actually
-    # Correction: TRIX is calculated on 12h data, so no HTF alignment needed
-    trix_aligned = trix  # Already on 12h timeframe
-    
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Align all indicators to LTF (4h)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     # Precompute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -61,27 +63,27 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready or outside session
-        if (np.isnan(trix_aligned[i]) or np.isnan(trix_aligned[i-1]) or 
-            np.isnan(ema200_1d_aligned[i]) or np.isnan(volume_spike_12h[i]) or
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(volume_spike_4h[i]) or
             not in_session[i]):
             signals[i] = 0.0
             continue
         
-        # TRIX zero-line crossover
-        trix_cross_above = trix_aligned[i-1] <= 0 and trix_aligned[i] > 0
-        trix_cross_below = trix_aligned[i-1] >= 0 and trix_aligned[i] < 0
+        # Breakout conditions
+        long_breakout = close[i] > donchian_upper_aligned[i]
+        short_breakout = close[i] < donchian_lower_aligned[i]
         
-        # 1d trend filter
-        bullish_trend = close[i] > ema200_1d_aligned[i]
-        bearish_trend = close[i] < ema200_1d_aligned[i]
+        # 12h trend filter
+        bullish_trend = close[i] > ema50_12h_aligned[i]
+        bearish_trend = close[i] < ema50_12h_aligned[i]
         
-        # Entry logic: TRIX crossover + trend alignment + volume confirmation
-        long_entry = trix_cross_above and bullish_trend and volume_spike_12h[i]
-        short_entry = trix_cross_below and bearish_trend and volume_spike_12h[i]
+        # Entry logic: Breakout + trend alignment + volume confirmation
+        long_entry = long_breakout and bullish_trend and volume_spike_4h[i]
+        short_entry = short_breakout and bearish_trend and volume_spike_4h[i]
         
-        # Exit logic: opposite TRIX crossover or trend reversal
-        long_exit = trix_cross_below or not bullish_trend
-        short_exit = trix_cross_above or not bearish_trend
+        # Exit logic: price returns to opposite Donchian level (mean reversion)
+        long_exit = close[i] < donchian_lower_aligned[i] or not bullish_trend
+        short_exit = close[i] > donchian_upper_aligned[i] or not bearish_trend
         
         if long_entry and position != 1:
             position = 1
@@ -106,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_trix_zero_cross_ema200_volume_v1"
-timeframe = "12h"
+name = "4h_12h_donchian_breakout_ema50_volume_v1"
+timeframe = "4h"
 leverage = 1.0
