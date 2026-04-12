@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h_1d_weekly_pivot_breakout_v1
-# Uses weekly pivot points (from 1d data aggregated to weekly) to identify key support/resistance.
-# In bull markets: buy breakouts above weekly R1 with volume confirmation.
-# In bear markets: sell breakdowns below weekly S1 with volume confirmation.
-# Uses 6h timeframe for entries, weekly pivot for direction, volume filter to avoid false breakouts.
-# Target: 20-35 trades/year per symbol (80-140 total over 4 years).
-name = "6h_1d_weekly_pivot_breakout_v1"
-timeframe = "6h"
+# Hypothesis: 12h_1w_volatility_breakout_v1
+# Uses weekly Bollinger Band breakouts with daily ATR filter and volume confirmation.
+# Works in bull markets by capturing breakouts above upper BB, and in bear markets
+# by shorting breakdowns below lower BB. Volatility filter ensures trades occur during
+# high-momentum periods, reducing false signals. Target: 15-25 trades/year per symbol.
+name = "12h_1w_volatility_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,45 +22,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data to calculate weekly pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    # Get weekly data for Bollinger Bands
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate weekly OHLC from daily data (simplified: use Friday's close as weekly close)
-    # For pivot calculation, we need weekly high, low, close
-    # Approximate weekly high as max of last 5 days, weekly low as min of last 5 days
-    # Weekly close as Friday's close (assuming 5-day week)
-    weekly_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().values
-    weekly_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().values
-    weekly_close = pd.Series(df_1d['close']).shift(4).values  # Friday's close (4 days ago from current day)
+    # Calculate weekly Bollinger Bands (20, 2)
+    close_1w = df_1w['close'].values
+    bb_mid = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_mid + 2 * bb_std
+    bb_lower = bb_mid - 2 * bb_std
     
-    # Weekly pivot points
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    weekly_s1 = 2 * weekly_pivot - weekly_high
+    # Align BB to 12h timeframe
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1w, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1w, bb_lower)
     
-    # Align weekly pivots to 6h timeframe
-    r1_level = align_htf_to_ltf(prices, df_1d, weekly_r1)
-    s1_level = align_htf_to_ltf(prices, df_1d, weekly_s1)
-    pivot_level = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    # Get daily data for ATR filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
     
-    # Volume confirmation: volume > 1.3 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate daily ATR (14)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Align ATR to 12h timeframe
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # Volume confirmation: volume > 1.3 * 50-period average
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     vol_confirm = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # start after warmup
+    for i in range(50, n):  # start after warmup
         # Skip if levels not ready
-        if np.isnan(r1_level[i]) or np.isnan(s1_level[i]) or np.isnan(pivot_level[i]):
+        if np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or np.isnan(atr_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Skip if volume confirmation fails
-        if not vol_confirm[i]:
-            # Hold current position if volume fails
+        # Volatility filter: only trade when ATR is above its 20-period average
+        atr_ma = pd.Series(atr_1d_aligned).rolling(window=20, min_periods=20).mean()
+        atr_ma_aligned = align_htf_to_ltf(prices, df_1d, atr_ma.values)
+        vol_filter = atr_1d_aligned[i] > atr_ma_aligned[i] if not np.isnan(atr_ma_aligned[i]) else False
+        
+        # Skip if volatility or volume filter fails
+        if not (vol_filter and vol_confirm[i]):
+            # Hold current position if filters fail
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -70,19 +86,19 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above weekly R1
-        if close[i] > r1_level[i] and position != 1:
+        # Long signal: price breaks above weekly upper BB
+        if close[i] > bb_upper_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below weekly S1
-        elif close[i] < s1_level[i] and position != -1:
+        # Short signal: price breaks below weekly lower BB
+        elif close[i] < bb_lower_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: price returns to weekly pivot
-        elif position == 1 and close[i] < pivot_level[i]:
+        # Exit conditions: opposite breakout
+        elif close[i] < bb_lower_aligned[i] and position == 1:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > pivot_level[i]:
+        elif close[i] > bb_upper_aligned[i] and position == -1:
             position = 0
             signals[i] = 0.0
         else:
