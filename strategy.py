@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h_1d_donchian_breakout_volume_v1
-# Donchian(20) breakout from daily chart with volume confirmation on 12h timeframe.
-# Uses 1-day Donchian channels to capture major breakouts in both bull and bear markets.
-# Volume confirmation ensures institutional participation, reducing false breakouts.
-# Designed for low trade frequency (15-25/year) to minimize fee drag.
-# Works in trending markets by riding breakouts and avoids chop via volume filter.
-name = "12h_1d_donchian_breakout_volume_v1"
-timeframe = "12h"
+# Hypothesis: 4h_1d_cci_reversal_v1
+# Commodity Channel Index (CCI) reversal strategy on 4h with 1d trend filter.
+# In bull markets: buy when CCI crosses above -100 from oversold, in 1d uptrend.
+# In bear markets: sell when CCI crosses below +100 from overbought, in 1d downtrend.
+# Uses 1d EMA50 as trend filter to avoid counter-trend trades.
+# Volume confirmation required to avoid false signals.
+# Target: 20-40 trades/year per symbol for low friction.
+name = "4h_1d_cci_reversal_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,34 +24,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian calculation
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 21:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 20-period Donchian channels from daily high/low
-    # Use previous day's data to avoid look-ahead
-    high_20 = df_1d['high'].rolling(window=20, min_periods=20).max().shift(1).values
-    low_20 = df_1d['low'].rolling(window=20, min_periods=20).min().shift(1).values
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align to 12h timeframe (already delayed by 1 day due to shift)
-    upper_band = align_htf_to_ltf(prices, df_1d, high_20)
-    lower_band = align_htf_to_ltf(prices, df_1d, low_20)
+    # Calculate CCI(20) on 4h
+    typical_price = (high + low + close) / 3.0
+    ma_tp = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
+    mad = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
+    # Avoid division by zero
+    mad = np.where(mad == 0, 1e-10, mad)
+    cci = (typical_price - ma_tp) / (0.015 * mad)
     
-    # Volume confirmation: volume > 1.8 * 20-period average
+    # Volume confirmation: volume > 1.3 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.8)
+    vol_confirm = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):  # start after warmup
-        # Skip if bands not ready
-        if np.isnan(upper_band[i]) or np.isnan(lower_band[i]):
+        # Skip if indicators not ready
+        if np.isnan(cci[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_confirm[i]):
             signals[i] = 0.0
             continue
         
-        # Require volume confirmation for new entries
+        # Check volume filter
         if not vol_confirm[i]:
             # Hold current position if volume filter fails
             if position == 1:
@@ -61,19 +65,19 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above upper Donchian band with volume
-        if close[i] > upper_band[i] and position != 1:
+        # Long signal: CCI crosses above -100 from oversold AND 1d uptrend (price > EMA50)
+        if cci[i] > -100 and cci[i-1] <= -100 and close[i] > ema50_1d_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below lower Donchian band with volume
-        elif close[i] < lower_band[i] and position != -1:
+        # Short signal: CCI crosses below +100 from overbought AND 1d downtrend (price < EMA50)
+        elif cci[i] < 100 and cci[i-1] >= 100 and close[i] < ema50_1d_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: opposite breakout
-        elif close[i] < lower_band[i] and position == 1:
+        # Exit conditions: opposite CCI cross
+        elif cci[i] < -100 and cci[i-1] >= -100 and position == 1:
             position = 0
             signals[i] = 0.0
-        elif close[i] > upper_band[i] and position == -1:
+        elif cci[i] > 100 and cci[i-1] <= 100 and position == -1:
             position = 0
             signals[i] = 0.0
         else:
