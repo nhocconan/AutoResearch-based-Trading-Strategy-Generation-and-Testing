@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-1d_1w_Camarilla_Breakout_WeeklyTrend_v1
-Hypothesis: On daily timeframe, enter long when price breaks above daily Camarilla R3 with weekly trend confirmation (price above weekly SMA50), enter short when price breaks below daily Camarilla S3 with weekly trend confirmation (price below weekly SMA50). Uses daily price channels for structure and weekly trend filter to avoid counter-trend trades. Designed for low trade frequency (<25/year) and robust performance in both bull and bear markets.
+12h_1d_Premium_Reversion
+Hypothesis: On 12h timeframe, enter long when price crosses below daily VWAP with volume contraction and 1d ATR contraction (low volatility regime), exit on VWAP reversion. Short when price crosses above daily VWAP with volume expansion and ATR expansion (high volatility regime), exit on VWAP reversion. Uses daily VWAP as mean, ATR regime filter, and volume change filter. Designed for mean reversion in low volatility and momentum in high volatility regimes. Targets 15-30 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Camarilla_Breakout_WeeklyTrend_v1"
-timeframe = "1d"
+name = "12h_1d_Premium_Reversion"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,8 +20,9 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # === DAILY CAMARILLA PIVOT LEVELS ===
+    # === DAILY VWAP ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -29,64 +30,83 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate daily Camarilla pivot levels
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # Typical price
+    tp_1d = (high_1d + low_1d + close_1d) / 3
+    # VWAP = sum(tp * volume) / sum(volume)
+    vwap_num = np.cumsum(tp_1d * volume_1d)
+    vwap_den = np.cumsum(volume_1d)
+    vwap_1d = np.where(vwap_den != 0, vwap_num / vwap_den, tp_1d)
     
-    # Camarilla R3 and S3 levels (key reversal levels)
-    r3 = close_1d + range_1d * 1.1 / 4
-    s3 = close_1d - range_1d * 1.1 / 4
+    # Align VWAP to 12h
+    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
     
-    # Align to daily timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # === DAILY ATR(14) FOR VOLATILITY REGIME ===
+    # True Range
+    tr = np.maximum(high_1d - low_1d, 
+                    np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
+                               np.abs(low_1d - np.roll(close_1d, 1))))
+    tr[0] = high_1d[0] - low_1d[0]
     
-    # === WEEKLY TREND FILTER (SMA50) ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # ATR(14)
+    atr_1d = np.full_like(tr, np.nan)
+    if len(tr) >= 14:
+        atr_1d[13] = np.mean(tr[0:14])
+        for i in range(14, len(tr)):
+            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    close_1w = df_1w['close'].values
+    # Align ATR to 12h
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate weekly SMA50
-    sma50_1w = np.full_like(close_1w, np.nan)
-    if len(close_1w) >= 50:
-        for i in range(50, len(close_1w)):
-            sma50_1w[i] = np.mean(close_1w[i-50:i])
+    # ATR percentile rank (20-period) for regime
+    atr_rank = np.full_like(atr_aligned, np.nan)
+    for i in range(20, len(atr_aligned)):
+        if not np.isnan(atr_aligned[i]):
+            window = atr_aligned[max(0, i-19):i+1]
+            valid = window[~np.isnan(window)]
+            if len(valid) > 0:
+                rank = np.sum(valid <= atr_aligned[i]) / len(valid) * 100
+                atr_rank[i] = rank
     
-    # Align weekly close and SMA50 to daily timeframe
-    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
-    sma50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma50_1w)
+    # === VOLUME CHANGE (12h) ===
+    vol_change = np.zeros_like(volume)
+    vol_ma_5 = np.zeros_like(volume)
+    if len(volume) >= 5:
+        vol_ma_5[4] = np.mean(volume[0:5])
+        for i in range(5, len(volume)):
+            vol_ma_5[i] = (vol_ma_5[i-1] * 4 + volume[i]) / 5
     
-    # Weekly trend: price above SMA50 = uptrend, below = downtrend
-    weekly_uptrend = close_1w_aligned > sma50_1w_aligned
-    weekly_downtrend = close_1w_aligned < sma50_1w_aligned
+    vol_change = volume / vol_ma_5 - 1  # percentage change from 5-period MA
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # start after warmup for SMA50
+    for i in range(50, n):  # start after warmup
         # Skip if indicators not available
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(sma50_1w_aligned[i]) or np.isnan(close_1w_aligned[i])):
+        if (np.isnan(vwap_aligned[i]) or np.isnan(atr_aligned[i]) or 
+            np.isnan(atr_rank[i]) or np.isnan(vol_change[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Breakout conditions with weekly trend filter
-        long_breakout = (close[i] > r3_aligned[i]) and weekly_uptrend[i]
-        short_breakout = (close[i] < s3_aligned[i]) and weekly_downtrend[i]
+        # Long: price below VWAP, low volatility regime (ATR rank < 30), volume contraction
+        long_entry = (close[i] < vwap_aligned[i] and 
+                      atr_rank[i] < 30 and 
+                      vol_change[i] < -0.1)  # volume below 5MA
         
-        # Exit conditions: reversal back inside opposite Camarilla level
-        # Exit long if price breaks below S3
-        exit_long = close[i] < s3_aligned[i]
-        # Exit short if price breaks above R3
-        exit_short = close[i] > r3_aligned[i]
+        # Short: price above VWAP, high volatility regime (ATR rank > 70), volume expansion
+        short_entry = (close[i] > vwap_aligned[i] and 
+                       atr_rank[i] > 70 and 
+                       vol_change[i] > 0.2)  # volume above 5MA
         
-        if long_breakout and position != 1:
+        # Exit: price crosses VWAP (mean reversion)
+        exit_long = close[i] > vwap_aligned[i]
+        exit_short = close[i] < vwap_aligned[i]
+        
+        if long_entry and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_breakout and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
