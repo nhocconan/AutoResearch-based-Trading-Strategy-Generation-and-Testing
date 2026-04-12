@@ -3,21 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h_1d1w_camarilla_breakout_v1
-# Uses daily and weekly timeframes to calculate weekly-based daily Camarilla levels.
-# Buys when price breaks above weekly H3 with volume confirmation and ADX > 25 (strong trend).
-# Shorts when price breaks below weekly L3 with volume confirmation and ADX > 25.
-# Designed for low trade frequency (target: 12-37 trades/year) on 12h timeframe to minimize fee drag.
-# Works in bull markets (breakouts continuation) and bear markets (breakdowns continuation).
-# Uses discrete position sizing (0.0, ±0.25) to reduce churn.
+# Hypothesis: 1h_4h_dema_cross_v1
+# Uses 4h DEMA crossover for trend direction (21/55) and 1h for entry timing.
+# Enters long when 4h DEMA21 > DEMA55 and price crosses above 1h VWAP.
+# Enters short when 4h DEMA21 < DEMA55 and price crosses below 1h VWAP.
+# Includes session filter (08-20 UTC) to reduce noise.
+# Designed for low trade frequency (target: 15-37/year) to minimize fee drag.
+# Works in bull markets (trend following) and bear markets (trend following with filters).
 
-name = "12h_1d1w_camarilla_breakout_v1"
-timeframe = "12h"
+name = "1h_4h_dema_cross_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,104 +25,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 4h data for DEMA calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 55:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous week
-    high_prev = df_1w['high'].shift(1).values
-    low_prev = df_1w['low'].shift(1).values
-    close_prev = df_1w['close'].shift(1).values
+    # Calculate DEMA on 4h close
+    close_4h = df_4h['close'].values
+    ema1_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema2_4h = pd.Series(close_4h).ewm(span=55, adjust=False, min_periods=55).mean().values
+    # DEMA = 2*EMA - EMA(EMA)
+    ema_of_ema1_4h = pd.Series(ema1_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_of_ema2_4h = pd.Series(ema2_4h).ewm(span=55, adjust=False, min_periods=55).mean().values
+    dema21_4h = 2 * ema1_4h - ema_of_ema1_4h
+    dema55_4h = 2 * ema2_4h - ema_of_ema2_4h
     
-    # Camarilla formulas
-    range_prev = high_prev - low_prev
-    camarilla_h3 = close_prev + range_prev * 1.1 / 4
-    camarilla_l3 = close_prev - range_prev * 1.1 / 4
+    # Align 4h DEMA to 1h timeframe (wait for 4h bar close)
+    dema21_4h_aligned = align_htf_to_ltf(prices, df_4h, dema21_4h)
+    dema55_4h_aligned = align_htf_to_ltf(prices, df_4h, dema55_4h)
     
-    # Align to 12h timeframe (weekly levels update only after weekly bar closes)
-    h3_level = align_htf_to_ltf(prices, df_1w, camarilla_h3)
-    l3_level = align_htf_to_ltf(prices, df_1w, camarilla_l3)
+    # 1h VWAP for entry timing
+    typical_price = (high + low + close) / 3.0
+    vwap_num = pd.Series(typical_price * volume).rolling(window=20, min_periods=20).sum().values
+    vwap_den = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
+    vwap = np.where(vwap_den != 0, vwap_num / vwap_den, 0.0)
     
-    # Volume confirmation: volume > 2.0 * 50-period average (strict for 12h)
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    vol_confirm = volume > (vol_ma * 2.0)
-    
-    # ADX trend filter: only trade when ADX > 25 (strong trend)
-    # Calculate True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # Plus and Minus Directional Movement
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    
-    # Wilder's smoothing function
-    def wilders_smooth(data, period):
-        result = np.full_like(data, np.nan, dtype=float)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(data[:period])
-        # Subsequent values: Wilder's smoothing
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    atr = wilders_smooth(tr, 14)
-    plus_dm_smooth = wilders_smooth(plus_dm, 14)
-    minus_dm_smooth = wilders_smooth(minus_dm, 14)
-    
-    # Avoid division by zero
-    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
-    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = wilders_smooth(dx, 14)
-    adx_filter = adx > 25  # strong trend only
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # start after warmup
-        # Skip if levels not ready
-        if np.isnan(h3_level[i]) or np.isnan(l3_level[i]) or np.isnan(adx_filter[i]):
+    for i in range(55, n):
+        # Skip if not in session or data not ready
+        if not session_filter[i] or np.isnan(dema21_4h_aligned[i]) or np.isnan(dema55_4h_aligned[i]) or np.isnan(vwap[i]):
             signals[i] = 0.0
             continue
         
-        # Require both volume and strong trend filters
-        if not (vol_confirm[i] and adx_filter[i]):
-            # Hold current position if filters fail
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
-            continue
+        # Trend filter: 4h DEMA21 > DEMA55 for long, < for short
+        trend_long = dema21_4h_aligned[i] > dema55_4h_aligned[i]
+        trend_short = dema21_4h_aligned[i] < dema55_4h_aligned[i]
         
-        # Long signal: price breaks above weekly H3 with volume
-        if close[i] > h3_level[i] and position != 1:
+        # Entry signals: price crosses VWAP in direction of 4h trend
+        if trend_long and close[i] > vwap[i] and close[i-1] <= vwap[i-1] and position != 1:
             position = 1
-            signals[i] = 0.25
-        # Short signal: price breaks below weekly L3 with volume
-        elif close[i] < l3_level[i] and position != -1:
+            signals[i] = 0.20
+        elif trend_short and close[i] < vwap[i] and close[i-1] >= vwap[i-1] and position != -1:
             position = -1
-            signals[i] = -0.25
-        # Exit conditions: opposite breakout
-        elif close[i] < l3_level[i] and position == 1:
+            signals[i] = -0.20
+        # Exit signals: price crosses VWAP against trend or trend reversal
+        elif (close[i] < vwap[i] and close[i-1] >= vwap[i-1]) or (not trend_long and position == 1):
             position = 0
             signals[i] = 0.0
-        elif close[i] > h3_level[i] and position == -1:
+        elif (close[i] > vwap[i] and close[i-1] <= vwap[i-1]) or (not trend_short and position == -1):
             position = 0
             signals[i] = 0.0
         else:
-            # Hold current position
+            # Hold position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
