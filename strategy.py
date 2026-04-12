@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v3"
+name = "4h_1d_camarilla_breakout_vol_tight"
 timeframe = "4h"
 leverage = 1.0
 
@@ -44,11 +44,11 @@ def generate_signals(prices):
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
     
-    # Trend filter: 50-period SMA on 4h data
+    # Trend filter: 20-period SMA on 4h data
     close_series = pd.Series(close)
-    sma_50 = close_series.rolling(window=50, min_periods=50).mean().values
-    trend_up = close > sma_50
-    trend_down = close < sma_50
+    sma_20 = close_series.rolling(window=20, min_periods=20).mean().values
+    trend_up = close > sma_20
+    trend_down = close < sma_20
     
     # Chop filter: avoid ranging markets (use 14-period on 4h)
     high_series = pd.Series(high)
