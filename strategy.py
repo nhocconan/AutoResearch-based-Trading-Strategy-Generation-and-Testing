@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Breakout_Trend
-Hypothesis: 12h breakout of daily Camarilla H4/L4 levels with volume confirmation and ADX trend filter.
+12h_1d_Camarilla_Breakout_Strategy_v1
+Hypothesis: 12-hour breakout of daily Camarilla H4/L4 levels with volume confirmation and ADX trend filter.
 Designed for low-frequency, high-probability trades in both bull and bear markets.
 Target: 12-37 trades/year to minimize fee drag while capturing significant moves.
 """
@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_Breakout_Trend"
+name = "12h_1d_Camarilla_Breakout_Strategy_v1"
 timeframe = "12h"
 leverage = 1.0
 
