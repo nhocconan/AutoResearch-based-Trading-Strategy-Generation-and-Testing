@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
 """
-4h_12h_MeanReversion_Fade_V1
-Hypothesis: Fade price extremes at 12h Bollinger Bands (2, 2) when 4h RSI shows extreme momentum,
-but only in low-volatility (high mean-reversion) regimes. Uses Bollinger Band width percentile
-to detect ranging markets where mean reversion works best. Designed for low trade frequency
-(15-25/year) by requiring Bollinger Band touch + RSI extreme + regime filter.
-Works in bull/bear via mean reversion logic and volatility regime filter.
+6h_1w_1d_Weekly_Pivot_Direction_v1
+Hypothesis: Use weekly pivot levels (from 1w) to determine long-term direction, and 1d pivot levels for entry signals.
+In uptrend (price above weekly pivot), buy at 1d S1/S2 with reversal signals; in downtrend, sell at 1d R1/R2.
+Uses volume confirmation to avoid false breaks. Designed for low trade frequency (15-25/year) by requiring
+alignment between weekly trend and daily pivot rejection. Works in bull/bear via weekly trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_MeanReversion_Fade_V1"
-timeframe = "4h"
+name = "6h_1w_1d_Weekly_Pivot_Direction_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,112 +25,113 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12H BOLLINGER BANDS (2, 2) ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # === WEEKLY PIVOT (trend filter) ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Weekly high, low, close from previous week
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Bollinger Bands: 20-period SMA, 2 std dev
-    sma_20 = np.zeros_like(close_12h)
-    std_20 = np.zeros_like(close_12h)
-    for i in range(len(close_12h)):
-        if i < 19:
-            sma_20[i] = np.nan
-            std_20[i] = np.nan
-        else:
-            sma_20[i] = np.mean(close_12h[i-19:i+1])
-            std_20[i] = np.std(close_12h[i-19:i+1])
+    # Calculate weekly pivot points (using previous week's data)
+    pp_1w = (high_1w[:-1] + low_1w[:-1] + close_1w[:-1]) / 3.0
+    r1_1w = 2 * pp_1w - low_1w[:-1]
+    s1_1w = 2 * pp_1w - high_1w[:-1]
+    r2_1w = pp_1w + (high_1w[:-1] - low_1w[:-1])
+    s2_1w = pp_1w - (high_1w[:-1] - low_1w[:-1])
     
-    upper_band = sma_20 + (2 * std_20)
-    lower_band = sma_20 - (2 * std_20)
+    # Prepend NaN for first week (no previous week)
+    pp_1w = np.concatenate([[np.nan], pp_1w])
+    r1_1w = np.concatenate([[np.nan], r1_1w])
+    s1_1w = np.concatenate([[np.nan], s1_1w])
+    r2_1w = np.concatenate([[np.nan], r2_1w])
+    s2_1w = np.concatenate([[np.nan], s2_1w])
     
-    # === 12H BOLLINGER BAND WIDTH FOR REGIME DETECTION ===
-    bb_width = (upper_band - lower_band) / sma_20
-    # Percentile rank of BB width over 50 periods to detect low volatility (rangy) regime
-    bb_width_percentile = np.full_like(bb_width, np.nan)
-    for i in range(49, len(bb_width)):
-        window = bb_width[i-49:i+1]
-        if not np.all(np.isnan(window)):
-            ranked = np.sum(~np.isnan(window) & (window < bb_width[i]))
-            total = np.sum(~np.isnan(window))
-            if total > 0:
-                bb_width_percentile[i] = (ranked / total) * 100
+    # Align weekly pivot to 6h
+    pp_1w_aligned = align_htf_to_ltf(prices, df_1w, pp_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
+    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
     
-    # Low volatility regime (rangy market) when BB width < 30th percentile
-    low_vol_regime = bb_width_percentile < 30
+    # === DAILY PIVOT (entry signals) ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
+        return np.zeros(n)
     
-    # === 4H RSI (14) FOR MOMENTUM EXTREMES ===
-    # RSI calculation with proper handling
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    for i in range(len(gain)):
-        if i < 13:
-            avg_gain[i] = np.nan
-            avg_loss[i] = np.nan
-        elif i == 13:
-            avg_gain[i] = np.mean(gain[0:14])
-            avg_loss[i] = np.mean(loss[0:14])
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Daily pivot points (using previous day's data)
+    pp_1d = (high_1d[:-1] + low_1d[:-1] + close_1d[:-1]) / 3.0
+    r1_1d = 2 * pp_1d - low_1d[:-1]
+    s1_1d = 2 * pp_1d - high_1d[:-1]
+    r2_1d = pp_1d + (high_1d[:-1] - low_1d[:-1])
+    s2_1d = pp_1d - (high_1d[:-1] - low_1d[:-1])
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
+    # Prepend NaN for first day
+    pp_1d = np.concatenate([[np.nan], pp_1d])
+    r1_1d = np.concatenate([[np.nan], r1_1d])
+    s1_1d = np.concatenate([[np.nan], s1_1d])
+    r2_1d = np.concatenate([[np.nan], r2_1d])
+    s2_1d = np.concatenate([[np.nan], s2_1d])
     
-    # === ALIGN ALL 12H INDICATORS TO 4H TIMEFRAME ===
-    upper_band_aligned = align_htf_to_ltf(prices, df_12h, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_12h, lower_band)
-    low_vol_regime_aligned = align_htf_to_ltf(prices, df_12h, low_vol_regime.astype(float))
+    # Align daily pivot to 6h
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
     
-    # Volume average (20-period for 4h = ~5 days) for confirmation
+    # Volume confirmation (24-period average for 6h = ~6 days)
     vol_avg = np.zeros(n)
     vol_sum = 0.0
     vol_count = 0
     for i in range(n):
         vol_sum += volume[i]
         vol_count += 1
-        if i >= 20:
-            vol_sum -= volume[i-20]
+        if i >= 24:
+            vol_sum -= volume[i-24]
             vol_count -= 1
-        if vol_count > 0:
-            vol_avg[i] = vol_sum / vol_count
-        else:
-            vol_avg[i] = 0.0
+        vol_avg[i] = vol_sum / vol_count if vol_count > 0 else 0.0
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # start after warmup
+    for i in range(100, n):  # start after warmup
         # Skip if indicators not available
-        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or 
-            np.isnan(low_vol_regime_aligned[i]) or np.isnan(rsi[i]) or vol_avg[i] == 0.0):
+        if (np.isnan(pp_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or
+            np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
+            np.isnan(r2_1d_aligned[i]) or np.isnan(s2_1d_aligned[i]) or
+            vol_avg[i] == 0.0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Volume confirmation: at least 1.3x average
         vol_confirm = volume[i] > 1.3 * vol_avg[i]
         
-        # Only trade in low volatility (rangy) regime where mean reversion works
-        in_low_vol_regime = low_vol_regime_aligned[i] > 0.5
+        # Weekly trend: price above/below weekly pivot
+        above_weekly_pp = close[i] > pp_1w_aligned[i]
+        below_weekly_pp = close[i] < pp_1w_aligned[i]
         
-        # Fade extreme price action at Bollinger Bands with RSI confirmation
-        # Long when price touches lower band AND RSI is oversold (< 30)
-        long_setup = (close[i] <= lower_band_aligned[i]) and (rsi[i] < 30) and vol_confirm and in_low_vol_regime
-        # Short when price touches upper band AND RSI is overbought (> 70)
-        short_setup = (close[i] >= upper_band_aligned[i]) and (rsi[i] > 70) and vol_confirm and in_low_vol_regime
+        # Entry conditions: fade at daily S1/S2 in uptrend, R1/R2 in downtrend
+        long_setup = (
+            above_weekly_pp and  # weekly uptrend
+            (close[i] <= s1_1d_aligned[i] or close[i] <= s2_1d_aligned[i]) and  # at or below daily S1/S2
+            vol_confirm
+        )
         
-        # Exit when price returns to mean (SMA) or RSI normalizes
-        exit_long = (close[i] >= sma_20[i]) or (rsi[i] >= 50)
-        exit_short = (close[i] <= sma_20[i]) or (rsi[i] <= 50)
+        short_setup = (
+            below_weekly_pp and  # weekly downtrend
+            (close[i] >= r1_1d_aligned[i] or close[i] >= r2_1d_aligned[i]) and  # at or above daily R1/R2
+            vol_confirm
+        )
+        
+        # Exit conditions: reverse when price crosses weekly pivot
+        exit_long = below_weekly_pp  # close below weekly pivot
+        exit_short = above_weekly_pp  # close above weekly pivot
         
         if long_setup and position != 1:
             position = 1
