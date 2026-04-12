@@ -5,67 +5,80 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
+    
+    # Hypothesis: 6h Williams %R extreme + 1d EMA50 trend filter + volume spike
+    # Williams %R identifies overextended moves in 6h timeframe
+    # EMA50 on 1d ensures we only take extreme %R in direction of higher timeframe trend
+    # Volume spike confirms participation and reduces false signals
+    # Discrete sizing 0.25 to minimize fee churn. Target: 50-150 total trades over 4 years.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for indicators
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d EMA20 for trend filter
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate 1d ATR14 for volatility filter
-    tr_1d = np.maximum(high_1d[1:] - low_1d[1:], 
-                       np.maximum(np.abs(high_1d[1:] - close_1d[:-1]),
-                                  np.abs(low_1d[1:] - close_1d[:-1])))
-    tr_1d = np.concatenate([[np.nan], tr_1d])
-    atr14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
+    # Williams %R on 6h (primary timeframe)
+    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    lookback = 14
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
     
-    # Calculate 1d volume MA20 for volume confirmation
-    vol_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
+    for i in range(lookback-1, n):
+        highest_high[i] = np.max(high[i-lookback+1:i+1])
+        lowest_low[i] = np.min(low[i-lookback+1:i+1])
+    
+    # Avoid division by zero
+    hl_range = highest_high - lowest_low
+    hl_range = np.where(hl_range == 0, 1e-10, hl_range)
+    williams_r = ((highest_high - close) / hl_range) * -100
+    
+    # Volume confirmation: volume > 1.8 * 20-period average
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    volume_spike = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema20_1d_aligned[i]) or np.isnan(atr14_1d_aligned[i]) or 
-            np.isnan(vol_ma20_1d_aligned[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Determine 1d trend
-        bullish_trend = close[i] > ema20_1d_aligned[i]
-        bearish_trend = close[i] < ema20_1d_aligned[i]
+        bullish_trend = close[i] > ema50_1d_aligned[i]
+        bearish_trend = close[i] < ema50_1d_aligned[i]
         
-        # Volume confirmation: current volume > 1.5 * 20-period average
-        volume_confirm = volume[i] > (1.5 * vol_ma20_1d_aligned[i])
+        # Entry logic: Williams %R extreme in direction of 1d trend with volume
+        long_entry = False
+        short_entry = False
         
-        # Volatility filter: avoid extremely low volatility periods
-        vol_filter = atr14_1d_aligned[i] > 0.01 * close[i]  # ATR > 1% of price
+        # Long: %R <= -80 (oversold) in bullish 1d trend with volume spike
+        if bullish_trend:
+            long_entry = (williams_r[i] <= -80) and volume_spike[i]
+        # Short: %R >= -20 (overbought) in bearish 1d trend with volume spike
+        elif bearish_trend:
+            short_entry = (williams_r[i] >= -20) and volume_spike[i]
         
-        # Entry logic: trend + volume + volatility filter
-        long_entry = bullish_trend and volume_confirm and vol_filter
-        short_entry = bearish_trend and volume_confirm and vol_filter
-        
-        # Exit logic: trend reversal
-        long_exit = bearish_trend
-        short_exit = bullish_trend
+        # Exit logic: %R returns to neutral zone or trend reversal
+        long_exit = (williams_r[i] >= -50) or (not bullish_trend and not bearish_trend)
+        short_exit = (williams_r[i] <= -50) or (not bullish_trend and not bearish_trend)
         
         if long_entry and position != 1:
             position = 1
@@ -90,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_ema20_trend_volume_filter_v1"
-timeframe = "1d"
+name = "6h_1d_williams_r_extreme_trend_volume_v2"
+timeframe = "6h"
 leverage = 1.0
