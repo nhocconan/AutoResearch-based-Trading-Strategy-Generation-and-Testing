@@ -3,22 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h_1d_alligator_v1
-# Uses Williams Alligator (Jaw, Teeth, Lips) from 1-day timeframe to identify trend direction and strength.
-# Long when Lips > Teeth > Jaw (bullish alignment) and price > 12h EMA26.
-# Short when Lips < Teeth < Jaw (bearish alignment) and price < 12h EMA26.
-# Uses volume confirmation (volume > 1.3x 20-period average) to filter false signals.
-# Designed for low trade frequency (target: 15-30 trades/year) to minimize fee drag.
-# Alligator acts as a trend-following system that works in both bull and bear markets by
-# identifying when the market is trending (aligned) vs ranging (intertwined).
+# Hypothesis: 4h_12h_donchian_breakout_volume
+# Uses 4-hour Donchian channel breakout with volume confirmation and 12-hour trend filter.
+# Long when price breaks above Donchian(20) high, volume > 1.5x 20-period average, and 12h EMA25 > EMA50.
+# Short when price breaks below Donchian(20) low, volume > 1.5x 20-period average, and 12h EMA25 < EMA50.
+# Designed for 4h timeframe to capture medium-term trends with low trade frequency (target: 20-50 trades/year).
+# Works in bull markets (buying breakouts) and bear markets (selling breakdowns).
 
-name = "12h_1d_alligator_v1"
-timeframe = "12h"
+name = "4h_12h_donchian_breakout_volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,42 +24,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Alligator calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Calculate SMAs for Alligator (Williams Alligator uses SMAs, not EMAs)
-    close_1d = df_1d['close'].values
-    # Jaw: 13-period SMA, shifted 8 bars forward
-    jaw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().values
-    jaw = np.roll(jaw, 8)  # shift forward 8 bars
-    # Teeth: 8-period SMA, shifted 5 bars forward
-    teeth = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().values
-    teeth = np.roll(teeth, 5)  # shift forward 5 bars
-    # Lips: 5-period SMA, shifted 3 bars forward
-    lips = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values
-    lips = np.roll(lips, 3)  # shift forward 3 bars
+    # Calculate EMA25 and EMA50 on 12h close
+    close_12h = df_12h['close'].values
+    ema25_12h = pd.Series(close_12h).ewm(span=25, adjust=False, min_periods=25).mean().values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align Alligator lines to 12h timeframe (daily values update after daily bar closes)
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    # Align 12h EMAs to 4h timeframe (12h values update after 12h bar closes)
+    ema25_12h_aligned = align_htf_to_ltf(prices, df_12h, ema25_12h)
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Calculate EMA26 on 12h for entry timing
-    ema26_12h = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean().values
+    # Calculate Donchian channel on 4h (20-period high/low)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: volume > 1.3 * 20-period average (12h timeframe)
+    # Volume confirmation: volume > 1.5 * 20-period average (4h timeframe)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.3)
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):  # start after warmup
+    for i in range(50, n):  # start after warmup
         # Skip if data not ready
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) 
-            or np.isnan(ema26_12h[i])):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
+           np.isnan(ema25_12h_aligned[i]) or np.isnan(ema50_12h_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -76,24 +69,19 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Bullish alignment: Lips > Teeth > Jaw
-        bullish_alignment = (lips_aligned[i] > teeth_aligned[i]) and (teeth_aligned[i] > jaw_aligned[i])
-        # Bearish alignment: Lips < Teeth < Jaw
-        bearish_alignment = (lips_aligned[i] < teeth_aligned[i]) and (teeth_aligned[i] < jaw_aligned[i])
-        
-        # Long signal: bullish alignment AND price above 12h EMA26
-        if bullish_alignment and close[i] > ema26_12h[i] and position != 1:
+        # Long signal: price breaks above Donchian high, volume confirmed, and 12h EMA25 > EMA50
+        if close[i] > donchian_high[i] and ema25_12h_aligned[i] > ema50_12h_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: bearish alignment AND price below 12h EMA26
-        elif bearish_alignment and close[i] < ema26_12h[i] and position != -1:
+        # Short signal: price breaks below Donchian low, volume confirmed, and 12h EMA25 < EMA50
+        elif close[i] < donchian_low[i] and ema25_12h_aligned[i] < ema50_12h_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: opposite alignment or market becomes ranging (intertwined)
-        elif not bullish_alignment and position == 1:
+        # Exit conditions: opposite Donchian breakout
+        elif close[i] < donchian_high[i] and position == 1:
             position = 0
             signals[i] = 0.0
-        elif not bearish_alignment and position == -1:
+        elif close[i] > donchian_low[i] and position == -1:
             position = 0
             signals[i] = 0.0
         else:
