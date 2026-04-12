@@ -33,69 +33,43 @@ def generate_signals(prices):
     pivot = (prev_high + prev_low + prev_close) / 3
     range_val = prev_high - prev_low
     
-    # Key levels: S1, S2, S3, R1, R2, R3 (Camarilla)
-    s1 = close_1d - (high_1d - low_1d) * 1.05 / 12
-    s2 = close_1d - (high_1d - low_1d) * 1.10 / 6
-    s3 = close_1d - (high_1d - low_1d) * 1.10 / 4
-    r1 = close_1d + (high_1d - low_1d) * 1.05 / 12
-    r2 = close_1d + (high_1d - low_1d) * 1.10 / 6
-    r3 = close_1d + (high_1d - low_1d) * 1.10 / 4
+    # Key levels: R3, S3, R4, S4 (Camarilla)
+    r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
+    s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
+    r4 = close_1d + (high_1d - low_1d) * 1.1 / 2
+    s4 = close_1d - (high_1d - low_1d) * 1.1 / 2
     
-    # Align levels to 12h timeframe
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
-    s2_12h = align_htf_to_ltf(prices, df_1d, s2)
-    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    r2_12h = align_htf_to_ltf(prices, df_1d, r2)
-    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
+    # Align levels to 6h timeframe
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
+    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Volume filter: 20-period volume moving average
+    # Calculate volume moving average (20-period on 6h)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    
-    # Calculate 12-period RSI for momentum confirmation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.full(n, np.nan)
-    avg_loss = np.full(n, np.nan)
-    for i in range(14, n):
-        if i == 14:
-            avg_gain[i] = np.mean(gain[1:15])
-            avg_loss[i] = np.mean(loss[1:15])
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(s1_12h[i]) or np.isnan(s2_12h[i]) or np.isnan(s3_12h[i]) or
-            np.isnan(r1_12h[i]) or np.isnan(r2_12h[i]) or np.isnan(r3_12h[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(rsi[i])):
+        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or 
+            np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period average
+        # Volume filter: current volume > 1.5x 20-period average (less strict than 2.0)
         volume_filter = volume[i] > vol_ma[i] * 1.5
         
-        # RSI filter: avoid overbought/oversold extremes
-        rsi_filter = (rsi[i] > 30) and (rsi[i] < 70)
+        # Entry conditions: Break of R4/S4 with volume (continuation)
+        long_breakout = (close[i] > r4_6h[i]) and volume_filter
+        short_breakout = (close[i] < s4_6h[i]) and volume_filter
         
-        # Entry conditions: Break of S1/R1 with volume and RSI filter
-        long_breakout = (close[i] > r1_12h[i]) and volume_filter and rsi_filter
-        short_breakout = (close[i] < s1_12h[i]) and volume_filter and rsi_filter
-        
-        # Exit conditions: Return to S2/R2 (mean reversion)
-        long_exit = close[i] < s2_12h[i]
-        short_exit = close[i] > r2_12h[i]
+        # Exit conditions: Return to R3/S3 (mean reversion)
+        long_exit = close[i] < r3_6h[i]
+        short_exit = close[i] > s3_6h[i]
         
         if long_breakout and position != 1:
             position = 1
@@ -120,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_camarilla_s1r1_breakout_s2r2_reversion_v1"
-timeframe = "12h"
+name = "6h_1d_camarilla_r4s4_breakout_r3s3_reversion_v2"
+timeframe = "6h"
 leverage = 1.0
