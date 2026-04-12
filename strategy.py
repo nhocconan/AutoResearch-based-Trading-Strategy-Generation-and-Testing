@@ -13,51 +13,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for context
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data for trend context
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate daily EMA(50)
-    close_1d_series = pd.Series(close_1d)
-    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 12h EMA(21) for trend filter
+    close_12h_series = pd.Series(close_12h)
+    ema_21_12h = close_12h_series.ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Calculate daily ATR(14)
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # Calculate 12h ADX(14) for trend strength
+    tr1 = np.abs(high_12h - low_12h)
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
     tr1[0] = tr2[0] = tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = np.full(len(df_1d), np.nan)
-    for i in range(14, len(df_1d)):
-        atr_1d[i] = np.mean(tr[i-14:i+1])
+    atr_12h = np.full(len(df_12h), np.nan)
+    for i in range(14, len(df_12h)):
+        atr_12h[i] = np.mean(tr[i-14:i+1])
     
-    # Calculate daily RSI(14)
-    delta = np.diff(close_1d)
-    delta = np.insert(delta, 0, np.nan)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.full(len(delta), np.nan)
-    avg_loss = np.full(len(delta), np.nan)
-    for i in range(14, len(delta)):
+    # +DM and -DM
+    up_move = np.diff(high_12h)
+    down_move = -np.diff(low_12h)
+    up_move = np.insert(up_move, 0, np.nan)
+    down_move = np.insert(down_move, 0, np.nan)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed +DM, -DM, TR
+    plus_dm_smooth = np.full(len(df_12h), np.nan)
+    minus_dm_smooth = np.full(len(df_12h), np.nan)
+    tr_smooth = np.full(len(df_12h), np.nan)
+    for i in range(14, len(df_12h)):
         if i == 14:
-            avg_gain[i] = np.mean(gain[1:15])
-            avg_loss[i] = np.mean(loss[1:15])
+            plus_dm_smooth[i] = np.sum(plus_dm[1:15])
+            minus_dm_smooth[i] = np.sum(minus_dm[1:15])
+            tr_smooth[i] = np.sum(tr[1:15])
         else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi_1d = 100 - (100 / (1 + rs))
+            plus_dm_smooth[i] = plus_dm_smooth[i-1] - (plus_dm_smooth[i-1] / 14) + plus_dm[i]
+            minus_dm_smooth[i] = minus_dm_smooth[i-1] - (minus_dm_smooth[i-1] / 14) + minus_dm[i]
+            tr_smooth[i] = tr_smooth[i-1] - (tr_smooth[i-1] / 14) + tr[i]
     
-    # Align daily indicators to 6h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # DI and DX
+    plus_di = np.divide(100 * plus_dm_smooth, tr_smooth, out=np.full_like(plus_dm_smooth, np.nan), where=tr_smooth!=0)
+    minus_di = np.divide(100 * minus_dm_smooth, tr_smooth, out=np.full_like(minus_dm_smooth, np.nan), where=tr_smooth!=0)
+    dx = np.divide(100 * np.abs(plus_di - minus_di), plus_di + minus_di, out=np.full_like(plus_di, np.nan), where=(plus_di + minus_di)!=0)
+    adx_12h = np.full(len(df_12h), np.nan)
+    for i in range(27, len(df_12h)):  # 14 + 13 for smoothing
+        if not np.isnan(dx[i-13:i+1]):
+            adx_12h[i] = np.mean(dx[i-13:i+1])
+    
+    # Align 12h indicators to 6h timeframe
+    ema_21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_21_12h)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
     
     # Calculate 6h ATR(14) for position sizing
     tr1_h = np.abs(high - low)
@@ -78,37 +90,26 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(atr_1d_aligned[i]) or np.isnan(atr_6h[i]) or np.isnan(vol_ma_20_6h[i])):
+        if (np.isnan(ema_21_12h_aligned[i]) or np.isnan(adx_12h_aligned[i]) or 
+            np.isnan(atr_6h[i]) or np.isnan(vol_ma_20_6h[i])):
             signals[i] = 0.0
             continue
         
         # Volume filter: current 6h volume > 1.5 * 20-period MA
         vol_filter = volume[i] > 1.5 * vol_ma_20_6h[i]
         
-        # Volatility filter: daily ATR > 0.5 * its 20-period MA (avoid low volatility)
-        atr_ma_20_1d = np.full(len(df_1d), np.nan)
-        for j in range(34, len(df_1d)):  # 14 + 19 for 20-period MA
-            if not np.isnan(np.mean(atr_1d[j-19:j+1])):
-                atr_ma_20_1d[j] = np.mean(atr_1d[j-19:j+1])
-        atr_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_20_1d)
-        vol_filter_daily = atr_1d_aligned[i] > 0.5 * atr_ma_20_1d_aligned[i] if not np.isnan(atr_ma_20_1d_aligned[i]) else False
+        # Trend filter: price above/below 12h EMA21 with strong trend (ADX > 25)
+        above_ema = close[i] > ema_21_12h_aligned[i]
+        below_ema = close[i] < ema_21_12h_aligned[i]
+        strong_trend = adx_12h_aligned[i] > 25
         
-        # Trend filter: price above/below daily EMA50
-        above_ema = close[i] > ema_50_1d_aligned[i]
-        below_ema = close[i] < ema_50_1d_aligned[i]
+        # Entry conditions: trend + volume + strong trend
+        long_entry = above_ema and vol_filter and strong_trend
+        short_entry = below_ema and vol_filter and strong_trend
         
-        # RSI filter: avoid overbought/oversold extremes
-        rsi_not_overbought = rsi_1d_aligned[i] < 70
-        rsi_not_oversold = rsi_1d_aligned[i] > 30
-        
-        # Entry conditions: trend + volume + volatility + RSI filter
-        long_entry = above_ema and vol_filter and vol_filter_daily and rsi_not_overbought
-        short_entry = below_ema and vol_filter and vol_filter_daily and rsi_not_oversold
-        
-        # Exit conditions: trend reversal or RSI extreme
-        long_exit = below_ema or rsi_1d_aligned[i] >= 70
-        short_exit = above_ema or rsi_1d_aligned[i] <= 30
+        # Exit conditions: trend weakening or reversal
+        long_exit = (not above_ema) or (adx_12h_aligned[i] < 20)
+        short_exit = (not below_ema) or (adx_12h_aligned[i] < 20)
         
         if long_entry and position != 1:
             position = 1
@@ -133,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_ema50_rsi_vol_vol_filter_v1"
+name = "6h_12h_ema21_adx_vol_filter_v1"
 timeframe = "6h"
 leverage = 1.0
