@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v1"
-timeframe = "12h"
+name = "4h_1d_trix_volume_regime"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,83 +17,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation (OHLC from previous day)
+    # Get 1d data for TRIX and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Previous day's OHLC (Camarilla uses previous day's range)
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for previous day
-    # H4 = Close + 1.5 * (High - Low)
-    # L4 = Close - 1.5 * (High - Low)
-    # H3 = Close + 1.125 * (High - Low)
-    # L3 = Close - 1.125 * (High - Low)
-    # H2 = Close + 0.75 * (High - Low)
-    # L2 = Close - 0.75 * (High - Low)
-    # H1 = Close + 0.5 * (High - Low)
-    # L1 = Close - 0.5 * (High - Low)
+    # Calculate TRIX on daily close (15-period triple EMA)
+    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    trix_raw = (ema3 / ema3.shift(1) - 1) * 100
+    trix = trix_raw.values
     
-    range_1d = prev_high - prev_low
-    h4 = prev_close + 1.5 * range_1d
-    l4 = prev_close - 1.5 * range_1d
-    h3 = prev_close + 1.125 * range_1d
-    l3 = prev_close - 1.125 * range_1d
-    h2 = prev_close + 0.75 * range_1d
-    l2 = prev_close - 0.75 * range_1d
-    h1 = prev_close + 0.5 * range_1d
-    l1 = prev_close - 0.5 * range_1d
+    # Calculate 34-period EMA for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align Camarilla levels to 12h timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h2_aligned = align_htf_to_ltf(prices, df_1d, h2)
-    l2_aligned = align_htf_to_ltf(prices, df_1d, l2)
-    h1_aligned = align_htf_to_ltf(prices, df_1d, h1)
-    l1_aligned = align_htf_to_ltf(prices, df_1d, l1)
+    # Get 1w data for regime filter (choppiness-like using range)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
     
-    # Volume filter: 24-period average on 12h data (2 days)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    # Weekly range as volatility measure
+    weekly_range = high_1w - low_1w
+    # Use 8-week average range for normalization
+    avg_range = pd.Series(weekly_range).rolling(window=8, min_periods=8).mean().values
+    # Avoid division by zero
+    range_ratio = np.where(avg_range > 0, weekly_range / avg_range, 1.0)
+    
+    # Align all indicators to 4h
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    range_ratio_aligned = align_htf_to_ltf(prices, df_1w, range_ratio)
+    
+    # Volume filter - 20-period average on 4h data
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=24, min_periods=24).mean().values
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
-    
-    # Trend filter: 50-period EMA on 1d close
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(h2_aligned[i]) or np.isnan(l2_aligned[i]) or
-            np.isnan(h1_aligned[i]) or np.isnan(l1_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(trix_aligned[i]) or np.isnan(ema34_aligned[i]) or 
+            np.isnan(range_ratio_aligned[i]) or np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend from 1d EMA
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # TRIX signal: zero line cross
+        trix_pos = trix_aligned[i] > 0
+        trix_neg = trix_aligned[i] < 0
         
-        # Camarilla breakout signals with volume confirmation
-        # Long: Break above H3 or H4 with volume
-        long_signal = ((close[i] > h3_aligned[i] or close[i] > h4_aligned[i]) and 
-                      uptrend and volume_ok[i])
-        # Short: Break below L3 or L4 with volume
-        short_signal = ((close[i] < l3_aligned[i] or close[i] < l4_aligned[i]) and 
-                       downtrend and volume_ok[i])
+        # Trend filter: price vs 34 EMA
+        uptrend = close[i] > ema34_aligned[i]
+        downtrend = close[i] < ema34_aligned[i]
         
-        # Exit when price returns to H1/L1 levels (mean reversion to mean)
-        exit_long = close[i] < h1_aligned[i]
-        exit_short = close[i] > l1_aligned[i]
+        # Regime filter: avoid extreme volatility (range_ratio > 2.0 = choppy)
+        low_volatility = range_ratio_aligned[i] < 2.0
+        
+        # Entry conditions with volume confirmation
+        # Long: TRIX positive AND uptrend AND low volatility AND volume
+        long_signal = trix_pos and uptrend and low_volatility and volume_ok[i]
+        # Short: TRIX negative AND downtrend AND low volatility AND volume
+        short_signal = trix_neg and downtrend and low_volatility and volume_ok[i]
+        
+        # Exit when TRIX crosses zero
+        exit_long = trix_aligned[i] <= 0
+        exit_short = trix_aligned[i] >= 0
         
         # Execute trades
         if long_signal and position != 1:
