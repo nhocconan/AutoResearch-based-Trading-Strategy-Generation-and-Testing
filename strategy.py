@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_1d_ema_crossover_volatility_filter
-Hypothesis: 12-hour strategy using EMA crossovers on daily timeframe for trend direction, with volatility-based position sizing.
-Uses daily EMA(50) and EMA(200) crossover for trend, and ATR-based volatility filter to avoid choppy markets.
-Designed to work in both bull and bear markets by only taking trades aligned with the higher timeframe trend.
-Target: 20-30 trades/year (80-120 total over 4 years) to minimize fee drag.
+4h_12h_camarilla_breakout_volume_v1
+Hypothesis: 4-hour strategy using 12-hour Camarilla pivot levels with volume confirmation. 
+Trades breakouts above/below daily pivot-based resistance/support levels only when accompanied by volume spikes.
+Works in bull markets (breakouts continue) and bear markets (breakdowns continue) by trading with momentum.
+Target: 25-40 trades/year (100-160 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,93 +21,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend and volatility
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    # Get 12-hour data for Camarilla calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate Camarilla levels from previous 12h bar
+    # Formula: Based on previous day's high, low, close
+    # Resistance levels: R1 = C + (H-L)*1.1/12, R2 = C + (H-L)*1.1/6, R3 = C + (H-L)*1.1/4, R4 = C + (H-L)*1.1/2
+    # Support levels: S1 = C - (H-L)*1.1/12, S2 = C - (H-L)*1.1/6, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
+    h_12h = df_12h['high'].values
+    l_12h = df_12h['low'].values
+    c_12h = df_12h['close'].values
     
-    # Daily EMA50 and EMA200 for trend direction
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate ranges
+    range_12h = h_12h - l_12h
     
-    # Daily ATR for volatility filter
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(np.roll(high_1d, 1) - close_1d)
-    tr3 = np.abs(np.roll(low_1d, 1) - close_1d)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Camarilla levels (using previous bar to avoid look-ahead)
+    r1_12h = c_12h + range_12h * 1.1 / 12
+    r2_12h = c_12h + range_12h * 1.1 / 6
+    r3_12h = c_12h + range_12h * 1.1 / 4
+    r4_12h = c_12h + range_12h * 1.1 / 2
+    s1_12h = c_12h - range_12h * 1.1 / 12
+    s2_12h = c_12h - range_12h * 1.1 / 6
+    s3_12h = c_12h - range_12h * 1.1 / 4
+    s4_12h = c_12h - range_12h * 1.1 / 2
     
-    # Align to 12h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Align to 4h timeframe
+    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
+    r2_12h_aligned = align_htf_to_ltf(prices, df_12h, r2_12h)
+    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
+    r4_12h_aligned = align_htf_to_ltf(prices, df_12h, r4_12h)
+    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
+    s2_12h_aligned = align_htf_to_ltf(prices, df_12h, s2_12h)
+    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
+    s4_12h_aligned = align_htf_to_ltf(prices, df_12h, s4_12h)
     
-    # Calculate 12-period ATR for position sizing (using 12h data)
-    tr_12h1 = np.abs(high - low)
-    tr_12h2 = np.abs(np.roll(high, 1) - close)
-    tr_12h3 = np.abs(np.roll(low, 1) - close)
-    tr_12h = np.maximum(tr_12h1, np.maximum(tr_12h2, tr_12h3))
-    atr_12h = pd.Series(tr_12h).rolling(window=12, min_periods=12).mean().values
+    # Volume spike detector (volume > 1.5x 20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or 
-            np.isnan(atr_1d_aligned[i]) or np.isnan(atr_12h[i])):
+        if (np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when ATR is above its 50-period median (avoid choppy markets)
-        atr_median = np.nanmedian(atr_12h[max(0, i-50):i+1])
-        if atr_12h[i] < atr_median * 0.8:  # Avoid low volatility periods
-            # Hold current position or stay flat
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Trend determination: EMA50 > EMA200 = uptrend, EMA50 < EMA200 = downtrend
-        uptrend = ema50_1d_aligned[i] > ema200_1d_aligned[i]
-        downtrend = ema50_1d_aligned[i] < ema200_1d_aligned[i]
-        
-        # Entry conditions
-        if uptrend and position != 1:
-            # Long entry: pullback to EMA50 area with momentum
-            if close[i] > ema50_1d_aligned[i] * 0.995 and close[i] < ema50_1d_aligned[i] * 1.005:
-                position = 1
-                signals[i] = 0.25  # Fixed size to reduce churn
-        elif downtrend and position != -1:
-            # Short entry: rally to EMA50 area with momentum
-            if close[i] < ema50_1d_aligned[i] * 1.005 and close[i] > ema50_1d_aligned[i] * 0.995:
-                position = -1
-                signals[i] = -0.25  # Fixed size to reduce churn
-        # Exit conditions: trend reversal
-        elif position == 1 and downtrend:
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and uptrend:
-            position = 0
-            signals[i] = 0.0
+        # Long breakout: price breaks above R1 with volume spike
+        if close[i] > r1_12h_aligned[i] and volume_spike[i]:
+            signals[i] = 0.25
+        # Short breakdown: price breaks below S1 with volume spike
+        elif close[i] < s1_12h_aligned[i] and volume_spike[i]:
+            signals[i] = -0.25
         else:
-            # Hold current position
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
+            # Hold flat or previous signal (minimize changes)
+            signals[i] = 0.0
     
     return signals
 
-name = "12h_1d_ema_crossover_volatility_filter"
-timeframe = "12h"
+name = "4h_12h_camarilla_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
