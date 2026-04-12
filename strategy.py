@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-1d_1w_RSI_Overbought_Oversold_Simple_v1
-Hypothesis: On daily timeframe, use weekly RSI(14) to identify overbought (>70) and oversold (<30) conditions.
-Enter short when weekly RSI > 70 and price closes below daily VWAP, enter long when weekly RSI < 30 and price closes above daily VWAP.
-Exit when RSI returns to neutral zone (30-70). Works in both bull and bear markets by fading extremes.
-Designed for low trade frequency (target 10-25 trades/year) by requiring extreme RSI levels.
+12h_1d_Camarilla_Pivot_Breakout_Volume_Trend_v2
+Hypothesis: 12h timeframe with 1d Camarilla pivot levels, volume confirmation, and 1d EMA trend filter.
+Improved version: tighter entry conditions (volume > 2x average, only H3/L3 breakouts) to reduce trade frequency
+and focus on high-probability breakouts. Designed for 12-37 trades/year. Works in bull/bear markets by only taking
+trend-aligned breakouts.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_RSI_Overbought_Oversold_Simple_v1"
-timeframe = "1d"
+name = "12h_1d_Camarilla_Pivot_Breakout_Volume_Trend_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -26,65 +26,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for RSI
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 15:  # Need at least 14 periods for RSI
+    # Load 1d data ONCE before loop for Camarilla pivots and EMA
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly RSI(14)
-    close_1w = df_1w['close'].values
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate Camarilla levels from previous day
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[14] = np.mean(gain[1:15])  # First average
-    avg_loss[14] = np.mean(loss[1:15])
+    # Calculate pivot and ranges
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
     
-    for i in range(15, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Camarilla levels (only H3 and L3 for tighter entries)
+    H3 = pivot + range_hl * 1.1 / 4
+    L3 = pivot - range_hl * 1.1 / 4
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi_1w = np.where(avg_loss == 0, 100, 100 - (100 / (1 + rs)))
-    rsi_1w[:14] = np.nan  # Not enough data
+    # Align to 12h timeframe
+    H3_12h = align_htf_to_ltf(prices, df_1d, H3)
+    L3_12h = align_htf_to_ltf(prices, df_1d, L3)
     
-    # Align RSI to daily timeframe
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # Calculate 1d EMA (21 period) for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate daily VWAP (typical price * volume cumulative)
-    typical_price = (high + low + close) / 3
-    vwap = np.cumsum(typical_price * volume) / np.cumsum(volume)
-    # Handle division by zero on first bar
-    vwap[volume.cumsum() == 0] = typical_price[volume.cumsum() == 0]
+    # Volume average (20 period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(14, n):  # Start after RSI warmup
-        # Skip if RSI data is invalid
-        if np.isnan(rsi_1w_aligned[i]):
+    for i in range(20, n):
+        # Skip if any required data is invalid
+        if (np.isnan(H3_12h[i]) or np.isnan(L3_12h[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Price relative to VWAP
-        above_vwap = close[i] > vwap[i]
-        below_vwap = close[i] < vwap[i]
+        # Volume spike: current volume > 2x average (tighter)
+        volume_spike = volume[i] > vol_ma[i] * 2.0
         
-        # RSI conditions
-        rsi_overbought = rsi_1w_aligned[i] > 70
-        rsi_oversold = rsi_1w_aligned[i] < 30
-        rsi_neutral = (rsi_1w_aligned[i] >= 30) & (rsi_1w_aligned[i] <= 70)
+        # Trend filter: price above/below 1d EMA
+        above_ema = close[i] > ema_1d_aligned[i]
+        below_ema = close[i] < ema_1d_aligned[i]
         
-        # Entry conditions
-        long_entry = rsi_oversold and above_vwap
-        short_entry = rsi_overbought and below_vwap
+        # Entry conditions: breakout of H3/L3 with volume and trend
+        long_entry = (close[i] > H3_12h[i]) and volume_spike and above_ema
+        short_entry = (close[i] < L3_12h[i]) and volume_spike and below_ema
         
-        # Exit conditions: RSI returns to neutral
-        long_exit = rsi_neutral
-        short_exit = rsi_neutral
+        # Exit conditions: return to opposite H3/L3 level or trend reversal
+        long_exit = (close[i] < L3_12h[i]) or (close[i] < ema_1d_aligned[i])
+        short_exit = (close[i] > H3_12h[i]) or (close[i] > ema_1d_aligned[i])
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
