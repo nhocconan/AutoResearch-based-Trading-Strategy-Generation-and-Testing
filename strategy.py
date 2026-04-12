@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_breakout_v1"
+name = "4h_1d_camarilla_breakout_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR and Donchian calculation
+    # Get 1d data for ATR and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -47,17 +47,20 @@ def generate_signals(prices):
     position_size = base_size * vol_scaling
     position_size = np.clip(position_size, 0.10, 0.30)
     
-    # Calculate Donchian channel (20-period high/low) using previous day's data
-    donchian_high = np.full(len(close_1d), np.nan)
-    donchian_low = np.full(len(close_1d), np.nan)
+    # Calculate Camarilla levels using previous day's data
+    camarilla_high = np.full(len(close_1d), np.nan)
+    camarilla_low = np.full(len(close_1d), np.nan)
     
-    for i in range(20, len(close_1d)):
-        donchian_high[i] = np.max(high_1d[i-20:i])
-        donchian_low[i] = np.min(low_1d[i-20:i])
+    for i in range(1, len(close_1d)):
+        H = high_1d[i-1]
+        L = low_1d[i-1]
+        C = close_1d[i-1]
+        camarilla_high[i] = C + ((H - L) * 1.1 / 2)
+        camarilla_low[i] = C - ((H - L) * 1.1 / 2)
     
-    # Align Donchian levels to 4h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Align Camarilla levels to 4h timeframe
+    camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
+    camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
     
     # Volume filter: current volume > 20-period average (on 4h data)
     vol_series = pd.Series(volume)
@@ -69,23 +72,31 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+        if (np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]) or 
             np.isnan(volume_ok[i]) or np.isnan(position_size[i])):
             signals[i] = 0.0 if position == 0 else (position_size[i] if position == 1 else -position_size[i])
             continue
         
         # Breakout conditions with volume confirmation
-        breakout_up = close[i] > donchian_high_aligned[i]
-        breakout_down = close[i] < donchian_low_aligned[i]
+        breakout_up = close[i] > camarilla_high_aligned[i]
+        breakout_down = close[i] < camarilla_low_aligned[i]
         vol_ok = volume_ok[i]
         
         # Entry signals
         long_signal = breakout_up and vol_ok
         short_signal = breakout_down and vol_ok
         
-        # Exit when price returns to the opposite Donchian level
-        exit_long = close[i] < donchian_low_aligned[i]
-        exit_short = close[i] > donchian_high_aligned[i]
+        # Exit when price returns to the Camarilla pivot (close of previous day)
+        pivot_point = np.full(len(close_1d), np.nan)
+        for j in range(1, len(close_1d)):
+            H = high_1d[j-1]
+            L = low_1d[j-1]
+            C = close_1d[j-1]
+            pivot_point[j] = (H + L + C) / 3
+        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_point)
+        
+        exit_long = close[i] < pivot_aligned[i]
+        exit_short = close[i] > pivot_aligned[i]
         
         # Execute trades
         if long_signal and position != 1:
