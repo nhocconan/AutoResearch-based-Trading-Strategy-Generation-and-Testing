@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-12h_1d_Weekly_Pivot_Breakout_v1
-Hypothesis: Use weekly pivot levels with volume confirmation on 12h timeframe.
-Long when price breaks above weekly R4 with volume > 1.5x 20-period average,
-short when breaks below weekly S4 with volume > 1.5x 20-period average.
-Weekly pivots provide strong institutional levels; volume confirms breakout strength.
+6h_1w_RSI_Extremes_v1
+Hypothesis: Use weekly RSI extremes with 6h price action to capture mean reversion in overbought/oversold conditions.
+Long when weekly RSI < 30 and 6h price closes above 6h VWAP, short when weekly RSI > 70 and 6h price closes below 6h VWAP.
+Exit when weekly RSI returns to neutral zone (40-60). Weekly RSI avoids whipsaw from lower timeframe noise.
+Works in bull via buying oversold dips, in bear via selling overbought rallies.
 Designed for low trade frequency (target: 50-150 total over 4 years) to minimize fee drag.
-Works in bull via breakouts above resistance, in bear via breakdowns below support.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Weekly_Pivot_Breakout_v1"
-timeframe = "12h"
+name = "6h_1w_RSI_Extremes_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,64 +27,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for pivot levels
+    # Weekly RSI calculation (14-period)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    if len(df_1w) < 15:  # Need at least 14 periods for RSI
         return np.zeros(n)
     
-    # Previous week's OHLC for pivot calculation
-    prev_high = df_1w['high'].iloc[-2] if len(df_1w) >= 2 else df_1w['high'].iloc[-1]
-    prev_low = df_1w['low'].iloc[-2] if len(df_1w) >= 2 else df_1w['low'].iloc[-1]
-    prev_close = df_1w['close'].iloc[-2] if len(df_1w) >= 2 else df_1w['close'].iloc[-1]
+    # Calculate weekly RSI
+    close_1w = df_1w['close'].values
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate weekly pivot levels (standard floor trader pivots)
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_val = prev_high - prev_low
-    if range_val <= 0:
-        return np.zeros(n)
+    # Use Wilder's smoothing (equivalent to EMA with alpha=1/14)
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14])  # First average of first 14 gains
+    avg_loss[13] = np.mean(loss[1:14])  # First average of first 14 losses
     
-    # Weekly R4 and S4 levels
-    weekly_r4 = prev_close + range_val * 1.1 * 2  # R4 = Close + 2.2 * Range
-    weekly_s4 = prev_close - range_val * 1.1 * 2  # S4 = Close - 2.2 * Range
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Align weekly levels to 12h timeframe
-    weekly_r4_array = np.full(len(df_1w), weekly_r4)
-    weekly_s4_array = np.full(len(df_1w), weekly_s4)
-    weekly_r4_aligned = align_htf_to_ltf(prices, df_1w, weekly_r4_array)
-    weekly_s4_aligned = align_htf_to_ltf(prices, df_1w, weekly_s4_array)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi_1w = np.where(avg_loss == 0, 100, 100 - (100 / (1 + rs)))
+    rsi_1w = np.where(avg_gain == 0, 0, rsi_1w)  # Handle case where avg_gain is 0
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    volume_series = pd.Series(volume)
-    vol_ma = volume_series.rolling(window=20, min_periods=20).mean()
-    vol_ratio = volume_series / vol_ma
-    vol_ratio = vol_ratio.fillna(1.0).values  # default to 1.0 if no MA
+    # Align weekly RSI to 6h timeframe
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    
+    # 6h VWAP calculation (typical price * volume cumsum / volume cumsum)
+    typical_price = (high + low + close) / 3
+    vwap_numerator = np.cumsum(typical_price * volume)
+    vwap_denominator = np.cumsum(volume)
+    vwap = np.where(vwap_denominator != 0, vwap_numerator / vwap_denominator, typical_price)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any data invalid
-        if (np.isnan(weekly_r4_aligned[i]) or np.isnan(weekly_s4_aligned[i]) or
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(rsi_1w_aligned[i]) or np.isnan(vwap[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Breakout conditions with volume filter
-        long_breakout = close[i] > weekly_r4_aligned[i] and vol_ratio[i] > 1.5
-        short_breakout = close[i] < weekly_s4_aligned[i] and vol_ratio[i] > 1.5
+        # Entry conditions: weekly RSI extremes + price vs VWAP
+        long_entry = rsi_1w_aligned[i] < 30 and close[i] > vwap[i]
+        short_entry = rsi_1w_aligned[i] > 70 and close[i] < vwap[i]
         
-        # Exit conditions: return to weekly pivot
-        weekly_pivot_array = np.full(len(df_1w), pivot)
-        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot_array)
-        
-        long_exit = close[i] < weekly_pivot_aligned[i]
-        short_exit = close[i] > weekly_pivot_aligned[i]
+        # Exit conditions: weekly RSI returns to neutral zone (40-60)
+        long_exit = rsi_1w_aligned[i] >= 40
+        short_exit = rsi_1w_aligned[i] <= 60
         
         # Signal logic
-        if long_breakout and position != 1:
+        if long_entry and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_breakout and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
