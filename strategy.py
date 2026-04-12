@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_1d_AngleBased_Trend_Reversal_v1
-Hypothesis: Price reverses at daily Camarilla L3/H3 when 4H price angle (slope of EMA20) is opposite to position, indicating exhaustion.
-Long when price touches L3 and 4H EMA20 slope turns up after being down; short when touches H3 and slope turns down after being up.
-Exit when price touches opposite H4/L4 or slope reverses. Designed for 4H to work in both bull and bear via mean-reversion at institutional levels.
+4h_1d_1w_Camarilla_Trend_Filter_v1
+Hypothesis: Mean reversion at daily Camarilla L3/H3 levels with weekly trend filter and volume confirmation.
+Long when price touches L3 in weekly uptrend with volume spike; short when touches H3 in weekly downtrend.
+Exit on trend reversal or break of H4/L4. Designed for 4h timeframe to capture mean-reversion bounces in both bull and bear markets.
 Target: 50-120 total trades over 4 years (12-30/year).
 """
 
@@ -11,13 +11,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_AngleBased_Trend_Reversal_v1"
+name = "4h_1d_1w_Camarilla_Trend_Filter_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -55,39 +55,50 @@ def generate_signals(prices):
     h4_4h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
     l4_4h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
-    # === 4-HOUR EMA20 AND SLOPE ===
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    # Slope: change over 3 periods
-    ema20_slope = np.zeros_like(ema20)
-    ema20_slope[3:] = (ema20[3:] - ema20[:-3]) / 3
+    # === WEEKLY TREND FILTER ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_4h = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # === VOLUME SURGE FILTER ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(h3_4h[i]) or np.isnan(l3_4h[i]) or np.isnan(h4_4h[i]) or 
-            np.isnan(l4_4h[i]) or np.isnan(ema20_slope[i])):
+        if (np.isnan(h3_4h[i]) or np.isnan(l3_4h[i]) or np.isnan(ema50_1w_4h[i]) or 
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: price at L3 and EMA20 slope turns up (was <=0, now >0)
-        long_signal = (close[i] <= l3_4h[i] * 1.001 and  # Very tight tolerance
-                      close[i] >= l4_4h[i] * 0.999 and   # Above L4
-                      ema20_slope[i] > 0 and 
-                      ema20_slope[i-1] <= 0)
+        # Get current 4h close
+        trend_up = close[i] > ema50_1w_4h[i]
+        trend_down = close[i] < ema50_1w_4h[i]
         
-        # Short: price at H3 and EMA20 slope turns down (was >=0, now <0)
-        short_signal = (close[i] >= h3_4h[i] * 0.999 and   # Very tight tolerance
-                       close[i] <= h4_4h[i] * 1.001 and    # Below H4
-                       ema20_slope[i] < 0 and 
-                       ema20_slope[i-1] >= 0)
+        # Long: touch L3 in weekly uptrend with volume surge
+        long_signal = (trend_up and 
+                      close[i] <= l3_4h[i] * 1.005 and  # Slightly relaxed tolerance
+                      close[i] >= l4_4h[i] * 0.995 and  # Above L4
+                      vol_ratio[i] > 2.0)
         
-        # Exit: price touches opposite level or slope reverses
+        # Short: touch H3 in weekly downtrend with volume surge
+        short_signal = (trend_down and 
+                       close[i] >= h3_4h[i] * 0.995 and  # Slightly relaxed tolerance
+                       close[i] <= h4_4h[i] * 1.005 and  # Below H4
+                       vol_ratio[i] > 2.0)
+        
+        # Exit: trend reversal or break of H4/L4
         exit_long = (position == 1 and 
-                    (close[i] >= h4_4h[i] or ema20_slope[i] < 0))
+                    (not trend_up or close[i] >= h4_4h[i]))
         exit_short = (position == -1 and 
-                     (close[i] <= l4_4h[i] or ema20_slope[i] > 0))
+                     (not trend_down or close[i] <= l4_4h[i]))
         
         # Execute trades
         if long_signal and position != 1:
