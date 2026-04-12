@@ -1,75 +1,89 @@
-# 4h_12h_camarilla_breakout_volatility_filter
-# Uses 12h Camarilla pivot levels (H4/L4) as support/resistance on 4h chart.
-# Long when price breaks above H4 with low volatility (ATR < 1.5x 20-period ATR).
-# Short when price breaks below L4 with low volatility.
-# Exits when price returns to 12h pivot point (mean reversion).
-# Designed for low trade frequency (target: 20-30 per year) to minimize fee drag.
-# Works in trending markets via breakouts and in ranging markets via mean reversion.
-# Filters out high-volatility breakouts that often fail, improving win rate.
-
-from __future__ import annotations
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_camarilla_breakout_volatility_filter"
-timeframe = "4h"
+# Hypothesis: 6h_1w_1d_trix_momentum_v1
+# Uses TRIX (12-period triple EMA) on weekly timeframe for trend direction,
+# combined with daily RSI(14) for momentum and volume confirmation on 6h chart.
+# Long when weekly TRIX > 0, daily RSI < 30 (oversold), and volume > 1.5x 20-period average.
+# Short when weekly TRIX < 0, daily RSI > 70 (overbought), and volume confirmation.
+# Exits when RSI returns to neutral zone (40-60) or TRIX changes sign.
+# Designed for low trade frequency (target: 15-25 trades/year) to minimize fee drag.
+# Works in trending markets via TRIX direction and in ranging markets via RSI mean reversion.
+
+name = "6h_1w_1d_trix_momentum_v1"
+timeframe = "6h"
 leverage = 1.0
 
-def generate_signals(prices: pd.DataFrame) -> np.ndarray:
+def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 12h data for Camarilla pivot calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get weekly data for TRIX calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:  # Need enough data for triple EMA
         return np.zeros(n)
     
-    # Calculate 12h Camarilla levels (based on previous 12h bar's OHLC)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate TRIX on weekly close
+    close_1w = df_1w['close'].values
     
-    # Calculate pivot point and Camarilla levels for each 12h period
-    pp = (high_12h + low_12h + close_12h) / 3.0
-    range_12h = high_12h - low_12h
+    # Triple EMA: EMA(EMA(EMA(close)))
+    ema1 = pd.Series(close_1w).ewm(span=12, adjust=False, min_periods=12).mean()
+    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
     
-    # Camarilla levels: H4 = PP + 1.1/2 * range, L4 = PP - 1.1/2 * range
-    h4 = pp + (1.1 / 2) * range_12h
-    l4 = pp - (1.1 / 2) * range_12h
+    # TRIX = (EMA3 - previous EMA3) / previous EMA3 * 100
+    trix_raw = (ema3 - ema3.shift(1)) / ema3.shift(1) * 100
+    trix = trix_raw.fillna(0).values  # Handle NaN from shift
     
-    # Align 12h levels to 4h timeframe (12h values update after 12h bar closes)
-    h4_aligned = align_htf_to_ltf(prices, df_12h, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_12h, l4)
-    pp_aligned = align_htf_to_ltf(prices, df_12h, pp)
+    # Align weekly TRIX to 6h timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_1w, trix)
     
-    # Volatility filter: ATR < 1.5 * 20-period ATR (4h timeframe)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = np.nan
-    tr3[0] = np.nan
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
-    vol_filter = atr < (1.5 * pd.Series(atr).rolling(window=20, min_periods=20).mean().values)
+    # Get daily data for RSI calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    
+    # Calculate RSI on daily close
+    close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing (equivalent to EMA with alpha=1/14)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    
+    rs = avg_gain / (avg_loss + 1e-10)  # Avoid division by zero
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.fillna(50).values  # Neutral RSI when not enough data
+    
+    # Align daily RSI to 6h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_values)
+    
+    # Volume confirmation: volume > 1.5 * 20-period average (6h timeframe)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(50, n):  # start after warmup
         # Skip if data not ready
-        if np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(pp_aligned[i]) or np.isnan(vol_filter[i]):
+        if np.isnan(trix_aligned[i]) or np.isnan(rsi_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Require low volatility for new entries
-        if not vol_filter[i]:
-            # Hold current position if volatility filter fails
+        # Require volume confirmation for new entries
+        if not vol_confirm[i]:
+            # Hold current position if volume filter fails
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -78,19 +92,19 @@ def generate_signals(prices: pd.DataFrame) -> np.ndarray:
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above H4 with low volatility
-        if close[i] > h4_aligned[i] and position != 1:
+        # Long signal: weekly TRIX positive (uptrend), daily RSI oversold (<30)
+        if trix_aligned[i] > 0 and rsi_aligned[i] < 30 and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below L4 with low volatility
-        elif close[i] < l4_aligned[i] and position != -1:
+        # Short signal: weekly TRIX negative (downtrend), daily RSI overbought (>70)
+        elif trix_aligned[i] < 0 and rsi_aligned[i] > 70 and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: price returns to 12h pivot point (mean reversion)
-        elif position == 1 and close[i] <= pp_aligned[i]:
+        # Exit conditions: RSI returns to neutral zone (40-60) or TRIX changes sign
+        elif position == 1 and (rsi_aligned[i] >= 40 or trix_aligned[i] <= 0):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] >= pp_aligned[i]:
+        elif position == -1 and (rsi_aligned[i] <= 60 or trix_aligned[i] >= 0):
             position = 0
             signals[i] = 0.0
         else:
