@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-1d_1w_MultiTimeframe_Momentum_v1
-Hypothesis: Combine daily price momentum (close > open) with weekly trend strength (price > weekly EMA50) and volume confirmation. 
-This strategy captures strong trending moves while avoiding choppy markets. Designed for low trade frequency (<25 trades/year) 
-by requiring confluence of daily momentum, weekly trend, and volume spike. Works in both bull (riding trends) and bear (shorting breakdowns) markets.
+4h_1d_RSI_MeanRev_Trend_Filter
+Hypothesis: On 4h timeframe, use 1d RSI extremes for mean-reversion entries in ranging markets,
+filtered by 1d ADX trend strength to avoid counter-trend trades. Uses 4h price action
+for entry timing with RSI(14) < 30 for long, > 70 for short. ADX(14) < 20 indicates ranging
+market where mean reversion works. Designed for low trade frequency (15-30/year) to avoid
+fee decay while capturing reversals at extremes in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_MultiTimeframe_Momentum_v1"
-timeframe = "1d"
+name = "4h_1d_RSI_MeanRev_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,64 +23,78 @@ def generate_signals(prices):
     
     # Price arrays
     close = prices['close'].values
-    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate weekly EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema50_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 50:
-        ema50_1w[49] = np.mean(close_1w[:50])  # Simple average for first value
-        alpha = 2 / (50 + 1)
-        for i in range(50, len(close_1w)):
-            ema50_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema50_1w[i-1]
+    # Calculate RSI(14) on daily closes
+    delta = np.diff(df_1d['close'].values)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    # First average gain/loss
+    avg_gain = np.full(len(df_1d), np.nan)
+    avg_loss = np.full(len(df_1d), np.nan)
+    avg_gain[14] = np.nanmean(gain[1:15])
+    avg_loss[14] = np.nanmean(loss[1:15])
+    for i in range(15, len(df_1d)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_1d = 100 - (100 / (1 + rs))
     
-    # Align weekly EMA50 to daily timeframe
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate ADX(14) on daily data
+    # True Range
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Directional Movement
+    up_move = df_1d['high'] - df_1d['high'].shift(1)
+    down_move = df_1d['low'].shift(1) - df_1d['low']
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Smoothed values
+    tr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
+    plus_dm_14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values
+    minus_dm_14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values
+    # Directional Indicators
+    plus_di = 100 * plus_dm_14 / tr_14
+    minus_di = 100 * minus_dm_14 / tr_14
+    # DX and ADX
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
     
-    # Calculate daily volume average (20-period)
-    vol_ma20 = np.full(n, np.nan)
-    if n >= 20:
-        vol_sum = np.sum(volume[:20])
-        vol_ma20[19] = vol_sum / 20
-        for i in range(20, n):
-            vol_sum = vol_sum - volume[i-20] + volume[i]
-            vol_ma20[i] = vol_sum / 20
+    # Align to 4h timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(20, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(adx_1d_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Daily momentum: close > open (bullish candle) or close < open (bearish candle)
-        bullish_momentum = close[i] > open_price[i]
-        bearish_momentum = close[i] < open_price[i]
+        # RSI extremes for mean reversion
+        rsi_oversold = rsi_1d_aligned[i] < 30
+        rsi_overbought = rsi_1d_aligned[i] > 70
         
-        # Weekly trend: price above/below weekly EMA50
-        above_weekly_ema = close[i] > ema50_1w_aligned[i]
-        below_weekly_ema = close[i] < ema50_1w_aligned[i]
+        # ADX trend filter: only mean revert in ranging markets (ADX < 20)
+        ranging_market = adx_1d_aligned[i] < 20
         
-        # Volume confirmation: current volume > 1.5x 20-day average
-        volume_spike = volume[i] > 1.5 * vol_ma20[i]
+        # Entry conditions: RSI extreme + ranging market
+        long_entry = rsi_oversold and ranging_market
+        short_entry = rsi_overbought and ranging_market
         
-        # Entry conditions: momentum + trend + volume
-        long_entry = bullish_momentum and above_weekly_ema and volume_spike
-        short_entry = bearish_momentum and below_weekly_ema and volume_spike
-        
-        # Exit conditions: opposite momentum or loss of trend
-        long_exit = (not bullish_momentum) or (not above_weekly_ema)
-        short_exit = (not bearish_momentum) or (not below_weekly_ema)
+        # Exit conditions: RSI returns to neutral or market trends
+        long_exit = (rsi_1d_aligned[i] >= 50) or (adx_1d_aligned[i] >= 25)
+        short_exit = (rsi_1d_aligned[i] <= 50) or (adx_1d_aligned[i] >= 25)
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
