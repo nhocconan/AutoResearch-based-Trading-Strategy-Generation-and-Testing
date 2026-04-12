@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-4h_1d_RSI_MeanRev_Trend_Filter
-Hypothesis: On 4h timeframe, use 1d RSI extremes for mean-reversion entries in ranging markets,
-filtered by 1d ADX trend strength to avoid counter-trend trades. Uses 4h price action
-for entry timing with RSI(14) < 30 for long, > 70 for short. ADX(14) < 20 indicates ranging
-market where mean reversion works. Designed for low trade frequency (15-30/year) to avoid
-fee decay while capturing reversals at extremes in both bull and bear markets.
+4h_1d_Camarilla_Pivot_Breakout_Volume_Trend_v3
+Hypothesis: Camarilla pivot levels from 1d timeframe combined with volume spike confirmation
+and 12h EMA trend filter. Uses tight entry conditions (breakout of H3/L3 levels with volume
+> 1.5x average and price above/below 12h EMA) to generate ~25-40 trades/year. Designed to
+work in both bull and bear markets by only taking breakouts in the direction of the 12h trend.
+Exit when price returns to the pivot center (H4/L4 levels) or trend reverses.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_RSI_MeanRev_Trend_Filter"
+name = "4h_1d_Camarilla_Pivot_Breakout_Volume_Trend_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,76 +25,72 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
+    # Load 1d data ONCE before loop for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate RSI(14) on daily closes
-    delta = np.diff(df_1d['close'].values)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    # First average gain/loss
-    avg_gain = np.full(len(df_1d), np.nan)
-    avg_loss = np.full(len(df_1d), np.nan)
-    avg_gain[14] = np.nanmean(gain[1:15])
-    avg_loss[14] = np.nanmean(loss[1:15])
-    for i in range(15, len(df_1d)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1d = 100 - (100 / (1 + rs))
+    # Calculate Camarilla levels from previous day
+    # H4, H3, L3, L4 - using standard Camarilla formula
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Calculate ADX(14) on daily data
-    # True Range
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    # Directional Movement
-    up_move = df_1d['high'] - df_1d['high'].shift(1)
-    down_move = df_1d['low'].shift(1) - df_1d['low']
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    # Smoothed values
-    tr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
-    plus_dm_14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values
-    minus_dm_14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values
-    # Directional Indicators
-    plus_di = 100 * plus_dm_14 / tr_14
-    minus_di = 100 * minus_dm_14 / tr_14
-    # DX and ADX
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
+    # Calculate pivot and ranges
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
     
-    # Align to 4h timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Camarilla levels
+    H4 = pivot + range_hl * 1.1 / 2
+    H3 = pivot + range_hl * 1.1 / 4
+    L3 = pivot - range_hl * 1.1 / 4
+    L4 = pivot - range_hl * 1.1 / 2
+    
+    # Align to 4h timeframe (these levels are valid for the entire day)
+    H4_4h = align_htf_to_ltf(prices, df_1d, H4)
+    H3_4h = align_htf_to_ltf(prices, df_1d, H3)
+    L3_4h = align_htf_to_ltf(prices, df_1d, L3)
+    L4_4h = align_htf_to_ltf(prices, df_1d, L4)
+    
+    # Load 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
+    
+    # Calculate 12h EMA (21 period)
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    
+    # Volume average (20 period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(H3_4h[i]) or np.isnan(L3_4h[i]) or 
+            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # RSI extremes for mean reversion
-        rsi_oversold = rsi_1d_aligned[i] < 30
-        rsi_overbought = rsi_1d_aligned[i] > 70
+        # Volume spike: current volume > 1.5x average
+        volume_spike = volume[i] > vol_ma[i] * 1.5
         
-        # ADX trend filter: only mean revert in ranging markets (ADX < 20)
-        ranging_market = adx_1d_aligned[i] < 20
+        # Trend filter: price above/below 12h EMA
+        above_ema = close[i] > ema_12h_aligned[i]
+        below_ema = close[i] < ema_12h_aligned[i]
         
-        # Entry conditions: RSI extreme + ranging market
-        long_entry = rsi_oversold and ranging_market
-        short_entry = rsi_overbought and ranging_market
+        # Entry conditions: breakout of H3/L3 with volume and trend
+        long_entry = (close[i] > H3_4h[i]) and volume_spike and above_ema
+        short_entry = (close[i] < L3_4h[i]) and volume_spike and below_ema
         
-        # Exit conditions: RSI returns to neutral or market trends
-        long_exit = (rsi_1d_aligned[i] >= 50) or (adx_1d_aligned[i] >= 25)
-        short_exit = (rsi_1d_aligned[i] <= 50) or (adx_1d_aligned[i] >= 25)
+        # Exit conditions: return to pivot center (H4/L4 levels) or trend reversal
+        long_exit = (close[i] < H4_4h[i]) or (close[i] < ema_12h_aligned[i])
+        short_exit = (close[i] > L4_4h[i]) or (close[i] > ema_12h_aligned[i])
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
