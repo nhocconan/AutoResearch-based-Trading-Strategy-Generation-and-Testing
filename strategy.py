@@ -1,10 +1,16 @@
+# 12h_1d_kama_volume_regime_v2
+# Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market noise - in trending markets it tracks price closely, in ranging markets it stays flat.
+# Combined with 1-day volume confirmation and choppy market filter (Choppiness Index), this should work in both bull and bear markets by adapting to conditions.
+# Uses 12h timeframe with 1d HTF for trend context and volume confirmation.
+# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_cci_momentum_v1"
-timeframe = "1h"
+name = "12h_1d_kama_volume_regime_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,78 +23,99 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for CCI calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
+    # Calculate KAMA on 12h data
+    def kama(close, length=10, fast=2, slow=30):
+        change = np.abs(np.diff(close, n=length))
+        volatility = np.sum(np.abs(np.diff(close)), axis=1)
+        er = np.where(volatility != 0, change / volatility, 0)
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        kama = np.full_like(close, np.nan, dtype=float)
+        kama[length-1] = close[length-1]
+        for i in range(length, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    kama_values = kama(close, 10, 2, 30)
     
-    # Calculate CCI(20) on 4h data
-    tp_4h = (high_4h + low_4h + close_4h) / 3.0
-    sma_tp = pd.Series(tp_4h).rolling(window=20, min_periods=20).mean().values
-    mad = pd.Series(tp_4h).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
-    cci_4h = (tp_4h - sma_tp) / (0.015 * mad)
-    
-    # Align CCI to 1h timeframe
-    cci_4h_aligned = align_htf_to_ltf(prices, df_4h, cci_4h)
-    
-    # Get 1d data for trend filter
+    # Get 1d data for volume and chop filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    volume_1d = df_1d['volume'].values
     
-    # Volume filter - 20-period average on 1h data
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > vol_ma
+    # Volume ratio (current vs average)
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_ratio = volume_1d / vol_ma_1d
+    volume_ratio_aligned = align_htf_to_ltf(prices, df_1d, volume_ratio)
     
-    # Session filter: 08-20 UTC
-    hour = prices.index.hour
-    session_ok = (hour >= 8) & (hour <= 20)
+    # Choppiness Index on 1d data
+    def choppiness_index(high, low, close, length=14):
+        atr = np.zeros_like(close)
+        for i in range(1, len(close)):
+            atr[i] = max(high[i] - low[i], np.abs(high[i] - close[i-1]), np.abs(low[i] - close[i-1]))
+        atr_sum = pd.Series(atr).rolling(window=length, min_periods=length).sum().values
+        highest_high = pd.Series(high).rolling(window=length, min_periods=length).max().values
+        lowest_low = pd.Series(low).rolling(window=length, min_periods=length).min().values
+        chop = np.where((highest_high - lowest_low) != 0, 
+                        100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(length), 
+                        50)
+        return chop
+    
+    chop_values = choppiness_index(high_1d, low_1d, close_1d, 14)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_values)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(cci_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(volume_ok[i]) or np.isnan(session_ok[i])):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+        if (np.isnan(kama_values[i]) or np.isnan(volume_ratio_aligned[i]) or 
+            np.isnan(chop_aligned[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Only trade during session
-        if not session_ok[i]:
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
-            continue
+        # Determine market regime
+        trending = chop_aligned[i] < 38.2  # Strong trend
+        ranging = chop_aligned[i] > 61.8   # Choppy/ranging market
         
-        # Trend from 1d EMA
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Volume confirmation
+        volume_ok = volume_ratio_aligned[i] > 1.5  # Above average volume
         
-        # CCI signals with volume confirmation
-        # Long: CCI > -100 (emerging bullish) in uptrend
-        long_signal = cci_4h_aligned[i] > -100 and uptrend and volume_ok[i]
-        # Short: CCI < 100 (emerging bearish) in downtrend
-        short_signal = cci_4h_aligned[i] < 100 and downtrend and volume_ok[i]
+        # KAMA signals
+        price_above_kama = close[i] > kama_values[i]
+        price_below_kama = close[i] < kama_values[i]
         
-        # Exit when CCI reverses
-        exit_long = cci_4h_aligned[i] < -100
-        exit_short = cci_4h_aligned[i] > 100
+        # Entry logic: Adapt to market regime
+        if trending and volume_ok:
+            # In trending markets: follow KAMA direction
+            long_signal = price_above_kama
+            short_signal = price_below_kama
+        elif ranging and volume_ok:
+            # In ranging markets: mean reversion at extremes
+            # Use price deviation from KAMA as signal
+            deviation = (close[i] - kama_values[i]) / kama_values[i]
+            long_signal = deviation < -0.02  # Oversold
+            short_signal = deviation > 0.02  # Overbought
+        else:
+            # Transition period or low volume: no signal
+            long_signal = False
+            short_signal = False
+        
+        # Exit logic: reverse signal or volume drops
+        exit_long = price_below_kama
+        exit_short = price_above_kama
         
         # Execute trades
         if long_signal and position != 1:
             position = 1
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif short_signal and position != -1:
             position = -1
-            signals[i] = -0.20
+            signals[i] = -0.25
         elif exit_long and position == 1:
             position = 0
             signals[i] = 0.0
@@ -98,9 +125,9 @@ def generate_signals(prices):
         else:
             # Hold position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
