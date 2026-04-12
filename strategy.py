@@ -1,19 +1,20 @@
+#37419
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_camarilla_pivot_volume
-# Uses daily Camarilla pivot levels (H3, L3) from previous day as entry triggers on 4h chart.
-# Long when price closes above H3 with volume confirmation (volume > 1.5x 20-period average).
-# Short when price closes below L3 with volume confirmation.
-# Exits when price crosses the daily pivot point (mean reversion).
-# Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drag.
-# Works in trending markets via breakouts and ranging markets via mean reversion to pivot.
+# Hypothesis: 6h_12h_1d_donchian_breakout_volume
+# Uses 12h Donchian channels (20-period high/low) as breakout levels on 6h chart.
+# Long when price breaks above 20-period 12h high with volume confirmation (volume > 1.5x 20-period avg).
+# Short when price breaks below 20-period 12h low with volume confirmation.
+# Exits when price crosses the 20-period 12h midpoint (mean reversion).
+# Designed for low trade frequency (target: 12-37 trades/year) to minimize fee drag.
+# Works in trending markets via breakouts and ranging markets via mean reversion to midpoint.
 # Focus on BTC/ETH as primary targets.
 
-name = "4h_1d_camarilla_pivot_volume"
-timeframe = "4h"
+name = "6h_12h_1d_donchian_breakout_volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,38 +27,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data for Donchian channel calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels (based on previous day's OHLC)
-    # Using previous day's data to avoid look-ahead
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 12h Donchian channels (20-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Shift by 1 to use previous day's data for today's levels
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    # Set first day's values to NaN since no previous day exists
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # 20-period high and low
+    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Midpoint for exit
+    donchian_mid = (donchian_high + donchian_low) / 2.0
     
-    # Camarilla calculations
-    range_prev = prev_high - prev_low
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    h3 = prev_close + range_prev * 1.1 / 2  # Resistance level
-    l3 = prev_close - range_prev * 1.1 / 2  # Support level
+    # Align 12h Donchian levels to 6h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_12h, donchian_mid)
     
-    # Align daily Camarilla levels to 4h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    
-    # Volume confirmation: volume > 1.5 * 20-period average (4h timeframe)
+    # Volume confirmation: volume > 1.5 * 20-period average (6h timeframe)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
@@ -66,7 +56,7 @@ def generate_signals(prices):
     
     for i in range(50, n):  # start after warmup
         # Skip if data not ready
-        if np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or np.isnan(pivot_aligned[i]):
+        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(donchian_mid_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -81,19 +71,19 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price closes above H3 (resistance breakout)
-        if close[i] > h3_aligned[i] and position != 1:
+        # Long signal: price breaks above 20-period 12h high
+        if close[i] > donchian_high_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price closes below L3 (support breakdown)
-        elif close[i] < l3_aligned[i] and position != -1:
+        # Short signal: price breaks below 20-period 12h low
+        elif close[i] < donchian_low_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: price crosses daily pivot point (mean reversion)
-        elif position == 1 and close[i] <= pivot_aligned[i]:
+        # Exit conditions: price crosses 20-period 12h midpoint (mean reversion)
+        elif position == 1 and close[i] <= donchian_mid_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] >= pivot_aligned[i]:
+        elif position == -1 and close[i] >= donchian_mid_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
