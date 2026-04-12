@@ -3,18 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h_1w_volatility_breakout_v1
-# Uses weekly Bollinger Band breakouts with daily ATR filter and volume confirmation.
-# Works in bull markets by capturing breakouts above upper BB, and in bear markets
-# by shorting breakdowns below lower BB. Volatility filter ensures trades occur during
-# high-momentum periods, reducing false signals. Target: 15-25 trades/year per symbol.
-name = "12h_1w_volatility_breakout_v1"
-timeframe = "12h"
+# Hypothesis: 4h_1d_camarilla_breakout_v34
+# Core strategy: Breakouts above H4 (bullish) or below L4 (bearish) from previous day's Camarilla levels.
+# Enhancements: Volume confirmation (>1.5x 20-bar avg) + Chop filter (CHOP < 61.8 = trending market).
+# Uses 1d timeframe for Camarilla levels to align with institutional daily reference.
+# Position size: 0.25 for clear risk control. Target: 20-40 trades/year per symbol.
+# Works in bull markets by buying breakouts, in bear markets by selling breakdowns.
+# Avoids choppy markets where false breakouts are common.
+name = "4h_1d_camarilla_breakout_v34"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,61 +24,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Bollinger Bands
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Calculate weekly Bollinger Bands (20, 2)
-    close_1w = df_1w['close'].values
-    bb_mid = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_mid + 2 * bb_std
-    bb_lower = bb_mid - 2 * bb_std
-    
-    # Align BB to 12h timeframe
-    bb_upper_aligned = align_htf_to_ltf(prices, df_1w, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_1w, bb_lower)
-    
-    # Get daily data for ATR filter
+    # Get 1d data for Camarilla calculation (institutional reference)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate daily ATR (14)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Camarilla levels from previous day (H4/L4)
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
     
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    range_prev = high_prev - low_prev
+    camarilla_h4 = close_prev + range_prev * 1.1 / 2  # H4 resistance
+    camarilla_l4 = close_prev - range_prev * 1.1 / 2  # L4 support
+    
+    # Align to 4h timeframe (already delayed by 1 day due to shift)
+    h4_level = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_level = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    
+    # Volume confirmation: volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma * 1.5)
+    
+    # Chop regime filter: avoid choppy markets (CHOP > 61.8)
+    # Calculate True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align ATR to 12h timeframe
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # Volume confirmation: volume > 1.3 * 50-period average
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    vol_confirm = volume > (vol_ma * 1.3)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10((highest_high - lowest_low) / (atr * np.sqrt(14))) / np.log10(14)
+    chop_filter = chop < 61.8  # trending market
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # start after warmup
+    for i in range(20, n):  # start after warmup
         # Skip if levels not ready
-        if np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or np.isnan(atr_1d_aligned[i]):
+        if np.isnan(h4_level[i]) or np.isnan(l4_level[i]):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when ATR is above its 20-period average
-        atr_ma = pd.Series(atr_1d_aligned).rolling(window=20, min_periods=20).mean()
-        atr_ma_aligned = align_htf_to_ltf(prices, df_1d, atr_ma.values)
-        vol_filter = atr_1d_aligned[i] > atr_ma_aligned[i] if not np.isnan(atr_ma_aligned[i]) else False
-        
-        # Skip if volatility or volume filter fails
-        if not (vol_filter and vol_confirm[i]):
+        # Check volume and chop filters
+        if not (vol_confirm[i] and chop_filter[i]):
             # Hold current position if filters fail
             if position == 1:
                 signals[i] = 0.25
@@ -86,19 +79,19 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above weekly upper BB
-        if close[i] > bb_upper_aligned[i] and position != 1:
+        # Long signal: price breaks above H4 with volume
+        if close[i] > h4_level[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below weekly lower BB
-        elif close[i] < bb_lower_aligned[i] and position != -1:
+        # Short signal: price breaks below L4 with volume
+        elif close[i] < l4_level[i] and position != -1:
             position = -1
             signals[i] = -0.25
         # Exit conditions: opposite breakout
-        elif close[i] < bb_lower_aligned[i] and position == 1:
+        elif close[i] < l4_level[i] and position == 1:
             position = 0
             signals[i] = 0.0
-        elif close[i] > bb_upper_aligned[i] and position == -1:
+        elif close[i] > h4_level[i] and position == -1:
             position = 0
             signals[i] = 0.0
         else:
