@@ -1,15 +1,15 @@
-#\047/usr/bin/env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_cci_trend_v2"
-timeframe = "12h"
+name = "4h_1d_donchian_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for CCI calculation
+    # Get 1d data for Donchian channels and volume average
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -25,53 +25,43 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate CCI(20) on daily data
-    tp_1d = (high_1d + low_1d + close_1d) / 3.0
-    sma_tp = pd.Series(tp_1d).rolling(window=20, min_periods=20).mean().values
-    mad = pd.Series(tp_1d).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
-    cci_1d = (tp_1d - sma_tp) / (0.015 * mad)
+    # Calculate Donchian channels (20-period) on daily data
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align CCI to 12h timeframe
-    cci_1d_aligned = align_htf_to_ltf(prices, df_1d, cci_1d)
+    # Calculate 20-period average volume on daily data
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Align Donchian channels and volume MA to 4h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Volume filter - 20-period average on 12h data
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > vol_ma
+    # Volume filter on 4h: current volume > 20-period average volume (aligned from 1d)
+    volume_ok = volume > vol_ma_1d_aligned
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(cci_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
             np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend from 1w EMA
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
+        # Breakout conditions with volume confirmation
+        # Long: price breaks above Donchian high with volume confirmation
+        long_signal = close[i] > donchian_high_aligned[i] and volume_ok[i]
+        # Short: price breaks below Donchian low with volume confirmation
+        short_signal = close[i] < donchian_low_aligned[i] and volume_ok[i]
         
-        # CCI signals with volume confirmation and stricter thresholds
-        # Long: CCI > -50 (strong bullish) in uptrend
-        long_signal = cci_1d_aligned[i] > -50 and uptrend and volume_ok[i]
-        # Short: CCI < 50 (strong bearish) in downtrend
-        short_signal = cci_1d_aligned[i] < 50 and downtrend and volume_ok[i]
-        
-        # Exit when CCI reverses beyond threshold
-        exit_long = cci_1d_aligned[i] < -50
-        exit_short = cci_1d_aligned[i] > 50
+        # Exit when price crosses the midline of the Donchian channel
+        midline = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2.0
+        exit_long = close[i] < midline
+        exit_short = close[i] > midline
         
         # Execute trades
         if long_signal and position != 1:
