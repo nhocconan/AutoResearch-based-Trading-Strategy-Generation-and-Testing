@@ -8,19 +8,29 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Williams %R extreme + 1d ADX trend filter + volume spike
-    # Williams %R(14) < -80 = oversold, > -20 = overbought on 6h
-    # Only take longs when 1d ADX > 25 (trending market) and price > 1d EMA50
-    # Only take shorts when 1d ADX > 25 and price < 1d EMA50
-    # Volume confirmation: volume > 1.5 * 20-period average to avoid low-vol false signals
-    # Discrete sizing 0.25. Target: 20-30 trades/year per symbol.
+    # Hypothesis: 12h Camarilla H3/L3 breakout with 1w trend filter and volume confirmation
+    # Uses weekly EMA200 for primary trend filter to avoid counter-trend trades
+    # 1d Camarilla levels calculated from prior 1d bar (H3/L3) for breakout entries
+    # Volume confirmation: volume > 1.8 * 20-period average to filter weak breakouts
+    # Discrete sizing 0.25 to minimize fee churn. Target: 12-25 trades/year per symbol.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX and EMA50 trend filter
+    # Get 1w data for weekly trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    
+    # Calculate 1w EMA200 for trend filter (requires min_periods)
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    
+    # Get 1d data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -29,107 +39,55 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Calculate 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate 1d Camarilla H3/L3 levels (based on prior 1d bar's range)
+    # H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4
+    camarilla_h3 = np.full(len(close_1d), np.nan)
+    camarilla_l3 = np.full(len(close_1d), np.nan)
     
-    # Calculate 1d ADX (14-period)
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = np.abs(high[1:] - low[1:])
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.nan], tr])  # align with original indices
-        
-        # Directional Movement
-        up_move = high[1:] - high[:-1]
-        down_move = low[:-1] - low[1:]
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        plus_dm = np.concatenate([[np.nan], plus_dm])
-        minus_dm = np.concatenate([[np.nan], minus_dm])
-        
-        # Smoothed TR, +DM, -DM (using Wilder's smoothing = EMA with alpha=1/period)
-        def WilderSmoothing(data, period):
-            result = np.full_like(data, np.nan)
-            if len(data) < period:
-                return result
-            # First value: simple average
-            result[period-1] = np.nanmean(data[:period])
-            # Subsequent values: Wilder smoothing
-            alpha = 1.0 / period
-            for i in range(period, len(data)):
-                if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                    result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
-                else:
-                    result[i] = np.nan
-            return result
-        
-        atr = WilderSmoothing(tr, period)
-        plus_dm_smooth = WilderSmoothing(plus_dm, period)
-        minus_dm_smooth = WilderSmoothing(minus_dm, period)
-        
-        # Directional Indicators
-        plus_di = 100 * plus_dm_smooth / atr
-        minus_di = 100 * minus_dm_smooth / atr
-        
-        # DX and ADX
-        dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
-        adx = WilderSmoothing(dx, period)
-        
-        return adx
+    for i in range(1, len(close_1d)):
+        daily_range = high_1d[i-1] - low_1d[i-1]
+        if daily_range > 0:
+            camarilla_h3[i] = close_1d[i-1] + 1.1 * daily_range / 4
+            camarilla_l3[i] = close_1d[i-1] - 1.1 * daily_range / 4
     
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Align Camarilla levels to 12h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Williams %R (14-period) on 6h
-    def williams_r(high, low, close, period=14):
-        highest_high = np.full_like(high, np.nan)
-        lowest_low = np.full_like(low, np.nan)
-        for i in range(period-1, len(high)):
-            highest_high[i] = np.max(high[i-period+1:i+1])
-            lowest_low[i] = np.min(low[i-period+1:i+1])
-        wr = -100 * (highest_high - close) / (highest_high - lowest_low)
-        return wr
-    
-    wr_6h = williams_r(high, low, close, 14)
-    
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # Volume confirmation: volume > 1.8 * 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(adx_1d_aligned[i]) or 
-            np.isnan(wr_6h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema200_1w_aligned[i]) or np.isnan(h3_aligned[i]) or 
+            np.isnan(l3_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Determine 1d trend regime
-        trending_market = adx_1d_aligned[i] > 25
-        bullish_bias = close[i] > ema50_1d_aligned[i]
-        bearish_bias = close[i] < ema50_1d_aligned[i]
+        # Determine 1w trend: price above/below weekly EMA200
+        bullish_trend = close[i] > ema200_1w_aligned[i]
+        bearish_trend = close[i] < ema200_1w_aligned[i]
         
-        # Entry logic: Williams %R extremes with trend and volume filter
+        # Entry logic: Camarilla H3/L3 breakout with volume and trend filter
         long_entry = False
         short_entry = False
         
-        # Long: oversold (%R < -80) in bullish trending market
-        if trending_market and bullish_bias:
-            long_entry = (wr_6h[i] < -80) and volume_spike[i]
-        # Short: overbought (%R > -20) in bearish trending market
-        elif trending_market and bearish_bias:
-            short_entry = (wr_6h[i] > -20) and volume_spike[i]
+        # Long breakout: price breaks above H3 in bullish weekly trend
+        if bullish_trend:
+            long_entry = (close[i] > h3_aligned[i-1]) and volume_spike[i]
+        # Short breakout: price breaks below L3 in bearish weekly trend
+        elif bearish_trend:
+            short_entry = (close[i] < l3_aligned[i-1]) and volume_spike[i]
         
-        # Exit logic: opposite Williams %R level or trend weakness
-        long_exit = (wr_6h[i] > -20) or (adx_1d_aligned[i] < 20) or not bullish_bias
-        short_exit = (wr_6h[i] < -80) or (adx_1d_aligned[i] < 20) or not bearish_bias
+        # Exit logic: opposite Camarilla level or trend reversal
+        long_exit = bearish_trend and close[i] < l3_aligned[i]
+        short_exit = bullish_trend and close[i] > h3_aligned[i]
         
         if long_entry and position != 1:
             position = 1
@@ -154,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_williams_r_adx_volume_v1"
-timeframe = "6h"
+name = "12h_1w_1d_camarilla_h3l3_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
