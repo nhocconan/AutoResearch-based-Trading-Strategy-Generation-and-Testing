@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
-"""
-4h_1d_kama_rsi_volatility_breakout
-Hypothesis: 4-hour KAMA trend direction combined with RSI momentum and volatility-adjusted breakouts.
-Uses 1-day ATR for volatility filtering to adapt to changing market conditions.
-Works in bull/bear by using adaptive trend (KAMA) and momentum (RSI) with volatility filters.
-Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
-"""
-
-name = "4h_1d_kama_rsi_volatility_breakout"
-timeframe = "4h"
-leverage = 1.0
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+# 4h_1d_camarilla_breakout_with_volume
+# Hypothesis: 4-hour Camarilla breakout with volume confirmation works in both bull and bear markets
+# by capturing intraday momentum with volatility-adjusted entries. Uses daily pivot levels for structure
+# and volume filter to avoid false breakouts. Target: 20-50 trades/year to minimize fee drag.
+
+name = "4h_1d_camarilla_breakout_with_volume"
+timeframe = "4h"
+leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,7 +22,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR and KAMA calculation
+    # Get daily data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -34,92 +31,53 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # KAMA calculation (adaptive moving average)
-    # Efficiency Ratio
-    change = np.abs(np.subtract(close_1d, np.roll(close_1d, 10)))
-    volatility = np.sum(np.abs(np.subtract(close_1d, np.roll(close_1d, 1))), axis=0) if False else None
-    # Proper volatility calculation for ER
-    volatility = np.zeros_like(close_1d)
-    for i in range(1, len(close_1d)):
-        volatility[i] = volatility[i-1] + np.abs(close_1d[i] - close_1d[i-1])
-    volatility = np.roll(volatility, 1)
-    volatility[0] = 0
-    er = np.zeros_like(close_1d)
-    for i in range(len(close_1d)):
-        if volatility[i] > 0:
-            er[i] = change[i] / volatility[i]
-        else:
-            er[i] = 0
+    # Previous day's range
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Camarilla levels (based on previous day)
+    range_ = prev_high - prev_low
+    # Resistance levels
+    r3 = prev_close + range_ * 1.1 / 2
+    r4 = prev_close + range_ * 1.1
+    # Support levels
+    s3 = prev_close - range_ * 1.1 / 2
+    s4 = prev_close - range_ * 1.1
     
-    # Calculate KAMA
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # RSI calculation (14-period)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # ATR for volatility filter (14-day ATR)
-    tr1 = np.abs(np.subtract(high_1d, low_1d))
-    tr2 = np.abs(np.subtract(high_1d, np.roll(close_1d, 1)))
-    tr3 = np.abs(np.subtract(low_1d, np.roll(close_1d, 1)))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Align KAMA, RSI, and ATR to 4h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
-    
-    # Volatility-adjusted breakout levels
-    # Upper band: KAMA + 1.5 * ATR
-    # Lower band: KAMA - 1.5 * ATR
-    upper_band = kama_aligned + 1.5 * atr_aligned
-    lower_band = kama_aligned - 1.5 * atr_aligned
-    
-    # Volume confirmation: volume > 1.3x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.3)
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
-            np.isnan(atr_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: price crosses above upper band with RSI > 50 and volume confirmation
-        if (close[i] > upper_band[i] and rsi_aligned[i] > 50 and 
-            vol_confirm[i] and atr_aligned[i] > 0 and position != 1):
+        # Long entry: close breaks above R4 with volume confirmation
+        if (close[i] > r4_aligned[i] and vol_confirm[i] and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: price crosses below lower band with RSI < 50 and volume confirmation
-        elif (close[i] < lower_band[i] and rsi_aligned[i] < 50 and 
-              vol_confirm[i] and atr_aligned[i] > 0 and position != -1):
+        # Short entry: close breaks below S4 with volume confirmation
+        elif (close[i] < s4_aligned[i] and vol_confirm[i] and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: reverse signal or price crosses back to KAMA
-        elif position == 1 and close[i] < kama_aligned[i]:
+        # Exit: close crosses back to opposite S3/R3
+        elif position == 1 and close[i] < s3_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > kama_aligned[i]:
+        elif position == -1 and close[i] > r3_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
