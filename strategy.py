@@ -3,21 +3,24 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h_4h_1d_rsi_momentum_v1
-# Uses 4h RSI(14) for trend direction and 1d RSI(14) for regime filter.
-# Long when 4h RSI crosses above 50 and 1d RSI > 40 (bullish regime).
-# Short when 4h RSI crosses below 50 and 1d RSI < 60 (bearish regime).
-# Exits when 4h RSI returns to 50.
-# Designed for low trade frequency (target: 15-30 trades/year) to minimize fee drag.
-# Works in trending markets via RSI momentum and in ranging markets via mean reversion to 50.
+# Hypothesis: 6h_1d_1w_donchian_breakout_v1
+# Uses weekly Donchian channel breakouts (20-period) as primary signal,
+# confirmed by daily volume and weekly trend (price above/below weekly SMA50).
+# Long when price breaks above weekly Donchian high with volume confirmation
+# and weekly trend up (price > weekly SMA50).
+# Short when price breaks below weekly Donchian low with volume confirmation
+# and weekly trend down (price < weekly SMA50).
+# Exits when price returns to weekly Donchian middle (mean reversion).
+# Designed for low trade frequency (target: 15-25 trades/year) to minimize fee drag.
+# Works in trending markets via breakouts and in ranging markets via mean reversion.
 
-name = "1h_4h_1d_rsi_momentum_v1"
-timeframe = "1h"
+name = "6h_1d_1w_donchian_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,76 +28,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for RSI calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get weekly data for Donchian and trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 4h RSI(14)
-    close_4h = df_4h['close'].values
-    delta = np.diff(close_4h, prepend=close_4h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate weekly Donchian channel (20-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Use Wilder's smoothing (equivalent to EMA with alpha=1/14)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_4h = 100 - (100 / (1 + rs))
+    # Donchian high and low (20-period)
+    donch_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high + donch_low) / 2.0
     
-    # Get 1d data for regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Weekly SMA50 for trend filter
+    sma50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
     
-    # Calculate 1d RSI(14)
-    close_1d = df_1d['close'].values
-    delta_1d = np.diff(close_1d, prepend=close_1d[0])
-    gain_1d = np.where(delta_1d > 0, delta_1d, 0)
-    loss_1d = np.where(delta_1d < 0, -delta_1d, 0)
+    # Align weekly levels to 6h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_1w, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1w, donch_low)
+    donch_mid_aligned = align_htf_to_ltf(prices, df_1w, donch_mid)
+    sma50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma50_1w)
     
-    avg_gain_1d = pd.Series(gain_1d).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss_1d = pd.Series(loss_1d).ewm(alpha=1/14, adjust=False).mean().values
-    rs_1d = avg_gain_1d / (avg_loss_1d + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs_1d))
-    
-    # Align HTF indicators to 1h timeframe
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Daily volume confirmation: volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):  # start after warmup
         # Skip if data not ready
-        if np.isnan(rsi_4h_aligned[i]) or np.isnan(rsi_1d_aligned[i]):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(donch_mid_aligned[i]) or np.isnan(sma50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        rsi4 = rsi_4h_aligned[i]
-        rsi1d = rsi_1d_aligned[i]
+        # Require volume confirmation for new entries
+        if not vol_confirm[i]:
+            # Hold current position if volume filter fails
+            if position == 1:
+                signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.0
+            continue
         
-        # Long signal: 4h RSI crosses above 50 and 1d RSI > 40 (bullish regime)
-        if rsi4 > 50 and rsi1d > 40 and position != 1:
+        # Long signal: price breaks above weekly Donchian high with weekly uptrend
+        if (close[i] > donch_high_aligned[i] and 
+            close_1w[-1] > sma50_1w[-1] if len(close_1w) > 0 else False and  # current weekly close > SMA50
+            position != 1):
             position = 1
-            signals[i] = 0.20
-        # Short signal: 4h RSI crosses below 50 and 1d RSI < 60 (bearish regime)
-        elif rsi4 < 50 and rsi1d < 60 and position != -1:
+            signals[i] = 0.25
+        # Short signal: price breaks below weekly Donchian low with weekly downtrend
+        elif (close[i] < donch_low_aligned[i] and 
+              close_1w[-1] < sma50_1w[-1] if len(close_1w) > 0 else False and  # current weekly close < SMA50
+              position != -1):
             position = -1
-            signals[i] = -0.20
-        # Exit conditions: 4h RSI returns to 50 (mean reversion)
-        elif position == 1 and rsi4 <= 50:
+            signals[i] = -0.25
+        # Exit conditions: price returns to weekly Donchian middle (mean reversion)
+        elif position == 1 and close[i] <= donch_mid_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and rsi4 >= 50:
+        elif position == -1 and close[i] >= donch_mid_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
