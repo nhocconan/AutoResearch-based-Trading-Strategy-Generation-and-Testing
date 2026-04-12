@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h_1d_camarilla_pivot_volume
-# Uses daily Camarilla pivot levels (based on previous day's range) as support/resistance.
-# Long when price breaks above R4 with volume confirmation (volume > 1.5x 20-period avg).
-# Short when price breaks below S4 with volume confirmation.
-# Exits when price returns to the daily pivot point (mean reversion).
-# Camarilla levels are effective in both trending and ranging markets due to their
-# statistical significance as intraday support/resistance levels.
-# Volume confirmation reduces false breakouts. Designed for low trade frequency.
+# Hypothesis: 12h_1d_camarilla_pivot_breakout_volume
+# Uses daily Camarilla pivot levels (support/resistance) as breakout/mean-reversion levels on 12h chart.
+# Long when price breaks above Camarilla H4 resistance with volume confirmation (>1.5x 20-period avg volume).
+# Short when price breaks below Camarilla L4 support with volume confirmation.
+# Exits when price returns to Camarilla Pivot level (mean reversion).
+# Works in trending markets via breakouts and ranging markets via mean reversion to pivot.
+# Volume confirmation reduces false breakouts. Designed for low trade frequency (target: 15-35/year) to minimize fee drag.
 # Focus on BTC/ETH as primary targets.
 
-name = "6h_1d_camarilla_pivot_volume"
-timeframe = "6h"
+name = "12h_1d_camarilla_pivot_breakout_volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,33 +36,28 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's values (Camarilla uses previous day's range)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    # First day has no previous data
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Camarilla formulas
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_ = high_1d - low_1d
     
-    # Calculate pivot and levels
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_val = prev_high - prev_low
+    # Resistance levels
+    r1 = close_1d + (range_ * 1.1 / 12)
+    r2 = close_1d + (range_ * 1.1 / 6)
+    r3 = close_1d + (range_ * 1.1 / 4)
+    r4 = close_1d + (range_ * 1.1 / 2)  # Strongest resistance
     
-    # Camarilla levels
-    r4 = pivot + (range_val * 1.1 / 2)
-    r3 = pivot + (range_val * 1.1 / 4)
-    s3 = pivot - (range_val * 1.1 / 4)
-    s4 = pivot - (range_val * 1.1 / 2)
+    # Support levels
+    s1 = close_1d - (range_ * 1.1 / 12)
+    s2 = close_1d - (range_ * 1.1 / 6)
+    s3 = close_1d - (range_ * 1.1 / 4)
+    s4 = close_1d - (range_ * 1.1 / 2)  # Strongest support
     
-    # Align daily Camarilla levels to 6h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Align daily Camarilla levels to 12h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Volume confirmation: volume > 1.5 * 20-period average (6h timeframe)
+    # Volume confirmation: volume > 1.5 * 20-period average (12h timeframe)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
@@ -72,8 +66,7 @@ def generate_signals(prices):
     
     for i in range(50, n):  # start after warmup
         # Skip if data not ready
-        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(vol_ma[i])):
+        if np.isnan(pivot_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -88,15 +81,15 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above R4
+        # Long signal: price breaks above Camarilla H4 resistance
         if close[i] > r4_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below S4
+        # Short signal: price breaks below Camarilla L4 support
         elif close[i] < s4_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: price returns to pivot point (mean reversion)
+        # Exit conditions: price returns to Camarilla Pivot (mean reversion)
         elif position == 1 and close[i] <= pivot_aligned[i]:
             position = 0
             signals[i] = 0.0
