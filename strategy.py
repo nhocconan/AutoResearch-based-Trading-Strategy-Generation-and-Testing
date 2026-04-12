@@ -8,124 +8,104 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h strategy using 12h Supertrend for trend direction and 12h Donchian(20) breakout
-    # for entry timing, filtered by 1d volume confirmation. Uses discrete position sizing (0.25)
-    # to minimize fee churn. Designed for low trade frequency (target: 12-37/year) to overcome
-    # the 6h timeframe's historically poor keep rate by combining strong trend filter with
-    # structural breakouts and volume confirmation - proven effective in both bull and bear markets.
+    # Hypothesis: 4h Williams Alligator with 1d trend filter and volume confirmation
+    # Alligator (Jaw=TEETH=LIPS) identifies trend absence/presence; trade only when all three aligned
+    # Uses 1d EMA50 for higher-timeframe trend filter to avoid counter-trend trades
+    # Volume spike (>1.8x 20-period average) confirms breakout strength
+    # Designed for low trade frequency (target: 20-40/year) to minimize fee drag
+    # Works in bull/bear markets by only trading strong aligned trends
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Supertrend and Donchian channels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 4h data for Alligator calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 13:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate ATR for Supertrend (10-period)
-    atr_period = 10
-    tr = np.maximum(np.maximum(high_12h[1:] - low_12h[1:], 
-                               np.abs(high_12h[1:] - close_12h[:-1])),
-                    np.abs(low_12h[1:] - close_12h[:-1]))
-    tr = np.concatenate([[np.nan], tr])  # align with index 0
-    atr = np.full(len(df_12h), np.nan)
-    for i in range(atr_period, len(df_12h)):
-        if np.isnan(atr[i-1]):
-            atr[i] = np.nanmean(tr[i-atr_period+1:i+1])
-        else:
-            atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
+    # Williams Alligator: Jaw (13,8), Teeth (8,5), Lips (5,3) - all SMMA
+    def smma(arr, period):
+        """Smoothed Moving Average"""
+        result = np.full_like(arr, np.nan, dtype=np.float64)
+        if len(arr) < period:
+            return result
+        # First value is simple SMA
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (PREV_SMMA*(period-1) + CURRENT_CLOSE) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Calculate Supertrend
-    factor = 3.0
-    hl2 = (high_12h + low_12h) / 2
-    upperband = hl2 + (factor * atr)
-    lowerband = hl2 - (factor * atr)
+    jaw = smma(close_4h, 13)  # Blue line
+    teeth = smma(close_4h, 8)  # Red line
+    lips = smma(close_4h, 5)   # Green line
     
-    supertrend = np.full(len(df_12h), np.nan)
-    direction = np.full(len(df_12h), np.nan)  # 1 for uptrend, -1 for downtrend
-    
-    for i in range(1, len(df_12h)):
-        if np.isnan(supertrend[i-1]):
-            # Initialize
-            supertrend[i] = lowerband[i]
-            direction[i] = 1
-        else:
-            if close_12h[i] > upperband[i-1]:
-                direction[i] = 1
-            elif close_12h[i] < lowerband[i-1]:
-                direction[i] = -1
-            else:
-                direction[i] = direction[i-1]
-            
-            if direction[i] == 1:
-                supertrend[i] = max(lowerband[i], supertrend[i-1])
-            else:
-                supertrend[i] = min(upperband[i], supertrend[i-1])
-    
-    # Calculate 12h Donchian channels (20-period)
-    donchian_high_12h = np.full(len(df_12h), np.nan)
-    donchian_low_12h = np.full(len(df_12h), np.nan)
-    
-    for i in range(20, len(df_12h)):
-        donchian_high_12h[i] = np.max(high_12h[i-20:i])
-        donchian_low_12h[i] = np.min(low_12h[i-20:i])
-    
-    # Get 1d data for volume confirmation
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    volume_1d = df_1d['volume'].values
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 1d volume MA (20-period) for confirmation
-    vol_ma_1d = np.full(len(df_1d), np.nan)
-    for i in range(20, len(df_1d)):
-        vol_ma_1d[i] = np.mean(volume_1d[i-20:i])
+    # Get 4h volume for confirmation
+    volume_4h = df_4h['volume'].values
+    vol_ma_4h = np.full(len(df_4h), np.nan)
+    for i in range(20, len(df_4h)):
+        vol_ma_4h[i] = np.mean(volume_4h[i-20:i])
     
-    # Volume confirmation: volume > 1.5 * 20-period average (1d)
-    volume_spike = volume_1d > (1.5 * vol_ma_1d)
+    # Volume confirmation: volume > 1.8 * 20-period average (4h)
+    volume_spike_4h = volume_4h > (1.8 * vol_ma_4h)
     
-    # Align all HTF indicators to 6h timeframe
-    supertrend_aligned = align_htf_to_ltf(prices, df_12h, supertrend)
-    direction_aligned = align_htf_to_ltf(prices, df_12h, direction)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high_12h)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low_12h)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
+    # Align all indicators to LTF (15m)
+    jaw_aligned = align_htf_to_ltf(prices, df_4h, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_4h, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_4h, lips)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_4h, volume_spike_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(direction_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or np.isnan(volume_spike_aligned[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(volume_spike_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Determine 12h trend from Supertrend direction
-        bullish_trend = direction_aligned[i] == 1
-        bearish_trend = direction_aligned[i] == -1
+        # Alligator alignment: Lips > Teeth > Jaw = bullish, Lips < Teeth < Jaw = bearish
+        bullish_alligator = (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i])
+        bearish_alligator = (lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i])
         
-        # Entry logic: Donchian breakout with volume and trend filter
+        # 1d trend filter
+        bullish_trend = close[i] > ema50_1d_aligned[i]
+        bearish_trend = close[i] < ema50_1d_aligned[i]
+        
+        # Entry logic: Alligator alignment + trend filter + volume confirmation
         long_entry = False
         short_entry = False
         
-        # Long breakout: price breaks above Donchian high in bullish trend with volume
-        if bullish_trend:
-            long_entry = (close[i] > donchian_high_aligned[i]) and volume_spike_aligned[i]
-        # Short breakout: price breaks below Donchian low in bearish trend with volume
-        elif bearish_trend:
-            short_entry = (close[i] < donchian_low_aligned[i]) and volume_spike_aligned[i]
+        # Long: bullish Alligator alignment + bullish 1d trend + volume spike
+        if bullish_alligator and bullish_trend:
+            long_entry = volume_spike_aligned[i]
+        # Short: bearish Alligator alignment + bearish 1d trend + volume spike
+        elif bearish_alligator and bearish_trend:
+            short_entry = volume_spike_aligned[i]
         
-        # Exit logic: opposite Donchian level or trend reversal
-        long_exit = bearish_trend and close[i] < donchian_low_aligned[i]
-        short_exit = bullish_trend and close[i] > donchian_high_aligned[i]
+        # Exit logic: Alligator sleeping (no clear trend) or trend reversal
+        # Sleeping: jaws intertwined (no clear separation)
+        jaw_teeth_close = abs(jaw_aligned[i] - teeth_aligned[i]) < (close[i] * 0.001)
+        teeth_lips_close = abs(teeth_aligned[i] - lips_aligned[i]) < (close[i] * 0.001)
+        alligator_sleeping = jaw_teeth_close and teeth_lips_close
+        
+        long_exit = bearish_trend or alligator_sleeping
+        short_exit = bullish_trend or alligator_sleeping
         
         if long_entry and position != 1:
             position = 1
@@ -150,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_supertrend_donchian_breakout_volume_v1"
-timeframe = "6h"
+name = "4h_1d_alligator_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
