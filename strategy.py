@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-6h_12h_1d_williams_alligator_trend_v1
-Hypothesis: Williams Alligator (3 SMAs) on 1d for trend, 12h for momentum confirmation via price > SMA3, 
-and 6h for entry on pullback to SMA2 with volume confirmation. Works in bull/bear by trading with 1d trend.
-Target: 50-150 total trades over 4 years (12-37/year).
+4h_1d_ema100_ema200_vol_trend_v1
+Hypothesis: Use 1-day EMA100 and EMA200 crossovers on the 4h chart to determine trend direction, with volume confirmation for entry.
+Long when EMA100 > EMA200 (uptrend) and price crosses above EMA200 with volume.
+Short when EMA100 < EMA200 (downtrend) and price crosses below EMA100 with volume.
+Exit when trend reverses or price crosses back to the opposite EMA.
+Designed to work in both bull and bear markets by following the daily trend and using volume to filter false signals.
+Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
 """
 
-name = "6h_12h_1d_williams_alligator_trend_v1"
-timeframe = "6h"
+name = "4h_1d_ema100_ema200_vol_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,48 +23,24 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams Alligator trend
+    # Get 1d data for EMA100 and EMA200
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    if len(df_1d) < 100:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Williams Alligator: Jaw (13-period SMMA), Teeth (8-period), Lips (5-period)
-    # SMMA: smoothed moving average (like Wilder's smoothing)
-    def smoothed_ma(arr, period):
-        result = np.full_like(arr, np.nan, dtype=float)
-        if len(arr) < period:
-            return result
-        # First value: SMA
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent: SMMA = (prev * (period-1) + current) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # 1d EMA100 and EMA200 for trend direction
+    ema100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    jaw = smoothed_ma(close_1d, 13)   # Blue line
-    teeth = smoothed_ma(close_1d, 8)   # Red line
-    lips = smoothed_ma(close_1d, 5)    # Green line
-    
-    # Align Alligator lines to 6h
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
-    
-    # Get 12h data for momentum confirmation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 10:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    # 12h SMA3 for momentum (price above SMA3 = bullish momentum)
-    sma3_12h = pd.Series(close_12h).rolling(window=3, min_periods=3).mean().values
-    sma3_12h_aligned = align_htf_to_ltf(prices, df_12h, sma3_12h)
+    # Align EMA100 and EMA200 to 4h timeframe
+    ema100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema100_1d)
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -72,39 +51,35 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(sma3_12h_aligned[i])):
+        if (np.isnan(ema100_1d_aligned[i]) or np.isnan(ema200_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend condition: Alligator aligned (Lips > Teeth > Jaw = bullish, Lips < Teeth < Jaw = bearish)
-        bullish_aligned = lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i]
-        bearish_aligned = lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i]
-        
-        # Momentum: price above/below 12h SMA3
-        price_above_sma3 = close[i] > sma3_12h_aligned[i]
-        price_below_sma3 = close[i] < sma3_12h_aligned[i]
-        
-        # Entry conditions
-        if bullish_aligned and price_above_sma3 and vol_confirm[i] and position != 1:
-            # Long: enter on pullback to lips (green line) in uptrend
-            if close[i] <= lips_aligned[i] * 1.005:  # Within 0.5% of lips
-                position = 1
-                signals[i] = 0.25
-        elif bearish_aligned and price_below_sma3 and vol_confirm[i] and position != -1:
-            # Short: enter on pullback to lips in downtrend
-            if close[i] >= lips_aligned[i] * 0.995:  # Within 0.5% of lips
-                position = -1
-                signals[i] = -0.25
-        # Exit: trend change or opposite lip touch
-        elif position == 1 and (not bullish_aligned or close[i] >= teeth_aligned[i]):
+        # Long entry: EMA100 > EMA200 (uptrend) AND price crosses above EMA200 with volume
+        if (ema100_1d_aligned[i] > ema200_1d_aligned[i] and 
+            close[i] > ema200_1d_aligned[i] and 
+            close[i-1] <= ema200_1d_aligned[i-1] and 
+            vol_confirm[i] and 
+            position != 1):
+            position = 1
+            signals[i] = 0.25
+        # Short entry: EMA100 < EMA200 (downtrend) AND price crosses below EMA100 with volume
+        elif (ema100_1d_aligned[i] < ema200_1d_aligned[i] and 
+              close[i] < ema100_1d_aligned[i] and 
+              close[i-1] >= ema100_1d_aligned[i-1] and 
+              vol_confirm[i] and 
+              position != -1):
+            position = -1
+            signals[i] = -0.25
+        # Exit: trend reversal or price crosses back to opposite EMA
+        elif position == 1 and (ema100_1d_aligned[i] < ema200_1d_aligned[i] or close[i] < ema100_1d_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (not bearish_aligned or close[i] <= teeth_aligned[i]):
+        elif position == -1 and (ema100_1d_aligned[i] > ema200_1d_aligned[i] or close[i] > ema200_1d_aligned[i]):
             position = 0
             signals[i] = 0.0
         else:
-            # Hold position
+            # Hold current position
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
