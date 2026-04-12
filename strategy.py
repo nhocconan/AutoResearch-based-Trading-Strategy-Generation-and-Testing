@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-12h_1d_Premium_Reversion
-Hypothesis: On 12h timeframe, enter long when price crosses below daily VWAP with volume contraction and 1d ATR contraction (low volatility regime), exit on VWAP reversion. Short when price crosses above daily VWAP with volume expansion and ATR expansion (high volatility regime), exit on VWAP reversion. Uses daily VWAP as mean, ATR regime filter, and volume change filter. Designed for mean reversion in low volatility and momentum in high volatility regimes. Targets 15-30 trades/year.
+4h_1d_Camarilla_Breakout_Volume_Trend_v1
+Hypothesis: On 4h timeframe, enter long when price breaks above daily Camarilla R3 with volume confirmation and rising ADX trend, enter short when price breaks below daily Camarilla S3 with volume confirmation and rising ADX trend. Uses daily Camarilla levels for structure, ADX for trend strength, and volume filter for institutional participation. Designed for fewer trades (<40/year) and better risk-adjusted returns in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Premium_Reversion"
-timeframe = "12h"
+name = "4h_1d_Camarilla_Breakout_Volume_Trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,7 +22,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY VWAP ===
+    # === DAILY INDICATORS: Camarilla pivot levels ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -30,83 +30,89 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Typical price
-    tp_1d = (high_1d + low_1d + close_1d) / 3
-    # VWAP = sum(tp * volume) / sum(volume)
-    vwap_num = np.cumsum(tp_1d * volume_1d)
-    vwap_den = np.cumsum(volume_1d)
-    vwap_1d = np.where(vwap_den != 0, vwap_num / vwap_den, tp_1d)
+    # Calculate daily Camarilla pivot levels
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Align VWAP to 12h
-    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    # Camarilla R3 and S3 levels (key reversal levels)
+    r3 = close_1d + range_1d * 1.1 / 4
+    s3 = close_1d - range_1d * 1.1 / 4
     
-    # === DAILY ATR(14) FOR VOLATILITY REGIME ===
-    # True Range
-    tr = np.maximum(high_1d - low_1d, 
-                    np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
-                               np.abs(low_1d - np.roll(close_1d, 1))))
+    # Align to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # === DAILY ADX TREND STRENGTH ===
+    # Calculate True Range
+    tr = np.maximum(high_1d - low_1d, np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), np.abs(low_1d - np.roll(close_1d, 1))))
     tr[0] = high_1d[0] - low_1d[0]
     
-    # ATR(14)
-    atr_1d = np.full_like(tr, np.nan)
-    if len(tr) >= 14:
-        atr_1d[13] = np.mean(tr[0:14])
-        for i in range(14, len(tr)):
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
+    # Calculate Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Align ATR to 12h
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Smooth TR, DM+, DM- with Wilder's smoothing (alpha = 1/14)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            result[period-1] = np.mean(data[:period])
+            for i in range(period, len(data)):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    # ATR percentile rank (20-period) for regime
-    atr_rank = np.full_like(atr_aligned, np.nan)
-    for i in range(20, len(atr_aligned)):
-        if not np.isnan(atr_aligned[i]):
-            window = atr_aligned[max(0, i-19):i+1]
-            valid = window[~np.isnan(window)]
-            if len(valid) > 0:
-                rank = np.sum(valid <= atr_aligned[i]) / len(valid) * 100
-                atr_rank[i] = rank
+    atr14 = wilders_smoothing(tr, 14)
+    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
+    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
     
-    # === VOLUME CHANGE (12h) ===
-    vol_change = np.zeros_like(volume)
-    vol_ma_5 = np.zeros_like(volume)
-    if len(volume) >= 5:
-        vol_ma_5[4] = np.mean(volume[0:5])
-        for i in range(5, len(volume)):
-            vol_ma_5[i] = (vol_ma_5[i-1] * 4 + volume[i]) / 5
+    # Calculate DI+ and DI-
+    di_plus = np.where(atr14 > 0, dm_plus_smooth / atr14 * 100, 0)
+    di_minus = np.where(atr14 > 0, dm_minus_smooth / atr14 * 100, 0)
     
-    vol_change = volume / vol_ma_5 - 1  # percentage change from 5-period MA
+    # Calculate DX and ADX
+    dx = np.where((di_plus + di_minus) > 0, np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
+    adx = wilders_smoothing(dx, 14)
+    
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # === VOLUME FILTER ===
+    vol_ma = np.zeros_like(volume)
+    if len(volume) >= 20:
+        vol_ma[20] = np.mean(volume[0:20])
+        for i in range(21, len(volume)):
+            vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
+    volume_filter = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # start after warmup
+    for i in range(100, n):  # start after warmup
         # Skip if indicators not available
-        if (np.isnan(vwap_aligned[i]) or np.isnan(atr_aligned[i]) or 
-            np.isnan(atr_rank[i]) or np.isnan(vol_change[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(volume_filter[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: price below VWAP, low volatility regime (ATR rank < 30), volume contraction
-        long_entry = (close[i] < vwap_aligned[i] and 
-                      atr_rank[i] < 30 and 
-                      vol_change[i] < -0.1)  # volume below 5MA
+        # Breakout conditions with volume and ADX trend filter
+        long_breakout = (close[i] > r3_aligned[i]) and volume_filter[i] and (adx_aligned[i] > 25)
+        short_breakout = (close[i] < s3_aligned[i]) and volume_filter[i] and (adx_aligned[i] > 25)
         
-        # Short: price above VWAP, high volatility regime (ATR rank > 70), volume expansion
-        short_entry = (close[i] > vwap_aligned[i] and 
-                       atr_rank[i] > 70 and 
-                       vol_change[i] > 0.2)  # volume above 5MA
+        # Exit conditions: reversal back inside Camarilla H3-L3 range or ADX weakens
+        h3 = close_1d + range_1d * 1.1 / 2
+        l3 = close_1d - range_1d * 1.1 / 2
+        h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+        l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
         
-        # Exit: price crosses VWAP (mean reversion)
-        exit_long = close[i] > vwap_aligned[i]
-        exit_short = close[i] < vwap_aligned[i]
+        exit_long = (close[i] < h3_aligned[i]) or (close[i] > l3_aligned[i]) or (adx_aligned[i] < 20)
+        exit_short = (close[i] > l3_aligned[i]) or (close[i] < h3_aligned[i]) or (adx_aligned[i] < 20)
         
-        if long_entry and position != 1:
+        if long_breakout and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_entry and position != -1:
+        elif short_breakout and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
