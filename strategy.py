@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 6h_1d_alligator_trend_with_volume
-# Hypothesis: Combines Williams Alligator (13,8,5 SMAs) with volume confirmation on 6h timeframe.
-# The Alligator identifies trend direction when jaws, teeth, and lips are aligned.
-# Volume confirms trend strength. Works in both bull/bear by only trading when trend is clear.
-# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
+# 12h_1d_volatility_breakout_with_volume
+# Hypothesis: 12-hour volatility breakout using 1-day ATR with volume confirmation
+# Works in bull/bear by capturing volatility expansion after consolidation, with volume filter to avoid false breakouts.
+# Target: 15-35 trades/year (60-140 total over 4 years) to minimize fee drag.
 
-name = "6h_1d_alligator_trend_with_volume"
-timeframe = "6h"
+name = "12h_1d_volatility_breakout_with_volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,58 +22,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Alligator calculation
+    # Get daily data for ATR calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Williams Alligator lines: 13, 8, 5 period SMAs
-    # Jaw (13-period SMA)
-    jaw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().values
-    # Teeth (8-period SMA)
-    teeth = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().values
-    # Lips (5-period SMA)
-    lips = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values
+    # Calculate True Range and ATR (14-day ATR)
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align Alligator lines to 6h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    # ATR multiplier for breakout threshold (0.5 * ATR)
+    atr_threshold = atr_14d * 0.5
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Calculate 20-period high/low for breakout levels
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Align ATR threshold and breakout levels to 12h timeframe
+    atr_threshold_aligned = align_htf_to_ltf(prices, df_1d, atr_threshold)
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    
+    # Volume confirmation: volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    vol_confirm = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i])):
+        if (np.isnan(atr_threshold_aligned[i]) or np.isnan(high_20_aligned[i]) or 
+            np.isnan(low_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Bullish alignment: Lips > Teeth > Jaw (alligator eating up)
-        bullish = (lips_aligned[i] > teeth_aligned[i]) and (teeth_aligned[i] > jaw_aligned[i])
-        # Bearish alignment: Lips < Teeth < Jaw (alligator eating down)
-        bearish = (lips_aligned[i] < teeth_aligned[i]) and (teeth_aligned[i] < jaw_aligned[i])
-        
-        # Long entry: bullish alignment with volume confirmation
-        if bullish and vol_confirm[i] and position != 1:
+        # Long entry: close breaks above 20-period high + volatility expansion + volume
+        if (close[i] > high_20_aligned[i] and 
+            (high[i] - low[i]) > atr_threshold_aligned[i] and 
+            vol_confirm[i] and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: bearish alignment with volume confirmation
-        elif bearish and vol_confirm[i] and position != -1:
+        # Short entry: close breaks below 20-period low + volatility expansion + volume
+        elif (close[i] < low_20_aligned[i] and 
+              (high[i] - low[i]) > atr_threshold_aligned[i] and 
+              vol_confirm[i] and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: opposite alignment or loss of volume confirmation
-        elif position == 1 and (not bullish or not vol_confirm[i]):
+        # Exit: reverse signal
+        elif position == 1 and close[i] < low_20_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (not bearish or not vol_confirm[i]):
+        elif position == -1 and close[i] > high_20_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
