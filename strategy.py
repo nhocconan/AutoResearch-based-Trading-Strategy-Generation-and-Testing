@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """
-1d_1w_Camarilla_Breakout_Trend
-Hypothesis: Use weekly CLOSE (not daily) to define trend direction, and daily Camarilla H3/L3 breakouts for entries.
-This avoids whipsaws by requiring higher-timeframe trend confirmation. Exit on trend reversal or price retracement to H4/L4.
-Target: 20-50 total trades over 4 years (5-12/year) on 1d timeframe.
+6h_1d_Alligator_ElderRay
+Hypothesis: Combine Williams Alligator (trend detection) with Elder Ray (bull/bear power) on 1d timeframe.
+Enter long when price > Alligator's Jaw AND Bull Power > 0 with rising 1d momentum.
+Enter short when price < Alligator's Jaw AND Bear Power < 0 with falling 1d momentum.
+Use 6h timeframe for entries with 0.25 position sizing.
+Designed to catch sustained trends while avoiding sideways chop. Works in bull via trend following,
+in bear via short signals during distribution phases.
+Target: 50-150 total trades over 4 years (12-37/year) on 6h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Camarilla_Breakout_Trend"
-timeframe = "1d"
+name = "6h_1d_Alligator_ElderRay"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,79 +26,80 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # === WEEKLY TREND FILTER ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    sma50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
-    sma50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma50_1w)
-    
-    # === DAILY CAMARILLA LEVELS ===
+    # === 1D ALLIGATOR (JAW, TEETH, LIPS) ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 13:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    median_1d = (df_1d['high'].values + df_1d['low'].values) / 2
     
-    # Calculate Camarilla levels (H3, L3, H4, L4)
-    camarilla_h3 = np.full(len(close_1d), np.nan)
-    camarilla_l3 = np.full(len(close_1d), np.nan)
-    camarilla_h4 = np.full(len(close_1d), np.nan)
-    camarilla_l4 = np.full(len(close_1d), np.nan)
+    # Jaw (13-period SMMA, 8 bars ahead)
+    jaw = pd.Series(median_1d).rolling(window=13, min_periods=13).mean().values
+    jaw = np.roll(jaw, 8)  # shift forward 8 bars
+    jaw[:8] = np.nan
     
-    for i in range(len(close_1d)):
-        if np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(close_1d[i]):
-            continue
-        range_val = high_1d[i] - low_1d[i]
-        camarilla_h3[i] = close_1d[i] + range_val * 1.1 / 6
-        camarilla_l3[i] = close_1d[i] - range_val * 1.1 / 6
-        camarilla_h4[i] = close_1d[i] + range_val * 1.1 / 4
-        camarilla_l4[i] = close_1d[i] - range_val * 1.1 / 4
+    # Teeth (8-period SMMA, 5 bars ahead)
+    teeth = pd.Series(median_1d).rolling(window=8, min_periods=8).mean().values
+    teeth = np.roll(teeth, 5)  # shift forward 5 bars
+    teeth[:5] = np.nan
     
-    # Align to 1d timeframe
-    h3_1d = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_1d = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    h4_1d = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_1d = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # Lips (5-period SMMA, 3 bars ahead)
+    lips = pd.Series(median_1d).rolling(window=5, min_periods=5).mean().values
+    lips = np.roll(lips, 3)  # shift forward 3 bars
+    lips[:3] = np.nan
     
-    # === VOLUME SURGE FILTER ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma
+    # Align Alligator lines to 6h
+    jaw_6h = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_6h = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_6h = align_htf_to_ltf(prices, df_1d, lips)
+    
+    # === 1D ELDER RAY (BULL/BEAR POWER) ===
+    # Bull Power = High - EMA13
+    # Bear Power = Low - EMA13
+    ema13_1d = pd.Series(df_1d['close'].values).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = df_1d['high'].values - ema13_1d
+    bear_power = df_1d['low'].values - ema13_1d
+    
+    # Align Elder Ray to 6h
+    bull_power_6h = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_6h = align_htf_to_ltf(prices, df_1d, bear_power)
+    
+    # === 1D MOMENTUM (ROC 3-period) ===
+    roc3_1d = pd.Series(df_1d['close'].values).pct_change(periods=3).values * 100
+    roc3_6h = align_htf_to_ltf(prices, df_1d, roc3_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(h3_1d[i]) or np.isnan(l3_1d[i]) or np.isnan(sma50_1w_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(jaw_6h[i]) or np.isnan(bull_power_6h[i]) or np.isnan(bear_power_6h[i]) or 
+            np.isnan(roc3_6h[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        trend_up = close[i] > sma50_1w_aligned[i]
-        trend_down = close[i] < sma50_1w_aligned[i]
+        # Long conditions:
+        # 1. Price above Alligator Jaw (uptrend)
+        # 2. Bull Power positive (bulls in control)
+        # 3. Rising 1d momentum (ROC3 > 0)
+        long_signal = (close[i] > jaw_6h[i] and 
+                      bull_power_6h[i] > 0 and 
+                      roc3_6h[i] > 0)
         
-        # Long: break above H3 in uptrend with volume surge
-        long_signal = (trend_up and 
-                      close[i] > h3_1d[i] and 
-                      vol_ratio[i] > 2.0)
+        # Short conditions:
+        # 1. Price below Alligator Jaw (downtrend)
+        # 2. Bear Power negative (bears in control)
+        # 3. Falling 1d momentum (ROC3 < 0)
+        short_signal = (close[i] < jaw_6h[i] and 
+                       bear_power_6h[i] < 0 and 
+                       roc3_6h[i] < 0)
         
-        # Short: break below L3 in downtrend with volume surge
-        short_signal = (trend_down and 
-                       close[i] < l3_1d[i] and 
-                       vol_ratio[i] > 2.0)
-        
-        # Exit: trend reversal or retracement to H4/L4
+        # Exit: price crosses Teeth (trend weakening) or Elder Ray diverges
         exit_long = (position == 1 and 
-                    (not trend_up or close[i] <= h4_1d[i]))
+                    (close[i] < teeth_6h[i] or bull_power_6h[i] < 0))
         exit_short = (position == -1 and 
-                     (not trend_down or close[i] >= l4_1d[i]))
+                     (close[i] > teeth_6h[i] or bear_power_6h[i] > 0))
         
         # Execute trades
         if long_signal and position != 1:
