@@ -1,13 +1,12 @@
-# 4h_1d_kama_volatility_regime
-# Hypothesis: 4-hour KAMA trend with 1-day volatility regime filter and volume confirmation
-# Uses KAMA (Kaufman Adaptive Moving Average) for adaptive trend following, combined with
-# 1-day ATR-based volatility regime (high volatility = trend following, low volatility = avoid)
-# Volume confirmation filters low-quality breakouts. Designed to work in both bull and bear
-# markets by avoiding choppy low-volatility periods and catching strong trends.
-# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
+#!/usr/bin/env python3
+# 6h_1d_adaptive_cci_volume_momentum
+# Hypothesis: 6-hour CCI (20) with 1d volume momentum filter
+# Uses CCI for overbought/oversold detection with volume confirmation to filter false signals
+# Works in bull/bear by adapting to volatility and using volume as confirmation of conviction
+# Target: 50-150 total trades over 4 years (12-37/year)
 
-name = "4h_1d_kama_volatility_regime"
-timeframe = "4h"
+name = "6h_1d_adaptive_cci_volume_momentum"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,84 +23,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for KAMA, volatility regime, and ATR
+    # Get daily data for volume momentum calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # KAMA (Kaufman Adaptive Moving Average) - 10-period ER, 2 and 30 SC
-    def kama(close, er_period=10, fast_sc=2, slow_sc=30):
-        change = np.abs(np.subtract(close, np.roll(close, er_period)))
-        volatility = np.sum(np.abs(np.subtract(np.roll(close, 1), close)), axis=0) if len(close.shape) > 0 else np.sum(np.abs(np.subtract(np.roll(close, 1), close)))
-        # For 1D array, calculate rolling volatility
-        volatility_arr = np.zeros_like(close)
-        for i in range(er_period, len(close)):
-            volatility_arr[i] = np.sum(np.abs(np.subtract(close[i-er_period+1:i+1], np.roll(close[i-er_period+1:i+1], 1))))
-        volatility_arr[:er_period] = np.nan
-        er = np.divide(change, volatility_arr, out=np.zeros_like(change), where=volatility_arr!=0)
-        sc = np.power(er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1), 2)
-        kama_out = np.zeros_like(close)
-        kama_out[0] = close[0]
-        for i in range(1, len(close)):
-            kama_out[i] = kama_out[i-1] + sc[i] * (close[i] - kama_out[i-1])
-        return kama_out
+    # CCI calculation (20-period)
+    tp = (high + low + close) / 3.0
+    ma_tp = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
+    mad = pd.Series(np.abs(tp - ma_tp)).rolling(window=20, min_periods=20).mean().values
+    # Avoid division by zero
+    cci = np.where(mad != 0, (tp - ma_tp) / (0.015 * mad), 0.0)
     
-    # Calculate KAMA on daily close
-    kama_1d = kama(close_1d, er_period=10, fast_sc=2, slow_sc=30)
-    
-    # Volatility regime: 1-day ATR ratio (current ATR / 20-period average ATR)
-    tr1 = np.abs(np.subtract(high_1d, low_1d))
-    tr2 = np.abs(np.subtract(high_1d, np.roll(close_1d, 1)))
-    tr3 = np.abs(np.subtract(low_1d, np.roll(close_1d, 1)))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_current = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
-    atr_ma = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
-    atr_ratio = np.divide(atr_current, atr_ma, out=np.ones_like(atr_current), where=atr_ma!=0)
-    
-    # ATR for volatility filter (avoid extremely low volatility)
-    atr_filter = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Align KAMA, ATR ratio, and ATR filter to 4h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
-    atr_filter_aligned = align_htf_to_ltf(prices, df_1d, atr_filter)
-    
-    # Volume confirmation: volume > 1.3x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.3)
+    # Volume momentum: 1d volume ratio (current vs 20-day average)
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_momentum = np.where(vol_ma_1d != 0, volume_1d / vol_ma_1d, 1.0)
+    vol_momentum_aligned = align_htf_to_ltf(prices, df_1d, vol_momentum)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
-            np.isnan(atr_filter_aligned[i])):
+        if np.isnan(cci[i]) or np.isnan(vol_momentum_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Only trade in high volatility regimes (ATR ratio > 0.8) to avoid chop
-        vol_regime_ok = atr_ratio_aligned[i] > 0.8
-        
-        # Long entry: price above KAMA with volume and volatility filter
-        if (close[i] > kama_aligned[i] and vol_confirm[i] and 
-            atr_filter_aligned[i] > 0 and vol_regime_ok and position != 1):
+        # Long entry: CCI crosses above -100 (oversold recovery) with volume confirmation
+        if (cci[i] > -100 and cci[i-1] <= -100 and 
+            vol_momentum_aligned[i] > 1.2 and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: price below KAMA with volume and volatility filter
-        elif (close[i] < kama_aligned[i] and vol_confirm[i] and 
-              atr_filter_aligned[i] > 0 and vol_regime_ok and position != -1):
+        # Short entry: CCI crosses below 100 (overbought rejection) with volume confirmation
+        elif (cci[i] < 100 and cci[i-1] >= 100 and 
+              vol_momentum_aligned[i] > 1.2 and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: reverse signal
-        elif position == 1 and close[i] < kama_aligned[i]:
+        # Exit: CCI crosses zero line (mean reversion)
+        elif position == 1 and cci[i] < 0:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > kama_aligned[i]:
+        elif position == -1 and cci[i] > 0:
             position = 0
             signals[i] = 0.0
         else:
