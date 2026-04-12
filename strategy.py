@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_1d_donchian_breakout_volume_v1
-Hypothesis: 4-hour Donchian channel breakout with volume confirmation and 1d trend filter.
-Enters long on breakout above 20-period high with volume spike and 1d uptrend; short on breakdown below 20-period low with volume spike and 1d downtrend.
-Uses fixed position sizing (0.25) to limit trades and reduce fee drag. Designed to capture strong trending moves while avoiding chop.
-Target: 20-30 trades/year (80-120 total over 4 years) to minimize fee drag while capturing strong moves.
+1d_1w_kama_rsi_chop_filter_v1
+Hypothesis: Daily strategy using KAMA for trend direction, RSI for momentum confirmation,
+and Choppiness Index as regime filter. Enters long when KAMA upward, RSI > 50, and choppy market (CHOP > 61.8).
+Enters short when KAMA downward, RSI < 50, and choppy market. Uses choppy regime to avoid whipsaws in trends.
+Designed to work in both bull and bear markets by focusing on mean-reversion in choppy conditions.
+Target: 10-25 trades/year (40-100 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
@@ -19,64 +20,119 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for Choppiness Index (regime filter)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    # 1d EMA50 for trend direction
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate weekly Choppiness Index
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 20-period Donchian channels on 4h data
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate ATR for volume filter threshold
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(np.roll(high, 1) - close)
-    tr3 = np.abs(np.roll(low, 1) - close)
+    # True Range
+    tr1 = np.abs(high_1w - low_1w)
+    tr2 = np.abs(np.roll(high_1w, 1) - close_1w)
+    tr3 = np.abs(np.roll(low_1w, 1) - close_1w)
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Sum of True Range over 14 periods
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    
+    # Highest high and lowest low over 14 periods
+    hh = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+    
+    # Choppiness Index: 100 * log10(atr_sum / (hh - ll)) / log10(14)
+    # Avoid division by zero
+    range_hl = hh - ll
+    range_hl = np.where(range_hl == 0, 1e-10, range_hl)
+    chop = 100 * np.log10(atr_sum / range_hl) / np.log10(14)
+    
+    # Align Choppiness Index to daily timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
+    
+    # Calculate KAMA on daily close
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, n=10))  # 10-period change
+    abs_change = np.sum(np.abs(np.diff(close, n=1)), axis=0)  # This needs fixing - let's do properly
+    
+    # Proper ER calculation
+    er = np.zeros_like(close)
+    for i in range(10, len(close)):
+        direction = np.abs(close[i] - close[i-10])
+        volatility = np.sum(np.abs(np.diff(close[i-9:i+1])))
+        if volatility > 0:
+            er[i] = direction / volatility
+        else:
+            er[i] = 0
+    
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # Calculate RSI(14)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    # Handle first 14 values
+    rsi[:14] = 50
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(20, n):  # Start after warmup
         # Skip if data not ready
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or np.isnan(atr[i])):
+        if (np.isnan(chop_aligned[i]) or np.isnan(kama[i]) or 
+            np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period average (avoid low-volume breakouts)
-        if i >= 20:
-            vol_ma = np.mean(volume[max(0, i-20):i])
-            volume_filter = volume[i] > vol_ma * 1.5
+        # Regime filter: choppy market (CHOP > 61.8) for mean reversion
+        choppy = chop_aligned[i] > 61.8
+        
+        # KAMA direction: slope of KAMA
+        kama_rising = kama[i] > kama[i-1]
+        kama_falling = kama[i] < kama[i-1]
+        
+        # RSI momentum
+        rsi_over_50 = rsi[i] > 50
+        rsi_under_50 = rsi[i] < 50
+        
+        # Entry conditions
+        long_entry = kama_rising and rsi_over_50 and choppy
+        short_entry = kama_falling and rsi_under_50 and choppy
+        
+        # Exit conditions: opposite signal or choppy regime ends
+        long_exit = not kama_rising or not choppy
+        short_exit = not kama_falling or not choppy
+        
+        # Position sizing: smaller in choppy markets
+        if choppy:
+            position_size = 0.25
         else:
-            volume_filter = False
+            position_size = 0.10  # Reduce size in trending markets
         
-        # Trend filter from 1d EMA50
-        uptrend_1d = close[i] > ema50_1d_aligned[i]
-        downtrend_1d = close[i] < ema50_1d_aligned[i]
-        
-        # Entry conditions: Donchian breakout with volume and trend confirmation
-        long_breakout = close[i] > high_20[i] and volume_filter and uptrend_1d
-        short_breakout = close[i] < low_20[i] and volume_filter and downtrend_1d
-        
-        # Exit conditions: opposite Donchian breakout
-        long_exit = close[i] < low_20[i]
-        short_exit = close[i] > high_20[i]
-        
-        if long_breakout and position != 1:
+        if long_entry and position != 1:
             position = 1
-            signals[i] = 0.25
-        elif short_breakout and position != -1:
+            signals[i] = position_size
+        elif short_entry and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -position_size
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -86,14 +142,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = position_size
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -position_size
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_1d_donchian_breakout_volume_v1"
-timeframe = "4h"
+name = "1d_1w_kama_rsi_chop_filter_v1"
+timeframe = "1d"
 leverage = 1.0
