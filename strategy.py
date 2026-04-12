@@ -13,42 +13,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend context
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data for trend and volatility context
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    volume_1w = df_1w['volume'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate weekly EMA(50) for trend
-    close_1w_series = pd.Series(close_1w)
-    ema_50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate daily EMA(50) for trend
+    close_1d_series = pd.Series(close_1d)
+    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate weekly ATR(20) for volatility
-    tr1 = np.abs(high_1w - low_1w)
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    # Calculate daily ATR(14) for volatility
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr1[0] = tr2[0] = tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1w = np.full(len(df_1w), np.nan)
-    for i in range(20, len(df_1w)):
-        atr_1w[i] = np.mean(tr[i-20:i+1])
+    atr_1d = np.full(len(df_1d), np.nan)
+    for i in range(14, len(df_1d)):
+        atr_1d[i] = np.mean(tr[i-14:i+1])
     
-    # Calculate weekly Donchian(20) channels
-    donch_high_1w = np.full(len(high_1w), np.nan)
-    donch_low_1w = np.full(len(low_1w), np.nan)
-    for i in range(19, len(high_1w)):
-        donch_high_1w[i] = np.max(high_1w[i-19:i+1])
-        donch_low_1w[i] = np.min(low_1w[i-19:i+1])
+    # Calculate daily Donchian(20) channels
+    donch_high_1d = np.full(len(high_1d), np.nan)
+    donch_low_1d = np.full(len(low_1d), np.nan)
+    for i in range(19, len(high_1d)):
+        donch_high_1d[i] = np.max(high_1d[i-19:i+1])
+        donch_low_1d[i] = np.min(low_1d[i-19:i+1])
     
-    # Align weekly indicators to 6h timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
-    donch_high_1w_aligned = align_htf_to_ltf(prices, df_1w, donch_high_1w)
-    donch_low_1w_aligned = align_htf_to_ltf(prices, df_1w, donch_low_1w)
+    # Align daily indicators to 6h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    donch_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
+    donch_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
     
     # Calculate 6h ATR(14) for position sizing
     tr1_h = np.abs(high - low)
@@ -65,33 +65,33 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr_1w_aligned[i]) or 
-            np.isnan(donch_high_1w_aligned[i]) or np.isnan(donch_low_1w_aligned[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(donch_high_1d_aligned[i]) or np.isnan(donch_low_1d_aligned[i]) or 
             np.isnan(atr_6h[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: ATR > 0.5 * ATR MA(20) to avoid low volatility
-        atr_ma_20 = np.full(n, np.nan)
-        for j in range(33, n):  # 14 + 19 for 20-period MA
-            if not np.isnan(np.mean(atr_1w_aligned[j-19:j+1])):
-                atr_ma_20[j] = np.mean(atr_1w_aligned[j-19:j+1])
-        vol_filter = atr_1w_aligned[i] > 0.5 * atr_ma_20[i] if not np.isnan(atr_ma_20[i]) else False
+        # Volatility filter: ATR > 0.5 * ATR MA(10) to avoid low volatility
+        atr_ma_10 = np.full(n, np.nan)
+        for j in range(23, n):  # 14 + 9 for 10-period MA
+            if not np.isnan(np.mean(atr_1d_aligned[j-9:j+1])):
+                atr_ma_10[j] = np.mean(atr_1d_aligned[j-9:j+1])
+        vol_filter = atr_1d_aligned[i] > 0.5 * atr_ma_10[i] if not np.isnan(atr_ma_10[i]) else False
         
-        # Trend filter: price relative to weekly EMA50
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
+        # Trend filter: price relative to daily EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Breakout conditions: price breaks weekly Donchian channels
-        breakout_up = close[i] > donch_high_1w_aligned[i]
-        breakout_down = close[i] < donch_low_1w_aligned[i]
+        # Breakout conditions: price breaks daily Donchian channels
+        breakout_up = close[i] > donch_high_1d_aligned[i]
+        breakout_down = close[i] < donch_low_1d_aligned[i]
         
         # Entry conditions: Donchian breakout with trend and volatility filter
         long_entry = breakout_up and vol_filter and uptrend
         short_entry = breakout_down and vol_filter and downtrend
         
-        # Exit conditions: price crosses back to weekly Donchian mid-point
-        mid_point = (donch_high_1w_aligned[i] + donch_low_1w_aligned[i]) / 2
+        # Exit conditions: price crosses back to daily Donchian mid-point
+        mid_point = (donch_high_1d_aligned[i] + donch_low_1d_aligned[i]) / 2
         long_exit = close[i] < mid_point
         short_exit = close[i] > mid_point
         
@@ -118,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_donchian_ema_trend_filter_v1"
+name = "6h_1d_donchian_ema_trend_filter_v1"
 timeframe = "6h"
 leverage = 1.0
