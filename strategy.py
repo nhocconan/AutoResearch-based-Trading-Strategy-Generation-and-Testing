@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend context and entry signals
+    # Get daily data for trend context and signals
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -23,11 +23,11 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate daily SMA(50) for trend filter
+    # Calculate daily SMA(50) for trend
     close_1d_series = pd.Series(close_1d)
     sma_50_1d = close_1d_series.rolling(window=50, min_periods=50).mean().values
     
-    # Calculate daily ATR(14) for volatility filter
+    # Calculate daily ATR(14)
     tr1 = np.abs(high_1d - low_1d)
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
@@ -37,19 +37,20 @@ def generate_signals(prices):
     for i in range(14, len(df_1d)):
         atr_1d[i] = np.mean(tr[i-14:i+1])
     
-    # Calculate daily SMA(20) of ATR for volatility threshold
-    atr_series = pd.Series(atr_1d)
-    atr_sma_20_1d = atr_series.rolling(window=20, min_periods=20).mean().values
+    # Calculate daily Donchian(10) channels
+    high_10_1d = pd.Series(high_1d).rolling(window=10, min_periods=10).max().values
+    low_10_1d = pd.Series(low_1d).rolling(window=10, min_periods=10).min().values
     
-    # Calculate daily volume SMA(20) for volume filter
-    volume_1d_series = pd.Series(volume_1d)
-    vol_sma_20_1d = volume_1d_series.rolling(window=20, min_periods=20).mean().values
+    # Calculate daily volume moving average
+    vol_s_1d = pd.Series(volume_1d)
+    vol_ma_20_1d = vol_s_1d.rolling(window=20, min_periods=20).mean().values
     
-    # Align daily indicators to 6h timeframe
+    # Align daily indicators to 12h timeframe
     sma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    atr_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_sma_20_1d)
-    vol_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma_20_1d)
+    high_10_1d_aligned = align_htf_to_ltf(prices, df_1d, high_10_1d)
+    low_10_1d_aligned = align_htf_to_ltf(prices, df_1d, low_10_1d)
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,27 +58,29 @@ def generate_signals(prices):
     for i in range(200, n):
         # Skip if data not ready
         if (np.isnan(sma_50_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(atr_sma_20_1d_aligned[i]) or np.isnan(vol_sma_20_1d_aligned[i])):
+            np.isnan(high_10_1d_aligned[i]) or np.isnan(low_10_1d_aligned[i]) or
+            np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
+        
+        # Volume filter: current volume > 1.5 * 20-period daily volume MA
+        vol_filter = volume[i] > 1.5 * vol_ma_20_1d_aligned[i]
         
         # Trend filter: price above/below daily SMA50
         uptrend = close[i] > sma_50_1d_aligned[i]
         downtrend = close[i] < sma_50_1d_aligned[i]
         
-        # Volatility filter: current ATR > 1.2 * its 20-period SMA (avoid low volatility)
-        vol_filter = atr_1d_aligned[i] > 1.2 * atr_sma_20_1d_aligned[i]
+        # Donchian breakout conditions
+        long_breakout = close[i] > high_10_1d_aligned[i]
+        short_breakout = close[i] < low_10_1d_aligned[i]
         
-        # Volume filter: current volume > 1.3 * 20-period daily volume SMA
-        vol_size_filter = volume[i] > 1.3 * vol_sma_20_1d_aligned[i]
+        # Entry conditions: breakout in trend direction + volume filter
+        long_entry = long_breakout and uptrend and vol_filter
+        short_entry = short_breakout and downtrend and vol_filter
         
-        # Entry conditions: volatility + volume filters must pass
-        long_entry = uptrend and vol_filter and vol_size_filter
-        short_entry = downtrend and vol_filter and vol_size_filter
-        
-        # Exit conditions: trend reversal or volatility/volume drop
-        long_exit = (not uptrend) or (not vol_filter) or (not vol_size_filter)
-        short_exit = (not downtrend) or (not vol_filter) or (not vol_size_filter)
+        # Exit conditions: opposite breakout
+        long_exit = close[i] < low_10_1d_aligned[i]
+        short_exit = close[i] > high_10_1d_aligned[i]
         
         if long_entry and position != 1:
             position = 1
@@ -102,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_sma50_atr_vol_filter_v1"
-timeframe = "6h"
+name = "12h_1d_sma50_donchian10_vol_filter_v1"
+timeframe = "12h"
 leverage = 1.0
