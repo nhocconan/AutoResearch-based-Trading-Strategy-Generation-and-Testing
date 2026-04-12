@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-4h_1D_CAMARILLA_REVERSION_V1
-Hypothesis: Mean reversion at Camarilla pivot levels (H3/L3) on 4h timeframe using 1d pivot calculation.
-In ranging markets (common in 2025 BTC/ETH), price tends to revert from extreme daily levels (H3/L3) back toward the daily pivot.
-Uses volume confirmation to avoid false signals and RSI to avoid overextended reversals. Works in both bull and bear markets
-as mean reversion occurs regardless of trend direction when price reaches statistically extreme levels.
-Target: 20-40 trades/year to minimize fee drag while capturing mean reversion edge.
+6h_1d_1w_Volume_Weighted_Average_Price_VWAP_Breakout
+Hypothesis: 6h timeframe with VWAP from 1d and 1w timeframes, using VWAP deviation and volume confirmation.
+Trades when price deviates significantly from VWAP with high volume, expecting mean reversion to VWAP.
+Works in both bull and bear markets as VWAP acts as dynamic support/resistance.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1D_CAMARILLA_REVERSION_V1"
-timeframe = "4h"
+name = "6h_1d_1w_Volume_Weighted_Average_Price_VWAP_Breakout"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,43 +26,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla pivots
+    # Load 1d and 1w data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    df_1w = get_htf_data(prices, '1w')
+    
+    if len(df_1d) < 2 or len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Calculate VWAP for 1d and 1w
+    # VWAP = sum(price * volume) / sum(volume)
+    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    vwap_1d = (typical_price_1d * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    vwap_1d_values = vwap_1d.values
     
-    # Calculate pivot and ranges
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
+    typical_price_1w = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
+    vwap_1w = (typical_price_1w * df_1w['volume']).cumsum() / df_1w['volume'].cumsum()
+    vwap_1w_values = vwap_1w.values
     
-    # Camarilla levels - focus on H3/L3 for mean reversion entries
-    H3 = pivot + range_hl * 1.1 / 4
-    L3 = pivot - range_hl * 1.1 / 4
-    H4 = pivot + range_hl * 1.1 / 2  # Stop loss level
-    L4 = pivot - range_hl * 1.1 / 2  # Stop loss level
+    # Align VWAP to 6h timeframe
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d_values)
+    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w_values)
     
-    # Align to 4h timeframe
-    H3_4h = align_htf_to_ltf(prices, df_1d, H3)
-    L3_4h = align_htf_to_ltf(prices, df_1d, L3)
-    H4_4h = align_htf_to_ltf(prices, df_1d, H4)
-    L4_4h = align_htf_to_ltf(prices, df_1d, L4)
-    
-    # RSI(14) for overbought/oversold confirmation
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values  # Neutral when undefined
-    
-    # Volume confirmation (20 period average)
+    # Calculate volume average (20 period) for volume confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -71,23 +55,27 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(H3_4h[i]) or np.isnan(L3_4h[i]) or 
-            np.isnan(rsi[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(vwap_1w_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume spike: current volume > 1.3x average (moderate filter)
-        volume_spike = volume[i] > vol_ma[i] * 1.3
+        # Volume spike: current volume > 1.5x average
+        volume_spike = volume[i] > vol_ma[i] * 1.5
         
-        # Mean reversion conditions
-        # Long: price at or below L3 with oversold RSI and volume
-        long_entry = (close[i] <= L3_4h[i]) and (rsi[i] < 30) and volume_spike
-        # Short: price at or above H3 with overbought RSI and volume
-        short_entry = (close[i] >= H3_4h[i]) and (rsi[i] > 70) and volume_spike
+        # Calculate deviation from VWAP (as percentage)
+        deviation_1d = (close[i] - vwap_1d_aligned[i]) / vwap_1d_aligned[i]
+        deviation_1w = (close[i] - vwap_1w_aligned[i]) / vwap_1w_aligned[i]
         
-        # Exit conditions: return to pivot or opposite extreme
-        long_exit = (close[i] >= pivot[i]) or (close[i] <= L4_4h[i])
-        short_exit = (close[i] <= pivot[i]) or (close[i] >= H4_4h[i])
+        # Entry conditions: significant deviation from VWAP with volume spike
+        # Long when price is significantly below VWAP (oversold)
+        # Short when price is significantly above VWAP (overbought)
+        long_entry = (deviation_1d < -0.015) and (deviation_1w < -0.01) and volume_spike
+        short_entry = (deviation_1d > 0.015) and (deviation_1w > 0.01) and volume_spike
+        
+        # Exit conditions: return to VWAP or opposite deviation
+        long_exit = (close[i] > vwap_1d_aligned[i]) or (deviation_1d > -0.005)
+        short_exit = (close[i] < vwap_1d_aligned[i]) or (deviation_1d < 0.005)
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
