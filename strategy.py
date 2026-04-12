@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_camarilla_breakout_volume_regime_v1"
-timeframe = "12h"
+name = "4h_12h_camarilla_breakout_volume_regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,38 +17,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla levels (previous day)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # 12h data for Camarilla levels (previous 12h bar)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Previous 1d bar's OHLC for Camarilla calculation
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Previous 12h bar's OHLC for Camarilla calculation
+    prev_close = df_12h['close'].shift(1).values
+    prev_high = df_12h['high'].shift(1).values
+    prev_low = df_12h['low'].shift(1).values
     
     H_minus_L = prev_high - prev_low
     # Camarilla levels: R4 (strong resistance), S4 (strong support)
     R4 = prev_close + H_minus_L * 1.1 / 2
     S4 = prev_close - H_minus_L * 1.1 / 2
     
-    # Map 1d Camarilla levels to each 12h bar using proper alignment
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    # Map 12h Camarilla levels to each 4h bar using proper alignment
+    R4_aligned = align_htf_to_ltf(prices, df_12h, R4)
+    S4_aligned = align_htf_to_ltf(prices, df_12h, S4)
     
-    # Volume confirmation: current 12h volume > 20-period average of 1d volume
-    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)
-    vol_ma = pd.Series(vol_1d_aligned).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Volume confirmation: current 4h volume > 20-period average of 12h volume
+    vol_12h_aligned = align_htf_to_ltf(prices, df_12h, df_12h['volume'].values)
+    vol_ma = pd.Series(vol_12h_aligned).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_filter = volume > vol_ma
     
-    # Chop index for regime filter (12h) - avoids ranging markets
+    # Chop index for regime filter (4h) - avoids ranging markets
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    atr_12h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    chop_raw = 100 * np.log10(tr_sum / (atr_12h * 14)) / np.log10(14)
+    atr_4h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    chop_raw = 100 * np.log10(tr_sum / (atr_4h * 14)) / np.log10(14)
     chop = np.where(tr_sum > 0, chop_raw, 50)
     
     signals = np.zeros(n)
@@ -72,11 +72,11 @@ def generate_signals(prices):
         
         # Exit: chop increases (range) or price returns to midpoint between R3/S3
         # Calculate R3/S3 for exit condition
-        H_minus_L_1d = (df_1d['high'].shift(1) - df_1d['low'].shift(1)).values
-        R3 = df_1d['close'].shift(1).values + H_minus_L_1d * 1.1 / 4
-        S3 = df_1d['close'].shift(1).values - H_minus_L_1d * 1.1 / 4
-        R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-        S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+        H_minus_L_12h = (df_12h['high'].shift(1) - df_12h['low'].shift(1)).values
+        R3 = df_12h['close'].shift(1).values + H_minus_L_12h * 1.1 / 4
+        S3 = df_12h['close'].shift(1).values - H_minus_L_12h * 1.1 / 4
+        R3_aligned = align_htf_to_ltf(prices, df_12h, R3)
+        S3_aligned = align_htf_to_ltf(prices, df_12h, S3)
         midpoint = (R3_aligned + S3_aligned) / 2
         
         exit_long = (position == 1 and (chop[i] > 60 or close[i] < midpoint[i]))
