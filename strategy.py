@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
 """
-6h_1d_Chaikin_Momentum_Pullback
-Hypothesis: On 6h timeframe, buy pullbacks to the 21-period EMA during strong bullish momentum 
-(Chaikin Money Flow > 0.25 on daily) and sell rallies to EMA during bearish momentum (CMF < -0.25).
-Uses daily CMF as regime filter and 6x EMA pullback for entry. Works in bull (buy dips) and 
-bear (sell rallies) by fading to the trend-defining EMA when institutional flow confirms direction.
-Target: 20-50 trades over 4 years (5-12/year).
+12h_1d_1w_Camarilla_Breakout_Volume_Regime
+Hypothesis: On 12h timeframe, buy when price breaks above Camarilla H4 level with volume spike and 
+daily price above weekly VWAP, sell when price breaks below L4 level with volume spike and daily 
+price below weekly VWAP. Uses Camarilla pivot levels from daily chart and weekly VWAP for regime 
+filter. Works in bull (breakouts above resistance) and bear (breakdowns below support) by fading 
+to mean reversion in ranging markets (filtered by weekly VWAP). Target: 15-40 trades over 4 years 
+(4-10/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Chaikin_Momentum_Pullback"
-timeframe = "6h"
+name = "12h_1d_1w_Camarilla_Breakout_Volume_Regime"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,70 +27,96 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 6H INDICATORS: 21-period EMA ===
-    # EMA with proper min_periods
-    close_series = pd.Series(close)
-    ema_21 = close_series.ewm(span=21, adjust=False, min_periods=21).mean().values
+    # === 12H INDICATORS ===
+    # Average True Range for volume spike detection
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
+    atr = np.full(n, np.nan)
+    for i in range(14, n):
+        if i == 14:
+            atr[i] = np.nanmean(tr[1:15])
+        else:
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
-    # === 1D INDICATOR: Chaikin Money Flow (20-period) ===
+    # Volume spike: volume > 1.5 * average volume (20-period)
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    volume_spike = volume > (vol_ma * 1.5)
+    
+    # === 1D INDICATOR: Camarilla Pivot Levels ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate CMF for daily
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Money Flow Multiplier
-    mfm = ((close_1d - low_1d) - (high_1d - close_1d)) / (high_1d - low_1d)
-    mfm = np.where((high_1d - low_1d) == 0, 0, mfm)  # avoid div by zero
+    # Calculate Camarilla levels for each day
+    camarilla_h4 = np.full(len(close_1d), np.nan)
+    camarilla_l4 = np.full(len(close_1d), np.nan)
+    for i in range(len(close_1d)):
+        range_ = high_1d[i] - low_1d[i]
+        camarilla_h4[i] = close_1d[i] + range_ * 1.1 / 2
+        camarilla_l4[i] = close_1d[i] - range_ * 1.1 / 2
     
-    # Money Flow Volume
-    mfv = mfm * volume_1d
+    # Align Camarilla levels to 12h timeframe
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
-    # 20-period CMF
-    cmf_20 = np.full(len(volume_1d), np.nan)
-    if len(volume_1d) >= 20:
-        mfv_sum = np.sum(mfv[:20])
-        vol_sum = np.sum(volume_1d[:20])
-        cmf_20[19] = mfv_sum / vol_sum if vol_sum != 0 else 0
-        for i in range(20, len(volume_1d)):
-            mfv_sum = mfv_sum - mfv[i-20] + mfv[i]
-            vol_sum = vol_sum - volume_1d[i-20] + volume_1d[i]
-            cmf_20[i] = mfv_sum / vol_sum if vol_sum != 0 else 0
+    # === 1W INDICATOR: Weekly VWAP for regime filter ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    # Align CMF to 6h timeframe (wait for daily close)
-    cmf_20_aligned = align_htf_to_ltf(prices, df_1d, cmf_20)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
+    
+    # Calculate VWAP for each week
+    vwap_1w = np.full(len(close_1w), np.nan)
+    for i in range(len(close_1w)):
+        typical_price = (high_1w[i] + low_1w[i] + close_1w[i]) / 3
+        vwap_1w[i] = typical_price  # Simplified: VWAP ≈ typical price for weekly
+    
+    # Align weekly VWAP to 12h timeframe
+    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(21, n):  # start after EMA warmup
-        # Skip if CMF not available
-        if np.isnan(cmf_20_aligned[i]) or np.isnan(ema_21[i]):
+    for i in range(30, n):  # start after warmup
+        # Skip if any data not available
+        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
+            np.isnan(vwap_1w_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Bullish regime: CMF > 0.25, buy pullbacks to EMA
-        bull_regime = cmf_20_aligned[i] > 0.25
-        # Bearish regime: CMF < -0.25, sell rallies to EMA
-        bear_regime = cmf_20_aligned[i] < -0.25
+        # Long setup: price breaks above H4 with volume spike and price above weekly VWAP
+        long_setup = (high[i] > camarilla_h4_aligned[i] and 
+                     volume_spike[i] and 
+                     close[i] > vwap_1w_aligned[i])
         
-        # Long signal: price at or below EMA in bull regime
-        long_signal = bull_regime and low[i] <= ema_21[i]
-        # Short signal: price at or above EMA in bear regime  
-        short_signal = bear_regime and high[i] >= ema_21[i]
+        # Short setup: price breaks below L4 with volume spike and price below weekly VWAP
+        short_setup = (low[i] < camarilla_l4_aligned[i] and 
+                      volume_spike[i] and 
+                      close[i] < vwap_1w_aligned[i])
         
-        # Exit conditions: reverse regime or opposing signal
-        exit_long = bear_regime or (position == 1 and high[i] >= ema_21[i] * 1.015)  # take profit at 1.5%
-        exit_short = bull_regime or (position == -1 and low[i] <= ema_21[i] * 0.985)   # take profit at 1.5%
+        # Exit conditions: opposite breakout or loss of volume/spike
+        exit_long = (low[i] < camarilla_l4_aligned[i] and volume_spike[i]) or \
+                   (not volume_spike[i] and position == 1)
+        exit_short = (high[i] > camarilla_h4_aligned[i] and volume_spike[i]) or \
+                    (not volume_spike[i] and position == -1)
         
-        if long_signal and position != 1:
+        if long_setup and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_signal and position != -1:
+        elif short_setup and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
