@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Breakout_Volume_Filter_v1
-Hypothesis: 4-hour breakout of daily Camarilla H4/L4 levels with volume confirmation (>2x 20-period average) and ADX trend filter (ADX > 25).
-Uses discrete position sizing (0.25) to minimize churn. Designed for low-frequency, high-probability trades in both bull and bear markets.
-Target: 20-50 total trades over 4 years (5-12/year) to avoid fee drag while capturing significant moves.
+6h_1d_WeeklyPivot_DonchianBreakout_v1
+Hypothesis: 6-hour breakout of weekly Donchian channel with directional filter from daily pivot point.
+In bull markets: price above daily pivot, break above weekly Donchian high -> long.
+In bear markets: price below daily pivot, break below weekly Donchian low -> short.
+Uses volume confirmation to avoid false breakouts. Designed for low-frequency, high-probability trades.
+Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_Breakout_Volume_Filter_v1"
-timeframe = "4h"
+name = "6h_1d_WeeklyPivot_DonchianBreakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,7 +26,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY CAMARILLA PIVOT CALCULATION ===
+    # === WEEKLY DONCHIAN CHANNEL (20 periods) ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    # Calculate Donchian high/low (20-period)
+    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    
+    # Align to 6h timeframe
+    donchian_high_6h = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_6h = align_htf_to_ltf(prices, df_1w, donchian_low)
+    
+    # === DAILY PIVOT POINT (for direction) ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -33,52 +51,11 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla H4/L4 levels for each day
-    H4 = np.zeros(len(df_1d))
-    L4 = np.zeros(len(df_1d))
+    # Standard pivot point: (H + L + C) / 3
+    pivot = (high_1d + low_1d + close_1d) / 3.0
     
-    for i in range(len(df_1d)):
-        range_ = high_1d[i] - low_1d[i]
-        if range_ <= 0:
-            H4[i] = L4[i] = close_1d[i]
-        else:
-            H4[i] = close_1d[i] + range_ * 1.1 / 2
-            L4[i] = close_1d[i] - range_ * 1.1 / 2
-    
-    # Align Camarilla levels to 4h timeframe
-    H4_4h = align_htf_to_ltf(prices, df_1d, H4)
-    L4_4h = align_htf_to_ltf(prices, df_1d, L4)
-    
-    # === ADX TREND FILTER ===
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    tr = np.zeros(n)
-    
-    for i in range(1, n):
-        high_diff = high[i] - high[i-1]
-        low_diff = low[i-1] - low[i]
-        
-        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
-        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
-        
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    # Wilder smoothing
-    def smooth_wilder(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        result[period-1] = np.nansum(arr[1:period+1])
-        for i in range(period, len(arr)):
-            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
-        return result
-    
-    period = 14
-    tr_smooth = smooth_wilder(tr, period)
-    plus_di = 100 * smooth_wilder(plus_dm, period) / tr_smooth
-    minus_di = 100 * smooth_wilder(minus_dm, period) / tr_smooth
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = smooth_wilder(dx, period)
+    # Align to 6h timeframe
+    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
     
     # === VOLUME CONFIRMATION ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -89,34 +66,21 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(H4_4h[i]) or np.isnan(L4_4h[i]) or 
-            np.isnan(adx[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(donchian_high_6h[i]) or np.isnan(donchian_low_6h[i]) or 
+            np.isnan(pivot_6h[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Breakout conditions
-        # Long: Price breaks above H4 with volume + strong trend (ADX > 25)
-        long_breakout = (close[i] > H4_4h[i]) and (vol_ratio[i] > 2.0) and (adx[i] > 25)
+        # Breakout conditions with pivot direction filter
+        # Long: Price above pivot AND breaks above weekly Donchian high with volume
+        long_breakout = (close[i] > pivot_6h[i]) and (close[i] > donchian_high_6h[i]) and (vol_ratio[i] > 1.5)
         
-        # Short: Price breaks below L4 with volume + strong trend (ADX > 25)
-        short_breakout = (close[i] < L4_4h[i]) and (vol_ratio[i] > 2.0) and (adx[i] > 25)
+        # Short: Price below pivot AND breaks below weekly Donchian low with volume
+        short_breakout = (close[i] < pivot_6h[i]) and (close[i] < donchian_low_6h[i]) and (vol_ratio[i] > 1.5)
         
-        # Exit: Price returns to opposite H3/L3 level or trend weakens
-        # Calculate H3/L3 for exit
-        H3 = np.zeros(len(df_1d))
-        L3 = np.zeros(len(df_1d))
-        for i_1d in range(len(df_1d)):
-            range_ = high_1d[i_1d] - low_1d[i_1d]
-            if range_ <= 0:
-                H3[i_1d] = L3[i_1d] = close_1d[i_1d]
-            else:
-                H3[i_1d] = close_1d[i_1d] + range_ * 1.1 / 4
-                L3[i_1d] = close_1d[i_1d] - range_ * 1.1 / 4
-        H3_4h = align_htf_to_ltf(prices, df_1d, H3)
-        L3_4h = align_htf_to_ltf(prices, df_1d, L3)
-        
-        exit_long = (position == 1) and ((close[i] < L3_4h[i]) or (adx[i] < 20))
-        exit_short = (position == -1) and ((close[i] > H3_4h[i]) or (adx[i] < 20))
+        # Exit: Price returns to opposite Donchian level or loses momentum
+        exit_long = (position == 1) and (close[i] < donchian_low_6h[i])
+        exit_short = (position == -1) and (close[i] > donchian_high_6h[i])
         
         # Execute trades
         if long_breakout and position != 1:
