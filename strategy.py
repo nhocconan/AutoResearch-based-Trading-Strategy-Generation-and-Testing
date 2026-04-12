@@ -1,88 +1,130 @@
 #!/usr/bin/env python3
-# 4h_1d_keltner_breakout_volume_trend_v1
-# Hypothesis: 4-hour strategy using 1-day EMA100 for trend direction and 1-day Keltner breakout for entries, with volume confirmation.
-# Works in bull/bear by requiring alignment with the 1d trend and confirming with volume to avoid false breakouts.
-# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
 
-name = "4h_1d_keltner_breakout_volume_trend_v1"
-timeframe = "4h"
+# 1d_1w_kama_rsi_chop_filter_v1
+# Hypothesis: Daily KAMA trend + RSI momentum + Choppiness regime filter to avoid whipsaws.
+# KAMA adapts to market noise, reducing false signals in ranging markets.
+# RSI captures momentum extremes, while Choppiness filter ensures we only trade in clear trends.
+# Works in bull/bear by using adaptive trend (KAMA) and avoiding trades in choppy markets.
+# Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag.
+
+name = "1d_1w_kama_rsi_chop_filter_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_kama(close, er_length=10, fast=2, slow=30):
+    """Calculate Kaufman Adaptive Moving Average"""
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close, prepend=close[0]))
+    
+    # Efficiency ratio
+    er = np.zeros_like(close)
+    for i in range(er_length, len(close)):
+        if volatility[i-er_length:i+1].sum() > 0:
+            er[i] = change[i-er_length:i+1].sum() / volatility[i-er_length:i+1].sum()
+        else:
+            er[i] = 0
+    
+    # Smoothing constants
+    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+    
+    # KAMA calculation
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    return kama
+
+def calculate_rsi(close, length=14):
+    """Calculate Relative Strength Index"""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).rolling(window=length, min_periods=length).mean().values
+    avg_loss = pd.Series(loss).rolling(window=length, min_periods=length).mean().values
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def calculate_choppiness(high, low, close, length=14):
+    """Calculate Choppiness Index"""
+    atr = np.zeros_like(close)
+    for i in range(1, len(close)):
+        tr = max(
+            high[i] - low[i],
+            np.abs(high[i] - close[i-1]),
+            np.abs(low[i] - close[i-1])
+        )
+        atr[i] = tr
+    
+    # Smoothed ATR
+    atr_sum = pd.Series(atr).rolling(window=length, min_periods=length).sum().values
+    
+    # Highest high and lowest low over period
+    hh = pd.Series(high).rolling(window=length, min_periods=length).max().values
+    ll = pd.Series(low).rolling(window=length, min_periods=length).min().values
+    
+    # Choppiness formula
+    chop = 100 * np.log10(atr_sum / (hh - ll)) / np.log10(length)
+    return chop
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for trend and Keltner
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 100:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # 1d EMA100 for trend direction
-    ema100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
-    ema100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema100_1d)
+    # Weekly KAMA for trend direction
+    kama_1w = calculate_kama(close_1w, er_length=10, fast=2, slow=30)
+    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
     
-    # Previous 1d bar's data for Keltner
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
-    
-    # ATR(20) for Keltner channels
-    tr1 = np.abs(prev_high_1d - prev_low_1d)
-    tr2 = np.abs(prev_high_1d - prev_close_1d)
-    tr3 = np.abs(prev_low_1d - prev_close_1d)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
-    
-    # Keltner channels (2x ATR)
-    upper_keltner = prev_close_1d + 2 * atr20
-    lower_keltner = prev_close_1d - 2 * atr20
-    
-    # Align to 4h timeframe
-    ema100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema100_1d)
-    upper_keltner_aligned = align_htf_to_ltf(prices, df_1d, upper_keltner)
-    lower_keltner_aligned = align_htf_to_ltf(prices, df_1d, lower_keltner)
-    
-    # Volume confirmation: volume > 2.0x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 2.0)
+    # Daily indicators
+    kama = calculate_kama(close, er_length=10, fast=2, slow=30)
+    rsi = calculate_rsi(close, length=14)
+    chop = calculate_choppiness(high, low, close, length=14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(30, n):
         # Skip if data not ready
-        if (np.isnan(ema100_1d_aligned[i]) or np.isnan(upper_keltner_aligned[i]) or 
-            np.isnan(lower_keltner_aligned[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
+            np.isnan(chop[i]) or np.isnan(kama_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: price > EMA100 (uptrend) AND close breaks above upper Keltner with volume
-        if (close[i] > ema100_1d_aligned[i] and close[i] > upper_keltner_aligned[i] and vol_confirm[i] and position != 1):
+        # Only trade when market is trending (Choppiness < 38.2)
+        trending_market = chop[i] < 38.2
+        
+        # Long: price above weekly KAMA AND RSI > 50 (bullish momentum)
+        if (close[i] > kama_1w_aligned[i] and rsi[i] > 50 and trending_market and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: price < EMA100 (downtrend) AND close breaks below lower Keltner with volume
-        elif (close[i] < ema100_1d_aligned[i] and close[i] < lower_keltner_aligned[i] and vol_confirm[i] and position != -1):
+        # Short: price below weekly KAMA AND RSI < 50 (bearish momentum)
+        elif (close[i] < kama_1w_aligned[i] and rsi[i] < 50 and trending_market and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: reverse signal or close crosses back to opposite Keltner band
-        elif position == 1 and close[i] < lower_keltner_aligned[i]:
+        # Exit: reverse signal or RSI crosses 50 in opposite direction
+        elif position == 1 and (rsi[i] < 50 or close[i] < kama_1w_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > upper_keltner_aligned[i]:
+        elif position == -1 and (rsi[i] > 50 or close[i] > kama_1w_aligned[i]):
             position = 0
             signals[i] = 0.0
         else:
