@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_donchian_volume_chop_v1"
-timeframe = "4h"
+name = "1d_1w_camarilla_breakout_volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,83 +17,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels and chop filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    # Get weekly data for Camarilla levels (1w timeframe)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 20-period Donchian channels on daily data
-    # Upper channel: highest high of last 20 days
-    high_series = pd.Series(high_1d)
-    donchian_up = high_series.rolling(window=20, min_periods=20).max().values
-    # Lower channel: lowest low of last 20 days
-    low_series = pd.Series(low_1d)
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels from previous week
+    # Previous week's high, low, close
+    prev_high = np.roll(high_1w, 1)
+    prev_low = np.roll(low_1w, 1)
+    prev_close = np.roll(close_1w, 1)
     
-    # Align to 4h timeframe
-    donchian_up_aligned = align_htf_to_ltf(prices, df_1d, donchian_up)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # First week has no previous week
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Calculate Choppiness Index on daily data (14-period)
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    # Camarilla levels
+    # Resistance levels
+    r4 = prev_close + (prev_high - prev_low) * 1.500
+    r3 = prev_close + (prev_high - prev_low) * 1.250
+    r2 = prev_close + (prev_high - prev_low) * 1.166
+    r1 = prev_close + (prev_high - prev_low) * 1.083
+    # Support levels
+    s1 = prev_close - (prev_high - prev_low) * 1.083
+    s2 = prev_close - (prev_high - prev_low) * 1.166
+    s3 = prev_close - (prev_high - prev_low) * 1.250
+    s4 = prev_close - (prev_high - prev_low) * 1.500
     
-    # ATR (smoothed TR)
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Align Camarilla levels to daily timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
     
-    # Sum of TR over 14 periods
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    
-    # Highest high and lowest low over 14 periods
-    hh = high_series.rolling(window=14, min_periods=14).max().values
-    ll = low_series.rolling(window=14, min_periods=14).min().values
-    
-    # Chop = 100 * log10(tr_sum / (hh - ll)) / log10(14)
-    # Avoid division by zero
-    range_hl = hh - ll
-    range_hl = np.where(range_hl == 0, 1e-10, range_hl)
-    chop = 100 * np.log10(tr_sum / range_hl) / np.log10(14)
-    
-    # Align Chop to 4h
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Volume filter - 20-period average on 4h data
+    # Volume filter: 20-day average on daily data
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
     
+    # Trend filter: 50-day EMA on daily close
+    close_series = pd.Series(close)
+    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend = close > ema_50
+    downtrend = close < ema_50
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(donchian_up_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(r2_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(volume_ok[i]) or
+            np.isnan(ema_50[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Chop > 61.8 indicates ranging market (mean reversion opportunity)
-        # Chop < 38.2 indicates trending market
-        # We'll use Chop > 61.8 for mean reversion at Donchian levels
-        chop_high = chop_aligned[i] > 61.8  # Ranging market
+        # Breakout signals with volume confirmation
+        # Long: Close breaks above R3 (strong resistance) in uptrend
+        long_signal = close[i] > r3_aligned[i] and uptrend[i] and volume_ok[i]
+        # Short: Close breaks below S3 (strong support) in downtrend
+        short_signal = close[i] < s3_aligned[i] and downtrend[i] and volume_ok[i]
         
-        # Long signal: price touches or breaks below lower Donchian in ranging market
-        long_signal = chop_high and (low[i] <= donchian_low_aligned[i]) and volume_ok[i]
-        # Short signal: price touches or breaks above upper Donchian in ranging market
-        short_signal = chop_high and (high[i] >= donchian_up_aligned[i]) and volume_ok[i]
-        
-        # Exit when price moves back to middle of channel or Chop drops
-        mid_channel = (donchian_up_aligned[i] + donchian_low_aligned[i]) / 2
-        exit_long = chop_aligned[i] < 50 or close[i] >= mid_channel
-        exit_short = chop_aligned[i] < 50 or close[i] <= mid_channel
+        # Exit when price returns to midpoint (mean reversion)
+        midpoint = (r1_aligned[i] + s1_aligned[i]) / 2
+        exit_long = close[i] < midpoint
+        exit_short = close[i] > midpoint
         
         # Execute trades
         if long_signal and position != 1:
