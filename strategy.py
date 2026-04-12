@@ -1,156 +1,122 @@
 #!/usr/bin/env python3
 """
-12h_1d_Adaptive_Channel_Breakout_v1
-Hypothesis: 12h Donchian channel (20) breakouts with 1d volatility filter and volume confirmation.
-The strategy adapts to volatility regimes: in high volatility (expanding channel), it follows breakouts;
-in low volatility (contracting channel), it fades reversals at channel edges. This works in both bull
-and bear markets by capturing momentum during trends and mean reversion during ranges. Uses 1d for
-volatility regime filter to avoid whipsaws. Target: 15-25 trades per year (60-100 total over 4 years).
+4h_1d_Camarilla_Pivot_Range_Reversion_v1
+Hypothesis: Price tends to reverse from Camarilla pivot levels (H3/L3) on the 4h timeframe during ranging markets.
+Uses 1d for pivot calculation, 4h for entry/exit, and a 4h Choppiness Index filter to avoid trending markets.
+Works in both bull and bear markets by fading extremes in range-bound conditions.
+Target: 20-30 trades per year (80-120 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Adaptive_Channel_Breakout_v1"
-timeframe = "12h"
+name = "4h_1d_Camarilla_Pivot_Range_Reversion_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1D data for volatility regime filter
+    # Get 1D data for Camarilla pivots and Choppiness Index
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === 12H DONCHIAN CHANNEL (20-period) ===
-    donchian_len = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    if n >= donchian_len:
-        # Calculate rolling max/min
-        for i in range(donchian_len - 1, n):
-            highest_high[i] = np.max(high[i - donchian_len + 1:i + 1])
-            lowest_low[i] = np.min(low[i - donchian_len + 1:i + 1])
+    # === CAMARILLA PIVOT LEVELS (based on previous 1d bar) ===
+    prev_high = np.roll(daily_high, 1)
+    prev_low = np.roll(daily_low, 1)
+    prev_close = np.roll(daily_close, 1)
     
-    # === 1D VOLATILITY REGIME (ATR ratio) ===
-    # Calculate ATR(10) and ATR(30) on 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_val = prev_high - prev_low
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # Align with indices
+    # H3 and L3 levels (primary reversal zones)
+    h3 = pivot - (range_val * 1.1 / 4)
+    l3 = pivot + (range_val * 1.1 / 4)
     
-    # ATR(10) and ATR(30)
-    atr10 = np.full(len(tr), np.nan)
-    atr30 = np.full(len(tr), np.nan)
+    # Align to 4h timeframe
+    h3_4h = align_htf_to_ltf(prices, df_1d, h3)
+    l3_4h = align_htf_to_ltf(prices, df_1d, l3)
+    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
     
-    if len(tr) >= 30:
-        # Initial ATR values
-        atr10[9] = np.nanmean(tr[1:11])  # Skip first NaN
-        atr30[29] = np.nanmean(tr[1:31])
-        
-        # Wilder's smoothing
-        for i in range(10, len(tr)):
-            if not np.isnan(atr10[i-1]):
-                atr10[i] = (atr10[i-1] * 9 + tr[i]) / 10
-        for i in range(30, len(tr)):
-            if not np.isnan(atr30[i-1]):
-                atr30[i] = (atr30[i-1] * 29 + tr[i]) / 30
+    # === CHOPPINESS INDEX (14-period on 4h) ===
+    # Chop = 100 * log10(sum(ATR) / (max(high) - min(low))) / log10(n)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Avoid division by zero
-    atr_ratio = np.where(atr30 > 0, atr10 / atr30, 1.0)
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    atr_sum = np.full(n, np.nan)
+    if n >= 14:
+        tr_sum = np.nansum(tr[1:15])  # Skip first NaN
+        atr_sum[14] = tr_sum
+        for i in range(15, n):
+            tr_sum = tr_sum - tr[i-1] + tr[i]
+            atr_sum[i] = tr_sum
     
-    # === 12H VOLUME CONFIRMATION ===
-    vol_ma = np.full(n, np.nan)
-    vol_len = 20
-    if n >= vol_len:
-        vol_sum = np.sum(volume[:vol_len])
-        vol_ma[vol_len-1] = vol_sum / vol_len
-        for i in range(vol_len, n):
-            vol_sum = vol_sum - volume[i-vol_len] + volume[i]
-            vol_ma[i] = vol_sum / vol_len
-    vol_spike = volume > (vol_ma * 1.8)
+    max_high = np.full(n, np.nan)
+    min_low = np.full(n, np.nan)
+    if n >= 14:
+        max_high[13] = np.max(high[0:14])
+        min_low[13] = np.min(low[0:14])
+        for i in range(14, n):
+            max_high[i] = max(max_high[i-1], high[i])
+            min_low[i] = min(min_low[i-1], low[i])
+    
+    chop = np.full(n, np.nan)
+    for i in range(14, n):
+        if not np.isnan(atr_sum[i]) and max_high[i] > min_low[i]:
+            chop[i] = 100 * np.log10(atr_sum[i] / (max_high[i] - min_low[i])) / np.log10(14)
+    
+    # Market is ranging when Chop > 61.8
+    ranging = chop > 61.8
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):
-        # Skip if data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(atr_ratio_aligned[i]) or np.isnan(vol_ma[i])):
+    for i in range(50, n):
+        # Skip if any data invalid
+        if (np.isnan(h3_4h[i]) or np.isnan(l3_4h[i]) or 
+            np.isnan(pivot_4h[i]) or np.isnan(chop[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volatility regime: high vol (expanding) > 0.8, low vol (contracting) <= 0.8
-        high_vol_regime = atr_ratio_aligned[i] > 0.8
+        # Entry conditions: price touches H3/L3 in ranging market
+        touch_h3 = high[i] >= h3_4h[i] * 0.999  # Allow small slippage
+        touch_l3 = low[i] <= l3_4h[i] * 1.001
         
-        # Channel width for sensitivity
-        channel_width = (highest_high[i] - lowest_low[i]) / closest_low[i] if lowest_low[i] > 0 else 0
+        long_entry = touch_l3 and ranging[i]
+        short_entry = touch_h3 and ranging[i]
         
-        # Adaptive logic based on regime
-        if high_vol_regime:
-            # HIGH VOLATILITY: Follow breakouts (momentum)
-            long_breakout = high[i] > highest_high[i]
-            short_breakout = low[i] < lowest_low[i]
-            
-            # Entry with volume confirmation
-            if long_breakout and vol_spike[i] and position != 1:
-                position = 1
-                signals[i] = 0.30
-            elif short_breakout and vol_spike[i] and position != -1:
-                position = -1
-                signals[i] = -0.30
-            
-            # Exit when price returns to middle of channel
-            mid_channel = (highest_high[i] + lowest_low[i]) / 2
-            if position == 1 and close[i] <= mid_channel:
-                position = 0
-                signals[i] = 0.0
-            elif position == -1 and close[i] >= mid_channel:
-                position = 0
-                signals[i] = 0.0
-                
+        # Exit conditions: price reverts to pivot or opposite signal
+        long_exit = close[i] >= pivot_4h[i] * 0.999
+        short_exit = close[i] <= pivot_4h[i] * 1.001
+        
+        # Signal logic
+        if long_entry and position != 1:
+            position = 1
+            signals[i] = 0.25
+        elif short_entry and position != -1:
+            position = -1
+            signals[i] = -0.25
+        elif position == 1 and long_exit:
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and short_exit:
+            position = 0
+            signals[i] = 0.0
         else:
-            # LOW VOLATILITY: Fade reversals at channel edges (mean reversion)
-            # Define entry zones near channel edges
-            upper_zone = lowest_low[i] + channel_width * 0.85
-            lower_zone = lowest_low[i] + channel_width * 0.15
-            
-            # Long when price rejects lower edge
-            long_setup = (low[i] <= lowest_low[i] * 1.002) and (close[i] > lower_zone)
-            # Short when price rejects upper edge
-            short_setup = (high[i] >= highest_high[i] * 0.998) and (close[i] < upper_zone)
-            
-            # Entry with volume confirmation (avoid fakeouts)
-            if long_setup and vol_spike[i] and position != 1:
-                position = 1
-                signals[i] = 0.25
-            elif short_setup and vol_spike[i] and position != -1:
-                position = -1
-                signals[i] = -0.25
-            
-            # Exit when price reaches opposite zone or middle
-            if position == 1 and close[i] >= upper_zone:
-                position = 0
-                signals[i] = 0.0
-            elif position == -1 and close[i] <= lower_zone:
-                position = 0
-                signals[i] = 0.0
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
