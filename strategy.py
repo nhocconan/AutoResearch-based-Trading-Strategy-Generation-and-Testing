@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_camarilla_volume"
-timeframe = "12h"
+name = "4h_1d_camarilla_volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,54 +17,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 40:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly Camarilla levels
-    range_1w = high_1w - low_1w
-    camarilla_h4 = close_1w + 1.5 * range_1w / 2
-    camarilla_l4 = close_1w - 1.5 * range_1w / 2
-    
-    # Align to 12h timeframe
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l4)
-    
-    # Get daily data for volume filter
+    # Get 1d data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    volume_1d = df_1d['volume'].values
-    volume_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Current 12h volume filter
-    volume_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > volume_ma_12h
+    # Calculate Camarilla levels for each day
+    # H4 = C + 1.1 * (H - L) / 2  (resistance)
+    # L4 = C - 1.1 * (H - L) / 2  (support)
+    camarilla_high = close_1d + 1.1 * (high_1d - low_1d) / 2
+    camarilla_low = close_1d - 1.1 * (high_1d - low_1d) / 2
+    
+    # Align to 4h timeframe (previous day's levels available after daily close)
+    camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
+    camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
+    
+    # Volume filter: 20-period average on 4h data
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_ok = volume > vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(20, n):
         # Skip if not ready
-        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
-            np.isnan(volume_1d_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]) or 
+            np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Camarilla breakout signals with volume confirmation
-        long_signal = close[i] > camarilla_h4_aligned[i] and volume_ok[i] and volume[i] > volume_1d_aligned[i]
-        short_signal = close[i] < camarilla_l4_aligned[i] and volume_ok[i] and volume[i] > volume_1d_aligned[i]
+        # Price touches Camarilla levels with volume confirmation
+        # Long when price touches or goes below L4 support with volume
+        long_signal = low[i] <= camarilla_low_aligned[i] and volume_ok[i]
+        # Short when price touches or goes above H4 resistance with volume
+        short_signal = high[i] >= camarilla_high_aligned[i] and volume_ok[i]
         
-        # Exit when price returns to weekly close
-        exit_long = close[i] < close_1w[-1] if not np.isnan(close_1w[-1]) else False
-        exit_short = close[i] > close_1w[-1] if not np.isnan(close_1w[-1]) else False
+        # Exit when price moves back inside the range
+        exit_long = high[i] > camarilla_low_aligned[i]  # price back above support
+        exit_short = low[i] < camarilla_high_aligned[i]  # price back below resistance
         
         # Execute trades
         if long_signal and position != 1:
