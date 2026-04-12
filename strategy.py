@@ -1,15 +1,17 @@
-# We need to adapt the given 4h strategy to 12h timeframe as required.
-# The strategy uses daily Camarilla pivot levels with volume confirmation and ADX trend filter.
-# We will change timeframe to "12h" and adjust the window sizes accordingly (e.g., 20-period average volume on 12h).
-# The core logic remains the same.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v1"
-timeframe = "12h"
+# Hypothesis: 4h_1d_camarilla_breakout_v2
+# Uses daily Camarilla pivot levels (H4/L4) with volume confirmation and ADX trend filter.
+# In bull markets, buys breakouts above H4 resistance with volume.
+# In bear markets, shorts breakdowns below L4 support with volume.
+# ADX > 25 ensures we only trade in trending markets, avoiding false signals in ranges.
+# Target: 20-40 trades/year per symbol for low friction and high edge.
+
+name = "4h_1d_camarilla_breakout_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,11 +39,11 @@ def generate_signals(prices):
     camarilla_h4 = close_prev + range_prev * 1.1 / 2
     camarilla_l4 = close_prev - range_prev * 1.1 / 2
     
-    # Align to 12h timeframe (already delayed by 1 day due to shift)
+    # Align to 4h timeframe (already delayed by 1 day due to shift)
     h4_level = align_htf_to_ltf(prices, df_1d, camarilla_h4)
     l4_level = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
-    # Volume confirmation: volume > 1.5 * 20-period average (on 12h)
+    # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
