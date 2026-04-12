@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_camarilla_breakout_v3
+# Hypothesis: 4h_1d_camarilla_breakout_v4
 # Uses daily Camarilla pivot levels (H3/L3) with volume confirmation and ADX trend filter.
-# In bull markets, buys breakouts above H3 resistance with volume.
-# In bear markets, shorts breakdowns below L3 support with volume.
+# Focuses on stronger H3/L3 levels (vs H4/L4) for higher quality breaks.
+# In bull markets, buys breaks above H3 resistance with volume.
+# In bear markets, shorts breaks below L3 support with volume.
 # ADX > 25 ensures we only trade in trending markets, avoiding false signals in ranges.
-# Target: 20-40 trades/year per symbol for low friction and high edge.
-# H3/L3 are more sensitive than H4/L4, increasing trade frequency while maintaining edge.
+# Target: 25-45 trades/year per symbol for low friction and high edge.
 
-name = "4h_1d_camarilla_breakout_v3"
+name = "4h_1d_camarilla_breakout_v4"
 timeframe = "4h"
 leverage = 1.0
 
@@ -35,7 +35,7 @@ def generate_signals(prices):
     low_prev = df_1d['low'].shift(1).values
     close_prev = df_1d['close'].shift(1).values
     
-    # Camarilla formulas (H3/L3 levels)
+    # Camarilla formulas - using H3/L3 for stronger levels
     range_prev = high_prev - low_prev
     camarilla_h3 = close_prev + range_prev * 1.1 / 4
     camarilla_l3 = close_prev - range_prev * 1.1 / 4
