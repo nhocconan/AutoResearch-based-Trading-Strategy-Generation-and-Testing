@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_1d_Williams_Alligator_MeanReversion
-Hypothesis: Williams Alligator (3 SMAs) on daily timeframe defines trend (jaws/teeth/lips).
-Price crossing lips with 12h momentum confirmation and volume spike triggers mean-reversion trades.
-Works in bull/bear: in trend, fade extreme deviations from Alligator; in range, trade reversals at extremes.
-Target: 15-30 trades/year via strict Alligator alignment + volume + momentum filters.
+12h_1w_Camarilla_Breakout_Trend_Filter
+Hypothesis: 12h close above/below weekly Camarilla R3/S3 levels with 1w ADX(14) trend filter and volume confirmation. Designed for low trade frequency (15-30/year) by requiring strong weekly breakouts, trend alignment (ADX>25), and volume surge (2x avg). Works in bull/bear via ADX trend filter and mean-reversion exit at weekly pivot. Targets 12h timeframe to reduce overtrading while capturing multi-day trends.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Williams_Alligator_MeanReversion"
+name = "12h_1w_Camarilla_Breakout_Trend_Filter"
 timeframe = "12h"
 leverage = 1.0
 
@@ -25,50 +22,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY WILLIAMS ALLIGATOR ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # === WEEKLY DATA ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Williams Alligator: Jaw (13), Teeth (8), Lips (5) SMAs
-    # Jaw: 13-period SMMA (smoothed) of median price
-    median_price_1d = (high_1d + low_1d) / 2
-    jaw = np.full_like(median_price_1d, np.nan)
-    if len(median_price_1d) >= 13:
-        # SMMA: smoothed moving average
-        jaw[12] = np.mean(median_price_1d[:13])
-        for i in range(13, len(median_price_1d)):
-            jaw[i] = (jaw[i-1] * 12 + median_price_1d[i]) / 13
+    # Weekly pivot calculation
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
     
-    # Teeth: 8-period SMMA
-    teeth = np.full_like(median_price_1d, np.nan)
-    if len(median_price_1d) >= 8:
-        teeth[7] = np.mean(median_price_1d[:8])
-        for i in range(8, len(median_price_1d)):
-            teeth[i] = (teeth[i-1] * 7 + median_price_1d[i]) / 8
+    # Weekly Camarilla levels (R3/S3 for breakouts)
+    r3_1w = close_1w + range_1w * 1.25
+    s3_1w = close_1w - range_1w * 1.25
     
-    # Lips: 5-period SMMA
-    lips = np.full_like(median_price_1d, np.nan)
-    if len(median_price_1d) >= 5:
-        lips[4] = np.mean(median_price_1d[:5])
-        for i in range(5, len(median_price_1d)):
-            lips[i] = (lips[i-1] * 4 + median_price_1d[i]) / 5
+    # Weekly ADX(14) for trend filter
+    def calculate_adx(high, low, close, period=14):
+        if len(high) < period + 1:
+            return np.full_like(high, np.nan)
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        for i in range(1, len(high)):
+            plus_dm[i] = max(high[i] - high[i-1], 0)
+            minus_dm[i] = max(low[i-1] - low[i], 0)
+            if plus_dm[i] < minus_dm[i]:
+                plus_dm[i] = 0
+            if minus_dm[i] < plus_dm[i]:
+                minus_dm[i] = 0
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        # Smooth TR, +DM, -DM
+        atr = np.zeros_like(high)
+        plus_dm_smooth = np.zeros_like(high)
+        minus_dm_smooth = np.zeros_like(high)
+        if len(high) >= period:
+            atr[period-1] = np.mean(tr[1:period])
+            plus_dm_smooth[period-1] = np.mean(plus_dm[1:period])
+            minus_dm_smooth[period-1] = np.mean(minus_dm[1:period])
+            for i in range(period, len(high)):
+                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+                plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
+                minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
+        # Avoid division by zero
+        plus_di = np.where(atr != 0, plus_dm_smooth / atr * 100, 0)
+        minus_di = np.where(atr != 0, minus_dm_smooth / atr * 100, 0)
+        dx = np.where((plus_di + minus_di) != 0, abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
+        adx = np.full_like(high, np.nan)
+        if len(high) >= 2 * period - 1:
+            adx[2*period-2] = np.mean(dx[period-1:2*period-1])
+            for i in range(2*period-1, len(high)):
+                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        return adx
     
-    # === 12H MOMENTUM (ROC 5) ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 6:
-        return np.zeros(n)
+    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
     
-    close_12h = df_12h['close'].values
-    roc_5 = np.full_like(close_12h, np.nan)
-    if len(close_12h) >= 6:
-        roc_5[5:] = (close_12h[5:] - close_12h[:-5]) / close_12h[:-5] * 100
+    # Align weekly data to 12h timeframe
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
-    # === VOLUME AVERAGE (20-period) ===
+    # Volume average (20-period for 12h = ~10 days) for confirmation
     vol_avg = np.zeros(n)
     vol_sum = 0.0
     vol_count = 0
@@ -78,70 +95,34 @@ def generate_signals(prices):
         if i >= 20:
             vol_sum -= volume[i-20]
             vol_count -= 1
-        vol_avg[i] = vol_sum / vol_count if vol_count > 0 else 0.0
-    
-    # Align all indicators to 12h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
-    roc_5_aligned = align_htf_to_ltf(prices, df_12h, roc_5)
+        if vol_count > 0:
+            vol_avg[i] = vol_sum / vol_count
+        else:
+            vol_avg[i] = 0.0
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # start after warmup
         # Skip if indicators not available
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(roc_5_aligned[i]) or vol_avg[i] == 0.0):
+        if (np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or 
+            np.isnan(pivot_1w_aligned[i]) or np.isnan(adx_1w_aligned[i]) or vol_avg[i] == 0.0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Alligator alignment: check if jaws/teeth/lips are ordered (trending) or tangled (ranging)
-        # In uptrend: Lips > Teeth > Jaw
-        # In downtrend: Lips < Teeth < Jaw
-        # In range: tangled (no clear order)
-        lips_val = lips_aligned[i]
-        teeth_val = teeth_aligned[i]
-        jaw_val = jaw_aligned[i]
+        # Trend filter: ADX > 25 indicates strong trend
+        trending = adx_1w_aligned[i] > 25
         
-        # Alligator is "sleeping" (tangled) when lines are close - ranging market
-        alligator_sleeping = (abs(lips_val - teeth_val) < (jaw_val * 0.001) and 
-                              abs(teeth_val - jaw_val) < (jaw_val * 0.001))
-        
-        # Alligator is "awake" (ordered) - trending market
-        alligator_awake_up = lips_val > teeth_val > jaw_val
-        alligator_awake_down = lips_val < teeth_val < jaw_val
-        
-        # Volume confirmation: spike > 2.0x average
+        # Volume confirmation: at least 2.0x average
         vol_confirm = volume[i] > 2.0 * vol_avg[i]
         
-        # 12h momentum confirmation
-        mom_confirm = roc_5_aligned[i] > 0  # positive momentum for long
-        mom_confirm_short = roc_5_aligned[i] < 0  # negative momentum for short
+        # Breakout entries at weekly S3/R3 with trend and volume filters
+        long_setup = (close[i] > r3_1w_aligned[i]) and trending and vol_confirm
+        short_setup = (close[i] < s3_1w_aligned[i]) and trending and vol_confirm
         
-        # Mean reentry signals: price deviation from lips with confirmation
-        # Long: price significantly below lips in ranging market OR 
-        #       price below lips with bullish momentum in uptrend
-        dev_from_lips = (close[i] - lips_val) / lips_val * 100  # % deviation
-        
-        long_setup = False
-        short_setup = False
-        
-        if alligator_sleeping:  # ranging market - pure mean reversion
-            # Price > 1.5% above lips = short opportunity
-            # Price < 1.5% below lips = long opportunity
-            long_setup = (dev_from_lips < -1.5) and vol_confirm
-            short_setup = (dev_from_lips > 1.5) and vol_confirm
-        elif alligator_awake_up:  # uptrend - fade only strong deviations with momentum
-            long_setup = (dev_from_lips < -2.0) and vol_confirm and mom_confirm
-            short_setup = False  # don't fight uptrend
-        elif alligator_awake_down:  # downtrend - fade only strong deviations with momentum
-            long_setup = False  # don't fight downtrend
-            short_setup = (dev_from_lips > 2.0) and vol_confirm and mom_confirm_short
-        
-        # Exit when price returns to lips (mean reversion complete) or Alligator wakes up against position
-        exit_long = (close[i] >= lips_val) or (position == 1 and alligator_awake_down)
-        exit_short = (close[i] <= lips_val) or (position == -1 and alligator_awake_up)
+        # Exit when price returns to weekly pivot (mean reversion)
+        exit_long = close[i] < pivot_1w_aligned[i]
+        exit_short = close[i] > pivot_1w_aligned[i]
         
         if long_setup and position != 1:
             position = 1
