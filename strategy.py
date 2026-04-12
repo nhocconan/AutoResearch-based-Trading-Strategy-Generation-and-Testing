@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_1d_camarilla_breakout_volume
-Hypothesis: 12-hour strategy using daily Camarilla pivot levels with volume confirmation.
-Enters long when price breaks above H3 with volume spike; short when breaks below L3 with volume spike.
-Uses fixed position sizing (0.25) to minimize churn and uses simple exit on opposite H3/L3 touch.
-Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag while capturing strong moves.
-Focus on breakout quality with volume filter to avoid false signals in chop.
-Works in both bull and bear markets by capturing breakouts from key daily levels.
+4h_1d_camarilla_breakout_volume_v4 - Ultra-low frequency with quality filters
+Hypothesis: 4-hour strategy using daily Camarilla pivot levels with strict volume confirmation and trend filter.
+Enters only when price breaks above H3 or below L3 with volume > 3x average AND price above/below 200-period EMA for trend alignment.
+Uses fixed position sizing (0.25) to minimize churn. Target: 15-25 trades/year (60-100 total) to avoid fee drag.
 """
 
 import numpy as np
@@ -15,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -52,37 +49,48 @@ def generate_signals(prices):
     h4 = pivot + 1.1 * range_val
     l4 = pivot - 1.1 * range_val
     
-    # Align Camarilla levels to 12h timeframe
-    h3_12h = align_htf_to_ltf(prices, df_1d, h3)
-    l3_12h = align_htf_to_ltf(prices, df_1d, l3)
-    h4_12h = align_htf_to_ltf(prices, df_1d, h4)
-    l4_12h = align_htf_to_ltf(prices, df_1d, l4)
+    # Align Camarilla levels to 4h timeframe
+    h3_4h = align_htf_to_ltf(prices, df_1d, h3)
+    l3_4h = align_htf_to_ltf(prices, df_1d, l3)
+    h4_4h = align_htf_to_ltf(prices, df_1d, h4)
+    l4_4h = align_htf_to_ltf(prices, df_1d, l4)
+    
+    # Calculate 200-period EMA for trend filter (using close prices)
+    close_series = pd.Series(close)
+    ema_200 = close_series.ewm(span=200, adjust=False, min_periods=200).mean().values
     
     # Calculate volume moving average (20-period)
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
+    vol_ma = np.zeros(n)
+    for i in range(n):
+        if i < 20:
+            vol_ma[i] = np.nan
+        else:
+            vol_ma[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(200, n):
         # Skip if data not ready
-        if (np.isnan(h3_12h[i]) or np.isnan(l3_12h[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(h3_4h[i]) or np.isnan(l3_4h[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(ema_200[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 2.0x 20-period average (strict filter)
-        volume_filter = volume[i] > vol_ma[i] * 2.0
+        # Volume filter: current volume > 3.0x 20-period average (very strict filter)
+        volume_filter = volume[i] > vol_ma[i] * 3.0
         
-        # Entry conditions: Camarilla H3/L3 breakout with volume confirmation
-        long_breakout = close[i] > h3_12h[i] and volume_filter
-        short_breakout = close[i] < l3_12h[i] and volume_filter
+        # Trend filter: price above/below 200 EMA
+        uptrend = close[i] > ema_200[i]
+        downtrend = close[i] < ema_200[i]
         
-        # Exit conditions: touch opposite H3/L3 level
-        long_exit = close[i] < l3_12h[i]
-        short_exit = close[i] > h3_12h[i]
+        # Entry conditions: Camarilla H3/L3 breakout with volume AND trend confirmation
+        long_breakout = close[i] > h3_4h[i] and volume_filter and uptrend
+        short_breakout = close[i] < l3_4h[i] and volume_filter and downtrend
+        
+        # Exit conditions: touch opposite H3/L3 level OR trend reversal
+        long_exit = close[i] < l3_4h[i] or (position == 1 and close[i] < ema_200[i])
+        short_exit = close[i] > h3_4h[i] or (position == -1 and close[i] > ema_200[i])
         
         if long_breakout and position != 1:
             position = 1
@@ -107,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_camarilla_breakout_volume"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_volume_v4"
+timeframe = "4h"
 leverage = 1.0
