@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_camarilla_breakout_v1
+# Hypothesis: 4h_1d_camarilla_breakout_v2
 # Uses daily Camarilla pivot levels (H4/L4) with volume confirmation and ADX trend filter.
 # In bull markets, buys breakouts above H4 resistance with volume.
 # In bear markets, shorts breakdowns below L4 support with volume.
 # ADX > 25 ensures we only trade in trending markets, avoiding false signals in ranges.
-# Target: 20-40 trades/year per symbol for low friction and high edge.
+# Target: 15-30 trades/year per symbol for low friction and high edge.
+# Added: volume filter requires volume > 2.0 * 20-period average (stricter) to reduce trades.
 
-name = "4h_1d_camarilla_breakout_v1"
+name = "4h_1d_camarilla_breakout_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -43,9 +44,9 @@ def generate_signals(prices):
     h4_level = align_htf_to_ltf(prices, df_1d, camarilla_h4)
     l4_level = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # Volume confirmation: volume > 2.0 * 20-period average (stricter filter)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    vol_confirm = volume > (vol_ma * 2.0)
     
     # ADX trend filter: only trade when ADX > 25 (trending market)
     # Calculate True Range
