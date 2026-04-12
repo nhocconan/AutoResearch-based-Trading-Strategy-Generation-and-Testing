@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 1d_1w_camarilla_breakout_volume_regime_v2
-# Hypothesis: Daily Camarilla breakout with weekly trend filter and volume confirmation.
-# Uses weekly EMA to filter long/short bias, reducing false signals in chop.
-# Volume > 1.3x 20-day average confirms breakout strength.
-# Target: 15-25 trades/year (60-100 total) to minimize fee drag.
-# Works in bull/bear by aligning with weekly trend.
+"""
+4h_1d_kama_rsi_volatility_breakout
+Hypothesis: 4-hour KAMA trend direction combined with RSI momentum and volatility-adjusted breakouts.
+Uses 1-day ATR for volatility filtering to adapt to changing market conditions.
+Works in bull/bear by using adaptive trend (KAMA) and momentum (RSI) with volatility filters.
+Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
+"""
 
-name = "1d_1w_camarilla_breakout_volume_regime_v2"
-timeframe = "1d"
+name = "4h_1d_kama_rsi_volatility_breakout"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,41 +25,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla
+    # Get daily data for ATR and KAMA calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Previous day's range for Camarilla
-    prev_high = np.roll(df_1d['high'].values, 1)
-    prev_low = np.roll(df_1d['low'].values, 1)
-    prev_close = np.roll(df_1d['close'].values, 1)
+    # KAMA calculation (adaptive moving average)
+    # Efficiency Ratio
+    change = np.abs(np.subtract(close_1d, np.roll(close_1d, 10)))
+    volatility = np.sum(np.abs(np.subtract(close_1d, np.roll(close_1d, 1))), axis=0) if False else None
+    # Proper volatility calculation for ER
+    volatility = np.zeros_like(close_1d)
+    for i in range(1, len(close_1d)):
+        volatility[i] = volatility[i-1] + np.abs(close_1d[i] - close_1d[i-1])
+    volatility = np.roll(volatility, 1)
+    volatility[0] = 0
+    er = np.zeros_like(close_1d)
+    for i in range(len(close_1d)):
+        if volatility[i] > 0:
+            er[i] = change[i] / volatility[i]
+        else:
+            er[i] = 0
     
-    range_ = prev_high - prev_low
-    # Resistance levels
-    r3 = prev_close + range_ * 1.1 / 2
-    r4 = prev_close + range_ * 1.1
-    # Support levels
-    s3 = prev_close - range_ * 1.1 / 2
-    s4 = prev_close - range_ * 1.1
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # Weekly EMA for trend filter (21-period)
-    weekly_close = df_1w['close'].values
-    ema_21 = pd.Series(weekly_close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Calculate KAMA
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # Align all to daily timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    ema_21_aligned = align_htf_to_ltf(prices, df_1w, ema_21)
+    # RSI calculation (14-period)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Volume confirmation: volume > 1.3x 20-day average
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # ATR for volatility filter (14-day ATR)
+    tr1 = np.abs(np.subtract(high_1d, low_1d))
+    tr2 = np.abs(np.subtract(high_1d, np.roll(close_1d, 1)))
+    tr3 = np.abs(np.subtract(low_1d, np.roll(close_1d, 1)))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Align KAMA, RSI, and ATR to 4h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    
+    # Volatility-adjusted breakout levels
+    # Upper band: KAMA + 1.5 * ATR
+    # Lower band: KAMA - 1.5 * ATR
+    upper_band = kama_aligned + 1.5 * atr_aligned
+    lower_band = kama_aligned - 1.5 * atr_aligned
+    
+    # Volume confirmation: volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.3)
     
@@ -67,31 +99,27 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(ema_21_aligned[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
+            np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: close above R4, above weekly EMA, with volume
-        if (close[i] > r4_aligned[i] and 
-            close[i] > ema_21_aligned[i] and 
-            vol_confirm[i] and 
-            position != 1):
+        # Long entry: price crosses above upper band with RSI > 50 and volume confirmation
+        if (close[i] > upper_band[i] and rsi_aligned[i] > 50 and 
+            vol_confirm[i] and atr_aligned[i] > 0 and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: close below S4, below weekly EMA, with volume
-        elif (close[i] < s4_aligned[i] and 
-              close[i] < ema_21_aligned[i] and 
-              vol_confirm[i] and 
-              position != -1):
+        # Short entry: price crosses below lower band with RSI < 50 and volume confirmation
+        elif (close[i] < lower_band[i] and rsi_aligned[i] < 50 and 
+              vol_confirm[i] and atr_aligned[i] > 0 and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: reverse signal or close crosses back to opposite S3/R3
-        elif position == 1 and close[i] < s3_aligned[i]:
+        # Exit: reverse signal or price crosses back to KAMA
+        elif position == 1 and close[i] < kama_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > r3_aligned[i]:
+        elif position == -1 and close[i] > kama_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
