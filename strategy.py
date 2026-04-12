@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_parabolic_sar_v1"
-timeframe = "6h"
+name = "4h_12h_camarilla_breakout_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,84 +17,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Parabolic SAR calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    # Get 12h data for Camarilla pivot calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 10:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Parabolic SAR calculation
-    # Parameters: start=0.02, increment=0.02, max=0.2
-    psar = np.zeros(len(high_1d))
-    psar[0] = low_1d[0]
-    trend = 1  # 1 for uptrend, -1 for downtrend
-    af = 0.02  # acceleration factor
-    max_af = 0.2
-    ep = high_1d[0] if trend == 1 else low_1d[0]  # extreme point
+    # Calculate Camarilla pivot levels from 12h data
+    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
+    range_12h = high_12h - low_12h
     
-    for i in range(1, len(high_1d)):
-        if trend == 1:  # uptrend
-            psar[i] = psar[i-1] + af * (ep - psar[i-1])
-            # Reverse if price goes below SAR
-            if low_1d[i] < psar[i]:
-                trend = -1
-                psar[i] = ep
-                af = 0.02
-                ep = low_1d[i]
-            else:
-                # Update EP and AF
-                if high_1d[i] > ep:
-                    ep = high_1d[i]
-                    af = min(af + 0.02, max_af)
-        else:  # downtrend
-            psar[i] = psar[i-1] + af * (ep - psar[i-1])
-            # Reverse if price goes above SAR
-            if high_1d[i] > psar[i]:
-                trend = 1
-                psar[i] = ep
-                af = 0.02
-                ep = high_1d[i]
-            else:
-                # Update EP and AF
-                if low_1d[i] < ep:
-                    ep = low_1d[i]
-                    af = min(af + 0.02, max_af)
+    # Camarilla levels (using standard multipliers)
+    h3_12h = pivot_12h + (range_12h * 1.1 / 4)   # Resistance 3
+    l3_12h = pivot_12h - (range_12h * 1.1 / 4)   # Support 3
     
-    # Align PSAR to 6h timeframe
-    psar_aligned = align_htf_to_ltf(prices, df_1d, psar)
+    # Align Camarilla levels to 4h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_12h, h3_12h)
+    l3_aligned = align_htf_to_ltf(prices, df_12h, l3_12h)
+    pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
     
-    # Volume filter - 20-period average on 6h data
+    # Volume filter - 20-period average on 4h data
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
     
-    # Simple trend filter: price above/below 50-period EMA
-    close_series = pd.Series(close)
-    ema_50 = close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
-    trend_up = close > ema_50
-    trend_down = close < ema_50
+    # ADX for trend strength filter (14-period)
+    high_low = high - low
+    high_close = np.abs(high - np.roll(close, 1))
+    low_close = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    tr[0] = high_low[0]
+    
+    # Calculate +DI and -DI
+    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), np.maximum(high - np.roll(high, 1), 0), 0)
+    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), np.maximum(np.roll(low, 1) - low, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
+    
+    tr_ma = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / tr_ma
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / tr_ma
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Strong trend filter: ADX > 25
+    trend_strong = adx > 25
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(psar_aligned[i]) or np.isnan(volume_ok[i]) or 
-            np.isnan(trend_up[i]) or np.isnan(trend_down[i])):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+            np.isnan(pivot_aligned[i]) or np.isnan(volume_ok[i]) or np.isnan(trend_strong[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: price above PSAR and volume confirmation and uptrend
-        long_signal = close[i] > psar_aligned[i] and volume_ok[i] and trend_up[i]
-        # Short: price below PSAR and volume confirmation and downtrend
-        short_signal = close[i] < psar_aligned[i] and volume_ok[i] and trend_down[i]
+        # Long: price breaks above H3 with volume confirmation and strong trend
+        long_signal = close[i] > h3_aligned[i] and volume_ok[i] and trend_strong[i]
+        # Short: price breaks below L3 with volume confirmation and strong trend
+        short_signal = close[i] < l3_aligned[i] and volume_ok[i] and trend_strong[i]
         
-        # Exit when price crosses PSAR in opposite direction
-        exit_long = close[i] < psar_aligned[i]
-        exit_short = close[i] > psar_aligned[i]
+        # Exit when price returns to pivot
+        exit_long = close[i] < pivot_aligned[i]
+        exit_short = close[i] > pivot_aligned[i]
         
         # Execute trades
         if long_signal and position != 1:
