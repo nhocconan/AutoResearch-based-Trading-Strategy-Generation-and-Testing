@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h_12h_1d_cci_reversal_v1
-# Uses CCI(20) on 12h timeframe to detect overbought/oversold conditions.
-# Combines with 1d trend filter (price > EMA50 for long, price < EMA50 for short) to align with higher timeframe trend.
-# Entry: CCI crosses below -100 (oversold) in uptrend (price > EMA50) for long.
-# Entry: CCI crosses above +100 (overbought) in downtrend (price < EMA50) for short.
-# Exit: CCI returns to neutral zone (-100 to +100) or trend reversal.
-# Designed for low trade frequency (12-30/year) with high edge in ranging markets with trend bias.
+# Hypothesis: 4h_1d_camarilla_breakout_v2
+# Uses daily Camarilla pivot levels (H4/L4) with volume confirmation and ADX trend filter.
+# In bull markets, buys breakouts above H4 resistance with volume.
+# In bear markets, shorts breakdowns below L4 support with volume.
+# ADX > 25 ensures we only trade in trending markets, avoiding false signals in ranges.
+# Target: 20-40 trades/year per symbol for low friction and high edge.
 
-name = "6h_12h_1d_cci_reversal_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,62 +22,98 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 12h data for CCI calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    # Get 1d data for EMA50 trend filter
+    # Get 1d data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate CCI(20) on 12h
-    typical_price = (df_12h['high'] + df_12h['low'] + df_12h['close']) / 3
-    tp_ma = typical_price.rolling(window=20, min_periods=20).mean()
-    tp_mad = typical_price.rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
-    cci = (typical_price - tp_ma) / (0.015 * tp_mad)
-    cci_values = cci.values
-    cci_12h_aligned = align_htf_to_ltf(prices, df_12h, cci_values)
+    # Calculate Camarilla levels from previous day
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
     
-    # Calculate EMA50 on 1d for trend filter
-    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Camarilla formulas
+    range_prev = high_prev - low_prev
+    camarilla_h4 = close_prev + range_prev * 1.1 / 2
+    camarilla_l4 = close_prev - range_prev * 1.1 / 2
+    
+    # Align to 4h timeframe (already delayed by 1 day due to shift)
+    h4_level = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_level = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    
+    # Volume confirmation: volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma * 1.5)
+    
+    # ADX trend filter: only trade when ADX > 25 (trending market)
+    # Calculate True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # Plus and Minus Directional Movement
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    
+    # Smooth TR, +DM, -DM using Welles Wilder's smoothing (alpha = 1/period)
+    def wilders_smooth(data, period):
+        result = np.full_like(data, np.nan, dtype=float)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    atr = wilders_smooth(tr, 14)
+    plus_dm_smooth = wilders_smooth(plus_dm, 14)
+    minus_dm_smooth = wilders_smooth(minus_dm, 14)
+    
+    # Avoid division by zero
+    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
+    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = wilders_smooth(dx, 14)
+    adx_filter = adx > 25  # trending market
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # start after warmup
-        # Skip if values not ready
-        if np.isnan(cci_12h_aligned[i]) or np.isnan(ema_50_aligned[i]):
+    for i in range(30, n):  # start after warmup
+        # Skip if levels not ready
+        if np.isnan(h4_level[i]) or np.isnan(l4_level[i]) or np.isnan(adx_filter[i]):
             signals[i] = 0.0
             continue
         
-        cci_val = cci_12h_aligned[i]
-        price = close[i]
-        ema50 = ema_50_aligned[i]
+        # Check volume and trend filters
+        if not (vol_confirm[i] and adx_filter[i]):
+            # Hold current position if filters fail
+            if position == 1:
+                signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.0
+            continue
         
-        # Determine trend: above EMA50 = uptrend, below = downtrend
-        uptrend = price > ema50
-        downtrend = price < ema50
-        
-        # Long entry: CCI crosses below -100 (oversold) in uptrend
-        long_entry = (cci_val < -100) and uptrend and (position != 1)
-        # Short entry: CCI crosses above +100 (overbought) in downtrend
-        short_entry = (cci_val > 100) and downtrend and (position != -1)
-        
-        # Exit: CCI returns to neutral zone (-100 to +100)
-        exit_long = position == 1 and (-100 <= cci_val <= 100)
-        exit_short = position == -1 and (-100 <= cci_val <= 100)
-        
-        if long_entry:
+        # Long signal: price breaks above H4 with volume
+        if close[i] > h4_level[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_entry:
+        # Short signal: price breaks below L4 with volume
+        elif close[i] < l4_level[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        elif exit_long or exit_short:
+        # Exit conditions: opposite breakout
+        elif close[i] < l4_level[i] and position == 1:
+            position = 0
+            signals[i] = 0.0
+        elif close[i] > h4_level[i] and position == -1:
             position = 0
             signals[i] = 0.0
         else:
