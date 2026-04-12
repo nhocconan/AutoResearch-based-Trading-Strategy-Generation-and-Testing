@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,74 +13,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian channels and ADX
+    # Get daily data for EMA filter and volatility regime
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
+    # Calculate daily 30-period EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema30_1d = pd.Series(close_1d).ewm(span=30, adjust=False, min_periods=30).mean().values
+    ema30_1d_aligned = align_htf_to_ltf(prices, df_1d, ema30_1d)
+    
+    # Calculate daily ATR for volatility regime
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate daily 20-period Donchian channels
-    donch_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate daily ADX for trend strength (14-period)
-    # True Range
     tr1 = np.abs(high_1d - low_1d)
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr1[0] = tr2[0] = tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr1d = np.full(len(df_1d), np.nan)
+    for i in range(14, len(df_1d)):
+        atr1d[i] = np.nanmean(tr[i-14:i+1])
     
-    # Directional Movement
-    up_move = np.diff(high_1d, prepend=high_1d[0])
-    down_move = np.diff(low_1d, prepend=low_1d[0]) * -1
+    # ATR ratio: current daily ATR / 20-period average ATR
+    atr_mean20 = np.full(len(df_1d), np.nan)
+    for i in range(19, len(df_1d)):
+        atr_mean20[i] = np.nanmean(atr1d[i-19:i+1])
+    atr_ratio = atr1d / atr_mean20
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Calculate 4-period RSI for mean reversion signals
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Smoothed values
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    plus_dm14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
-    minus_dm14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    for i in range(3, n):
+        if i == 3:
+            avg_gain[i] = np.mean(gain[0:4])
+            avg_loss[i] = np.mean(loss[0:4])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 3 + gain[i]) / 4
+            avg_loss[i] = (avg_loss[i-1] * 3 + loss[i]) / 4
     
-    # DI values
-    plus_di14 = np.where(tr14 != 0, 100 * plus_dm14 / tr14, 0)
-    minus_di14 = np.where(tr14 != 0, 100 * minus_dm14 / tr14, 0)
-    
-    # DX and ADX
-    dx = np.where((plus_di14 + minus_di14) != 0, 100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14), 0)
-    adx14 = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align to 12h timeframe
-    donch_high_20_aligned = align_htf_to_ltf(prices, df_1d, donch_high_20)
-    donch_low_20_aligned = align_htf_to_ltf(prices, df_1d, donch_low_20)
-    adx14_aligned = align_htf_to_ltf(prices, df_1d, adx14)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi4 = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if data not ready
-        if (np.isnan(donch_high_20_aligned[i]) or np.isnan(donch_low_20_aligned[i]) or 
-            np.isnan(adx14_aligned[i])):
+        if (np.isnan(ema30_1d_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
+            np.isnan(rsi4[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: ADX > 20 indicates trending market
-        trending = adx14_aligned[i] > 20
+        # Volatility filter: elevated volatility (ATR ratio > 1.2)
+        vol_filter = atr_ratio_aligned[i] > 1.2
         
-        # Entry conditions: Donchian breakout in trending market
-        long_breakout = close[i] > donch_high_20_aligned[i]
-        short_breakout = close[i] < donch_low_20_aligned[i]
+        # Trend filter: price relative to daily EMA
+        price_above_ema = close[i] > ema30_1d_aligned[i]
+        price_below_ema = close[i] < ema30_1d_aligned[i]
         
-        long_entry = long_breakout and trending
-        short_entry = short_breakout and trending
+        # Mean reversion entries: RSI extremes in direction of trend with volatility
+        long_entry = (rsi4[i] < 30) and price_above_ema and vol_filter
+        short_entry = (rsi4[i] > 70) and price_below_ema and vol_filter
         
-        # Exit conditions: reversal breakout
-        long_exit = short_breakout  # opposite breakout
-        short_exit = long_breakout  # opposite breakout
+        # Exit: RSI returns to neutral zone or volatility drops
+        long_exit = (rsi4[i] > 50) or (atr_ratio_aligned[i] < 0.8)
+        short_exit = (rsi4[i] < 50) or (atr_ratio_aligned[i] < 0.8)
         
         if long_entry and position != 1:
             position = 1
@@ -105,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_donchian20_adx20_trend"
-timeframe = "12h"
+name = "4h_1d_rsi4_mean_reversion_vol_filter_v1"
+timeframe = "4h"
 leverage = 1.0
