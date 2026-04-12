@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_1d_donchian_breakout_volume_filter
-Hypothesis: 12-hour strategy using daily Donchian channel breakouts with volume confirmation to capture trends in both bull and bear markets.
-Uses daily Donchian(20) breakouts confirmed by volume > 1.5x 20-period average.
-Breakouts in direction of daily EMA50 trend to avoid counter-trend trades.
-Position sizing fixed at 0.25 to minimize churn. Target: 15-25 trades/year.
+6h_1d_volume_weighted_rsi_mean_reversion
+Hypothesis: Mean reversion on 6-hour timeframe using volume-weighted RSI(14) from 1-day timeframe.
+In ranging markets (2025+), price tends to revert to VWAP. Volume-weighted RSI identifies
+overextended conditions with institutional participation. Only trade when volume confirms.
+Uses 1-day VWAP as dynamic mean and volume-weighted RSI extremes for entry.
+Designed for low frequency (15-25 trades/year) to minimize fee drift in choppy markets.
+Works in both bull/bear by fading extremes regardless of trend direction.
 """
 
 import numpy as np
@@ -21,78 +23,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend and breakout levels
+    # Get 1-day data for VWAP and volume-weighted RSI
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Daily EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1-day VWAP (volume-weighted average price)
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
+    vwap_numerator = np.cumsum(typical_price_1d * volume_1d)
+    vwap_denominator = np.cumsum(volume_1d)
+    vwap_1d = np.where(vwap_denominator > 0, vwap_numerator / vwap_denominator, typical_price_1d)
     
-    # Daily Donchian(20) channels
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate volume-weighted RSI(14) on 1-day timeframe
+    # Weight price changes by volume
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    weighted_gain = np.where(delta > 0, delta * volume_1d, 0.0)
+    weighted_loss = np.where(delta < 0, -delta * volume_1d, 0.0)
     
-    # Daily volume average for confirmation
-    vol_avg = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Smoothed weighted gains/losses using Wilder's smoothing
+    avg_weighted_gain = np.zeros_like(weighted_gain)
+    avg_weighted_loss = np.zeros_like(weighted_loss)
     
-    # Align to 12h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg)
+    for i in range(1, len(weighted_gain)):
+        if i < 14:
+            # Simple average for first 14 periods
+            avg_weighted_gain[i] = np.mean(weighted_gain[max(0, i-13):i+1])
+            avg_weighted_loss[i] = np.mean(weighted_loss[max(0, i-13):i+1])
+        else:
+            # Wilder's smoothing
+            avg_weighted_gain[i] = (avg_weighted_gain[i-1] * 13 + weighted_gain[i]) / 14
+            avg_weighted_loss[i] = (avg_weighted_loss[i-1] * 13 + weighted_loss[i]) / 14
+    
+    # Avoid division by zero
+    rs = np.where(avg_weighted_loss != 0, avg_weighted_gain / avg_weighted_loss, 0)
+    vw_rsi_1d = 100 - (100 / (1 + rs))
+    
+    # Align VWAP and volume-weighted RSI to 6h timeframe
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    vw_rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, vw_rsi_1d)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or np.isnan(vol_avg_aligned[i])):
+        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(vw_rsi_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend determination
-        uptrend = ema50_1d_aligned[i] > close_1d[min(i//2, len(close_1d)-1)] if i//2 < len(close_1d) else ema50_1d_aligned[i] > ema50_1d_aligned[i-1]
-        downtrend = ema50_1d_aligned[i] < close_1d[min(i//2, len(close_1d)-1)] if i//2 < len(close_1d) else ema50_1d_aligned[i] < ema50_1d_aligned[i-1]
-        
-        # Volume confirmation: current 12h volume > 1.5x daily average volume
-        vol_confirm = volume[i] > (vol_avg_aligned[i] * 1.5)
-        
-        # Breakout conditions
-        long_breakout = close[i] > donchian_high_aligned[i]
-        short_breakout = close[i] < donchian_low_aligned[i]
-        
-        # Entry logic
-        if uptrend and long_breakout and vol_confirm and position != 1:
-            position = 1
+        # Mean reversion signals based on volume-weighted RSI extremes
+        # Oversold: VW-RSI < 25 -> long
+        # Overbought: VW-RSI > 75 -> short
+        if vw_rsi_1d_aligned[i] < 25 and close[i] < vwap_1d_aligned[i]:
+            # Long: price below VWAP and oversold
             signals[i] = 0.25
-        elif downtrend and short_breakout and vol_confirm and position != -1:
-            position = -1
+        elif vw_rsi_1d_aligned[i] > 75 and close[i] > vwap_1d_aligned[i]:
+            # Short: price above VWAP and overbought
             signals[i] = -0.25
-        # Exit: opposite breakout or trend reversal
-        elif position == 1 and (short_breakout or (downtrend and close[i] < ema50_1d_aligned[i])):
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and (long_breakout or (uptrend and close[i] > ema50_1d_aligned[i])):
-            position = 0
-            signals[i] = 0.0
         else:
-            # Hold position
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
+            # No clear signal - stay flat or hold
+            signals[i] = 0.0
     
     return signals
 
-name = "12h_1d_donchian_breakout_volume_filter"
-timeframe = "12h"
+name = "6h_1d_volume_weighted_rsi_mean_reversion"
+timeframe = "6h"
 leverage = 1.0
