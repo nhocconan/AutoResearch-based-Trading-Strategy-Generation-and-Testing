@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_cci_meanrev_volume_v1"
+name = "4h_1d_cci_trend_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -35,6 +35,15 @@ def generate_signals(prices):
     # Align CCI to 4h timeframe
     cci_1d_aligned = align_htf_to_ltf(prices, df_1d, cci_1d)
     
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
     # Volume filter - 20-period average on 4h data
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
@@ -45,20 +54,24 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(cci_1d_aligned[i]) or 
+        if (np.isnan(cci_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
             np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Mean-reversion signals with volume confirmation
-        # Long: CCI < -100 (oversold) - contrarian long
-        long_signal = cci_1d_aligned[i] < -100 and volume_ok[i]
-        # Short: CCI > 100 (overbought) - contrarian short
-        short_signal = cci_1d_aligned[i] > 100 and volume_ok[i]
+        # Trend from 1w EMA
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
-        # Exit when CCI returns to neutral zone
-        exit_long = cci_1d_aligned[i] > -100
-        exit_short = cci_1d_aligned[i] < 100
+        # CCI signals with volume confirmation
+        # Long: CCI > -100 (emerging bullish) in uptrend
+        long_signal = cci_1d_aligned[i] > -100 and uptrend and volume_ok[i]
+        # Short: CCI < 100 (emerging bearish) in downtrend
+        short_signal = cci_1d_aligned[i] < 100 and downtrend and volume_ok[i]
+        
+        # Exit when CCI reverses
+        exit_long = cci_1d_aligned[i] < -100
+        exit_short = cci_1d_aligned[i] > 100
         
         # Execute trades
         if long_signal and position != 1:
