@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_camarilla_volume_v2"
-timeframe = "4h"
+name = "12h_1d_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,49 +17,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla pivots - ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 1d data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Previous 12h bar data to avoid look-ahead
-    high_12h_prev = df_12h['high'].shift(1).values
-    low_12h_prev = df_12h['low'].shift(1).values
-    close_12h_prev = df_12h['close'].shift(1).values
+    # Previous 1d bar data to avoid look-ahead
+    high_1d_prev = df_1d['high'].shift(1).values
+    low_1d_prev = df_1d['low'].shift(1).values
+    close_1d_prev = df_1d['close'].shift(1).values
     
-    # Calculate 12h Camarilla levels (H4/L4 breakout)
-    pivot_prev = (high_12h_prev + low_12h_prev + close_12h_prev) / 3.0
-    range_12h_prev = high_12h_prev - low_12h_prev
-    h4_prev = pivot_prev + (range_12h_prev * 1.1 / 2)
-    l4_prev = pivot_prev - (range_12h_prev * 1.1 / 2)
+    # Calculate 1d Camarilla levels (H4/L4 breakout)
+    pivot_prev = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
+    range_1d_prev = high_1d_prev - low_1d_prev
+    h4_prev = pivot_prev + (range_1d_prev * 1.1 / 2)
+    l4_prev = pivot_prev - (range_1d_prev * 1.1 / 2)
     
-    # Align to 4h - use completed bars only
-    h4_aligned = align_htf_to_ltf(prices, df_12h, h4_prev)
-    l4_aligned = align_htf_to_ltf(prices, df_12h, l4_prev)
+    # Align to 12h
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4_prev)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4_prev)
     
-    # Volume filter: 20-period average on 4h
+    # Volume filter: 20-period average on 12h
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
     
-    # Trend filter: 50-period SMA on 4h
+    # Trend filter: 50-period SMA on 12h
     close_series = pd.Series(close)
     sma_50 = close_series.rolling(window=50, min_periods=50).mean().values
     trend_up = close > sma_50
     trend_down = close < sma_50
     
-    # Pivot line for mean reversion exit
-    pivot_prev_val = (high_12h_prev + low_12h_prev + close_12h_prev) / 3.0
-    pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot_prev_val)
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if any values not ready
         if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(pivot_aligned[i]) or np.isnan(volume_ok[i]) or
-            np.isnan(trend_up[i]) or np.isnan(trend_down[i])):
+            np.isnan(volume_ok[i]) or np.isnan(trend_up[i]) or np.isnan(trend_down[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -68,7 +63,9 @@ def generate_signals(prices):
         # Short: break below L4 with volume and downtrend
         short_signal = close[i] < l4_aligned[i] and volume_ok[i] and trend_down[i]
         
-        # Exit on reversion to pivot line (mean reversion)
+        # Exit on opposite breakout (mean reversion to pivot)
+        pivot_prev_val = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
+        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_prev_val)
         exit_long = close[i] < pivot_aligned[i]
         exit_short = close[i] > pivot_aligned[i]
         
