@@ -3,15 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1d volatility filter and volume confirmation
-# Works in bull/bear: Breakouts capture trends, volatility filter avoids chop, volume confirms institutional participation
-name = "6h_1d_donchian_breakout_vol_volume"
-timeframe = "6h"
+name = "1h_4h_1d_camarilla_breakout_volatility_filter_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,74 +17,105 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volatility filter and Donchian calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 4h data for primary trend direction (HTF)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate 20-period Donchian channels on 1d data
-    high_20 = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
+    # Get 1d data for volatility filtering and Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
     
-    # Calculate 1d ATR for volatility filter
-    tr1 = df_1d['high'].values[1:] - df_1d['low'].values[1:]
-    tr2 = np.abs(df_1d['high'].values[1:] - df_1d['close'].values[:-1])
-    tr3 = np.abs(df_1d['low'].values[1:] - df_1d['close'].values[:-1])
+    # 4h EMA(50) for trend direction
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    
+    # 1d ATR(14) for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate 1d ATR ratio (current ATR / 50-period ATR mean) for volatility filter
-    atr_ma_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr_14 / atr_ma_50
-    
-    # Align 1d indicators to 6h timeframe
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ma_20 = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
+    atr_ratio = atr_1d / atr_ma_20
     atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    # Volume filter: 6h volume > 20-period average
+    # 1d Camarilla levels (using previous day's data)
+    camarilla_high = np.full(len(close_1d), np.nan)
+    camarilla_low = np.full(len(close_1d), np.nan)
+    for i in range(1, len(close_1d)):
+        H = high_1d[i-1]
+        L = low_1d[i-1]
+        C = close_1d[i-1]
+        camarilla_high[i] = C + ((H - L) * 1.1 / 2)
+        camarilla_low[i] = C - ((H - L) * 1.1 / 2)
+    camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
+    camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
+    
+    # 1h volume filter: current volume > 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    session_ok = (hours >= 8) & (hours <= 20)
+    
+    # Position sizing: base 0.20, scaled by volatility (inverse)
+    vol_scaling = np.clip(1.0 / (atr_ratio_aligned + 0.001), 0.5, 1.5)
+    position_size = 0.20 * vol_scaling
+    position_size = np.clip(position_size, 0.10, 0.30)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # warmup
         # Skip if not ready
-        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
-            np.isnan(atr_ratio_aligned[i]) or np.isnan(volume_ok[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(camarilla_high_aligned[i]) or 
+            np.isnan(camarilla_low_aligned[i]) or np.isnan(volume_ok[i]) or 
+            np.isnan(atr_ratio_aligned[i]) or np.isnan(position_size[i])):
+            signals[i] = 0.0 if position == 0 else (position_size[i] if position == 1 else -position_size[i])
             continue
         
-        # Volatility filter: only trade when volatility is elevated (avoid chop)
-        vol_filter = atr_ratio_aligned[i] > 1.2
+        # Trend filter: price above/below 4h EMA50
+        uptrend = close[i] > ema_4h_aligned[i]
+        downtrend = close[i] < ema_4h_aligned[i]
         
-        # Breakout conditions
-        breakout_up = close[i] > high_20_aligned[i]
-        breakout_down = close[i] < low_20_aligned[i]
+        # Breakout conditions with volume and session confirmation
+        breakout_up = close[i] > camarilla_high_aligned[i]
+        breakout_down = close[i] < camarilla_low_aligned[i]
         vol_ok = volume_ok[i]
+        sess_ok = session_ok[i]
         
-        # Entry signals with all conditions
-        long_signal = breakout_up and vol_filter and vol_ok
-        short_signal = breakout_down and vol_filter and vol_ok
+        # Entry signals
+        long_signal = breakout_up and vol_ok and sess_ok and uptrend
+        short_signal = breakout_down and vol_ok and sess_ok and downtrend
         
-        # Exit when price returns to the middle of the Donchian channel
-        mid_point = (high_20_aligned[i] + low_20_aligned[i]) / 2
-        exit_long = close[i] < mid_point
-        exit_short = close[i] > mid_point
+        # Exit when price returns to the Camarilla pivot (average of H,L,C)
+        pivot_point = np.full(len(close_1d), np.nan)
+        for j in range(1, len(close_1d)):
+            H = high_1d[j-1]
+            L = low_1d[j-1]
+            C = close_1d[j-1]
+            pivot_point[j] = (H + L + C) / 3
+        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_point)
         
-        # Fixed position size
-        position_size = 0.25
+        exit_long = close[i] < pivot_aligned[i]
+        exit_short = close[i] > pivot_aligned[i]
         
         # Execute trades
         if long_signal and position != 1:
             position = 1
-            signals[i] = position_size
+            signals[i] = position_size[i]
         elif short_signal and position != -1:
             position = -1
-            signals[i] = -position_size
+            signals[i] = -position_size[i]
         elif exit_long and position == 1:
             position = 0
             signals[i] = 0.0
@@ -94,11 +123,11 @@ def generate_signals(prices):
             position = 0
             signals[i] = 0.0
         else:
-            # Hold position
+            # Hold position with dynamic sizing
             if position == 1:
-                signals[i] = position_size
+                signals[i] = position_size[i]
             elif position == -1:
-                signals[i] = -position_size
+                signals[i] = -position_size[i]
             else:
                 signals[i] = 0.0
     
