@@ -3,21 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h_1w_bollinger_breakout_v1
-# Uses weekly Bollinger Bands to identify volatility extremes and breakouts.
-# Long when price breaks above weekly upper band with volume confirmation.
-# Short when price breaks below weekly lower band with volume confirmation.
-# Uses 6h ADX > 25 to filter for strong trends, avoiding false signals in ranges.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
-# Works in bull markets (breakouts continuation) and bear markets (breakdowns continuation).
+# Hypothesis: 1d_1w_ema_crossover_volume_filter_v1
+# Uses 50-day EMA and 200-day EMA crossover on daily chart for trend direction.
+# Enters long when 50 EMA crosses above 200 EMA with volume confirmation (volume > 1.5x 20-day average).
+# Enters short when 50 EMA crosses below 200 EMA with volume confirmation.
+# Uses weekly ADX > 25 to filter for strong trends, avoiding false signals in weak trends or ranges.
+# Designed for low trade frequency (target: 10-30 trades/year) to minimize fee drift.
+# Works in bull markets (golden cross continuation) and bear markets (death cross continuation).
 
-name = "6h_1w_bollinger_breakout_v1"
-timeframe = "6h"
+name = "1d_1w_ema_crossover_volume_filter_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,66 +25,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Bollinger Bands
+    # Get weekly data for ADX filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate Bollinger Bands (20-period, 2 std dev)
-    close_1w = df_1w['close'].values
-    bb_middle = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
+    # Calculate 50 EMA and 200 EMA on daily close
+    close_series = pd.Series(close)
+    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).values
+    ema_200 = close_series.ewm(span=200, adjust=False, min_periods=200).values
     
-    # Align to 6h timeframe (weekly bands update only after weekly bar closes)
-    bb_upper_aligned = align_htf_to_ltf(prices, df_1w, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_1w, bb_lower)
+    # Calculate crossover signals
+    ema_crossover = np.where(ema_50 > ema_200, 1, -1)  # 1 for golden cross, -1 for death cross
     
-    # Volume confirmation: volume > 1.5 * 50-period average
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Volume confirmation: volume > 1.5 * 20-day average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
-    # ADX trend filter on 6h: only trade when ADX > 25 (strong trend)
-    # Calculate True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
+    # Weekly ADX calculation (using Wilder's smoothing)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # True Range
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
     tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Plus and Minus Directional Movement
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    # Directional Movement
+    plus_dm = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    minus_dm = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
     
     # Wilder's smoothing function
     def wilders_smooth(data, period):
         result = np.full_like(data, np.nan, dtype=float)
         if len(data) < period:
             return result
-        # First value is simple average
         result[period-1] = np.mean(data[:period])
-        # Subsequent values: Wilder's smoothing
         for i in range(period, len(data)):
             result[i] = (result[i-1] * (period-1) + data[i]) / period
         return result
     
-    atr = wilders_smooth(tr, 14)
+    atr_1w = wilders_smooth(tr, 14)
     plus_dm_smooth = wilders_smooth(plus_dm, 14)
     minus_dm_smooth = wilders_smooth(minus_dm, 14)
     
-    # Avoid division by zero
-    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
-    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
+    plus_di = np.where(atr_1w != 0, 100 * plus_dm_smooth / atr_1w, 0)
+    minus_di = np.where(atr_1w != 0, 100 * minus_dm_smooth / atr_1w, 0)
     dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = wilders_smooth(dx, 14)
-    adx_filter = adx > 25  # strong trend only
+    adx_1w = wilders_smooth(dx, 14)
+    
+    # Align weekly ADX to daily timeframe (only use completed weekly bars)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    adx_filter = adx_aligned > 25  # strong trend only
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # start after warmup
-        # Skip if levels not ready
-        if np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or np.isnan(adx_filter[i]):
+    for i in range(200, n):  # start after warmup
+        # Skip if EMA or ADX not ready
+        if np.isnan(ema_50[i]) or np.isnan(ema_200[i]) or np.isnan(adx_filter[i]):
             signals[i] = 0.0
             continue
         
@@ -99,19 +100,19 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above weekly upper band with volume
-        if close[i] > bb_upper_aligned[i] and position != 1:
+        # Long signal: 50 EMA crosses above 200 EMA (golden cross) with volume
+        if ema_crossover[i] == 1 and ema_crossover[i-1] == -1 and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below weekly lower band with volume
-        elif close[i] < bb_lower_aligned[i] and position != -1:
+        # Short signal: 50 EMA crosses below 200 EMA (death cross) with volume
+        elif ema_crossover[i] == -1 and ema_crossover[i-1] == 1 and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: opposite breakout
-        elif close[i] < bb_lower_aligned[i] and position == 1:
+        # Exit conditions: opposite crossover
+        elif ema_crossover[i] == -1 and ema_crossover[i-1] == 1 and position == 1:
             position = 0
             signals[i] = 0.0
-        elif close[i] > bb_upper_aligned[i] and position == -1:
+        elif ema_crossover[i] == 1 and ema_crossover[i-1] == -1 and position == -1:
             position = 0
             signals[i] = 0.0
         else:
