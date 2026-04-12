@@ -1,12 +1,4 @@
-# -*- coding: utf-8 -*-
-# 6h_1w_1d_camarilla_breakout_weekly_trend_v1
-# Hypothesis: 6-hour strategy using weekly trend from Ichimoku (Tenkan-Kijun cross) on 1w,
-# combined with daily Camarilla breakouts (H3/L3) and volume confirmation on 6h.
-# Weekly trend ensures we only trade in the direction of the higher timeframe trend,
-# reducing false breakouts in sideways markets. Volume filter ensures breakout strength.
-# Designed for low trade frequency (10-30/year) to minimize fee drag in 6h timeframe.
-# Works in both bull and bear markets by following weekly trend direction.
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -21,106 +13,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Ichimoku trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # Get daily data for Camarilla levels
+    # Get daily data for ATR and close
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Ichimoku on weekly data (using proper formulas)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
     
-    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
-    period9_high = np.array([np.max(high_1w[i-8:i+1]) if i >= 8 else np.nan for i in range(len(high_1w))])
-    period9_low = np.array([np.min(low_1w[i-8:i+1]) if i >= 8 else np.nan for i in range(len(low_1w))])
-    tenkan = (period9_high + period9_low) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + low) / 2
-    period26_high = np.array([np.max(high_1w[i-25:i+1]) if i >= 25 else np.nan for i in range(len(high_1w))])
-    period26_low = np.array([np.min(low_1w[i-25:i+1]) if i >= 25 else np.nan for i in range(len(low_1w))])
-    kijun = (period26_high + period26_low) / 2
-    
-    # Weekly trend: Tenkan > Kijun = bullish, Tenkan < Kijun = bearish
-    weekly_trend = np.where(tenkan > kijun, 1, np.where(tenkan < kijun, -1, 0))
-    
-    # Align weekly trend to 6h timeframe
-    weekly_trend_6h = align_htf_to_ltf(prices, df_1w, weekly_trend)
-    
-    # Calculate daily Camarilla levels using PREVIOUS day's data (no look-ahead)
+    # Calculate daily ATR(14)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's values for pivot calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    # Set first day's previous values to NaN (no data yet)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
+    atr_1d = np.zeros_like(tr)
+    for i in range(len(tr)):
+        if i < 14:
+            atr_1d[i] = np.nan
+        else:
+            atr_1d[i] = np.mean(tr[i-13:i+1])
     
-    # Camarilla calculations using previous day's data
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_val = prev_high - prev_low
+    # Align daily ATR to 4h timeframe
+    atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Camarilla levels
-    h3 = pivot + 1.1 * range_val / 2
-    l3 = pivot - 1.1 * range_val / 2
-    h4 = pivot + 1.1 * range_val
-    l4 = pivot - 1.1 * range_val
+    # Calculate weekly EMA(21) for trend filter
+    close_1w = df_1w['close'].values
+    ema_21_1w = np.zeros_like(close_1w, dtype=float)
+    ema_21_1w[:] = np.nan
+    if len(close_1w) >= 21:
+        multiplier = 2 / (21 + 1)
+        ema_21_1w[20] = np.mean(close_1w[:21])
+        for i in range(21, len(close_1w)):
+            ema_21_1w[i] = (close_1w[i] - ema_21_1w[i-1]) * multiplier + ema_21_1w[i-1]
     
-    # Align Camarilla levels to 6h timeframe
-    h3_6h = align_htf_to_ltf(prices, df_1d, h3)
-    l3_6h = align_htf_to_ltf(prices, df_1d, l3)
-    h4_6h = align_htf_to_ltf(prices, df_1d, h4)
-    l4_6h = align_htf_to_ltf(prices, df_1d, l4)
+    # Align weekly EMA to 4h timeframe
+    ema_21_4h = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
-    # Calculate volume moving average (20-period)
-    vol_ma = np.full(n, np.nan)
+    # Calculate 4-hour Donchian channels (20-period)
+    high_4h = high
+    low_4h = low
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
     for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
+        donchian_high[i] = np.max(high_4h[i-20:i])
+        donchian_low[i] = np.min(low_4h[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(weekly_trend_6h[i]) or np.isnan(h3_6h[i]) or np.isnan(l3_6h[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(atr_4h[i]) or np.isnan(ema_21_4h[i]) or 
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.8x 20-period average (moderate filter)
-        volume_filter = volume[i] > vol_ma[i] * 1.8
+        # Weekly trend filter: price above/below EMA21
+        price_above_ema = close[i] > ema_21_4h[i]
+        price_below_ema = close[i] < ema_21_4h[i]
         
-        # Only take trades in direction of weekly trend
-        weekly_bullish = weekly_trend_6h[i] == 1
-        weekly_bearish = weekly_trend_6h[i] == -1
+        # Donchian breakout conditions
+        long_breakout = close[i] > donchian_high[i]
+        short_breakout = close[i] < donchian_low[i]
         
-        # Entry conditions: Camarilla H3/L3 breakout with volume confirmation and weekly trend alignment
-        long_breakout = (close[i] > h3_6h[i]) and volume_filter and weekly_bullish
-        short_breakout = (close[i] < l3_6h[i]) and volume_filter and weekly_bearish
+        # ATR-based volatility filter: only trade when ATR is expanding
+        atr_expanding = atr_4h[i] > np.mean(atr_4h[max(0, i-20):i]) if i >= 20 else False
         
-        # Exit conditions: touch opposite H3/L3 level or weekly trend reversal
-        long_exit = (close[i] < l3_6h[i]) or (weekly_trend_6h[i] == -1)
-        short_exit = (close[i] > h3_6h[i]) or (weekly_trend_6h[i] == 1)
-        
-        if long_breakout and position != 1:
+        # Entry conditions
+        if long_breakout and price_above_ema and atr_expanding and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_breakout and position != -1:
+        elif short_breakout and price_below_ema and atr_expanding and position != -1:
             position = -1
             signals[i] = -0.25
-        elif position == 1 and long_exit:
+        # Exit conditions: opposite Donchian breakout or ATR contraction
+        elif position == 1 and (close[i] < donchian_low[i] or not atr_expanding):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and short_exit:
+        elif position == -1 and (close[i] > donchian_high[i] or not atr_expanding):
             position = 0
             signals[i] = 0.0
         else:
@@ -134,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_1d_camarilla_breakout_weekly_trend_v1"
-timeframe = "6h"
+name = "4h_1w_donchian_atr_trend_filter_v1"
+timeframe = "4h"
 leverage = 1.0
