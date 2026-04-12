@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_breakout_mean_reversion
-# Uses daily Donchian channels (20-period high/low) as breakout levels on 4h chart.
-# Long when price breaks above 20-day high with volume confirmation (volume > 1.5x 20-period avg).
-# Short when price breaks below 20-day low with volume confirmation.
-# Exits when price crosses the 20-day midpoint (mean reversion).
-# Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drag.
-# Works in trending markets via breakouts and ranging markets via mean reversion to midpoint.
+# Hypothesis: 4h_1d_donchian_breakout_volume_v2
+# Uses daily Donchian channels (20-period) for breakout signals with volume confirmation.
+# Long when price breaks above 20-day high + volume > 1.5x 20-period average.
+# Short when price breaks below 20-day low + volume > 1.5x 20-period average.
+# Exits when price crosses 20-day midpoint (mean reversion).
+# Tight entry conditions to limit trades (~20-40/year) and reduce fee drag.
+# Designed to work in both bull (breakouts) and bear (mean reversion to midpoint) markets.
 # Focus on BTC/ETH as primary targets.
 
-name = "4h_1d_breakout_mean_reversion"
+name = "4h_1d_donchian_breakout_volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -34,9 +34,8 @@ def generate_signals(prices):
     # Calculate daily Donchian channels (20-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # 20-period high and low
+    # 20-period high and low with min_periods
     donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     # Midpoint for exit
