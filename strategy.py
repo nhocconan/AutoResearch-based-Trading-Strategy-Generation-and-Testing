@@ -27,9 +27,8 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Donchian(20) channels
-    high_20_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Calculate 1d ATR(14)
     tr1 = np.abs(high_1d - low_1d)
@@ -45,8 +44,7 @@ def generate_signals(prices):
     volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
     # Align 1d indicators to 12h timeframe
-    high_20_1d_aligned = align_htf_to_ltf(prices, df_1d, high_20_1d)
-    low_20_1d_aligned = align_htf_to_ltf(prices, df_1d, low_20_1d)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
@@ -96,9 +94,8 @@ def generate_signals(prices):
             continue
         
         # Skip if data not ready
-        if (np.isnan(high_20_1d_aligned[i]) or np.isnan(low_20_1d_aligned[i]) or 
-            np.isnan(atr_1d_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i]) or
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(volume_ma_20_1d_aligned[i]) or np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -117,18 +114,17 @@ def generate_signals(prices):
         # Regime filter: choppiness < 50 (trending market)
         trending_regime = chop_aligned[i] < 50
         
-        # Trend filter: price above/below 1d Donchian mid
-        mid_1d = (high_20_1d_aligned[i] + low_20_1d_aligned[i]) / 2
-        uptrend = close[i] > mid_1d
-        downtrend = close[i] < mid_1d
+        # Trend filter: price above/below 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Entry conditions: 12h breakout of 1d Donchian in trend direction + volatility + volume + regime
-        long_entry = (close[i] > high_20_1d_aligned[i]) and uptrend and vol_filter and vol_spike and trending_regime
-        short_entry = (close[i] < low_20_1d_aligned[i]) and downtrend and vol_filter and vol_spike and trending_regime
+        # Entry conditions: EMA50 trend + volatility + volume + regime
+        long_entry = uptrend and vol_filter and vol_spike and trending_regime
+        short_entry = downtrend and vol_filter and vol_spike and trending_regime
         
-        # Exit conditions: opposite 12h breakout of 1d Donchian or volatility drop or regime change
-        long_exit = (close[i] < low_20_1d_aligned[i]) or (not vol_filter) or (not trending_regime)
-        short_exit = (close[i] > high_20_1d_aligned[i]) or (not vol_filter) or (not trending_regime)
+        # Exit conditions: opposite EMA50 cross or volatility drop or regime change
+        long_exit = (not uptrend) or (not vol_filter) or (not trending_regime)
+        short_exit = (not downtrend) or (not vol_filter) or (not trending_regime)
         
         if long_entry and position != 1:
             position = 1
@@ -153,6 +149,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_1w_donchian_vol_vol_chop"
+name = "12h_1d_1w_ema50_vol_vol_chop"
 timeframe = "12h"
 leverage = 1.0
