@@ -3,118 +3,93 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h_1w_1d_ichimoku_trend_v1
-# Uses Ichimoku Cloud on daily timeframe with weekly trend filter.
-# Long when price above cloud and Tenkan > Kijun with weekly uptrend (price above weekly Senkou Span B).
-# Short when price below cloud and Tenkan < Kijun with weekly downtrend (price below weekly Senkou Span B).
-# Ichimoku provides dynamic support/resistance and trend direction, effective in both bull and bear markets.
-# Weekly filter ensures we only trade in the direction of higher timeframe trend, reducing whipsaw.
-# Target: 15-30 trades/year per symbol for low friction and high edge.
+# Hypothesis: 4h_1d_camarilla_breakout_v2
+# Uses daily Camarilla pivot levels (H3/L3) with volume confirmation and volatility filter.
+# Trades breakouts of H3/L3 levels in trending markets (ATR-based volatility filter).
+# Designed to work in both bull and bear markets by capturing momentum breakouts.
+# Target: 20-40 trades/year per symbol to minimize fee drag.
 
-name = "6h_1w_1d_ichimoku_trend_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get daily data for Ichimoku calculation
+    # Get 1d data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 26:
-        return np.zeros(n)
+    # Calculate Camarilla levels from previous day (H3/L3 for tighter stops)
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
     
-    # Calculate Ichimoku components on daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Camarilla formulas - using H3/L3 for tighter, more frequent signals
+    range_prev = high_prev - low_prev
+    camarilla_h3 = close_prev + range_prev * 1.1 / 4
+    camarilla_l3 = close_prev - range_prev * 1.1 / 4
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period_tenkan = 9
-    max_high_9 = pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
-    min_low_9 = pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
-    tenkan = (max_high_9 + min_low_9) / 2
+    # Align to 4h timeframe
+    h3_level = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_level = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period_kijun = 26
-    max_high_26 = pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max().values
-    min_low_26 = pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min().values
-    kijun = (max_high_26 + min_low_26) / 2
+    # Volume confirmation: volume > 1.3 * 20-period average (slightly relaxed)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma * 1.3)
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
+    # Volatility filter: only trade when volatility is above average (avoid low vol chop)
+    # Calculate ATR(14) for volatility measurement
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period_senkou_b = 52
-    max_high_52 = pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
-    min_low_52 = pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
-    senkou_b = (max_high_52 + min_low_52) / 2
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b)
-    
-    # Weekly trend filter: price relative to weekly Senkou Span B
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    max_high_52w = pd.Series(high_1w).rolling(window=52, min_periods=52).max().values
-    min_low_52w = pd.Series(low_1w).rolling(window=52, min_periods=52).min().values
-    senkou_b_1w = (max_high_52w + min_low_52w) / 2
-    
-    senkou_b_1w_aligned = align_htf_to_ltf(prices, df_1w, senkou_b_1w)
-    
-    # Determine cloud top and bottom
-    cloud_top = np.maximum(senkou_a_6h, senkou_b_6h)
-    cloud_bottom = np.minimum(senkou_a_6h, senkou_b_6h)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    vol_filter = atr > atr_ma  # Trade when volatility is above average
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(52, n):  # start after warmup for Senkou Span B (52-period)
-        # Skip if Ichimoku not ready
-        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
-            np.isnan(senkou_a_6h[i]) or np.isnan(senkou_b_6h[i]) or 
-            np.isnan(senkou_b_1w_aligned[i])):
+    for i in range(50, n):  # start after warmup
+        # Skip if levels not ready
+        if np.isnan(h3_level[i]) or np.isnan(l3_level[i]):
             signals[i] = 0.0
             continue
         
-        # Long conditions: price above cloud, Tenkan > Kijun, weekly uptrend
-        if (close[i] > cloud_top[i] and 
-            tenkan_6h[i] > kijun_6h[i] and 
-            close[i] > senkou_b_1w_aligned[i]):
-            if position != 1:
-                position = 1
+        # Check volume and volatility filters
+        if not (vol_confirm[i] and vol_filter[i]):
+            # Hold current position if filters fail
+            if position == 1:
                 signals[i] = 0.25
-            else:
-                signals[i] = 0.25
-        # Short conditions: price below cloud, Tenkan < Kijun, weekly downtrend
-        elif (close[i] < cloud_bottom[i] and 
-              tenkan_6h[i] < kijun_6h[i] and 
-              close[i] < senkou_b_1w_aligned[i]):
-            if position != -1:
-                position = -1
+            elif position == -1:
                 signals[i] = -0.25
             else:
-                signals[i] = -0.25
-        # Exit conditions: opposite cloud cross
-        elif position == 1 and close[i] < cloud_bottom[i]:
+                signals[i] = 0.0
+            continue
+        
+        # Long signal: price breaks above H3 with volume
+        if close[i] > h3_level[i] and position != 1:
+            position = 1
+            signals[i] = 0.25
+        # Short signal: price breaks below L3 with volume
+        elif close[i] < l3_level[i] and position != -1:
+            position = -1
+            signals[i] = -0.25
+        # Exit conditions: opposite breakout
+        elif close[i] < l3_level[i] and position == 1:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > cloud_top[i]:
+        elif close[i] > h3_level[i] and position == -1:
             position = 0
             signals[i] = 0.0
         else:
