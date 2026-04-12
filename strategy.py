@@ -55,13 +55,17 @@ def generate_signals(prices):
     close_s = pd.Series(close)
     ema_21_4h = close_s.ewm(span=21, adjust=False, min_periods=21).mean().values
     
+    # Calculate 4h volume moving average
+    vol_s = pd.Series(volume)
+    vol_ma_20 = vol_s.rolling(window=20, min_periods=20).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
         if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(ema_21_4h[i]) or np.isnan(atr_4h[i])):
+            np.isnan(ema_21_4h[i]) or np.isnan(atr_4h[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -72,6 +76,9 @@ def generate_signals(prices):
                 atr_ma_10[j] = np.mean(atr_1d_aligned[j-9:j+1])
         vol_filter = atr_1d_aligned[i] > 0.5 * atr_ma_10[i] if not np.isnan(atr_ma_10[i]) else False
         
+        # Volume filter: volume > 1.5 * 20-period MA
+        vol_spike = volume[i] > 1.5 * vol_ma_20[i]
+        
         # Trend filter: price relative to daily EMA50
         uptrend = close[i] > ema_50_1d_aligned[i]
         downtrend = close[i] < ema_50_1d_aligned[i]
@@ -80,9 +87,9 @@ def generate_signals(prices):
         price_above_ema = close[i] > ema_21_4h[i]
         price_below_ema = close[i] < ema_21_4h[i]
         
-        # Entry conditions: price above/below both EMAs with volatility filter
-        long_entry = price_above_ema and uptrend and vol_filter
-        short_entry = price_below_ema and downtrend and vol_filter
+        # Entry conditions: price above/below both EMAs with volatility and volume filters
+        long_entry = price_above_ema and uptrend and vol_filter and vol_spike
+        short_entry = price_below_ema and downtrend and vol_filter and vol_spike
         
         # Exit conditions: price crosses back to EMA21
         long_exit = close[i] < ema_21_4h[i]
@@ -111,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_ema_dual_trend_filter_v1"
+name = "4h_1d_ema_dual_trend_filter_vol_vol"
 timeframe = "4h"
 leverage = 1.0
