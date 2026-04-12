@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_breakout_volume_v3"
-timeframe = "1d"
+name = "6h_12h_pivot_breakout_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,67 +17,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for ATR and volume
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 12h data for pivot calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Weekly ATR for volatility filter
-    tr1 = df_1w['high'].values[1:] - df_1w['low'].values[1:]
-    tr2 = np.abs(df_1w['high'].values[1:] - df_1w['close'].values[:-1])
-    tr3 = np.abs(df_1w['low'].values[1:] - df_1w['close'].values[:-1])
-    tr_weekly = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_weekly_raw = pd.Series(tr_weekly).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Calculate 12h pivot points using previous 12h bar
+    prev_close = df_12h['close'].shift(1).values
+    prev_high = df_12h['high'].shift(1).values
+    prev_low = df_12h['low'].shift(1).values
     
-    # Map ATR to daily timeframe using proper alignment
-    atr_weekly = align_htf_to_ltf(prices, df_1w, atr_weekly_raw)
+    # Pivot point and support/resistance levels
+    pivot = (prev_high + prev_low + prev_close) / 3
+    r1 = 2 * pivot - prev_low
+    s1 = 2 * pivot - prev_high
+    r2 = pivot + (prev_high - prev_low)
+    s2 = pivot - (prev_high - prev_low)
+    r3 = prev_high + 2 * (pivot - prev_low)
+    s3 = prev_low - 2 * (prev_high - pivot)
     
-    # Weekly volume average for volume confirmation
-    vol_weekly = df_1w['volume'].values
-    vol_weekly_avg = pd.Series(vol_weekly).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_weekly_avg_aligned = align_htf_to_ltf(prices, df_1w, vol_weekly_avg)
+    # Align 12h pivot levels to 6h timeframe
+    pivot_6h = align_htf_to_ltf(prices, df_12h, pivot)
+    r1_6h = align_htf_to_ltf(prices, df_12h, r1)
+    s1_6h = align_htf_to_ltf(prices, df_12h, s1)
+    r2_6h = align_htf_to_ltf(prices, df_12h, r2)
+    s2_6h = align_htf_to_ltf(prices, df_12h, s2)
+    r3_6h = align_htf_to_ltf(prices, df_12h, r3)
+    s3_6h = align_htf_to_ltf(prices, df_12h, s3)
     
-    # Daily Chop index for regime filter
+    # Volume confirmation: current 6h volume > 20-period average
+    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_filter = volume > vol_ma
+    
+    # ATR for volatility filter
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_daily = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    chop_raw = 100 * np.log10(tr_sum / (atr_daily * 14)) / np.log10(14)
-    chop = np.where(tr_sum > 0, chop_raw, 50)
-    
-    # Calculate daily pivot points for entry levels
-    pivot = (high + low + close) / 3
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    r2 = pivot + (high - low)
-    s2 = pivot - (high - low)
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_ma = pd.Series(atr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_filter = atr > atr_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if not ready
-        if np.isnan(atr_weekly[i]) or np.isnan(vol_weekly_avg_aligned[i]) or np.isnan(chop[i]):
+        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or 
+            np.isnan(volume_filter[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volatility filter: only trade when volatility is elevated
-        vol_filter = atr_weekly[i] > np.nanmedian(atr_weekly[max(0, i-20):i+1])
+        # Long: break above R3 with volume and volatility
+        long_signal = (close[i] > r3_6h[i] and volume_filter[i] and vol_filter[i])
         
-        # Chop regime: Chop < 40 = trending (favor breakouts), Chop > 60 = ranging (avoid)
-        trending_regime = chop[i] < 40
+        # Short: break below S3 with volume and volatility
+        short_signal = (close[i] < s3_6h[i] and volume_filter[i] and vol_filter[i])
         
-        # Long: price breaks above R1 in trending market with volume
-        long_signal = (close[i] > r1[i] and trending_regime and volume[i] > vol_weekly_avg_aligned[i] and vol_filter)
-        
-        # Short: price breaks below S1 in trending market with volume
-        short_signal = (close[i] < s1[i] and trending_regime and volume[i] > vol_weekly_avg_aligned[i] and vol_filter)
-        
-        # Exit: chop increases (range) or price returns to pivot
-        exit_long = (position == 1 and (chop[i] > 60 or close[i] < pivot[i]))
-        exit_short = (position == -1 and (chop[i] > 60 or close[i] > pivot[i]))
+        # Exit: return to pivot level
+        exit_long = (position == 1 and close[i] < pivot_6h[i])
+        exit_short = (position == -1 and close[i] > pivot_6h[i])
         
         # Execute trades
         if long_signal and position != 1:
