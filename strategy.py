@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v30"
+name = "4h_1d_camarilla_breakout_v31"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots
+    # Get 1d data for Camarilla pivots and volume
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -26,6 +26,7 @@ def generate_signals(prices):
     high_1d_prev = df_1d['high'].shift(1).values
     low_1d_prev = df_1d['low'].shift(1).values
     close_1d_prev = df_1d['close'].shift(1).values
+    volume_1d = df_1d['volume'].values
     
     # Calculate 1d Camarilla H4/L4 levels (stronger breakout levels)
     pivot_prev = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
@@ -37,15 +38,15 @@ def generate_signals(prices):
     h4_aligned = align_htf_to_ltf(prices, df_1d, h4_prev)
     l4_aligned = align_htf_to_ltf(prices, df_1d, l4_prev)
     
-    # 1d volume spike: volume > 2x 20-day average (moderate to balance signal frequency)
-    vol_ma_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
-    vol_spike = df_1d['volume'] > (vol_ma_1d * 2.0)
+    # 1d volume spike: volume > 2x 20-day average
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_1d > (vol_ma_1d * 2.0)
     vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
     
     signals = np.zeros(n)
     position = 0
     
-    for i in range(50, n):
+    for i in range(100, n):
         if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
             np.isnan(vol_spike_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.30 if position == 1 else -0.30)
