@@ -1,11 +1,18 @@
-# [Experiment 37104] Hypothesis: 1d Donchian breakout with weekly trend filter and volume confirmation
-# In bull markets: buy when price breaks above 20-day high with volume, weekly EMA up
-# In bear markets: sell when price breaks below 20-day low with volume, weekly EMA down
-# Weekly EMA filter ensures we only trade with the higher timeframe trend
-# Target: 15-25 trades/year per symbol to minimize fee drag
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian_weekly_trend_volume"
-timeframe = "1d"
+# Hypothesis: 4h_1d_camarilla_breakout_v2
+# Uses daily Camarilla pivot levels (H4/L4) with volume confirmation and ADX trend filter.
+# In bull markets, buys breakouts above H4 resistance with volume.
+# In bear markets, shorts breakdowns below L4 support with volume.
+# ADX > 25 ensures we only trade in trending markets, avoiding false signals in ranges.
+# Added volume spike filter (volume > 2x 20-period average) to reduce false breakouts.
+# Target: 25-45 trades/year per symbol for low friction and high edge.
+
+name = "4h_1d_camarilla_breakout_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,63 +25,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 21:
+    # Get 1d data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Weekly EMA21 for trend direction
-    weekly_close = df_weekly['close'].values
-    weekly_ema21 = pd.Series(weekly_close).ewm(span=21, adjust=False).values
-    weekly_ema21_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema21)
+    # Calculate Camarilla levels from previous day
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
     
-    # Daily Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Camarilla formulas
+    range_prev = high_prev - low_prev
+    camarilla_h4 = close_prev + range_prev * 1.1 / 2
+    camarilla_l4 = close_prev - range_prev * 1.1 / 2
     
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # Align to 4h timeframe (already delayed by 1 day due to shift)
+    h4_level = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_level = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    
+    # Volume confirmation: volume > 2.0 * 20-period average (stricter to reduce trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    vol_confirm = volume > (vol_ma * 2.0)
+    
+    # ADX trend filter: only trade when ADX > 25 (trending market)
+    # Calculate True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # Plus and Minus Directional Movement
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    
+    # Smooth TR, +DM, -DM using Welles Wilder's smoothing (alpha = 1/period)
+    def wilders_smooth(data, period):
+        result = np.full_like(data, np.nan, dtype=float)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    atr = wilders_smooth(tr, 14)
+    plus_dm_smooth = wilders_smooth(plus_dm, 14)
+    minus_dm_smooth = wilders_smooth(minus_dm, 14)
+    
+    # Avoid division by zero
+    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
+    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = wilders_smooth(dx, 14)
+    adx_filter = adx > 25  # trending market
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
-        # Skip if weekly trend not ready
-        if np.isnan(weekly_ema21_aligned[i]):
+    for i in range(30, n):  # start after warmup
+        # Skip if levels not ready
+        if np.isnan(h4_level[i]) or np.isnan(l4_level[i]) or np.isnan(adx_filter[i]):
             signals[i] = 0.0
             continue
         
-        # Long: price breaks above 20-day high with volume, weekly EMA rising
-        if (not np.isnan(high_20[i]) and 
-            close[i] > high_20[i] and 
-            vol_confirm[i] and 
-            weekly_ema21_aligned[i] > weekly_ema21_aligned[i-1] and  # EMA rising
-            position != 1):
+        # Check volume and trend filters
+        if not (vol_confirm[i] and adx_filter[i]):
+            # Hold current position if filters fail
+            if position == 1:
+                signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Long signal: price breaks above H4 with volume
+        if close[i] > h4_level[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        
-        # Short: price breaks below 20-day low with volume, weekly EMA falling
-        elif (not np.isnan(low_20[i]) and 
-              close[i] < low_20[i] and 
-              vol_confirm[i] and 
-              weekly_ema21_aligned[i] < weekly_ema21_aligned[i-1] and  # EMA falling
-              position != -1):
+        # Short signal: price breaks below L4 with volume
+        elif close[i] < l4_level[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        
-        # Exit: opposite breakout or EMA flatten
-        elif position == 1 and (close[i] < low_20[i] or 
-                                weekly_ema21_aligned[i] <= weekly_ema21_aligned[i-1]):
+        # Exit conditions: opposite breakout
+        elif close[i] < l4_level[i] and position == 1:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > high_20[i] or 
-                                 weekly_ema21_aligned[i] >= weekly_ema21_aligned[i-1]):
+        elif close[i] > h4_level[i] and position == -1:
             position = 0
             signals[i] = 0.0
-        
-        # Hold position
         else:
+            # Hold current position
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
