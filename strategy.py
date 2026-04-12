@@ -3,62 +3,76 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_volume"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v32"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
-    
-    # Get 1d data for Camarilla levels
+    # Get 1d data (HTF) ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Camarilla pivot levels for the previous day
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
     
-    # Calculate Camarilla levels from previous day
-    # H4 = C + 1.1*(H-L)/2
-    # L4 = C - 1.1*(H-L)/2
-    H4 = close_1d + 1.1 * (high_1d - low_1d) / 2
-    L4 = close_1d - 1.1 * (high_1d - low_1d) / 2
+    # Calculate pivot and levels
+    pivot = (high_prev + low_prev + close_prev) / 3
+    range_prev = high_prev - low_prev
     
-    # Align to 12h timeframe
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    # Camarilla levels
+    r4 = close_prev + range_prev * 1.1 / 2
+    r3 = close_prev + range_prev * 1.1 / 4
+    r2 = close_prev + range_prev * 1.1 / 6
+    r1 = close_prev + range_prev * 1.1 / 12
+    s1 = close_prev - range_prev * 1.1 / 12
+    s2 = close_prev - range_prev * 1.1 / 6
+    s3 = close_prev - range_prev * 1.1 / 4
+    s4 = close_prev - range_prev * 1.1 / 2
     
-    # Volume filter - 20-period average
-    vol_series = pd.Series(volume)
+    # Align Camarilla levels to 4h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Volume filter on 4h - 20-period average
+    vol_series = pd.Series(prices['volume'].values)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > vol_ma
+    volume_ok = prices['volume'].values > vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
-        # Skip if not ready
-        if (np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or 
-            np.isnan(volume_ok[i])):
+    for i in range(100, n):
+        # Skip if not ready (check for NaN in aligned arrays)
+        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(r2_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: Price breaks above H4 level with volume
-        long_signal = close[i] > H4_aligned[i] and volume_ok[i]
-        # Short: Price breaks below L4 level with volume
-        short_signal = close[i] < L4_aligned[i] and volume_ok[i]
+        close_price = prices['close'].iloc[i]
         
-        # Exit when price returns to previous day's close
-        exit_long = close[i] <= close_1d[i-1] if i > 0 else False
-        exit_short = close[i] >= close_1d[i-1] if i > 0 else False
+        # Breakout signals with volume confirmation
+        # Long: price breaks above R3 (strong resistance)
+        long_signal = close_price > r3_aligned[i] and volume_ok[i]
+        # Short: price breaks below S3 (strong support)
+        short_signal = close_price < s3_aligned[i] and volume_ok[i]
+        
+        # Exit when price returns to mean (pivot level)
+        exit_long = close_price < pivot[i]
+        exit_short = close_price > pivot[i]
         
         # Execute trades
         if long_signal and position != 1:
