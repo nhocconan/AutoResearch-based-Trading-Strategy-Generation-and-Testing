@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 4h_1d_donchian_breakout_volume
-# Hypothesis: 4-hour Donchian channel breakout with volume confirmation and ATR stoploss
-# Works in bull/bear by using price channel breakouts with volume filter to avoid false signals.
-# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
+# 6h_1d_weekly_pivot_breakout_trend
+# Hypothesis: 6-hour breakout from weekly pivot levels (R2/S2) with 1-day EMA200 trend filter.
+# Weekly pivots provide strong institutional levels; EMA200 filter avoids counter-trend trades.
+# Works in bull/bear by only trading in direction of higher timeframe trend.
+# Target: 15-35 trades/year (60-140 total over 4 years) to minimize fee drag.
 
-name = "4h_1d_donchian_breakout_volume"
-timeframe = "4h"
+name = "6h_1d_weekly_pivot_breakout_trend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,61 +21,60 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get daily data for Donchian calculation
+    # Get daily data for weekly pivot and EMA200 calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Donchian channels (20-day high/low)
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Previous week's high, low, close (using 5-day approximation for weekly)
+    # For simplicity, using 5 trading days as proxy for week
+    prev_week_high = pd.Series(high_1d).rolling(window=5, min_periods=5).max().shift(1).values
+    prev_week_low = pd.Series(low_1d).rolling(window=5, min_periods=5).min().shift(1).values
+    prev_week_close = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().shift(1).values
     
-    # ATR for volatility filter (14-day ATR)
-    tr1 = np.abs(np.subtract(high_1d, low_1d))
-    tr2 = np.abs(np.subtract(high_1d, np.roll(close_1d, 1)))
-    tr3 = np.abs(np.subtract(low_1d, np.roll(close_1d, 1)))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Weekly pivot point and support/resistance levels
+    pp = (prev_week_high + prev_week_low + prev_week_close) / 3.0
+    r1 = 2 * pp - prev_week_low
+    r2 = pp + (prev_week_high - prev_week_low)
+    s1 = 2 * pp - prev_week_high
+    s2 = pp - (prev_week_high - prev_week_low)
     
-    # Align Donchian levels and ATR to 4h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    # EMA200 for trend filter
+    ema200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Volume confirmation: volume > 1.3x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.3)
+    # Align weekly pivot levels and EMA200 to 6h timeframe
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(atr_aligned[i])):
+        if (np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or 
+            np.isnan(ema200_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: close breaks above Donchian high with volume
-        if (close[i] > donchian_high_aligned[i] and vol_confirm[i] and 
-            atr_aligned[i] > 0 and position != 1):
+        # Long entry: price breaks above R2 with uptrend filter (price > EMA200)
+        if (close[i] > r2_aligned[i] and close[i] > ema200_aligned[i] and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: close breaks below Donchian low with volume
-        elif (close[i] < donchian_low_aligned[i] and vol_confirm[i] and 
-              atr_aligned[i] > 0 and position != -1):
+        # Short entry: price breaks below S2 with downtrend filter (price < EMA200)
+        elif (close[i] < s2_aligned[i] and close[i] < ema200_aligned[i] and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: reverse signal or close crosses back to opposite Donchian level
-        elif position == 1 and close[i] < donchian_low_aligned[i]:
+        # Exit: reverse signal or price crosses back to opposite pivot level
+        elif position == 1 and close[i] < pp:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > donchian_high_aligned[i]:
+        elif position == -1 and close[i] > pp:
             position = 0
             signals[i] = 0.0
         else:
