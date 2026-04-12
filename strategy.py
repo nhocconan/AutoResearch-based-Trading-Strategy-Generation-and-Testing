@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_keltner_breakout_v1"
-timeframe = "1d"
+name = "6h_1d_elder_ray_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,55 +17,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for ATR and EMA
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for Elder Ray calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 15:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate ATR(20) on weekly data
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    # Calculate EMA13 on daily data
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate EMA(20) on weekly close
-    ema_20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power_1d = high_1d - ema13_1d
+    bear_power_1d = low_1d - ema13_1d
     
-    # Keltner Channels: EMA(20) ± 2 * ATR(20)
-    upper_keltner = ema_20 + 2.0 * atr_20
-    lower_keltner = ema_20 - 2.0 * atr_20
+    # Align to 6h timeframe
+    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
     
-    # Align to daily timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1w, upper_keltner)
-    lower_aligned = align_htf_to_ltf(prices, df_1w, lower_keltner)
-    ema_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
-    
-    # Volume filter: 20-day average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume filter - 20-period average on 6h data
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(ema_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(bull_power_1d_aligned[i]) or np.isnan(bear_power_1d_aligned[i]) or 
+            np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Breakout signals with volume confirmation
-        long_signal = close[i] > upper_aligned[i] and volume_ok[i]
-        short_signal = close[i] < lower_aligned[i] and volume_ok[i]
+        # Elder Ray signals with volume confirmation
+        # Long: Bull Power > 0 and rising (bullish momentum)
+        long_signal = bull_power_1d_aligned[i] > 0 and bull_power_1d_aligned[i] > bull_power_1d_aligned[i-1] and volume_ok[i]
+        # Short: Bear Power < 0 and falling (bearish momentum)
+        short_signal = bear_power_1d_aligned[i] < 0 and bear_power_1d_aligned[i] < bear_power_1d_aligned[i-1] and volume_ok[i]
         
-        # Exit when price crosses EMA (mean reversion within channel)
-        exit_long = close[i] < ema_aligned[i]
-        exit_short = close[i] > ema_aligned[i]
+        # Exit when momentum fades
+        exit_long = bull_power_1d_aligned[i] <= 0
+        exit_short = bear_power_1d_aligned[i] >= 0
         
         # Execute trades
         if long_signal and position != 1:
