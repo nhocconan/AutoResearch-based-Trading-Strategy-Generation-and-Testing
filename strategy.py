@@ -1,20 +1,21 @@
+# Phase 3: Final — 12h Timeframe Focus
+# Hypothesis: Weekly Bollinger Band breakout with volume confirmation and daily trend filter
+# Uses weekly Bollinger Bands (20-period, 2.0 std) as dynamic breakout levels on 12h chart.
+# Long when price breaks above weekly upper band with volume confirmation (volume > 1.5x 20-period avg).
+# Short when price breaks below weekly lower band with volume confirmation.
+# Exits when price crosses weekly middle band (mean reversion).
+# Only trade when daily ADX > 25 to filter for trending markets and avoid whipsaws.
+# Designed for low trade frequency (target: 12-37 trades/year) to minimize fee drag.
+# Works in trending markets via breakouts and ranging markets via mean reversion to middle band.
+# Focus on BTC/ETH as primary targets.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h_1d_1w_pivot_reversion_v1
-# Uses weekly pivot points (from prior week) as mean reversion levels on 6h chart.
-# Long when price touches weekly S1 with bullish rejection (close > open) and volume confirmation.
-# Short when price touches weekly R1 with bearish rejection (close < open) and volume confirmation.
-# Exits when price crosses weekly pivot point (mean reversion).
-# Only trades when 1d ADX < 25 (ranging market) to avoid trending whipsaws.
-# Designed for low trade frequency (target: 15-35 trades/year) to minimize fee drag.
-# Works in ranging markets via pivot reversion and avoids trending markets via ADX filter.
-# Focus on BTC/ETH as primary targets.
-
-name = "6h_1d_1w_pivot_reversion_v1"
-timeframe = "6h"
+name = "12h_1w_bb_breakout_volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,46 +27,41 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_price = prices['open'].values
     
-    # Get daily and weekly data
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for Bollinger Band calculation
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 5 or len(df_1w) < 2:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (from prior week)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate weekly Bollinger Bands (20-period, 2.0 std)
     close_1w = df_1w['close'].values
+    bb_middle = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2.0 * bb_std
+    bb_lower = bb_middle - 2.0 * bb_std
     
-    # Weekly pivot (using prior week's OHLC)
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    # Weekly support/resistance levels
-    r1_1w = 2 * pivot_1w - low_1w
-    s1_1w = 2 * pivot_1w - high_1w
-    r2_1w = pivot_1w + (high_1w - low_1w)
-    s2_1w = pivot_1w - (high_1w - low_1w)
+    # Align weekly Bollinger Bands to 12h timeframe
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1w, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1w, bb_lower)
+    bb_middle_aligned = align_htf_to_ltf(prices, df_1w, bb_middle)
     
-    # Align weekly levels to 6h timeframe
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
-    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
-    
-    # Volume confirmation: volume > 1.3 * 20-period average (6h timeframe)
+    # Volume confirmation: volume > 1.5 * 20-period average (12h timeframe)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.3)
+    vol_confirm = volume > (vol_ma * 1.5)
     
-    # ADX filter: only trade when ADX < 25 (ranging market)
+    # Get daily data for ADX filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    
+    # Calculate ADX using Wilder's smoothing
     def calculate_adx(high, low, close, period=14):
         # True Range
         tr1 = high - low
         tr2 = np.abs(high - np.roll(close, 1))
         tr3 = np.abs(low - np.roll(close, 1))
         tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]
+        tr[0] = tr1[0]  # First value
         
         # Directional Movement
         dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
@@ -75,15 +71,15 @@ def generate_signals(prices):
         dm_plus[0] = 0
         dm_minus[0] = 0
         
-        # Wilder's smoothing
+        # Smoothed values using Wilder's smoothing (alpha = 1/period)
         def wilders_smoothing(data, period):
             result = np.full_like(data, np.nan)
-            if len(data) < period:
-                return result
             alpha = 1.0 / period
-            result[period-1] = np.nansum(data[:period]) / period
-            for i in range(period, len(data)):
-                result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
+            # First value is simple average
+            if len(data) >= period:
+                result[period-1] = np.nansum(data[:period]) / period
+                for i in range(period, len(data)):
+                    result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
             return result
         
         atr = wilders_smoothing(tr, period)
@@ -98,20 +94,24 @@ def generate_signals(prices):
         adx = wilders_smoothing(dx, period)
         return adx
     
-    adx = calculate_adx(high, low, close, 14)
-    adx_filter = adx < 25  # ranging market
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    adx = calculate_adx(high_1d, low_1d, close_1d, 14)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    adx_filter = adx_aligned > 25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # start after warmup
         # Skip if data not ready
-        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or 
-            np.isnan(s1_1w_aligned[i]) or np.isnan(adx[i])):
+        if (np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or 
+            np.isnan(bb_middle_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Check if filters pass
+        # Require volume confirmation and ADX filter for new entries
         if not (vol_confirm[i] and adx_filter[i]):
             # Hold current position if filters fail
             if position == 1:
@@ -122,23 +122,19 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price touches S1 with bullish rejection
-        if (low[i] <= s1_1w_aligned[i] * 1.001 and  # allow 0.1% tolerance
-            close[i] > open_price[i] and  # bullish candle
-            position != 1):
+        # Long signal: price breaks above weekly upper band
+        if close[i] > bb_upper_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price touches R1 with bearish rejection
-        elif (high[i] >= r1_1w_aligned[i] * 0.999 and  # allow 0.1% tolerance
-              close[i] < open_price[i] and  # bearish candle
-              position != -1):
+        # Short signal: price breaks below weekly lower band
+        elif close[i] < bb_lower_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: price crosses weekly pivot (mean reversion)
-        elif position == 1 and close[i] >= pivot_1w_aligned[i]:
+        # Exit conditions: price crosses weekly middle band (mean reversion)
+        elif position == 1 and close[i] <= bb_middle_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] <= pivot_1w_aligned[i]:
+        elif position == -1 and close[i] >= bb_middle_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
