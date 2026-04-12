@@ -5,12 +5,12 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter + volume confirmation
     # Uses 1d EMA50 for trend filter: only take breakouts in direction of 1d trend
-    # Volume confirmation: volume > 2.0 * 20-period average to filter false breakouts
+    # Volume confirmation: volume > 1.8 * 20-period average to filter false breakouts
     # Discrete sizing 0.25 to minimize fee churn. Target: 20-40 trades/year per symbol.
     
     close = prices['close'].values
@@ -36,11 +36,11 @@ def generate_signals(prices):
         donchian_high[i] = np.max(high[i-20:i])
         donchian_low[i] = np.min(low[i-20:i])
     
-    # Volume confirmation: volume > 2.0 * 20-period average
+    # Volume confirmation: volume > 1.8 * 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
