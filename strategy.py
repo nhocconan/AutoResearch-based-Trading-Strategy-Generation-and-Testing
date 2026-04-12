@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_breakout_with_volume_and_atr
-# Hypothesis: 12-hour Camarilla breakout with volume confirmation and ATR volatility filter
+# 4h_1d_camarilla_breakout_with_volume_and_atr
+# Hypothesis: 4-hour Camarilla breakout with volume confirmation and ATR volatility filter
 # Works in bull/bear by using volatility-adjusted breakouts and volume confirmation to avoid false signals.
-# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag.
+# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
 
-name = "12h_1d_camarilla_breakout_with_volume_and_atr"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_with_volume_and_atr"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -52,7 +52,7 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align Camarilla levels and ATR to 12h timeframe
+    # Align Camarilla levels and ATR to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
