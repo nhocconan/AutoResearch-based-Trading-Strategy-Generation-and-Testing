@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 """
-4h_12h_KAMA_Trend_Reversal
-Hypothesis: On 4h timeframe, take long when KAMA turns upward from oversold (RSI<30) in uptrend,
-and short when KAMA turns downward from overbought (RSI>70) in downtrend.
-Use 12h ADX>25 for trend strength filter and volume > 1.5x average for confirmation.
-Exit when RSI reaches opposite extreme or trend weakens (ADX<20).
-Designed to capture mean-reversion within strong trends with low trade frequency.
-Works in bull markets (buying dips in uptrend) and bear markets (selling rallies in downtrend).
+12h_1d_Camarilla_Range_Breakout
+Hypothesis: On 12h timeframe, take long when price breaks above Camarilla H3 from prior day in ranging markets,
+and short when price breaks below Camarilla L3. Use 1d ADX < 25 to identify ranging conditions.
+Add volume confirmation > 1.5x average. Target 50-150 total trades over 4 years (12-37/year).
+Works in bull markets (buying breakouts in ranges) and bear markets (selling breakdowns in ranges).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_KAMA_Trend_Reversal"
-timeframe = "4h"
+name = "12h_1d_Camarilla_Range_Breakout"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,107 +25,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12H DATA FOR TREND STRENGTH (ADX) ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # === 1D DATA FOR CAMARILLA LEVELS AND ADX ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate ADX
-    tr1 = high_12h[1:] - low_12h[1:]
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate Camarilla H3/L3 for each day (from prior day)
+    camarilla_h3 = np.full(len(df_1d), np.nan)
+    camarilla_l3 = np.full(len(df_1d), np.nan)
+    for i in range(1, len(df_1d)):
+        range_prev = high_1d[i-1] - low_1d[i-1]
+        close_prev = close_1d[i-1]
+        camarilla_h3[i] = close_prev + range_prev * 1.1 / 6
+        camarilla_l3[i] = close_prev - range_prev * 1.1 / 6
     
-    plus_dm = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
-                       np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
-                        np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
-    minus_dm = np.concatenate([[np.nan], minus_dm])
+    # Calculate ADX(14) for daily timeframe
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(0, high[i] - high[i-1])
+            minus_dm[i] = max(0, low[i-1] - low[i])
+            if plus_dm[i] < minus_dm[i]:
+                plus_dm[i] = 0
+            if minus_dm[i] < plus_dm[i]:
+                minus_dm[i] = 0
+            if plus_dm[i] == minus_dm[i]:
+                plus_dm[i] = 0
+                minus_dm[i] = 0
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        atr = np.zeros_like(high)
+        if len(high) >= period:
+            atr[period-1] = np.mean(tr[1:period])
+            for i in range(period, len(high)):
+                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        plus_di = np.zeros_like(high)
+        minus_di = np.zeros_like(high)
+        dx = np.zeros_like(high)
+        for i in range(period, len(high)):
+            if atr[i] != 0:
+                plus_di[i] = 100 * plus_dm[i] / atr[i]
+                minus_di[i] = 100 * minus_dm[i] / atr[i]
+                if plus_di[i] + minus_di[i] != 0:
+                    dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+        
+        adx = np.zeros_like(high)
+        if len(high) >= 2*period:
+            adx[2*period-1] = np.mean(dx[period:2*period])
+            for i in range(2*period, len(high)):
+                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        return adx
     
-    atr = np.convolve(tr, np.ones(14)/14, mode='same')
-    atr[:13] = np.nan
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    plus_di = 100 * np.convolve(plus_dm, np.ones(14)/14, mode='same') / atr
-    minus_di = 100 * np.convolve(minus_dm, np.ones(14)/14, mode='same') / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = np.convolve(dx, np.ones(14)/14, mode='same')
-    
-    adx[:27] = np.nan
-    adx_12h = adx
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
-    
-    # === KAMA CALCULATION ===
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, k=10))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(close) >= 10 else np.full_like(close, np.nan)
-    er = np.where(volatility != 0, change / volatility, 0)
-    
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    
-    # KAMA
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # Start after 10 periods
-    for i in range(10, len(close)):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    
-    kama_slope = np.diff(kama, prepend=kama[0])
-    
-    # === RSI CALCULATION ===
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.convolve(gain, np.ones(14)/14, mode='same')
-    avg_loss = np.convolve(loss, np.ones(14)/14, mode='same')
-    avg_gain[:13] = np.nan
-    avg_loss[:13] = np.nan
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Align to 12h timeframe
+    h3_12h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_12h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    adx_12h = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     # === VOLUME FILTER ===
-    vol_ma = np.convolve(volume, np.ones(20)/20, mode='same')
-    vol_ma[:19] = np.nan
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(adx_12h_aligned[i]) or np.isnan(kama_slope[i]) or 
-            np.isnan(rsi[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(h3_12h[i]) or np.isnan(l3_12h[i]) or 
+            np.isnan(adx_12h[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend strength filter
-        strong_trend = adx_12h_aligned[i] > 25
-        weak_trend = adx_12h_aligned[i] < 20
+        # Range condition: ADX < 25 indicates ranging market
+        is_ranging = adx_12h[i] < 25
         
-        # KAMA direction
-        kama_up = kama_slope[i] > 0
-        kama_down = kama_slope[i] < 0
+        # Breakout conditions
+        breakout_up = close[i] > h3_12h[i]  # Close above H3
+        breakout_down = close[i] < l3_12h[i]  # Close below L3
         
-        # RSI extremes
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
+        # Entry conditions: breakout + ranging + volume
+        long_signal = breakout_up and is_ranging and vol_ratio[i] > 1.5
+        short_signal = breakout_down and is_ranging and vol_ratio[i] > 1.5
         
-        # Entry conditions
-        long_signal = kama_up and rsi_oversold and strong_trend and vol_ratio[i] > 1.5
-        short_signal = kama_down and rsi_overbought and strong_trend and vol_ratio[i] > 1.5
-        
-        # Exit conditions
-        exit_long = (position == 1 and (rsi[i] > 70 or weak_trend))
-        exit_short = (position == -1 and (rsi[i] < 30 or weak_trend))
+        # Exit conditions: return to mean (close back inside H3/L3 range) or trend emerges
+        exit_long = position == 1 and close[i] < (h3_12h[i] + l3_12h[i]) / 2
+        exit_short = position == -1 and close[i] > (h3_12h[i] + l3_12h[i]) / 2
         
         # Execute trades
         if long_signal and position != 1:
