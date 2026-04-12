@@ -1,11 +1,18 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mlib import talib
+from mlib.talib import SMA, STDDEV
+
+# Hypothesis: 4h Bollinger Band breakouts with volume confirmation and trend filter
+# Works in bull/bear by using Bollinger Bands (adaptive volatility bands) and requiring
+# volume confirmation to avoid false breakouts. Trend filter uses 4h 50 EMA to align with
+# intermediate trend. Designed for low trade frequency (<50/year) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,66 +20,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Donchian channels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Bollinger Bands (20, 2)
+    basis = SMA(close, 20)
+    dev = STDDEV(close, 20)
+    upper = basis + 2 * dev
+    lower = basis - 2 * dev
     
-    # Calculate 1d 10-period EMA (trend filter)
-    close_1d = df_1d['close'].values
-    ema10_1d = pd.Series(close_1d).ewm(span=10, adjust=False, min_periods=10).mean().values
-    ema10_1d_aligned = align_htf_to_ltf(prices, df_1d, ema10_1d)
+    # 4h 50 EMA for trend filter
+    ema50 = talib.EMA(close, 50)
     
-    # Calculate 1d 20-period high and low for Donchian channels
-    high_20 = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
-    
-    # Calculate 14-period ATR for volatility filter
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = tr2[0] = tr3[0] = np.nan
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr14 = np.full(n, np.nan)
-    for i in range(13, n):
-        atr14[i] = np.nanmean(tr[i-13:i+1])
-    
-    # Calculate 20-period ATR EMA for volatility regime
-    atr_ema20 = np.full(n, np.nan)
-    atr_series = pd.Series(atr14)
-    atr_ema20_values = atr_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    atr_ema20[:] = atr_ema20_values
+    # Volume confirmation: volume > 1.5x 20-period average volume
+    avg_vol = SMA(volume, 20)
+    vol_threshold = avg_vol * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(50, n):  # start after indicators are valid
         # Skip if data not ready
-        if (np.isnan(ema10_1d_aligned[i]) or np.isnan(high_20_aligned[i]) or 
-            np.isnan(low_20_aligned[i]) or np.isnan(atr14[i]) or 
-            np.isnan(atr_ema20[i])):
+        if (np.isnan(basis[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(ema50[i]) or np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: current ATR14 > 1.0x 20-period ATR EMA (elevated volatility)
-        vol_filter = atr14[i] > atr_ema20[i] * 1.0
+        # Trend filter
+        uptrend = close[i] > ema50[i]
+        downtrend = close[i] < ema50[i]
         
-        # Trend filter: price above/below 1d 10 EMA
-        price_above_ema10 = close[i] > ema10_1d_aligned[i]
-        price_below_ema10 = close[i] < ema10_1d_aligned[i]
+        # Volume confirmation
+        vol_confirm = volume[i] > vol_threshold[i]
         
-        # Entry conditions: Donchian breakout in direction of trend with volatility expansion
-        long_breakout = close[i] > high_20_aligned[i]  # break above 1d 20-period high
-        short_breakout = close[i] < low_20_aligned[i]  # break below 1d 20-period low
+        # Breakout conditions
+        long_breakout = close[i] > upper[i]
+        short_breakout = close[i] < lower[i]
         
-        long_entry = long_breakout and price_above_ema10 and vol_filter
-        short_entry = short_breakout and price_below_ema10 and vol_filter
+        # Entry conditions
+        long_entry = long_breakout and uptrend and vol_confirm
+        short_entry = short_breakout and downtrend and vol_confirm
         
-        # Exit conditions: reversal signal or volatility contraction
-        long_exit = (close[i] < ema10_1d_aligned[i]) or (atr14[i] < atr_ema20[i] * 0.8)
-        short_exit = (close[i] > ema10_1d_aligned[i]) or (atr14[i] < atr_ema20[i] * 0.8)
+        # Exit conditions: return to middle band or opposite breakout
+        long_exit = close[i] < basis[i] or (position == 1 and close[i] < lower[i])
+        short_exit = close[i] > basis[i] or (position == -1 and close[i] > upper[i])
         
         if long_entry and position != 1:
             position = 1
@@ -97,9 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Donchian breakout with 1d trend filter and volatility filter.
-# Works in bull markets via trend-following breakouts and in bear markets via volatility-filtered short breakdowns.
-# 12h timeframe reduces trade frequency to avoid fee drag while capturing major moves.
-name = "12h_1d_donchian_ema10_breakout_vol_filter_v1"
-timeframe = "12h"
+name = "4h_bb_breakout_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
