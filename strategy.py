@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v17"
+name = "4h_1d_camarilla_breakout_v18"
 timeframe = "4h"
 leverage = 1.0
 
@@ -41,7 +41,7 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
-    # Additional filter: avoid low volatility periods using ATR ratio
+    # ATR filter: avoid low volatility periods
     atr_period = 14
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
