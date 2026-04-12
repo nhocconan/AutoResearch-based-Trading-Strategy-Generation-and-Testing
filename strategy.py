@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-1d_1w_Camarilla_Breakout_With_Trend
-Hypothesis: Weekly trend filter + daily Camarilla breakouts with volume confirmation.
-In bull markets, buy breakouts above H3/H4 when weekly trend is up.
-In bear markets, sell breakdowns below L3/L4 when weekly trend is down.
-Weekly trend avoids counter-trend trades, reducing whipsaw. Low frequency (~10-25 trades/year).
+6h_1d_Aggressive_Momentum_Breakout
+Hypothesis: Aggressive breakout above 6h Donchian(20) high/low with volume confirmation,
+filtered by 1d RSI trend filter (RSI>50 for long, RSI<50 for short). Uses tight stops
+via time-based exit (max 3 bars) to limit whipsaw in sideways markets. Designed for
+low-frequency, high-conviction trades in both bull and bear regimes.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Camarilla_Breakout_With_Trend"
-timeframe = "1d"
+name = "6h_1d_Aggressive_Momentum_Breakout"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,45 +25,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === WEEKLY TREND FILTER (EMA 20) ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # === 6H DONCHIAN(20) CHANNEL ===
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    close_1w = df_1w['close'].values
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
-    
-    # === DAILY CAMARILLA PIVOT CALCULATION ===
+    # === 1D RSI(14) TREND FILTER ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels for each day
-    H3 = np.zeros(len(df_1d))
-    L3 = np.zeros(len(df_1d))
-    H4 = np.zeros(len(df_1d))
-    L4 = np.zeros(len(df_1d))
-    
-    for i in range(len(df_1d)):
-        range_ = high_1d[i] - low_1d[i]
-        if range_ <= 0:
-            H3[i] = H4[i] = L3[i] = L4[i] = close_1d[i]
-        else:
-            H3[i] = close_1d[i] + range_ * 1.1 / 4
-            L3[i] = close_1d[i] - range_ * 1.1 / 4
-            H4[i] = close_1d[i] + range_ * 1.1 / 2
-            L4[i] = close_1d[i] - range_ * 1.1 / 2
-    
-    # Align Camarilla levels to daily timeframe
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     # === VOLUME CONFIRMATION ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -71,45 +50,44 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    bars_since_entry = 0
     
-    for i in range(50, n):
-        # Skip if not ready
-        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or 
-            np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or 
-            np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_ratio[i])):
+    for i in range(20, n):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+            np.isnan(rsi_1d_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+            if position != 0:
+                bars_since_entry += 1
             continue
         
-        # Determine weekly trend
-        weekly_up = close[i] > ema20_1w_aligned[i]
-        weekly_down = close[i] < ema20_1w_aligned[i]
+        # Entry conditions
+        long_breakout = (close[i] > high_max[i]) and (vol_ratio[i] > 1.8) and (rsi_1d_aligned[i] > 50)
+        short_breakout = (close[i] < low_min[i]) and (vol_ratio[i] > 1.8) and (rsi_1d_aligned[i] < 50)
         
-        # Breakout conditions with weekly trend filter
-        # Long: Price breaks above H3 with volume + weekly trend up
-        long_breakout = (close[i] > H3_aligned[i]) and (vol_ratio[i] > 1.5) and weekly_up
+        # Time-based exit: max 3 bars (18 hours)
+        time_exit = bars_since_entry >= 3
         
-        # Short: Price breaks below L3 with volume + weekly trend down
-        short_breakout = (close[i] < L3_aligned[i]) and (vol_ratio[i] > 1.5) and weekly_down
-        
-        # Exit: Price returns to opposite Camarilla level (L3 for long, H3 for short)
-        exit_long = (position == 1) and (close[i] < L3_aligned[i])
-        exit_short = (position == -1) and (close[i] > H3_aligned[i])
+        # Reverse signals for aggressive re-entry
+        reverse_long = (position == -1) and long_breakout
+        reverse_short = (position == 1) and short_breakout
         
         # Execute trades
-        if long_breakout and position != 1:
+        if (long_breakout or reverse_long) and position != 1:
             position = 1
+            bars_since_entry = 0
             signals[i] = 0.25
-        elif short_breakout and position != -1:
+        elif (short_breakout or reverse_short) and position != -1:
             position = -1
+            bars_since_entry = 0
             signals[i] = -0.25
-        elif exit_long and position == 1:
+        elif time_exit and position != 0:
             position = 0
-            signals[i] = 0.0
-        elif exit_short and position == -1:
-            position = 0
+            bars_since_entry = 0
             signals[i] = 0.0
         else:
             # Hold position
             signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            if position != 0:
+                bars_since_entry += 1
     
     return signals
