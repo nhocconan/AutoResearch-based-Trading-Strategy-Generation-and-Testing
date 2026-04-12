@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_1d_camarilla_breakout_volume
-Camarilla pivot levels on 1d timeframe for support/resistance levels.
-Breakout from levels with volume confirmation and chop regime filter.
-Designed for low trade frequency (target: 20-35 trades/year) to minimize fee drag.
-Works in both trending and ranging markets: breakouts in trends, mean reversion at extremes in ranges.
+1d_1w_donchian_breakout_volume_v1
+Daily Donchian(20) breakout with weekly trend filter and volume confirmation.
+Long when price breaks above upper band AND weekly EMA21 is rising AND volume > 1.5x average.
+Short when price breaks below lower band AND weekly EMA21 is falling AND volume > 1.5x average.
+Exit when price crosses opposite Donchian band or volume dries up.
+Designed for low trade frequency (<15/year) to minimize fee drag in both bull and bear markets.
 """
 
-name = "4h_1d_camarilla_breakout_volume"
-timeframe = "4h"
+name = "1d_1w_donchian_breakout_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -25,95 +26,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 25:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    close_prev = df_1d['close'].shift(1).values
+    close_1w = df_1w['close'].values
     
-    # Camarilla levels
-    # H5 = Close + 1.1*(High-Low)*1.1/2
-    # H4 = Close + 1.1*(High-Low)*1.1/4
-    # H3 = Close + 1.1*(High-Low)*1.1/6
-    # L3 = Close - 1.1*(High-Low)*1.1/6
-    # L4 = Close - 1.1*(High-Low)*1.1/4
-    # L5 = Close - 1.1*(High-Low)*1.1/2
+    # Weekly EMA21 for trend direction
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_prev = np.roll(ema_21_1w, 1)
+    ema_21_1w_prev[0] = np.nan
+    weekly_rising = ema_21_1w > ema_21_1w_prev
+    weekly_falling = ema_21_1w < ema_21_1w_prev
     
-    camarilla_h4 = close_prev + 1.1 * (high_prev - low_prev) * 1.1 / 4
-    camarilla_l4 = close_prev - 1.1 * (high_prev - low_prev) * 1.1 / 4
-    camarilla_h3 = close_prev + 1.1 * (high_prev - low_prev) * 1.1 / 6
-    camarilla_l3 = close_prev - 1.1 * (high_prev - low_prev) * 1.1 / 6
-    camarilla_h5 = close_prev + 1.1 * (high_prev - low_prev) * 1.1 / 2
-    camarilla_l5 = close_prev - 1.1 * (high_prev - low_prev) * 1.1 / 2
+    # Align weekly trend to daily
+    weekly_rising_aligned = align_htf_to_ltf(prices, df_1w, weekly_rising)
+    weekly_falling_aligned = align_htf_to_ltf(prices, df_1w, weekly_falling)
     
-    # Align Camarilla levels to 4h timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    h5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h5)
-    l5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l5)
+    # Daily Donchian(20) channels
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
-    # Chop regime filter: Chop > 61.8 = ranging (mean revert), Chop < 38.2 = trending (breakout)
-    atr_period = 14
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
-    
-    # Calculate Chop: 100 * log10(sum(TR)/ (ATR * n)) / log10(n)
-    chop_period = 14
-    sum_tr = pd.Series(tr).rolling(window=chop_period, min_periods=chop_period).sum().values
-    chop = 100 * np.log10(sum_tr / (atr * chop_period)) / np.log10(chop_period)
-    chop[~np.isfinite(chop)] = 50  # handle invalid values
-    
-    chop_threshold_high = 61.8  # ranging
-    chop_threshold_low = 38.2   # trending
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(h5_aligned[i]) or np.isnan(l5_aligned[i]) or
-            np.isnan(chop[i])):
+        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
+            np.isnan(weekly_rising_aligned[i]) or np.isnan(weekly_falling_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: break above H4 in trending market OR bounce from L3 in ranging market
-        long_breakout = (close[i] > h4_aligned[i] and chop[i] < chop_threshold_low and vol_confirm[i])
-        long_bounce = (close[i] < l3_aligned[i] and chop[i] > chop_threshold_high and 
-                       close[i] > l4_aligned[i] and vol_confirm[i])
-        
-        # Short entry: break below L4 in trending market OR bounce from H3 in ranging market
-        short_breakout = (close[i] < l4_aligned[i] and chop[i] < chop_threshold_low and vol_confirm[i])
-        short_bounce = (close[i] > h3_aligned[i] and chop[i] > chop_threshold_high and 
-                        close[i] < h4_aligned[i] and vol_confirm[i])
-        
-        # Entry logic
-        if (long_breakout or long_bounce) and position != 1:
+        # Long entry: break above upper band + weekly uptrend + volume
+        if (close[i] > highest_20[i] and weekly_rising_aligned[i] and 
+            vol_confirm[i] and position != 1):
             position = 1
             signals[i] = 0.25
-        elif (short_breakout or short_bounce) and position != -1:
+        # Short entry: break below lower band + weekly downtrend + volume
+        elif (close[i] < lowest_20[i] and weekly_falling_aligned[i] and 
+              vol_confirm[i] and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit conditions
-        elif position == 1 and (close[i] < l3_aligned[i] or close[i] > h5_aligned[i]):
+        # Exit long: price breaks below lower band
+        elif position == 1 and close[i] < lowest_20[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > h3_aligned[i] or close[i] < l5_aligned[i]):
+        # Exit short: price breaks above upper band
+        elif position == -1 and close[i] > highest_20[i]:
+            position = 0
+            signals[i] = 0.0
+        # Optional exit: volume dries up (< 0.5x average)
+        elif position == 1 and volume[i] < (vol_ma[i] * 0.5):
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and volume[i] < (vol_ma[i] * 0.5):
             position = 0
             signals[i] = 0.0
         else:
