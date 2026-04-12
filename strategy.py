@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h_1d_elder_ray_power_v1
-# Uses daily Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) with 6h price action.
-# Goes long when Bull Power > 0 and 6h close > prior 6h close (momentum).
-# Goes short when Bear Power > 0 and 6h close < prior 6h close.
-# Uses 6h ATR(14) > 0 to avoid dead markets.
-# Designed for low trade frequency (target: 15-35 trades/year) to minimize fee drag.
-# Works in bull markets (strong bull power + upward momentum) and bear markets (strong bear power + downward momentum).
+# Hypothesis: 12h_1d1w_camarilla_breakout_v1
+# Uses daily and weekly timeframes to calculate weekly-based daily Camarilla levels.
+# Buys when price breaks above weekly H3 with volume confirmation and ADX > 25 (strong trend).
+# Shorts when price breaks below weekly L3 with volume confirmation and ADX > 25.
+# Designed for low trade frequency (target: 12-37 trades/year) on 12h timeframe to minimize fee drag.
+# Works in bull markets (breakouts continuation) and bear markets (breakdowns continuation).
+# Uses discrete position sizing (0.0, ±0.25) to reduce churn.
 
-name = "6h_1d_elder_ray_power_v1"
-timeframe = "6h"
+name = "12h_1d1w_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,48 +23,77 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get daily data for Elder Ray calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for Camarilla calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate EMA13 on daily closes
-    close_1d = df_1d['close'].values
-    ema13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate Camarilla levels from previous week
+    high_prev = df_1w['high'].shift(1).values
+    low_prev = df_1w['low'].shift(1).values
+    close_prev = df_1w['close'].shift(1).values
     
-    # Calculate Bull Power and Bear Power
-    bull_power = df_1d['high'].values - ema13  # High - EMA13
-    bear_power = ema13 - df_1d['low'].values   # EMA13 - Low
+    # Camarilla formulas
+    range_prev = high_prev - low_prev
+    camarilla_h3 = close_prev + range_prev * 1.1 / 4
+    camarilla_l3 = close_prev - range_prev * 1.1 / 4
     
-    # Align to 6h timeframe (daily values update after daily bar closes)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    # Align to 12h timeframe (weekly levels update only after weekly bar closes)
+    h3_level = align_htf_to_ltf(prices, df_1w, camarilla_h3)
+    l3_level = align_htf_to_ltf(prices, df_1w, camarilla_l3)
     
-    # 6h momentum: close > prior close
-    mom = np.zeros(n)
-    mom[1:] = close[1:] > close[:-1]
+    # Volume confirmation: volume > 2.0 * 50-period average (strict for 12h)
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    vol_confirm = volume > (vol_ma * 2.0)
     
-    # 6h volatility filter: ATR(14) > 0 (avoid dead markets)
+    # ADX trend filter: only trade when ADX > 25 (strong trend)
+    # Calculate True Range
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    vol_filter = atr > 0
+    
+    # Plus and Minus Directional Movement
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    
+    # Wilder's smoothing function
+    def wilders_smooth(data, period):
+        result = np.full_like(data, np.nan, dtype=float)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    atr = wilders_smooth(tr, 14)
+    plus_dm_smooth = wilders_smooth(plus_dm, 14)
+    minus_dm_smooth = wilders_smooth(minus_dm, 14)
+    
+    # Avoid division by zero
+    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
+    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = wilders_smooth(dx, 14)
+    adx_filter = adx > 25  # strong trend only
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):  # start after warmup
-        # Skip if data not ready
-        if np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or np.isnan(mom[i]) or np.isnan(vol_filter[i]):
+        # Skip if levels not ready
+        if np.isnan(h3_level[i]) or np.isnan(l3_level[i]) or np.isnan(adx_filter[i]):
             signals[i] = 0.0
             continue
         
-        # Require volatility filter
-        if not vol_filter[i]:
-            # Hold current position if no volatility
+        # Require both volume and strong trend filters
+        if not (vol_confirm[i] and adx_filter[i]):
+            # Hold current position if filters fail
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -73,19 +102,19 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: Bull Power > 0 and upward momentum
-        if bull_power_aligned[i] > 0 and mom[i] and position != 1:
+        # Long signal: price breaks above weekly H3 with volume
+        if close[i] > h3_level[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: Bear Power > 0 and downward momentum
-        elif bear_power_aligned[i] > 0 and not mom[i] and position != -1:
+        # Short signal: price breaks below weekly L3 with volume
+        elif close[i] < l3_level[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: opposite power > 0
-        elif bear_power_aligned[i] > 0 and position == 1:
+        # Exit conditions: opposite breakout
+        elif close[i] < l3_level[i] and position == 1:
             position = 0
             signals[i] = 0.0
-        elif bull_power_aligned[i] > 0 and position == -1:
+        elif close[i] > h3_level[i] and position == -1:
             position = 0
             signals[i] = 0.0
         else:
