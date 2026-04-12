@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_1w_camarilla_breakout_v1"
-timeframe = "4h"
+name = "12h_1w_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,15 +17,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla levels (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Weekly data for Camarilla levels (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate previous day's Camarilla levels
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Calculate previous week's Camarilla levels
+    prev_close = df_1w['close'].shift(1).values
+    prev_high = df_1w['high'].shift(1).values
+    prev_low = df_1w['low'].shift(1).values
     
     H_minus_L = prev_high - prev_low
     R4 = prev_close + H_minus_L * 1.1 / 2
@@ -33,7 +33,7 @@ def generate_signals(prices):
     S3 = prev_close - H_minus_L * 1.1 / 4
     S4 = prev_close - H_minus_L * 1.1 / 2
     
-    # Map daily Camarilla levels to each 4h bar
+    # Map weekly Camarilla levels to each 12h bar
     R4_mapped = np.full(n, np.nan)
     R3_mapped = np.full(n, np.nan)
     S3_mapped = np.full(n, np.nan)
@@ -41,52 +41,55 @@ def generate_signals(prices):
     
     for i in range(n):
         current_time = pd.Timestamp(prices.iloc[i]['open_time'])
-        prev_day_start = current_time.date() - pd.Timedelta(days=1)
-        for j in range(len(df_1d)):
-            if pd.Timestamp(df_1d.iloc[j]['open_time']).date() == prev_day_start:
+        # Find the week that ended before this 12h bar
+        week_start = current_time - pd.Timedelta(days=current_time.weekday(), hours=current_time.hour, minutes=current_time.minute, seconds=current_time.second, microseconds=current_time.microsecond)
+        week_start = week_start.normalize()  # Start of week (Monday)
+        for j in range(len(df_1w)):
+            week_end = pd.Timestamp(df_1w.iloc[j]['open_time']) + pd.Timedelta(days=7)
+            if pd.Timestamp(df_1w.iloc[j]['open_time']) <= current_time < week_end:
                 R4_mapped[i] = R4[j]
                 R3_mapped[i] = R3[j]
                 S3_mapped[i] = S3[j]
                 S4_mapped[i] = S4[j]
                 break
     
-    # Daily ATR for volatility filter
-    tr1 = df_1d['high'].values[1:] - df_1d['low'].values[1:]
-    tr2 = np.abs(df_1d['high'].values[1:] - df_1d['close'].values[:-1])
-    tr3 = np.abs(df_1d['low'].values[1:] - df_1d['close'].values[:-1])
-    tr_daily = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_daily = pd.Series(tr_daily).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Weekly ATR for volatility filter
+    tr1 = df_1w['high'].values[1:] - df_1w['low'].values[1:]
+    tr2 = np.abs(df_1w['high'].values[1:] - df_1w['close'].values[:-1])
+    tr3 = np.abs(df_1w['low'].values[1:] - df_1w['close'].values[:-1])
+    tr_weekly = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_weekly = pd.Series(tr_weekly).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Map ATR to 4h timeframe
-    atr_daily_mapped = np.full(n, np.nan)
+    # Map ATR to 12h timeframe
+    atr_weekly_mapped = np.full(n, np.nan)
     for i in range(n):
         current_time = pd.Timestamp(prices.iloc[i]['open_time'])
-        prev_day_start = current_time.date() - pd.Timedelta(days=1)
-        for j in range(len(df_1d)):
-            if pd.Timestamp(df_1d.iloc[j]['open_time']).date() == prev_day_start:
-                atr_daily_mapped[i] = atr_daily[j]
+        for j in range(len(df_1w)):
+            week_end = pd.Timestamp(df_1w.iloc[j]['open_time']) + pd.Timedelta(days=7)
+            if pd.Timestamp(df_1w.iloc[j]['open_time']) <= current_time < week_end:
+                atr_weekly_mapped[i] = atr_weekly[j]
                 break
     
-    # Volume confirmation: current 4h volume > 20-period average of daily volume
-    vol_1d_mapped = np.full(n, np.nan)
+    # Volume confirmation: current 12h volume > 20-period average of weekly volume
+    vol_1w_mapped = np.full(n, np.nan)
     for i in range(n):
         current_time = pd.Timestamp(prices.iloc[i]['open_time'])
-        prev_day_start = current_time.date() - pd.Timedelta(days=1)
-        for j in range(len(df_1d)):
-            if pd.Timestamp(df_1d.iloc[j]['open_time']).date() == prev_day_start:
-                vol_1d_mapped[i] = df_1d.iloc[j]['volume']
+        for j in range(len(df_1w)):
+            week_end = pd.Timestamp(df_1w.iloc[j]['open_time']) + pd.Timedelta(days=7)
+            if pd.Timestamp(df_1w.iloc[j]['open_time']) <= current_time < week_end:
+                vol_1w_mapped[i] = df_1w.iloc[j]['volume']
                 break
-    vol_ma = pd.Series(vol_1d_mapped).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ma = pd.Series(vol_1w_mapped).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_filter = volume > vol_ma
     
-    # Chop index for regime filter (4h)
+    # Chop index for regime filter (12h)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    atr_4h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    chop_raw = 100 * np.log10(tr_sum / (atr_4h * 14)) / np.log10(14)
+    atr_12h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    chop_raw = 100 * np.log10(tr_sum / (atr_12h * 14)) / np.log10(14)
     chop = np.where(tr_sum > 0, chop_raw, 50)
     
     signals = np.zeros(n)
@@ -96,13 +99,13 @@ def generate_signals(prices):
         # Skip if not ready
         if (np.isnan(R4_mapped[i]) or np.isnan(R3_mapped[i]) or 
             np.isnan(S3_mapped[i]) or np.isnan(S4_mapped[i]) or
-            np.isnan(atr_daily_mapped[i]) or np.isnan(chop[i]) or 
+            np.isnan(atr_weekly_mapped[i]) or np.isnan(chop[i]) or 
             np.isnan(volume_filter[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Volatility filter: only trade when volatility is elevated (ATR > 20-period average)
-        vol_filter = atr_daily_mapped[i] > np.nanmedian(atr_daily_mapped[max(0, i-20):i+1])
+        vol_filter = atr_weekly_mapped[i] > np.nanmedian(atr_weekly_mapped[max(0, i-20):i+1])
         
         # Chop regime: Chop < 40 = trending (favor breakouts), Chop > 60 = ranging (avoid)
         trending_regime = chop[i] < 40
