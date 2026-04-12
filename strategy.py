@@ -1,17 +1,18 @@
+# 12h 1d Camarilla Breakout with Volume Confirmation and Chop Filter
+# Uses 12h primary timeframe and 1d Camarilla levels for breakout detection
+# Volume spike (>1.5x 20-period MA) confirms institutional participation
+# Chop filter (CHOP < 61.8) avoids false signals in ranging markets
+# Target: 12-37 trades/year per symbol, focusing on clean breakouts
+# Works in bull markets (breakouts above H4) and bear markets (breakdowns below L4)
+# Designed to avoid overtrading and fee drag while maintaining edge
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h_1d_rsi_vs_ma_mean_reversion
-# Uses RSI(14) mean reversion with daily moving average filter.
-# Long when RSI < 30 and price > daily EMA(50) (oversold in uptrend).
-# Short when RSI > 70 and price < daily EMA(50) (overbought in downtrend).
-# Works in both bull and bear markets by combining momentum exhaustion with trend filter.
-# Target: 20-40 trades/year per symbol.
-
-name = "6h_1d_rsi_vs_ma_mean_reversion"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,50 +23,83 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for EMA filter
+    # Get 1d data for Camarilla calculation (ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate daily EMA(50)
-    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Calculate Camarilla levels from previous day's range
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
     
-    # Calculate RSI(14) on 6h closes
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    range_prev = high_prev - low_prev
+    camarilla_h4 = close_prev + range_prev * 1.1 / 2  # H4 resistance
+    camarilla_l4 = close_prev - range_prev * 1.1 / 2  # L4 support
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Align Camarilla levels to 12h timeframe (properly delayed)
+    h4_level = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_level = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Volume confirmation: volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma * 1.5)
+    
+    # Chop regime filter: avoid choppy markets (CHOP > 61.8)
+    # Calculate True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate highest high and lowest low over 14 periods
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    
+    # Choppiness Index: CHOP = 100 * log10((HH - LL) / (ATR * sqrt(14))) / log10(14)
+    chop = 100 * np.log10((highest_high - lowest_low) / (atr * np.sqrt(14))) / np.log10(14)
+    chop_filter = chop < 61.8  # Trending market condition
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):
-        # Skip if EMA not ready
-        if np.isnan(ema_50_aligned[i]):
+    for i in range(20, n):  # Start after warmup period
+        # Skip if Camarilla levels not ready
+        if np.isnan(h4_level[i]) or np.isnan(l4_level[i]):
             signals[i] = 0.0
             continue
         
-        # Long: RSI oversold and price above daily EMA
-        if rsi[i] < 30 and close[i] > ema_50_aligned[i] and position != 1:
+        # Check volume and chop filters
+        if not (vol_confirm[i] and chop_filter[i]):
+            # Hold current position if filters fail
+            if position == 1:
+                signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Long signal: price breaks above H4 with volume confirmation
+        if close[i] > h4_level[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: RSI overbought and price below daily EMA
-        elif rsi[i] > 70 and close[i] < ema_50_aligned[i] and position != -1:
+        # Short signal: price breaks below L4 with volume confirmation
+        elif close[i] < l4_level[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: RSI returns to neutral zone
-        elif 40 <= rsi[i] <= 60 and position != 0:
+        # Exit conditions: opposite breakout
+        elif close[i] < l4_level[i] and position == 1:
             position = 0
             signals[i] = 0.0
-        # Hold position
+        elif close[i] > h4_level[i] and position == -1:
+            position = 0
+            signals[i] = 0.0
         else:
+            # Hold current position
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
