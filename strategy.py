@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_1d_camarilla_breakout_volume
-Hypothesis: 12-hour strategy using Camarilla pivot levels from daily timeframe for entry/exit, with volume confirmation.
-Buys when price breaks above Camarilla H3 with volume surge, sells when breaks below L3.
-Uses daily volatility filter to avoid choppy markets. Designed to work in both bull and bear markets by trading breakouts.
-Target: 25-35 trades/year (100-140 total over 4 years) to minimize fee drag.
+4h_1d_donchian_breakout_volume_trend
+Hypothesis: 4-hour strategy using daily Donchian breakouts with volume confirmation and 1-week trend filter.
+Trades only in direction of weekly trend to avoid counter-trend whipsaws in bear markets.
+Uses volume spike (1.5x average) to confirm breakout strength.
+Target: 20-35 trades/year (80-140 total over 4 years) to minimize fee drag.
+Works in bull markets via breakouts and in bear markets via trend filter preventing false signals.
 """
 
 import numpy as np
@@ -13,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,109 +22,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and volatility
+    # Get daily data for Donchian channels and volume average
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla pivot levels for previous day
-    # H4 = close + 1.5 * (high - low)
-    # H3 = close + 1.0 * (high - low)
-    # H2 = close + 0.5 * (high - low)
-    # H1 = close + 0.25 * (high - low)
-    # L1 = close - 0.25 * (high - low)
-    # L2 = close - 0.5 * (high - low)
-    # L3 = close - 1.0 * (high - low)
-    # L4 = close - 1.5 * (high - low)
-    range_1d = high_1d - low_1d
-    H3_1d = close_1d + 1.0 * range_1d
-    L3_1d = close_1d - 1.0 * range_1d
-    H4_1d = close_1d + 1.5 * range_1d
-    L4_1d = close_1d - 1.5 * range_1d
+    # Calculate daily Donchian channels (20-period)
+    highest_high = np.full_like(high_1d, np.nan)
+    lowest_low = np.full_like(low_1d, np.nan)
+    for i in range(20, len(high_1d)):
+        highest_high[i] = np.max(high_1d[i-20:i])
+        lowest_low[i] = np.min(low_1d[i-20:i])
     
-    # Align Camarilla levels to 12h timeframe
-    H3_1d_aligned = align_htf_to_ltf(prices, df_1d, H3_1d)
-    L3_1d_aligned = align_htf_to_ltf(prices, df_1d, L3_1d)
-    H4_1d_aligned = align_htf_to_ltf(prices, df_1d, H4_1d)
-    L4_1d_aligned = align_htf_to_ltf(prices, df_1d, L4_1d)
+    # Calculate 20-period average volume for spike detection
+    avg_volume = np.full_like(volume_1d, np.nan)
+    for i in range(20, len(volume_1d)):
+        avg_volume[i] = np.mean(volume_1d[i-20:i])
     
-    # Daily ATR for volatility filter
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(np.roll(high_1d, 1) - close_1d)
-    tr3 = np.abs(np.roll(low_1d, 1) - close_1d)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Volume moving average for confirmation
-    vol_ma = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    close_1w = df_1w['close'].values
+    # Weekly EMA50 for trend direction
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align all indicators to 4h timeframe
+    highest_high_aligned = align_htf_to_ltf(prices, df_1d, highest_high)
+    lowest_low_aligned = align_htf_to_ltf(prices, df_1d, lowest_low)
+    avg_volume_aligned = align_htf_to_ltf(prices, df_1d, avg_volume)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(10, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(H3_1d_aligned[i]) or np.isnan(L3_1d_aligned[i]) or 
-            np.isnan(H4_1d_aligned[i]) or np.isnan(L4_1d_aligned[i]) or 
-            np.isnan(atr_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(highest_high_aligned[i]) or np.isnan(lowest_low_aligned[i]) or 
+            np.isnan(avg_volume_aligned[i]) or np.isnan(ema50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when ATR is above 50% of its 50-period median
-        atr_median = np.nanmedian(atr_1d_aligned[max(0, i-50):i+1])
-        if atr_1d_aligned[i] < atr_median * 0.5:
-            # Low volatility - hold position or stay flat
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
-            continue
+        # Weekly trend: above EMA50 = uptrend, below = downtrend
+        weekly_uptrend = close[i] > ema50_1w_aligned[i]
+        weekly_downtrend = close[i] < ema50_1w_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x MA volume
-        volume_ok = volume[i] > vol_ma[i] * 1.5
+        # Volume spike: current volume > 1.5x average volume
+        volume_spike = volume[i] > 1.5 * avg_volume_aligned[i]
         
         # Breakout conditions
-        if volume_ok:
-            # Long breakout above H3
-            if close[i] > H3_1d_aligned[i] and position != 1:
-                position = 1
-                signals[i] = 0.25
-            # Short breakdown below L3
-            elif close[i] < L3_1d_aligned[i] and position != -1:
-                position = -1
-                signals[i] = -0.25
-            # Exit on opposite breakout
-            elif position == 1 and close[i] < L3_1d_aligned[i]:
-                position = 0
-                signals[i] = 0.0
-            elif position == -1 and close[i] > H3_1d_aligned[i]:
-                position = 0
-                signals[i] = 0.0
-            else:
-                # Hold current position
-                if position == 1:
-                    signals[i] = 0.25
-                elif position == -1:
-                    signals[i] = -0.25
-                else:
-                    signals[i] = 0.0
+        long_breakout = high[i] > highest_high_aligned[i] and volume_spike
+        short_breakout = low[i] < lowest_low_aligned[i] and volume_spike
+        
+        # Entry logic: only trade in direction of weekly trend
+        if weekly_uptrend and long_breakout and position != 1:
+            position = 1
+            signals[i] = 0.30  # Long 30%
+        elif weekly_downtrend and short_breakout and position != -1:
+            position = -1
+            signals[i] = -0.30  # Short 30%
+        # Exit: opposite breakout or trend change
+        elif position == 1 and (short_breakout or not weekly_uptrend):
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and (long_breakout or not weekly_downtrend):
+            position = 0
+            signals[i] = 0.0
         else:
-            # No volume confirmation - hold or flat
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
+            # Hold current position
+            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
     
     return signals
 
-name = "12h_1d_camarilla_breakout_volume"
-timeframe = "12h"
+name = "4h_1d_donchian_breakout_volume_trend"
+timeframe = "4h"
 leverage = 1.0
