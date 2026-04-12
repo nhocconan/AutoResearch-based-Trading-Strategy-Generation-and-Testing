@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_cci_trend_v1"
-timeframe = "1d"
+name = "4h_1d_cci_meanrev_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for CCI calculation
+    # Get 1d data for CCI calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -29,23 +29,13 @@ def generate_signals(prices):
     # Calculate CCI(20) on daily data
     tp_1d = (high_1d + low_1d + close_1d) / 3.0
     sma_tp = pd.Series(tp_1d).rolling(window=20, min_periods=20).mean().values
-    mad = pd.Series(tp_1d).rolling(window=20, min_periods=20).apply(
-        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
+    mad = pd.Series(tp_1d).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
     cci_1d = (tp_1d - sma_tp) / (0.015 * mad)
     
-    # Align CCI to daily timeframe (same timeframe, no shift needed)
+    # Align CCI to 4h timeframe
     cci_1d_aligned = align_htf_to_ltf(prices, df_1d, cci_1d)
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Volume filter - 20-period average on daily data
+    # Volume filter - 20-period average on 4h data
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
@@ -55,24 +45,20 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(cci_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+        if (np.isnan(cci_1d_aligned[i]) or 
             np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend from weekly EMA
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
+        # Mean-reversion signals with volume confirmation
+        # Long: CCI < -100 (oversold) - contrarian long
+        long_signal = cci_1d_aligned[i] < -100 and volume_ok[i]
+        # Short: CCI > 100 (overbought) - contrarian short
+        short_signal = cci_1d_aligned[i] > 100 and volume_ok[i]
         
-        # CCI signals with volume confirmation
-        # Long: CCI > -100 (emerging bullish) in uptrend
-        long_signal = cci_1d_aligned[i] > -100 and uptrend and volume_ok[i]
-        # Short: CCI < 100 (emerging bearish) in downtrend
-        short_signal = cci_1d_aligned[i] < 100 and downtrend and volume_ok[i]
-        
-        # Exit when CCI reverses
-        exit_long = cci_1d_aligned[i] < -100
-        exit_short = cci_1d_aligned[i] > 100
+        # Exit when CCI returns to neutral zone
+        exit_long = cci_1d_aligned[i] > -100
+        exit_short = cci_1d_aligned[i] < 100
         
         # Execute trades
         if long_signal and position != 1:
