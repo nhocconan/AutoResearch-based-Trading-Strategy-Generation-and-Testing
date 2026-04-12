@@ -1,168 +1,102 @@
 #!/usr/bin/env python3
 """
-1d_1w_KAMA_RSI_Chop_v1
-Hypothesis: On daily timeframe, use Kaufman Adaptive Moving Average (KAMA) for trend direction,
-RSI(14) for momentum confirmation, and Choppiness Index (14) for regime filter.
-Enter long when KAMA turns up, RSI > 50, and CHOP > 61.8 (ranging market); short when KAMA turns down,
-RSI < 50, and CHOP > 61.8. Exit on opposite KAMA crossover. Weekly trend filter ensures alignment
-with higher timeframe momentum. Designed for low trade frequency (<25/year) to minimize fee drag.
-Works in ranging markets via mean reversion logic and avoids trending whipsaws via CHOP filter.
+6h_12h_1d_Triple_Pullback_Strategy
+Hypothesis: Enter long on pullbacks to 12h EMA21 when 1d trend is up (price > 1d EMA50) and 12h momentum is bullish (MACD > 0). Enter short on pullbacks to 12h EMA21 when 1d trend is down (price < 1d EMA50) and 12h momentum is bearish (MACD < 0). Uses 1d trend filter to avoid counter-trend trades, and 12h EMA21 as dynamic support/resistance. Designed for low trade frequency (15-30/year) by requiring trend alignment and pullback entries. Works in bull via long bias in uptrends and in bear via short bias in downtrends.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_KAMA_RSI_Chop_v1"
-timeframe = "1d"
+name = "6h_12h_1d_Triple_Pullback_Strategy"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     
-    # === DAILY DATA ===
+    # === 1D TREND FILTER ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    if len(close_1d) >= 50:
+        ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    else:
+        ema_50_1d = np.full_like(close_1d, np.nan)
     
-    # KAMA(10,2,30) - fast, slow, lookback
-    kama_period = 10
-    fast_ema = 2
-    slow_ema = 30
-    
-    # Calculate Efficiency Ratio
-    change = np.abs(np.diff(close_1d, kama_period))
-    abs_price_change = np.sum(np.abs(np.diff(close_1d)), axis=0) if False else None  # placeholder
-    # Proper ER calculation
-    er = np.zeros_like(close_1d)
-    for i in range(kama_period, len(close_1d)):
-        if i >= kama_period:
-            direction = np.abs(close_1d[i] - close_1d[i-kama_period])
-            volatility = np.sum(np.abs(np.diff(close_1d[i-kama_period+1:i+1])))
-            er[i] = direction / volatility if volatility != 0 else 0
-    
-    # Smoothing constants
-    sc = (er * (2/(slow_ema+1) - 2/(fast_ema+1)) + 2/(fast_ema+1)) ** 2
-    
-    # Calculate KAMA
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    
-    # RSI(14)
-    delta = np.diff(close_1d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros_like(close_1d)
-    avg_loss = np.zeros_like(close_1d)
-    for i in range(1, len(close_1d)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Choppiness Index(14)
-    atr_period = 14
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])  # align with close_1d
-    
-    atr = np.zeros_like(close_1d)
-    for i in range(atr_period, len(close_1d)):
-        atr[i] = np.mean(tr[i-atr_period+1:i+1])
-    
-    # True range for CHOP denominator
-    tr_sum = np.zeros_like(close_1d)
-    for i in range(atr_period, len(close_1d)):
-        tr_sum[i] = np.sum(tr[i-atr_period+1:i+1])
-    
-    max_high = np.zeros_like(close_1d)
-    min_low = np.zeros_like(close_1d)
-    for i in range(atr_period, len(close_1d)):
-        max_high[i] = np.max(high_1d[i-atr_period+1:i+1])
-        min_low[i] = np.min(low_1d[i-atr_period+1:i+1])
-    
-    chop = np.zeros_like(close_1d)
-    for i in range(atr_period, len(close_1d)):
-        if tr_sum[i] > 0 and max_high[i] > min_low[i]:
-            chop[i] = 100 * np.log10(tr_sum[i] / (max_high[i] - min_low[i])) / np.log10(atr_period)
-        else:
-            chop[i] = 50  # neutral
-    
-    # === WEEKLY DATA ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # === 12H INDICATORS ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 34:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # Weekly EMA(21) for trend filter
-    if len(close_1w) >= 21:
-        ema_21_1w = np.zeros_like(close_1w)
-        ema_21_1w[0] = close_1w[0]
-        alpha = 2.0 / (21 + 1)
-        for i in range(1, len(close_1w)):
-            ema_21_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_21_1w[i-1]
-    else:
-        ema_21_1w = np.full_like(close_1w, np.nan)
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Align all indicators to daily timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # 12h EMA21 for pullback entries
+    if len(close_12h) >= 21:
+        ema_21_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    else:
+        ema_21_12h = np.full_like(close_12h, np.nan)
+    
+    # 12h MACD for momentum confirmation
+    if len(close_12h) >= 34:
+        ema_12 = pd.Series(close_12h).ewm(span=12, adjust=False, min_periods=12).mean().values
+        ema_26 = pd.Series(close_12h).ewm(span=26, adjust=False, min_periods=26).mean().values
+        macd_line = ema_12 - ema_26
+        signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
+        macd_hist = macd_line - signal_line
+    else:
+        macd_line = np.full_like(close_12h, np.nan)
+        signal_line = np.full_like(close_12h, np.nan)
+        macd_hist = np.full_like(close_12h, np.nan)
+    
+    # Align all 1d and 12h indicators to 6h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_21_12h)
+    macd_hist_aligned = align_htf_to_ltf(prices, df_12h, macd_hist)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # start after warmup
+    for i in range(100, n):
         # Skip if indicators not available
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or np.isnan(ema_21_1w_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_21_12h_aligned[i]) or 
+            np.isnan(macd_hist_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # KAMA direction: slope of KAMA
-        kama_up = kama_aligned[i] > kama_aligned[i-1]
-        kama_down = kama_aligned[i] < kama_aligned[i-1]
+        # Trend alignment: 1d price vs 1d EMA50
+        trend_up = close[i] > ema_50_1d_aligned[i]
+        trend_down = close[i] < ema_50_1d_aligned[i]
         
-        # RSI conditions
-        rsi_above_50 = rsi_aligned[i] > 50
-        rsi_below_50 = rsi_aligned[i] < 50
+        # Momentum: 12h MACD histogram
+        mom_bullish = macd_hist_aligned[i] > 0
+        mom_bearish = macd_hist_aligned[i] < 0
         
-        # Choppiness filter: ranging market (CHOP > 61.8)
-        chop_high = chop_aligned[i] > 61.8
-        
-        # Weekly trend filter: price above/below weekly EMA
-        price_above_weekly_ema = close[i] > ema_21_1w_aligned[i]
-        price_below_weekly_ema = close[i] < ema_21_1w_aligned[i]
+        # Pullback to 12h EMA21 (within 0.5% for entry zone)
+        near_ema = abs(close[i] - ema_21_12h_aligned[i]) / ema_21_12h_aligned[i] < 0.005
         
         # Entry conditions
-        long_setup = kama_up and rsi_above_50 and chop_high and price_above_weekly_ema
-        short_setup = kama_down and rsi_below_50 and chop_high and price_below_weekly_ema
+        long_entry = trend_up and mom_bullish and near_ema
+        short_entry = trend_down and mom_bearish and near_ema
         
-        # Exit on opposite KAMA crossover
-        exit_long = kama_down
-        exit_short = kama_up
+        # Exit conditions: trend reversal or momentum divergence
+        exit_long = not trend_up or not mom_bullish
+        exit_short = not trend_down or not mom_bearish
         
-        if long_setup and position != 1:
+        if long_entry and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_setup and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
