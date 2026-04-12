@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_12h_camarilla_breakout_v1
-# Uses 12-hour chart for daily-like structure and 1d chart for weekly-like pivot levels.
-# Long when 4h price breaks above 12h H4 level with volume confirmation (volume > 1.3x 20-period avg).
-# Short when 4h price breaks below 12h L4 level with volume confirmation.
-# Exits when price returns to 12h pivot point (PP).
-# Designed for low trade frequency (target: 20-30 trades/year) to minimize fee drag.
-# Works in trending markets via breakouts and in ranging markets via mean reversion to pivot.
-# 12h pivot levels are more stable than daily, reducing false signals.
+# Hypothesis: 1h_4h_1d_rsi_momentum_v1
+# Uses 4h RSI(14) for trend direction and 1d RSI(14) for regime filter.
+# Long when 4h RSI crosses above 50 and 1d RSI > 40 (bullish regime).
+# Short when 4h RSI crosses below 50 and 1d RSI < 60 (bearish regime).
+# Exits when 4h RSI returns to 50.
+# Designed for low trade frequency (target: 15-30 trades/year) to minimize fee drag.
+# Works in trending markets via RSI momentum and in ranging markets via mean reversion to 50.
 
-name = "4h_12h_camarilla_breakout_v1"
-timeframe = "4h"
+name = "1h_4h_1d_rsi_momentum_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,74 +25,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla pivot calculation (daily-like structure)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 4h data for RSI calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate 12h Camarilla levels based on previous 12h bar's OHLC
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate 4h RSI(14)
+    close_4h = df_4h['close'].values
+    delta = np.diff(close_4h, prepend=close_4h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate pivot point and Camarilla levels for each 12h period
-    pp_12h = (high_12h + low_12h + close_12h) / 3.0
-    range_12h = high_12h - low_12h
+    # Use Wilder's smoothing (equivalent to EMA with alpha=1/14)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_4h = 100 - (100 / (1 + rs))
     
-    # Camarilla levels: H4 = PP + 1.1/2 * range, L4 = PP - 1.1/2 * range
-    h4_12h = pp_12h + (1.1 / 2) * range_12h
-    l4_12h = pp_12h - (1.1 / 2) * range_12h
+    # Get 1d data for regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Align 12h levels to 4h timeframe (12h values update after 12h bar closes)
-    h4_12h_aligned = align_htf_to_ltf(prices, df_12h, h4_12h)
-    l4_12h_aligned = align_htf_to_ltf(prices, df_12h, l4_12h)
-    pp_12h_aligned = align_htf_to_ltf(prices, df_12h, pp_12h)
+    # Calculate 1d RSI(14)
+    close_1d = df_1d['close'].values
+    delta_1d = np.diff(close_1d, prepend=close_1d[0])
+    gain_1d = np.where(delta_1d > 0, delta_1d, 0)
+    loss_1d = np.where(delta_1d < 0, -delta_1d, 0)
     
-    # Volume confirmation: volume > 1.3 * 20-period average (4h timeframe)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.3)
+    avg_gain_1d = pd.Series(gain_1d).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss_1d = pd.Series(loss_1d).ewm(alpha=1/14, adjust=False).mean().values
+    rs_1d = avg_gain_1d / (avg_loss_1d + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs_1d))
+    
+    # Align HTF indicators to 1h timeframe
+    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # start after warmup
+    for i in range(50, n):
         # Skip if data not ready
-        if np.isnan(h4_12h_aligned[i]) or np.isnan(l4_12h_aligned[i]) or np.isnan(pp_12h_aligned[i]):
+        if np.isnan(rsi_4h_aligned[i]) or np.isnan(rsi_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Require volume confirmation for new entries
-        if not vol_confirm[i]:
-            # Hold current position if volume filter fails
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
-            continue
+        rsi4 = rsi_4h_aligned[i]
+        rsi1d = rsi_1d_aligned[i]
         
-        # Long signal: 4h price breaks above 12h H4
-        if close[i] > h4_12h_aligned[i] and position != 1:
+        # Long signal: 4h RSI crosses above 50 and 1d RSI > 40 (bullish regime)
+        if rsi4 > 50 and rsi1d > 40 and position != 1:
             position = 1
-            signals[i] = 0.25
-        # Short signal: 4h price breaks below 12h L4
-        elif close[i] < l4_12h_aligned[i] and position != -1:
+            signals[i] = 0.20
+        # Short signal: 4h RSI crosses below 50 and 1d RSI < 60 (bearish regime)
+        elif rsi4 < 50 and rsi1d < 60 and position != -1:
             position = -1
-            signals[i] = -0.25
-        # Exit conditions: price returns to 12h pivot point (mean reversion)
-        elif position == 1 and close[i] <= pp_12h_aligned[i]:
+            signals[i] = -0.20
+        # Exit conditions: 4h RSI returns to 50 (mean reversion)
+        elif position == 1 and rsi4 <= 50:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] >= pp_12h_aligned[i]:
+        elif position == -1 and rsi4 >= 50:
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
