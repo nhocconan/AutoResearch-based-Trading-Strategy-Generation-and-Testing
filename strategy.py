@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """
-1d_1w_Turtle_Reversal_v1
-Hypothesis: Use weekly Donchian channels (20) for trend direction and daily Donchian breakouts (20) for entries.
-Long when price breaks above daily DONCHIAN(20) high and weekly trend is up.
-Short when price breaks below daily DONCHIAN(20) low and weekly trend is down.
-Exit on opposite daily Donchian breakout or weekly trend reversal.
-Designed for low trade frequency (10-25/year) with trend following in both bull and bear markets.
-Uses volume confirmation to avoid false breakouts and ATR-based position sizing for risk control.
+6h_12h_Turtle_Squeeze_Breakout
+Hypothesis: Trade Bollinger Band squeeze breakouts on 6h with 12h Donchian(20) as trend filter.
+In Bollinger squeeze (low volatility), price often breaks out strongly. Use 12h Donchian to filter direction:
+- Long when 6h breaks above Bollinger Upper Band AND 12h price > Donchian High(20)
+- Short when 6h breaks below Bollinger Lower Band AND 12h price < Donchian Low(20)
+Requires volume > 1.5x 20-period average to confirm breakout.
+Works in both bull and bear markets: squeeze breakouts capture volatility expansion after consolidation.
+Designed for low trade frequency (~15-30/year) with high conviction exits on opposite Donchian touch.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Turtle_Reversal_v1"
-timeframe = "1d"
+name = "6h_12h_Turtle_Squeeze_Breakout"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,62 +28,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === WEEKLY DATA FOR TREND DIRECTION ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # === 12H DATA FOR DONCHIAN TREND FILTER ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Weekly Donchian channels (20)
-    high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Calculate 12h Donchian channels (20-period)
+    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Weekly trend: price above/below midpoint of weekly channel
-    mid_20 = (high_20 + low_20) / 2
-    weekly_uptrend = close_1w > mid_20
-    weekly_downtrend = close_1w < mid_20
+    # Align Donchian levels to 6h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
     
-    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend)
-    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend)
+    # === 6H INDICATORS ===
+    # Bollinger Bands (20, 2.0)
+    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma20 + (2.0 * std20)
+    lower_bb = sma20 - (2.0 * std20)
     
-    # === DAILY DATA FOR ENTRY SIGNALS ===
-    # Daily Donchian channels (20)
-    high_20d = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20d = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Bollinger Band width for squeeze detection (optional filter)
+    bb_width = (upper_bb - lower_bb) / sma20
+    # Squeeze condition: BB width below 20-period average (low volatility)
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    squeeze_condition = bb_width < bb_width_ma
     
-    # Volume confirmation: volume > 1.5x 20-day average
+    # Volume filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(60, n):
         # Skip if not ready
-        if (np.isnan(high_20d[i]) or np.isnan(low_20d[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(weekly_uptrend_aligned[i]) or
-            np.isnan(weekly_downtrend_aligned[i])):
+        if (np.isnan(sma20[i]) or np.isnan(std20[i]) or 
+            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume filter
+        # Volume strength
         strong_volume = volume[i] > (vol_ma[i] * 1.5)
         
-        # Entry conditions
-        long_breakout = close[i] > high_20d[i] and weekly_uptrend_aligned[i] and strong_volume
-        short_breakout = close[i] < low_20d[i] and weekly_downtrend_aligned[i] and strong_volume
+        # Long: 6h breaks above upper BB AND 12h price above Donchian High (uptrend)
+        long_signal = (close[i] > upper_bb[i] and 
+                      close[i] > donchian_high_aligned[i] and 
+                      strong_volume)
         
-        # Exit conditions: opposite breakout or weekly trend reversal
-        exit_long = position == 1 and (close[i] < low_20d[i] or not weekly_uptrend_aligned[i])
-        exit_short = position == -1 and (close[i] > high_20d[i] or not weekly_downtrend_aligned[i])
+        # Short: 6h breaks below lower BB AND 12h price below Donchian Low (downtrend)
+        short_signal = (close[i] < lower_bb[i] and 
+                       close[i] < donchian_low_aligned[i] and 
+                       strong_volume)
+        
+        # Exit: opposite Donchian touch (turtle-style exit)
+        exit_long = (position == 1 and close[i] < donchian_low_aligned[i])
+        exit_short = (position == -1 and close[i] > donchian_high_aligned[i])
         
         # Execute trades
-        if long_breakout and position != 1:
+        if long_signal and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_breakout and position != -1:
+        elif short_signal and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
