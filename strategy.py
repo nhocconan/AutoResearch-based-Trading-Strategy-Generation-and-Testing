@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_cci_trend_v2"
-timeframe = "4h"
+name = "12h_1d_donchian_breakout_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,34 +17,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for CCI calculation
+    # Get 1d data for Donchian channels and ADX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate CCI(20) on daily data
-    tp_1d = (high_1d + low_1d + close_1d) / 3.0
-    sma_tp = pd.Series(tp_1d).rolling(window=20, min_periods=20).mean().values
-    mad = pd.Series(tp_1d).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
-    cci_1d = (tp_1d - sma_tp) / (0.015 * mad)
+    # Calculate Donchian channels (20) on daily data
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align CCI to 4h timeframe
-    cci_1d_aligned = align_htf_to_ltf(prices, df_1d, cci_1d)
+    # Calculate ADX (14) on daily data for trend strength
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(high[i] - high[i-1], 0) if high[i] - high[i-1] > high[i-1] - low[i] else 0
+            minus_dm[i] = max(low[i-1] - low[i], 0) if high[i-1] - low[i] > high[i] - high[i-1] else 0
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Smooth with Wilder's smoothing (equivalent to EMA with alpha=1/period)
+        atr = np.zeros_like(tr)
+        atr[period] = np.mean(tr[1:period+1])
+        for i in range(period+1, len(tr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        plus_di = np.zeros_like(high)
+        minus_di = np.zeros_like(high)
+        dx = np.zeros_like(high)
+        
+        for i in range(period, len(high)):
+            if atr[i] != 0:
+                plus_di[i] = (pd.Series(plus_dm).ewm(alpha=1/period, adjust=False).mean().values[i] / atr[i]) * 100
+                minus_di[i] = (pd.Series(minus_dm).ewm(alpha=1/period, adjust=False).mean().values[i] / atr[i]) * 100
+                if plus_di[i] + minus_di[i] != 0:
+                    dx[i] = (abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])) * 100
+        
+        adx = np.zeros_like(high)
+        adx[2*period-1] = np.mean(dx[period:2*period])
+        for i in range(2*period, len(dx)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align indicators to 12h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Volume filter - 20-period average on 4h data
+    # Volume filter - 20-period average on 12h data
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
@@ -54,24 +82,24 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(cci_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(volume_ok[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(adx_1d_aligned[i]) or np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend from 1w EMA
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
+        # Trend strength filter
+        strong_trend = adx_1d_aligned[i] > 25
         
-        # CCI signals with volume confirmation
-        # Long: CCI > -100 (emerging bullish) in uptrend
-        long_signal = cci_1d_aligned[i] > -100 and uptrend and volume_ok[i]
-        # Short: CCI < 100 (emerging bearish) in downtrend
-        short_signal = cci_1d_aligned[i] < 100 and downtrend and volume_ok[i]
+        # Donchian breakout signals with volume confirmation
+        # Long: price breaks above Donchian high in strong trend
+        long_signal = close[i] > donchian_high_aligned[i] and strong_trend and volume_ok[i]
+        # Short: price breaks below Donchian low in strong trend
+        short_signal = close[i] < donchian_low_aligned[i] and strong_trend and volume_ok[i]
         
-        # Exit when CCI reverses
-        exit_long = cci_1d_aligned[i] < -100
-        exit_short = cci_1d_aligned[i] > 100
+        # Exit when price returns to middle of channel
+        middle = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2
+        exit_long = close[i] < middle
+        exit_short = close[i] > middle
         
         # Execute trades
         if long_signal and position != 1:
