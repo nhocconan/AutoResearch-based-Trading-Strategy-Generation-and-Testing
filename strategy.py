@@ -1,10 +1,12 @@
-# 12h_1d_camarilla_breakout_with_volume_and_atr
-# Hypothesis: 12-hour Camarilla breakout with volume confirmation and ATR volatility filter
+#!/usr/bin/env python3
+# 4h_1d_camarilla_breakout_with_volume_and_atr_v2
+# Hypothesis: 4-hour Camarilla breakout with volume confirmation and ATR volatility filter.
+# Uses tighter entry conditions to reduce trade frequency and avoid fee drag.
 # Works in bull/bear by using volatility-adjusted breakouts and volume confirmation to avoid false signals.
 # Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
 
-name = "12h_1d_camarilla_breakout_with_volume_and_atr"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_with_volume_and_atr_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -51,16 +53,16 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align Camarilla levels and ATR to 12h timeframe
+    # Align Camarilla levels and ATR to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    # Volume confirmation: volume > 1.8x 30-period average (stricter)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    vol_confirm = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
