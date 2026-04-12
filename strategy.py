@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-4h_1d_RSI_Contrarian_v1
-Hypothesis: Use daily RSI(14) for mean-reversion signals in ranging markets. Buy when RSI<30 and sell when RSI>70, filtered by 4h ADX<20 to avoid trending markets. Works in both bull/bear by capturing mean-reversion in ranging conditions while avoiding strong trends.
+1d_1w_Momentum_Momentum_v1
+Hypothesis: Combines 1d momentum (14-day ROC) with 1w momentum (4-week ROC) to capture strong trends. 
+Long when both ROCs > 0 and price above 1d EMA(50), short when both ROCs < 0 and price below 1d EMA(50).
+Uses 1w ADX > 25 to filter for trending markets only. Works in bull/bear by capturing momentum in trending conditions.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_RSI_Contrarian_v1"
-timeframe = "4h"
+name = "1d_1w_Momentum_Momentum_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,80 +21,70 @@ def generate_signals(prices):
     
     # Price arrays
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # 4h ADX for regime filter (range detection)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # 1w data for momentum and trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # True Range
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr_4h = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_4h[0] = tr1[0]
+    # 1w ROC(4) - 4-week rate of change
+    roc_4 = np.zeros_like(close_1w)
+    roc_4[4:] = (close_1w[4:] - close_1w[:-4]) / close_1w[:-4] * 100
     
-    # Directional Movement
-    up_move = high_4h - np.roll(high_4h, 1)
-    down_move = np.roll(low_4h, 1) - low_4h
+    # 1w ADX for trend filter
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1w[0] = tr1[0]
+    
+    up_move = high_1w - np.roll(high_1w, 1)
+    down_move = np.roll(low_1w, 1) - low_1w
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Smoothed values
-    tr_14 = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
+    tr_14 = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
     plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
     minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
     
-    # DI and ADX
     plus_di = 100 * plus_dm_14 / tr_14
     minus_di = 100 * minus_dm_14 / tr_14
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx_4h = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
+    adx_1w = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Daily RSI(14)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # 1d EMA(50) for trend confirmation
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    close_1d = df_1d['close'].values
-    
-    # RSI calculation
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Align 1w indicators to daily
+    roc_4_aligned = align_htf_to_ltf(prices, df_1w, roc_4)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if any data invalid
-        if (np.isnan(adx_4h_aligned[i]) or np.isnan(rsi_1d_aligned[i])):
+        if (np.isnan(roc_4_aligned[i]) or np.isnan(adx_1w_aligned[i]) or 
+            np.isnan(ema_50[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Range filter: only trade when ADX < 20 (ranging market)
-        ranging = adx_4h_aligned[i] < 20
+        # Trend filter: only trade when ADX > 25 (trending market)
+        trending = adx_1w_aligned[i] > 25
         
-        # Mean-reversion signals
-        long_signal = rsi_1d_aligned[i] < 30 and ranging
-        short_signal = rsi_1d_aligned[i] > 70 and ranging
+        # Momentum signals
+        long_signal = roc_4_aligned[i] > 0 and close[i] > ema_50[i] and trending
+        short_signal = roc_4_aligned[i] < 0 and close[i] < ema_50[i] and trending
         
-        # Exit: return to RSI 50
-        long_exit = rsi_1d_aligned[i] >= 50
-        short_exit = rsi_1d_aligned[i] <= 50
+        # Exit: momentum reversal or trend weakening
+        long_exit = roc_4_aligned[i] <= 0 or adx_1w_aligned[i] <= 25
+        short_exit = roc_4_aligned[i] >= 0 or adx_1w_aligned[i] <= 25
         
         # Signal logic
         if long_signal and position != 1:
