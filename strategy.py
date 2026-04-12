@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """
-4h_1d_Donchian_Breakout_Trend_v1
-Hypothesis: On 4h timeframe, trade breakouts of daily Donchian channels (20-period) with 1d trend filter.
-Long when price breaks above 20-day high with 1d uptrend; short when breaks below 20-day low with 1d downtrend.
-Exit when price returns to the 20-day midpoint. Uses volume confirmation to avoid false breakouts.
-Designed for low trade frequency (20-40/year) by requiring multi-timeframe confluence.
-Works in bull/bear via 1d trend filter and mean-reversion exit at channel midpoint.
+6h_1d_Relative_Strength_Index_v1
+Hypothesis: Use 1-day RSI(14) as a regime filter on 60-minute timeframe. In bull markets (1d RSI > 50), 
+look for 6-hour bullish momentum when price crosses above 6h EMA(9) with volume confirmation. 
+In bear markets (1d RSI < 50), look for 6-hour bearish momentum when price crosses below 6h EMA(9) 
+with volume confirmation. Exit when price crosses back over the 6h EMA(9). 
+This strategy adapts to market regime using higher timeframe RSI, reducing false signals 
+in choppy environments. Designed for moderate trade frequency (20-40/year) by requiring 
+both regime alignment and momentum confirmation.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Donchian_Breakout_Trend_v1"
-timeframe = "4h"
+name = "6h_1d_Relative_Strength_Index_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,35 +28,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY DONCHIAN CHANNEL (20-period) ===
+    # === 1-DAY RSI(14) FOR REGIME FILTER ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 15:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # 20-day high and low
-    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
     
-    # Midpoint for exit
-    mid_20 = (high_20 + low_20) / 2
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # === 1D EMA(50) FOR TREND FILTER ===
-    if len(close_1d) >= 50:
-        ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    else:
-        ema_50_1d = np.full_like(close_1d, np.nan)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi_1d = np.where(avg_loss == 0, 100, 100 - (100 / (1 + rs)))
     
-    # Align data to 4h timeframe
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
-    mid_20_aligned = align_htf_to_ltf(prices, df_1d, mid_20)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # === 6H EMA(9) FOR MOMENTUM ===
+    ema9 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
     
-    # Volume average (20-period for 4h = ~10 days) for confirmation
+    # Align 1D RSI to 6H timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
+    # Volume average (20-period for 6h = ~5 days) for confirmation
     vol_avg = np.zeros(n)
     vol_sum = 0.0
     vol_count = 0
@@ -72,27 +75,30 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # start after warmup
+    for i in range(50, n):
         # Skip if indicators not available
-        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
-            np.isnan(mid_20_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or vol_avg[i] == 0.0):
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(ema9[i]) or vol_avg[i] == 0.0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Volume confirmation: at least 1.5x average
         vol_confirm = volume[i] > 1.5 * vol_avg[i]
         
-        # Trend filter: price above/below 1d EMA(50)
-        price_above_ema = close[i] > ema_50_1d_aligned[i]
-        price_below_ema = close[i] < ema_50_1d_aligned[i]
+        # Momentum: price cross above/below 6h EMA(9)
+        price_cross_above = close[i] > ema9[i] and close[i-1] <= ema9[i-1]
+        price_cross_below = close[i] < ema9[i] and close[i-1] >= ema9[i-1]
+        
+        # Regime filter: 1d RSI > 50 = bull, < 50 = bear
+        rsi_bull = rsi_1d_aligned[i] > 50
+        rsi_bear = rsi_1d_aligned[i] < 50
         
         # Entry conditions
-        long_setup = (close[i] > high_20_aligned[i]) and vol_confirm and price_above_ema
-        short_setup = (close[i] < low_20_aligned[i]) and vol_confirm and price_below_ema
+        long_setup = price_cross_above and vol_confirm and rsi_bull
+        short_setup = price_cross_below and vol_confirm and rsi_bear
         
-        # Exit conditions: mean reversion to 20-day midpoint
-        exit_long = close[i] < mid_20_aligned[i]
-        exit_short = close[i] > mid_20_aligned[i]
+        # Exit conditions: price crosses back over EMA(9)
+        exit_long = close[i] < ema9[i] and close[i-1] >= ema9[i-1]
+        exit_short = close[i] > ema9[i] and close[i-1] <= ema9[i-1]
         
         if long_setup and position != 1:
             position = 1
