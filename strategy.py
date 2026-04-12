@@ -1,18 +1,18 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 """
-1h_4h_1d_Camarilla_Trend_Momentum_v1
-Hypothesis: Use 4h for trend direction (price > EMA50), 1d for momentum (RSI > 50), and 1h for entry timing.
-Only take long when 4h uptrend + 1d bullish momentum + 1h price breaks above 4h EMA20.
-Short when 4h downtrend + 1d bearish momentum + 1h price breaks below 4h EMA20.
-Designed for low trade frequency (15-30/year) with trend alignment to work in both bull and bear markets.
+12h_1d_Camarilla_Pivot_Breakout_Volume_Trend_v2
+Hypothesis: 12h timeframe with 1d Camarilla pivot levels, volume confirmation, and 1d EMA trend filter.
+Designed for fewer trades (target 12-37/year) by requiring breakouts of H3/L3 levels with volume > 1.5x average
+and price aligned with 1d EMA trend. Works in bull/bear markets by only taking trend-aligned breakouts.
+Uses stricter volume filter and higher threshold to reduce trade frequency.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_Camarilla_Trend_Momentum_v1"
-timeframe = "1h"
+name = "12h_1d_Camarilla_Pivot_Breakout_Volume_Trend_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,70 +24,74 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop for trend and EMA
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
-        return np.zeros(n)
-    
-    # Calculate 4h EMA50 for trend
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Calculate 4h EMA20 for entry timing
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
-    
-    # Load 1d data ONCE before loop for momentum (RSI)
+    # Load 1d data ONCE before loop for Camarilla pivots and EMA
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d RSI (14 period)
+    # Calculate Camarilla levels from previous day
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    # Calculate pivot and ranges
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
+    
+    # Camarilla levels
+    H3 = pivot + range_hl * 1.1 / 4
+    L3 = pivot - range_hl * 1.1 / 4
+    H4 = pivot + range_hl * 1.1 / 2
+    L4 = pivot - range_hl * 1.1 / 2
+    
+    # Align to 12h timeframe
+    H3_12h = align_htf_to_ltf(prices, df_1d, H3)
+    L3_12h = align_htf_to_ltf(prices, df_1d, L3)
+    H4_12h = align_htf_to_ltf(prices, df_1d, H4)
+    L4_12h = align_htf_to_ltf(prices, df_1d, L4)
+    
+    # Calculate 1d EMA (21 period) for trend filter
     close_1d = df_1d['close'].values
-    delta = pd.Series(close_1d).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    ema_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Volume average (30 period for more stability)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_20_4h_aligned[i]) or 
-            np.isnan(rsi_1d_aligned[i])):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+        if (np.isnan(H3_12h[i]) or np.isnan(L3_12h[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter: 4h price vs EMA50
-        uptrend_4h = close[i] > ema_50_4h_aligned[i]
-        downtrend_4h = close[i] < ema_50_4h_aligned[i]
+        # Volume spike: current volume > 2.0x average (stricter)
+        volume_spike = volume[i] > vol_ma[i] * 2.0
         
-        # Momentum filter: 1d RSI
-        bullish_momentum = rsi_1d_aligned[i] > 50
-        bearish_momentum = rsi_1d_aligned[i] < 50
+        # Trend filter: price above/below 1d EMA
+        above_ema = close[i] > ema_1d_aligned[i]
+        below_ema = close[i] < ema_1d_aligned[i]
         
-        # Entry timing: 1h price vs 4h EMA20
-        long_entry = uptrend_4h and bullish_momentum and (close[i] > ema_20_4h_aligned[i])
-        short_entry = downtrend_4h and bearish_momentum and (close[i] < ema_20_4h_aligned[i])
+        # Entry conditions: breakout of H3/L3 with volume and trend
+        long_entry = (close[i] > H3_12h[i]) and volume_spike and above_ema
+        short_entry = (close[i] < L3_12h[i]) and volume_spike and below_ema
         
-        # Exit conditions: trend/momentum reversal
-        long_exit = not (uptrend_4h and bullish_momentum)
-        short_exit = not (downtrend_4h and bearish_momentum)
+        # Exit conditions: return to H4/L4 levels or trend reversal
+        long_exit = (close[i] < H4_12h[i]) or (close[i] < ema_1d_aligned[i])
+        short_exit = (close[i] > L4_12h[i]) or (close[i] > ema_1d_aligned[i])
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
             position = 1
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif short_entry and position != -1:
             position = -1
-            signals[i] = -0.20
+            signals[i] = -0.25
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -96,6 +100,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
