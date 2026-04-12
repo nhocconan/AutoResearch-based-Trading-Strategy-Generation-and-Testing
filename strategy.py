@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_12h_camarilla_breakout
-Uses 12h Camarilla pivot levels to identify key support/resistance. Breakouts occur when price moves beyond S3/R3 levels with volume confirmation on 4h. 
-Trades only in low volatility regimes (Choppiness Index > 61.8) to avoid whipsaws. 
-Designed for low trade frequency (target: 20-40 trades/year) to minimize fee drag.
-Works in trending markets by capturing breakouts from key levels.
+1h_1d_rsi_volatility_breakout
+Uses daily RSI extremes and volatility contraction (ATR ratio) to detect exhaustion points.
+Enters on 1h breakouts in the direction of the extreme with volume confirmation.
+Designed for low trade frequency (target: 15-30 trades/year) to minimize fee drift.
+Works in both bull and bear markets by capturing mean reversion after overextension.
 """
 
-name = "4h_12h_camarilla_breakout"
-timeframe = "4h"
+name = "1h_1d_rsi_volatility_breakout"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,107 +25,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla pivot levels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get daily data for RSI and ATR
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate previous period's Camarilla levels
-    # Using previous day's high, low, close for intraday calculation
-    prev_high = np.roll(high_12h, 1)
-    prev_low = np.roll(low_12h, 1)
-    prev_close = np.roll(close_12h, 1)
-    prev_high[0] = high_12h[0]  # First value
-    prev_low[0] = low_12h[0]
-    prev_close[0] = close_12h[0]
+    # Daily RSI (14)
+    rsi_length = 14
+    delta = pd.Series(close_1d).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=rsi_length, min_periods=rsi_length).mean()
+    avg_loss = loss.rolling(window=rsi_length, min_periods=rsi_length).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values  # neutral when undefined
     
-    # Camarilla calculations
-    range_ = prev_high - prev_low
-    # Avoid division by zero
-    range_[range_ == 0] = 1e-10
+    # Daily ATR (14) for volatility measurement
+    atr_length = 14
+    tr1 = pd.Series(high_1d - low_1d)
+    tr2 = pd.Series(abs(high_1d - pd.Series(close_1d).shift()))
+    tr3 = pd.Series(abs(low_1d - pd.Series(close_1d).shift()))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=atr_length, min_periods=atr_length).mean().values
     
-    # Camarilla levels
-    R4 = prev_close + range_ * 1.5
-    R3 = prev_close + range_ * 1.25
-    R2 = prev_close + range_ * 1.166
-    R1 = prev_close + range_ * 1.083
-    S1 = prev_close - range_ * 1.083
-    S2 = prev_close - range_ * 1.166
-    S3 = prev_close - range_ * 1.25
-    S4 = prev_close - range_ * 1.5
+    # ATR ratio: current ATR / 50-period average ATR (volatility contraction/expansion)
+    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr / np.where(atr_ma == 0, np.nan, atr_ma)
     
-    # Use S3 and R3 as breakout levels
-    breakout_upper = R3
-    breakout_lower = S3
+    # Align daily indicators to 1h
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    # Align Camarilla levels to 4h
-    breakout_upper_aligned = align_htf_to_ltf(prices, df_12h, breakout_upper)
-    breakout_lower_aligned = align_htf_to_ltf(prices, df_12h, breakout_lower)
-    
-    # Choppiness Index on 12h for regime filtering
-    # Chop = 100 * log10(sum(ATR) / (max(high) - min(low))) / log10(n)
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    max_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
-    range_max_min = max_high - min_low
-    range_max_min[range_max_min == 0] = 1e-10
-    
-    chop = 100 * np.log10(atr_sum / range_max_min) / np.log10(14)
-    chop[np.isnan(chop)] = 50  # Default value for insufficient data
-    
-    # Chop > 61.8 indicates ranging market (good for mean reversion, but we use it to avoid strong trends)
-    # Actually, Chop > 61.8 = ranging, Chop < 38.2 = trending
-    # We want to avoid choppy markets for breakouts, so we require Chop < 61.8 (trending or mildly ranging)
-    chop_filter = chop < 61.8
-    
-    chop_aligned = align_htf_to_ltf(prices, df_12h, chop_filter)
-    
-    # Volume confirmation on 4h: volume > 1.5x 20-period average
+    # 1h volume confirmation: volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    vol_confirm = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(breakout_upper_aligned[i]) or np.isnan(breakout_lower_aligned[i]) or 
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(rsi_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: price breaks above R3 with volume, in non-choppy regime
-        if breakout_upper_aligned[i] > 0 and close[i] > breakout_upper_aligned[i] and vol_confirm[i] and chop_aligned[i] and position != 1:
+        # Long entry: daily RSI oversold (<30) + volatility contraction (ATR ratio < 0.8) 
+        # + 1h breakout above recent high + volume
+        if (rsi_aligned[i] < 30 and atr_ratio_aligned[i] < 0.8 and 
+            close[i] > np.max(high[max(0, i-20):i]) and vol_confirm[i] and position != 1):
             position = 1
-            signals[i] = 0.25
-        # Short entry: price breaks below S3 with volume, in non-choppy regime
-        elif breakout_lower_aligned[i] > 0 and close[i] < breakout_lower_aligned[i] and vol_confirm[i] and chop_aligned[i] and position != -1:
+            signals[i] = 0.20
+        # Short entry: daily RSI overbought (>70) + volatility contraction (ATR ratio < 0.8)
+        # + 1h breakout below recent low + volume
+        elif (rsi_aligned[i] > 70 and atr_ratio_aligned[i] < 0.8 and 
+              close[i] < np.min(low[max(0, i-20):i]) and vol_confirm[i] and position != -1):
             position = -1
-            signals[i] = -0.25
-        # Exit conditions: return to midpoint of previous day's range
-        elif position == 1 and close[i] <= (breakout_upper_aligned[i] + breakout_lower_aligned[i]) / 2:
+            signals[i] = -0.20
+        # Exit conditions: RSI returns to neutral zone (40-60) or volatility expands
+        elif position == 1 and (rsi_aligned[i] > 50 or atr_ratio_aligned[i] > 1.2):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] >= (breakout_upper_aligned[i] + breakout_lower_aligned[i]) / 2:
+        elif position == -1 and (rsi_aligned[i] < 50 or atr_ratio_aligned[i] > 1.2):
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
