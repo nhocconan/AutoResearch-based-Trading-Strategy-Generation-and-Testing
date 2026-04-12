@@ -1,24 +1,20 @@
 #!/usr/bin/env python3
 """
-6h_1w_Camarilla_Pivot_Breakout_Trend_v1
-Hypothesis: Weekly Camarilla pivot levels with breakout/continuation logic.
-In trending markets (ADX > 25), price breaking above R4 or below S4 continues.
-In ranging markets (ADX < 20), price reverts from R3/S3 levels.
-Uses 6h timeframe for execution and weekly Camarilla levels for structure.
-Designed for low trade frequency (12-37 trades/year) to minimize fee drag.
+4h_1d_Structure_Breakout_v1
+Hypothesis: Daily structure (higher highs/lows) defines trend; 4h Donchian breakout enters in trend direction with volume confirmation. Works in bull/bear by following higher timeframe structure. Low trade frequency via structure filter and volume spike requirement.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_Camarilla_Pivot_Breakout_Trend_v1"
-timeframe = "6h"
+name = "4h_1d_Structure_Breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     # Price arrays
@@ -27,115 +23,115 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate ADX on 6h data for regime filter
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            high_diff = high[i] - high[i-1]
-            low_diff = low[i-1] - low[i]
-            
-            plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
-            minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
-            
-            tr[i] = max(
-                high[i] - low[i],
-                abs(high[i] - close[i-1]),
-                abs(low[i] - close[i-1])
-            )
-        
-        # Smooth TR, +DM, -DM
-        atr = np.zeros_like(high)
-        plus_dm_smooth = np.zeros_like(high)
-        minus_dm_smooth = np.zeros_like(high)
-        
-        atr[period] = np.mean(tr[1:period+1])
-        plus_dm_smooth[period] = np.mean(plus_dm[1:period+1])
-        minus_dm_smooth[period] = np.mean(minus_dm[1:period+1])
-        
-        for i in range(period+1, len(high)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-            plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
-            minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
-        
-        # Calculate DX
-        dx = np.zeros_like(high)
-        di_sum = plus_dm_smooth + minus_dm_smooth
-        dx[period:] = np.where(
-            di_sum[period:] != 0,
-            abs(plus_dm_smooth[period:] - minus_dm_smooth[period:]) / di_sum[period:] * 100,
-            0
-        )
-        
-        # Calculate ADX
-        adx = np.zeros_like(high)
-        adx[2*period] = np.mean(dx[period:2*period+1])
-        for i in range(2*period+1, len(high)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
-    
-    adx = calculate_adx(high, low, close)
-    
-    # Load weekly data ONCE before loop for Camarilla levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Load daily data ONCE before loop for structure and volume
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly Camarilla levels
-    # Typical price = (H + L + C) / 3
-    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
-    range_val = df_1w['high'] - df_1w['low']
+    # Calculate daily structure: Higher Highs and Higher Lows (uptrend) or Lower Highs and Lower Lows (downtrend)
+    # Use 20-period lookback for structure
+    dh = df_1d['high'].rolling(window=20, min_periods=20).max().values  # Daily Higher High
+    dl = df_1d['low'].rolling(window=20, min_periods=20).min().values   # Daily Lower Low
+    hh = df_1d['high'].rolling(window=20, min_periods=20).max().values  # Daily Highest High (same as dh, but conceptually)
+    hl = df_1d['low'].rolling(window=20, min_periods=20).min().values   # Daily Lowest Low (same as dl)
     
-    # Camarilla levels
-    r4 = typical_price + range_val * 1.1 / 2
-    r3 = typical_price + range_val * 1.1 / 4
-    r2 = typical_price + range_val * 1.1 / 6
-    r1 = typical_price + range_val * 1.1 / 12
-    s1 = typical_price - range_val * 1.1 / 12
-    s2 = typical_price - range_val * 1.1 / 6
-    s3 = typical_price - range_val * 1.1 / 4
-    s4 = typical_price - range_val * 1.1 / 2
+    # Uptrend: Today's close > yesterday's HH and today's low > yesterday's HL
+    # Downtrend: Today's close < yesterday's LH and today's high < yesterday's HL
+    # Simplified: Higher Highs/Lows structure
+    dh_prev = np.roll(dh, 1)  # Previous day's Higher High
+    dl_prev = np.roll(dl, 1)  # Previous day's Lower Low
+    hh_prev = np.roll(hh, 1)  # Previous day's Highest High
+    hl_prev = np.roll(hl, 1)  # Previous day's Lowest Low
     
-    # Align Camarilla levels to 6h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1w, r4.values)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3.values)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3.values)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, s4.values)
+    # Handle first value
+    dh_prev[0] = dh[0]
+    dl_prev[0] = dl[0]
+    hh_prev[0] = hh[0]
+    hl_prev[0] = hl[0]
+    
+    # Structure signals: 1 = uptrend structure, -1 = downtrend structure, 0 = unclear
+    struct_up = (df_1d['close'].values > hh_prev) & (df_1d['low'].values > hl_prev)
+    struct_down = (df_1d['close'].values < ll_prev) & (df_1d['high'].values < lh_prev) if False else (df_1d['close'].values < dh_prev) & (df_1d['high'].values < hh_prev)
+    # Fix: Actually need to compute Lower High and Higher Low properly
+    lh = df_1d['high'].rolling(window=20, min_periods=20).max().values  # Same as HH for simplicity in this context
+    hl_val = df_1d['low'].rolling(window=20, min_periods=20).min().values # Same as LL
+    
+    # Proper structure: Higher High and Higher Low = uptrend
+    hh_20 = df_1d['high'].rolling(window=20, min_periods=20).max().values
+    hl_20 = df_1d['low'].rolling(window=20, min_periods=20).min().values
+    lh_20 = df_1d['high'].rolling(window=20, min_periods=20).max().values  # Simplified
+    ll_20 = df_1d['low'].rolling(window=20, min_periods=20).min().values   # Simplified
+    
+    # Shift to get previous values
+    hh_20_prev = np.roll(hh_20, 1)
+    hl_20_prev = np.roll(hl_20, 1)
+    hh_20_prev[0] = hh_20[0]
+    hl_20_prev[0] = hl_20[0]
+    
+    # Uptrend: Higher High (close > prev HH) and Higher Low (low > prev HL)
+    struct_up = (df_1d['close'].values > hh_20_prev) & (df_1d['low'].values > hl_20_prev)
+    # Downtrend: Lower High (high < prev LH) and Lower Low (low < prev LL) - simplified
+    lh_20 = df_1d['high'].rolling(window=20, min_periods=20).max().values
+    ll_20 = df_1d['low'].rolling(window=20, min_periods=20).min().values
+    lh_20_prev = np.roll(lh_20, 1)
+    ll_20_prev = np.roll(ll_20, 1)
+    lh_20_prev[0] = lh_20[0]
+    ll_20_prev[0] = ll_20[0]
+    struct_down = (df_1d['high'].values < lh_20_prev) & (df_1d['low'].values < ll_20_prev)
+    
+    # Structure signal: 1 for uptrend, -1 for downtrend, 0 otherwise
+    struct_signal = np.where(struct_up, 1, np.where(struct_down, -1, 0))
+    
+    # Align structure to 4h
+    struct_aligned = align_htf_to_ltf(prices, df_1d, struct_signal)
+    
+    # Daily volume average (20-period) for volume spike
+    vol_ma = df_1d['volume'].rolling(window=20, min_periods=20).mean().values
+    vol_ratio = df_1d['volume'].values / vol_ma
+    vol_ratio = np.where(vol_ma > 0, vol_ratio, 1.0)
+    vol_ratio_prev = np.roll(vol_ratio, 1)
+    vol_ratio_prev[0] = vol_ratio[0]
+    vol_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_prev)
+    
+    # 4h Donchian channels (20-period)
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup period
+    for i in range(lookback, n):
         # Skip if any required data is invalid
-        if (np.isnan(adx[i]) or np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i])):
+        if (np.isnan(struct_aligned[i]) or np.isnan(vol_aligned[i]) or 
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Regime filter: trending vs ranging
-        trending_market = adx[i] > 25
-        ranging_market = adx[i] < 20
+        # Structure filter: only trade in direction of daily structure
+        struct_bull = struct_aligned[i] > 0
+        struct_bear = struct_aligned[i] < 0
         
-        # Breakout conditions (trending market)
-        long_breakout = trending_market and close[i] > r4_aligned[i]
-        short_breakout = trending_market and close[i] < s4_aligned[i]
+        # Volume confirmation: volume spike > 1.5x average
+        vol_spike = vol_aligned[i] > 1.5
         
-        # Mean reversion conditions (ranging market)
-        long_reversion = ranging_market and close[i] < s3_aligned[i]
-        short_reversion = ranging_market and close[i] > r3_aligned[i]
+        # Donchian breakout
+        breakout_up = high[i] > highest_high[i-1] if i > 0 else False
+        breakout_down = low[i] < lowest_low[i-1] if i > 0 else False
         
-        # Exit conditions
-        long_exit = (close[i] < r3_aligned[i]) or (close[i] > s3_aligned[i])
-        short_exit = (close[i] > s3_aligned[i]) or (close[i] < r3_aligned[i])
+        # Entry conditions: breakout in direction of structure with volume
+        long_entry = struct_bull and breakout_up and vol_spike
+        short_entry = struct_bear and breakout_down and vol_spike
         
-        # Priority: breakout > reversion > exit > hold
-        if (long_breakout or long_reversion) and position != 1:
+        # Exit conditions: opposite breakout or structure change
+        long_exit = breakout_down or (struct_aligned[i] < 0)
+        short_exit = breakout_up or (struct_aligned[i] > 0)
+        
+        # Priority: entry > exit > hold
+        if long_entry and position != 1:
             position = 1
             signals[i] = 0.25
-        elif (short_breakout or short_reversion) and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
