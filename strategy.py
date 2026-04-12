@@ -97,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_donchian_ema10_breakout_vol_filter_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_ema10_breakout_vol_filter_v1"
+timeframe = "12h"
 leverage = 1.0
