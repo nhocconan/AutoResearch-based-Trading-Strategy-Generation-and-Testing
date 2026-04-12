@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_volatility_filter_v4"
+name = "12h_1d_camarilla_breakout_volume_v5"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for daily ATR and Camarilla calculation
+    # Get 1d data for ATR and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -33,23 +33,19 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], tr])
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate daily ATR ratio (current ATR / 20-period ATR mean)
+    # Calculate ATR ratio (current ATR / 20-period ATR mean)
     atr_ma_20 = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
     atr_ratio = atr_1d / atr_ma_20
     
     # Align ATR ratio to 12h timeframe
     atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    # Calculate previous day's close for volatility-based position sizing
-    prev_close_1d = np.concatenate([[np.nan], close_1d[:-1]])
-    prev_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close_1d)
-    
     # Calculate ATR-based position size (inverse volatility scaling)
     # Higher volatility = smaller position, capped at 0.30
-    vol_scaling = np.clip(1.0 / (atr_ratio_aligned + 0.001), 0.5, 1.5)  # Scale between 0.5x and 1.5x
+    vol_scaling = np.clip(1.0 / (atr_ratio_aligned + 0.001), 0.5, 1.5)
     base_size = 0.25
     position_size = base_size * vol_scaling
-    position_size = np.clip(position_size, 0.10, 0.30)  # Keep within reasonable bounds
+    position_size = np.clip(position_size, 0.10, 0.30)
     
     # Calculate Camarilla levels using previous day's data
     camarilla_high = np.full(len(close_1d), np.nan)
@@ -74,7 +70,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(40, n):  # warmup
+    for i in range(50, n):
         # Skip if not ready
         if (np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]) or 
             np.isnan(volume_ok[i]) or np.isnan(position_size[i])):
