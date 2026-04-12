@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-4h_12h_Camarilla_Volume_Filter_v1
-Hypothesis: Camarilla pivot levels from 12h chart act as strong support/resistance on 4h timeframe.
-Price tends to reverse or bounce from these levels with confirmation from volume spike and RSI filter.
-Uses 12h for structure (reduced noise) and 4h for timely entries. Works in both bull and bear markets.
-Target: 20-30 trades per year (80-120 total over 4 years).
+4h_12h_TRIX_Volume_Regime_v1
+Hypothesis: TRIX momentum on 12h timeframe combined with volume confirmation and Choppiness regime filter on 4h provides reliable trend signals.
+TRIX filters noise, volume confirms institutional interest, and Choppiness identifies trending vs ranging markets.
+Works in both bull and bear markets by adapting to regime. Target: 20-30 trades per year (80-120 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_Camarilla_Volume_Filter_v1"
+name = "4h_12h_TRIX_Volume_Regime_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,46 +24,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12H data for Camarilla pivots
+    # Get 12H data for TRIX
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    daily_high = df_12h['high'].values
-    daily_low = df_12h['low'].values
     daily_close = df_12h['close'].values
     
-    # === CAMARILLA PIVOT LEVELS (based on previous 12h bar) ===
-    # Calculate from previous 12h bar's OHLC
-    prev_high = np.roll(daily_high, 1)
-    prev_low = np.roll(daily_low, 1)
-    prev_close = np.roll(daily_close, 1)
+    # === TRIX CALCULATION (12-period on 12h) ===
+    # EMA1
+    ema1 = pd.Series(daily_close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # EMA2
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # EMA3
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # TRIX = (EMA3 - prev EMA3) / prev EMA3 * 100
+    trix_raw = np.zeros_like(ema3)
+    trix_raw[1:] = (ema3[1:] - ema3[:-1]) / (ema3[:-1] + 1e-10) * 100
+    trix_signal = pd.Series(trix_raw).ewm(span=12, adjust=False, min_periods=12).mean().values
+    trix_4h = align_htf_to_ltf(prices, df_12h, trix_signal)
     
-    # First bar will have invalid data, but we'll handle with valid check
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_val = prev_high - prev_low
+    # === CHOPPINESS INDEX (14-period on 4h) ===
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Set first TR to high-low to avoid roll issue
+    tr[0] = tr1[0]
     
-    # Camarilla levels
-    l3 = pivot + (range_val * 1.1 / 4)
-    l4 = pivot + (range_val * 1.1 / 2)
-    h3 = pivot - (range_val * 1.1 / 4)
-    h4 = pivot - (range_val * 1.1 / 2)
+    # ATR14
+    atr = np.full(n, np.nan)
+    if n >= 14:
+        atr_sum = np.sum(tr[:14])
+        atr[13] = atr_sum / 14
+        for i in range(14, n):
+            atr_sum = atr_sum - tr[i-14] + tr[i]
+            atr[i] = atr_sum / 14
     
-    # Align to 4h timeframe (these levels are valid for the entire 12h bar)
-    l3_4h = align_htf_to_ltf(prices, df_12h, l3)
-    l4_4h = align_htf_to_ltf(prices, df_12h, l4)
-    h3_4h = align_htf_to_ltf(prices, df_12h, h3)
-    h4_4h = align_htf_to_ltf(prices, df_12h, h4)
+    # Sum of ATR over 14 periods
+    atr_sum = np.full(n, np.nan)
+    if n >= 14:
+        atr_sum[13] = np.sum(atr[0:14])  # First valid sum
+        for i in range(14, n):
+            atr_sum[i] = atr_sum[i-1] - atr[i-14] + atr[i]
     
-    # === RSI FILTER (14-period on 12h) ===
-    delta = pd.Series(daily_close).diff().values
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_4h = align_htf_to_ltf(prices, df_12h, rsi)
+    # Max and min close over 14 periods
+    max_close = np.full(n, np.nan)
+    min_close = np.full(n, np.nan)
+    if n >= 14:
+        max_close[13] = np.max(close[0:14])
+        min_close[13] = np.min(close[0:14])
+        for i in range(14, n):
+            max_close[i] = max(max_close[i-1], close[i])
+            min_close[i] = min(min_close[i-1], close[i])
+    
+    # Chop = 100 * log10(sum(ATR14) / (max_close - min_close)) / log10(14)
+    chop = np.full(n, np.nan)
+    if n >= 14:
+        denominator = max_close - min_close
+        # Avoid division by zero
+        denominator = np.where(denominator == 0, 1e-10, denominator)
+        chop = 100 * np.log10(atr_sum / denominator) / np.log10(14)
     
     # === VOLUME SPIKE (2x 20-period average on 4h) ===
     vol_ma = np.full(n, np.nan)
@@ -79,32 +100,27 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
-        # Skip if any data invalid (first bar roll will have NaN)
-        if (np.isnan(l3_4h[i]) or np.isnan(l4_4h[i]) or 
-            np.isnan(h3_4h[i]) or np.isnan(h4_4h[i]) or
-            np.isnan(rsi_4h[i]) or np.isnan(vol_ma[i])):
+    for i in range(30, n):
+        # Skip if any data invalid
+        if (np.isnan(trix_4h[i]) or np.isnan(chop[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Price near Camarilla levels (within 0.15% tolerance)
-        near_l3 = abs(low[i] - l3_4h[i]) / l3_4h[i] < 0.0015
-        near_l4 = abs(low[i] - l4_4h[i]) / l4_4h[i] < 0.0015
-        near_h3 = abs(high[i] - h3_4h[i]) / h3_4h[i] < 0.0015
-        near_h4 = abs(high[i] - h4_4h[i]) / h4_4h[i] < 0.0015
+        # Regime filter: Chop < 38.2 = trending (use TRIX), Chop > 61.8 = ranging (avoid)
+        trending_regime = chop[i] < 38.2
         
-        # RSI conditions for reversal
-        rsi_oversold = rsi_4h[i] < 30
-        rsi_overbought = rsi_4h[i] > 70
+        # TRIX signals
+        trix_bullish = trix_4h[i] > 0 and trix_4h[i] > trix_4h[i-1]  # Rising above zero
+        trix_bearish = trix_4h[i] < 0 and trix_4h[i] < trix_4h[i-1]  # Falling below zero
         
-        # Entry conditions with volume confirmation
-        long_entry = (near_l3 or near_l4) and rsi_oversold and vol_spike[i]
-        short_entry = (near_h3 or near_h4) and rsi_overbought and vol_spike[i]
+        # Entry conditions with volume confirmation and regime filter
+        long_entry = trending_regime and trix_bullish and vol_spike[i]
+        short_entry = trending_regime and trix_bearish and vol_spike[i]
         
-        # Exit conditions: price moves back toward pivot or opposite signal
-        pivot_4h = align_htf_to_ltf(prices, df_12h, pivot)
-        long_exit = close[i] >= pivot_4h[i]  # Exit long when price reaches pivot
-        short_exit = close[i] <= pivot_4h[i]  # Exit short when price reaches pivot
+        # Exit conditions: opposite TRIX signal or chop exceeds threshold (range developing)
+        long_exit = not trending_regime or (trix_4h[i] < 0)  # Exit long when TRIX turns negative or market ranges
+        short_exit = not trending_regime or (trix_4h[i] > 0)  # Exit short when TRIX turns positive or market ranges
         
         # Signal logic
         if long_entry and position != 1:
