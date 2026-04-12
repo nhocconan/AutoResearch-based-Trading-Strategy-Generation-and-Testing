@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_camarilla_breakout_v1"
+name = "12h_1w_ema_bounce_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -17,60 +17,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend and Camarilla levels
+    # Get weekly data for EMA trend
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    if len(df_1w) < 21:
         return np.zeros(n)
     
-    # Weekly trend: EMA(21)
+    # Weekly EMA(21) - trend filter
     ema_21 = pd.Series(df_1w['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
     ema_21_aligned = align_htf_to_ltf(prices, df_1w, ema_21)
     
-    # Previous weekly bar's OHLC for Camarilla calculation
-    prev_close = df_1w['close'].shift(1).values
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
+    # Get daily data for pullback measurement
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
     
-    H_minus_L = prev_high - prev_low
-    # Camarilla levels: R3 (strong resistance), S3 (strong support)
-    R3 = prev_close + H_minus_L * 1.1 / 4
-    S3 = prev_close - H_minus_L * 1.1 / 4
+    # Daily RSI(14) for oversold/overbought
+    delta = pd.Series(df_1d['close']).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_values)
     
-    # Map weekly levels to 12h bars
-    R3_aligned = align_htf_to_ltf(prices, df_1w, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1w, S3)
+    # Daily ATR(14) for volatility
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    atr_values = atr.values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_values)
     
-    # Volume confirmation: current 12h volume > 20-period average of weekly volume
-    vol_1w_aligned = align_htf_to_ltf(prices, df_1w, df_1w['volume'].values)
-    vol_ma = pd.Series(vol_1w_aligned).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_filter = volume > vol_ma
+    # Weekly high/low for dynamic support/resistance
+    weekly_high = df_1w['high'].rolling(window=4, min_periods=4).max().values
+    weekly_low = df_1w['low'].rolling(window=4, min_periods=4).min().values
+    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(ema_21_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(ema_21_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(atr_1d_aligned[i]) or np.isnan(weekly_high_aligned[i]) or 
+            np.isnan(weekly_low_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: price breaks above R3 with volume and above weekly EMA
-        long_signal = (close[i] > R3_aligned[i] and volume_filter[i] and close[i] > ema_21_aligned[i])
+        # Long: price near weekly low, RSI oversold, above weekly EMA
+        near_support = close[i] <= weekly_low_aligned[i] + (atr_1d_aligned[i] * 0.5)
+        rsi_oversold = rsi_1d_aligned[i] < 35
+        above_ema = close[i] > ema_21_aligned[i]
+        long_signal = near_support and rsi_oversold and above_ema
         
-        # Short: price breaks below S3 with volume and below weekly EMA
-        short_signal = (close[i] < S3_aligned[i] and volume_filter[i] and close[i] < ema_21_aligned[i])
-        
-        # Exit: price returns to midpoint between R2/S2
-        H_minus_L_1w = (df_1w['high'].shift(1) - df_1w['low'].shift(1)).values
-        R2 = df_1w['close'].shift(1).values + H_minus_L_1w * 1.1 / 6
-        S2 = df_1w['close'].shift(1).values - H_minus_L_1w * 1.1 / 6
-        R2_aligned = align_htf_to_ltf(prices, df_1w, R2)
-        S2_aligned = align_htf_to_ltf(prices, df_1w, S2)
-        midpoint = (R2_aligned + S2_aligned) / 2
-        
-        exit_long = (position == 1 and close[i] < midpoint[i])
-        exit_short = (position == -1 and close[i] > midpoint[i])
+        # Short: price near weekly high, RSI overbought, below weekly EMA
+        near_resistance = close[i] >= weekly_high_aligned[i] - (atr_1d_aligned[i] * 0.5)
+        rsi_overbought = rsi_1d_aligned[i] > 65
+        below_ema = close[i] < ema_21_aligned[i]
+        short_signal = near_resistance and rsi_overbought and below_ema
         
         # Execute trades
         if long_signal and position != 1:
@@ -79,10 +87,12 @@ def generate_signals(prices):
         elif short_signal and position != -1:
             position = -1
             signals[i] = -0.25
-        elif exit_long and position == 1:
+        elif position == 1 and close[i] < ema_21_aligned[i]:
+            # Exit long if price falls below weekly EMA
             position = 0
             signals[i] = 0.0
-        elif exit_short and position == -1:
+        elif position == -1 and close[i] > ema_21_aligned[i]:
+            # Exit short if price rises above weekly EMA
             position = 0
             signals[i] = 0.0
         else:
