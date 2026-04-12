@@ -1,15 +1,15 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_camarilla_breakout_v32
-# Camarilla pivot levels from 1-day chart with volume confirmation and trend filter (ADX).
-# Uses ADX > 25 to filter for trending markets only, reducing false breakouts in ranging conditions.
-# In bull markets: longs on breaks above H4 with volume and ADX confirmation.
-# In bear markets: shorts on breaks below L4 with volume and ADX confirmation.
-# Target: 20-30 trades/year per symbol to minimize fee drag.
-name = "4h_1d_camarilla_breakout_v32"
+# Hypothesis: 4h_1d_adaptive_kama_breakout_v1
+# Adaptive KAMA direction filter (2-period) + price breaking above/below ATR-based channel.
+# Uses KAMA to determine trend direction (bullish if KAMA rising >2 periods, bearish if falling >2 periods).
+# Entry only when price breaks above upper channel (ATR*1.5) in bull trend or below lower channel in bear trend.
+# Includes volume confirmation (>1.5x 20-period average) and chop filter (CHOP < 61.8) to avoid false signals.
+# Target: 20-35 trades/year per symbol with strong trend capture in both bull and bear markets.
+name = "4h_1d_adaptive_kama_breakout_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,68 +23,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation
+    # Get 1d data for adaptive filtering
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    close_prev = df_1d['close'].shift(1).values
+    # Calculate 1-day KAMA for trend direction
+    close_1d = df_1d['close'].values
+    # Efficiency Ratio
+    change = np.abs(np.diff(close_1d))
+    volatility = np.sum(np.abs(np.diff(close_1d, 1)), axis=0) if len(close_1d) > 1 else np.array([0])
+    # Simplified ER calculation for array
+    er = np.zeros_like(close_1d)
+    for i in range(10, len(close_1d)):
+        if i >= 10:
+            change_val = np.abs(close_1d[i] - close_1d[i-9])
+            volatility_val = np.sum(np.abs(np.diff(close_1d[i-9:i+1])))
+            if volatility_val > 0:
+                er[i] = change_val / volatility_val
+            else:
+                er[i] = 1.0
+    # Smoothing constants
+    sc = (er * 0.2889 + 0.0645) ** 2  # 2/(2+1) = 0.6667, 2/(30+1)=0.0645
+    # Calculate KAMA
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # Camarilla formulas
-    range_prev = high_prev - low_prev
-    camarilla_h4 = close_prev + range_prev * 1.1 / 2
-    camarilla_l4 = close_prev - range_prev * 1.1 / 2
+    # Determine trend direction: rising if KAMA up >2 periods, falling if down >2 periods
+    kama_diff = np.diff(kama, prepend=kama[0])
+    kama_rising = kama_diff > 0
+    kama_falling = kama_diff < 0
+    # Count consecutive periods
+    rising_count = np.zeros_like(kama)
+    falling_count = np.zeros_like(kama)
+    for i in range(1, len(kama)):
+        if kama_rising[i]:
+            rising_count[i] = rising_count[i-1] + 1
+        else:
+            rising_count[i] = 0
+        if kama_falling[i]:
+            falling_count[i] = falling_count[i-1] + 1
+        else:
+            falling_count[i] = 0
+    kama_bull = rising_count >= 2
+    kama_bear = falling_count >= 2
     
-    # Align to 4h timeframe (already delayed by 1 day due to shift)
-    h4_level = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_level = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # Align KAMA trend to 4h timeframe
+    kama_bull_aligned = align_htf_to_ltf(prices, df_1d, kama_bull.astype(float))
+    kama_bear_aligned = align_htf_to_ltf(prices, df_1d, kama_bear.astype(float))
+    
+    # Calculate ATR-based channel for breakout
+    atr_period = 14
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    
+    # Upper and lower channels (ATR * 1.5)
+    upper_channel = close + atr * 1.5
+    lower_channel = close - atr * 1.5
     
     # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
-    # Trend filter: ADX > 25 (trending market)
-    # Calculate True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # Directional Movement
-    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smoothed TR and DM
-    tr_period = 14
-    atr = pd.Series(tr).rolling(window=tr_period, min_periods=tr_period).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).rolling(window=tr_period, min_periods=tr_period).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).rolling(window=tr_period, min_periods=tr_period).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / atr
-    di_minus = 100 * dm_minus_smooth / atr
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).rolling(window=tr_period, min_periods=tr_period).mean().values
-    trend_filter = adx > 25  # trending market
+    # Chop regime filter: avoid choppy markets (CHOP > 61.8)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10((highest_high - lowest_low) / (atr * np.sqrt(14))) / np.log10(14)
+    chop_filter = chop < 61.8  # trending market
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(30, n):  # start after warmup
-        # Skip if levels not ready
-        if np.isnan(h4_level[i]) or np.isnan(l4_level[i]):
+        # Skip if data not ready
+        if np.isnan(kama_bull_aligned[i]) or np.isnan(kama_bear_aligned[i]) or np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]):
             signals[i] = 0.0
             continue
         
-        # Check volume and trend filters
-        if not (vol_confirm[i] and trend_filter[i]):
+        # Check volume and chop filters
+        if not (vol_confirm[i] and chop_filter[i]):
             # Hold current position if filters fail
             if position == 1:
                 signals[i] = 0.25
@@ -94,19 +116,22 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above H4 with volume
-        if close[i] > h4_level[i] and position != 1:
+        # Long signal: KAMA bull trend + price breaks above upper channel
+        if kama_bull_aligned[i] > 0.5 and close[i] > upper_channel[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below L4 with volume
-        elif close[i] < l4_level[i] and position != -1:
+        # Short signal: KAMA bear trend + price breaks below lower channel
+        elif kama_bear_aligned[i] > 0.5 and close[i] < lower_channel[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: opposite breakout
-        elif close[i] < l4_level[i] and position == 1:
+        # Exit conditions: opposite KAMA signal or channel re-entry
+        elif (kama_bear_aligned[i] > 0.5 and position == 1) or (kama_bull_aligned[i] > 0.5 and position == -1):
             position = 0
             signals[i] = 0.0
-        elif close[i] > h4_level[i] and position == -1:
+        elif close[i] < lower_channel[i] and position == 1:
+            position = 0
+            signals[i] = 0.0
+        elif close[i] > upper_channel[i] and position == -1:
             position = 0
             signals[i] = 0.0
         else:
