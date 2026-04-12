@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h_1w_donchian_breakout_v1
-# Uses weekly Donchian channels (20-period) with volume confirmation and ADX trend filter.
-# In bull markets, buys breakouts above weekly high with volume.
-# In bear markets, shorts breakdowns below weekly low with volume.
+# Hypothesis: 4h_1d_camarilla_breakout_v2
+# Uses daily Camarilla pivot levels (H4/L4) with volume confirmation and ADX trend filter.
+# In bull markets, buys breakouts above H4 resistance with volume.
+# In bear markets, shorts breakdowns below L4 support with volume.
 # ADX > 25 ensures we only trade in trending markets, avoiding false signals in ranges.
-# Target: 15-30 trades/year per symbol for low friction and high edge.
+# Target: 20-40 trades/year per symbol for low friction and high edge.
 
-name = "12h_1w_donchian_breakout_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,22 +24,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Donchian calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Donchian channels from previous week
-    high_prev = df_1w['high'].shift(1).values
-    low_prev = df_1w['low'].shift(1).values
+    # Calculate Camarilla levels from previous day
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
     
-    # Donchian formulas
-    donchian_high = pd.Series(high_prev).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_prev).rolling(window=20, min_periods=20).min().values
+    # Camarilla formulas
+    range_prev = high_prev - low_prev
+    camarilla_h4 = close_prev + range_prev * 1.1 / 2
+    camarilla_l4 = close_prev - range_prev * 1.1 / 2
     
-    # Align to 12h timeframe (already delayed by 1 week due to shift)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    # Align to 4h timeframe (already delayed by 1 day due to shift)
+    h4_level = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_level = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
     # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -84,7 +86,7 @@ def generate_signals(prices):
     
     for i in range(30, n):  # start after warmup
         # Skip if levels not ready
-        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(adx_filter[i]):
+        if np.isnan(h4_level[i]) or np.isnan(l4_level[i]) or np.isnan(adx_filter[i]):
             signals[i] = 0.0
             continue
         
@@ -99,19 +101,19 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above weekly high with volume
-        if close[i] > donchian_high_aligned[i] and position != 1:
+        # Long signal: price breaks above H4 with volume
+        if close[i] > h4_level[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below weekly low with volume
-        elif close[i] < donchian_low_aligned[i] and position != -1:
+        # Short signal: price breaks below L4 with volume
+        elif close[i] < l4_level[i] and position != -1:
             position = -1
             signals[i] = -0.25
         # Exit conditions: opposite breakout
-        elif close[i] < donchian_low_aligned[i] and position == 1:
+        elif close[i] < l4_level[i] and position == 1:
             position = 0
             signals[i] = 0.0
-        elif close[i] > donchian_high_aligned[i] and position == -1:
+        elif close[i] > h4_level[i] and position == -1:
             position = 0
             signals[i] = 0.0
         else:
