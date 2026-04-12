@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""
-4h_1d_camarilla_breakout_volume_regime
-Hypothesis: 4-hour Camarilla breakout with volume confirmation and volatility regime filter.
-Uses 1d Camarilla levels from prior day, volume > 1.5x 20-period average, and ATR-based volatility filter.
-Designed for fewer trades (<50/year) to minimize fee drag and work in both bull/bear markets.
-"""
-name = "4h_1d_camarilla_breakout_volume_regime"
+# 4h_1d_camarilla_breakout_with_volume_and_atr
+# Hypothesis: 4-hour Camarilla breakout with volume confirmation and ATR volatility filter
+# Works in bull/bear by using volatility-adjusted breakouts and volume confirmation to avoid false signals.
+# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
+
+name = "4h_1d_camarilla_breakout_with_volume_and_atr"
 timeframe = "4h"
 leverage = 1.0
 
@@ -36,11 +35,6 @@ def generate_signals(prices):
     prev_high = np.roll(high_1d, 1)
     prev_low = np.roll(low_1d, 1)
     prev_close = np.roll(close_1d, 1)
-    
-    # Handle first value (no previous day)
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
     
     # Camarilla levels (based on previous day)
     range_ = prev_high - prev_low
