@@ -3,8 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_keltner_channel_breakout_v1"
-timeframe = "4h"
+# Hypothesis: Weekly breakout from Bollinger Bands (20,2) with volume confirmation
+# and daily RSI filter to avoid overtrading. Works in bull (breakouts continue)
+# and bear (mean reversion at bands). Target: 10-20 trades/year.
+name = "1d_1w_bollinger_breakout_volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,48 +20,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Keltner Channel and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for Bollinger Bands
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Daily ATR for Keltner Channel
-    atr_1d = pd.Series(df_1d['high'] - df_1d['low']).rolling(window=14, min_periods=14).mean().values
-    # Daily EMA for middle line
-    ema_20 = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    # Keltner Channel bands
-    upper = ema_20 + 2 * atr_1d
-    lower = ema_20 - 2 * atr_1d
+    # Weekly Bollinger Bands (20, 2)
+    close_1w = pd.Series(df_1w['close'])
+    bb_middle = close_1w.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_1w.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
     
-    # Map to 4h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
-    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
+    # Align to daily
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1w, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1w, bb_lower)
+    bb_middle_aligned = align_htf_to_ltf(prices, df_1w, bb_middle)
     
-    # Volume confirmation: current 4h volume > 20-period average of daily volume
-    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)
-    vol_ma = pd.Series(vol_1d_aligned).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_filter = volume > vol_ma
+    # Weekly volume average (20-period)
+    vol_1w = pd.Series(df_1w['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_1w)
+    
+    # Daily RSI (14) for filter
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(ema_20_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or 
+            np.isnan(bb_middle_aligned[i]) or np.isnan(vol_1w_aligned[i]) or 
+            np.isnan(rsi_values[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: price breaks above upper Keltner band with volume
-        long_signal = (close[i] > upper_aligned[i] and volume_filter[i])
+        # Volume filter: current weekly volume > 20-period average
+        volume_filter = volume[i] > vol_1w_aligned[i]
         
-        # Short: price breaks below lower Keltner band with volume
-        short_signal = (close[i] < lower_aligned[i] and volume_filter[i])
+        # Long: price breaks above upper BB with volume and RSI < 70 (not overbought)
+        long_signal = (close[i] > bb_upper_aligned[i] and volume_filter and rsi_values[i] < 70)
         
-        # Exit: price returns to EMA(20)
-        exit_long = (position == 1 and close[i] < ema_20_aligned[i])
-        exit_short = (position == -1 and close[i] > ema_20_aligned[i])
+        # Short: price breaks below lower BB with volume and RSI > 30 (not oversold)
+        short_signal = (close[i] < bb_lower_aligned[i] and volume_filter and rsi_values[i] > 30)
+        
+        # Exit: price returns to middle band
+        exit_long = (position == 1 and close[i] < bb_middle_aligned[i])
+        exit_short = (position == -1 and close[i] > bb_middle_aligned[i])
         
         # Execute trades
         if long_signal and position != 1:
