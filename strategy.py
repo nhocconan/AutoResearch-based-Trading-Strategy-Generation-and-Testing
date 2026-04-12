@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for context (HTF)
+    # Get 1d data for context
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -21,15 +21,13 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Donchian Channel (20-period)
-    donch_high_1d = np.full(len(df_1d), np.nan)
-    donch_low_1d = np.full(len(df_1d), np.nan)
-    for i in range(19, len(df_1d)):
-        donch_high_1d[i] = np.max(high_1d[i-19:i+1])
-        donch_low_1d[i] = np.min(low_1d[i-19:i+1])
+    # Calculate daily EMA(50)
+    close_1d_series = pd.Series(close_1d)
+    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 1d ATR (14-period) for volatility filter
+    # Calculate daily ATR(14) for volatility filter
     tr1 = np.abs(high_1d - low_1d)
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
@@ -39,51 +37,57 @@ def generate_signals(prices):
     for i in range(14, len(df_1d)):
         atr_1d[i] = np.mean(tr[i-14:i+1])
     
-    # Calculate 1d ATR moving average (20-period)
-    atr_ma_20_1d = np.full(len(df_1d), np.nan)
-    for i in range(33, len(df_1d)):  # 14 + 19 for 20-period MA
-        atr_ma_20_1d[i] = np.mean(atr_1d[i-19:i+1])
-    
-    # Align 1d indicators to 4h timeframe
-    donch_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
-    donch_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    atr_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_20_1d)
-    
-    # Calculate 4h ATR (14-period) for position sizing and stop
+    # Calculate 12h ATR(14) for position sizing
     tr1_h = np.abs(high - low)
     tr2_h = np.abs(high - np.roll(close, 1))
     tr3_h = np.abs(low - np.roll(close, 1))
     tr1_h[0] = tr2_h[0] = tr3_h[0] = np.nan
     tr_h = np.maximum(tr1_h, np.maximum(tr2_h, tr3_h))
-    atr_4h = np.full(n, np.nan)
+    atr_12h = np.full(n, np.nan)
     for i in range(14, n):
-        atr_4h[i] = np.mean(tr_h[i-14:i+1])
+        atr_12h[i] = np.mean(tr_h[i-14:i+1])
+    
+    # Align daily indicators to 12h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # Calculate 12h volume moving average
+    vol_s = pd.Series(volume)
+    vol_ma_20_12h = vol_s.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(donch_high_1d_aligned[i]) or np.isnan(donch_low_1d_aligned[i]) or 
-            np.isnan(atr_1d_aligned[i]) or np.isnan(atr_ma_20_1d_aligned[i]) or np.isnan(atr_4h[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(atr_12h[i]) or np.isnan(vol_ma_20_12h[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: avoid low volatility regimes
-        vol_filter = atr_1d_aligned[i] > 0.5 * atr_ma_20_1d_aligned[i]
+        # Volume filter: current 12h volume > 1.3 * 20-period MA
+        vol_filter = volume[i] > 1.3 * vol_ma_20_12h[i]
         
-        # Breakout conditions: price breaks 1d Donchian levels
-        breakout_long = close[i] > donch_high_1d_aligned[i]
-        breakout_short = close[i] < donch_low_1d_aligned[i]
+        # Volatility filter: daily ATR > 0.4 * its 20-period MA (avoid low volatility)
+        atr_ma_20_1d = np.full(len(df_1d), np.nan)
+        for j in range(34, len(df_1d)):  # 14 + 19 for 20-period MA
+            if not np.isnan(np.mean(atr_1d[j-19:j+1])):
+                atr_ma_20_1d[j] = np.mean(atr_1d[j-19:j+1])
+        atr_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_20_1d)
+        vol_filter_daily = (not np.isnan(atr_ma_20_1d_aligned[i]) and 
+                           atr_1d_aligned[i] > 0.4 * atr_ma_20_1d_aligned[i])
         
-        # Entry conditions: breakout + volatility filter
-        long_entry = breakout_long and vol_filter
-        short_entry = breakout_short and vol_filter
+        # Trend filter: price above/below daily EMA50
+        above_ema = close[i] > ema_50_1d_aligned[i]
+        below_ema = close[i] < ema_50_1d_aligned[i]
         
-        # Exit conditions: opposite breakout or volatility collapse
-        long_exit = breakout_short or (atr_1d_aligned[i] < 0.3 * atr_ma_20_1d_aligned[i])
-        short_exit = breakout_long or (atr_1d_aligned[i] < 0.3 * atr_ma_20_1d_aligned[i])
+        # Entry conditions: trend + volume + volatility filter
+        long_entry = above_ema and vol_filter and vol_filter_daily
+        short_entry = below_ema and vol_filter and vol_filter_daily
+        
+        # Exit conditions: trend reversal
+        long_exit = below_ema
+        short_exit = above_ema
         
         if long_entry and position != 1:
             position = 1
@@ -108,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_breakout_vol_filter_v1"
-timeframe = "4h"
+name = "12h_1d_ema50_vol_vol_filter_v1"
+timeframe = "12h"
 leverage = 1.0
