@@ -1,22 +1,15 @@
-# 6h_1d_Weekly_Pivot_Breakout_v2
-# Hypothesis: Use weekly pivot levels with volume confirmation on 6h.
-# Long when price breaks above weekly R4 with volume > 1.5x 20-period average,
-# short when breaks below weekly S4 with volume > 1.5x 20-period average.
-# Weekly pivots provide strong institutional levels; volume confirms breakout strength.
-# Designed for low trade frequency (target: 50-150 total over 4 years) to minimize fee drag.
-# Works in bull via breakouts above resistance, in bear via breakdowns below support.
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Weekly_Pivot_Breakout_v2"
-timeframe = "6h"
+name = "4h_1d_KAMA_Trend_RSI_MeanReversion_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -25,64 +18,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # 1D KAMA trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Previous week's OHLC for pivot calculation
-    prev_high = df_1w['high'].iloc[-2] if len(df_1w) >= 2 else df_1w['high'].iloc[-1]
-    prev_low = df_1w['low'].iloc[-2] if len(df_1w) >= 2 else df_1w['low'].iloc[-1]
-    prev_close = df_1w['close'].iloc[-2] if len(df_1w) >= 2 else df_1w['close'].iloc[-1]
+    # KAMA calculation
+    close_1d = df_1d['close'].values
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.abs(np.diff(close_1d, 10))
+    er = change / (volatility + 1e-10)
+    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # Calculate weekly pivot levels (standard floor trader pivots)
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_val = prev_high - prev_low
-    if range_val <= 0:
-        return np.zeros(n)
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
-    # Weekly R4 and S4 levels
-    weekly_r4 = prev_close + range_val * 1.1 * 2  # R4 = Close + 2.2 * Range
-    weekly_s4 = prev_close - range_val * 1.1 * 2  # S4 = Close - 2.2 * Range
+    # 4H RSI with mean reversion
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Align weekly levels to 6h timeframe
-    weekly_r4_array = np.full(len(df_1w), weekly_r4)
-    weekly_s4_array = np.full(len(df_1w), weekly_s4)
-    weekly_r4_aligned = align_htf_to_ltf(prices, df_1w, weekly_r4_array)
-    weekly_s4_aligned = align_htf_to_ltf(prices, df_1w, weekly_s4_array)
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation
     volume_series = pd.Series(volume)
     vol_ma = volume_series.rolling(window=20, min_periods=20).mean()
     vol_ratio = volume_series / vol_ma
-    vol_ratio = vol_ratio.fillna(1.0).values  # default to 1.0 if no MA
+    vol_ratio = vol_ratio.fillna(1.0).values
     
     signals = np.zeros(n)
-    position = 0  # 1=long, -1=short, 0=flat
+    position = 0
     
-    for i in range(50, n):
-        # Skip if any data invalid
-        if (np.isnan(weekly_r4_aligned[i]) or np.isnan(weekly_s4_aligned[i]) or
-            np.isnan(vol_ratio[i])):
+    for i in range(100, n):
+        if np.isnan(kama_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ratio[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Breakout conditions with volume filter
-        long_breakout = close[i] > weekly_r4_aligned[i] and vol_ratio[i] > 1.5
-        short_breakout = close[i] < weekly_s4_aligned[i] and vol_ratio[i] > 1.5
+        # Trend filter: price above/below KAMA
+        above_kama = close[i] > kama_aligned[i]
+        below_kama = close[i] < kama_aligned[i]
         
-        # Exit conditions: return to weekly pivot
-        weekly_pivot_array = np.full(len(df_1w), pivot)
-        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot_array)
+        # Mean reversion signals
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
         
-        long_exit = close[i] < weekly_pivot_aligned[i]
-        short_exit = close[i] > weekly_pivot_aligned[i]
+        # Entry conditions
+        long_entry = above_kama and rsi_oversold and vol_ratio[i] > 1.3
+        short_entry = below_kama and rsi_overbought and vol_ratio[i] > 1.3
+        
+        # Exit conditions
+        long_exit = rsi[i] > 50
+        short_exit = rsi[i] < 50
         
         # Signal logic
-        if long_breakout and position != 1:
+        if long_entry and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_breakout and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
