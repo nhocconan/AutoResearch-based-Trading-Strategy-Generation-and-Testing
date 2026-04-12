@@ -1,87 +1,118 @@
 #!/usr/bin/env python3
 """
-1d_1w_Weekly_RSI_Momentum
-Hypothesis: Use weekly RSI to identify momentum extremes on daily timeframe.
-Long when weekly RSI > 50 and daily RSI crosses above 30 from below (bullish momentum in uptrend).
-Short when weekly RSI < 50 and daily RSI crosses below 70 from above (bearish momentum in downtrend).
-Weekly RSI acts as trend filter, daily RSI provides entry timing.
-Designed to capture medium-term moves in both bull and bear markets with low trade frequency.
-Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe.
+6h_1d_Ichimoku_Kumo_Twist
+Hypothesis: Use Ichimoku Cloud twist (Senkou Span A/B crossover) from daily timeframe as trend filter,
+combined with Tenkan/Kijun cross on 6h for entry. Works in bull/bear because cloud twist
+indicates trend acceleration, and Tenkan/Kijun provides timely entries with trend alignment.
+Targets 60-120 total trades over 4 years (15-30/year) on 6h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Weekly_RSI_Momentum"
-timeframe = "1d"
+name = "6h_1d_Ichimoku_Kumo_Twist"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # === WEEKLY DATA FOR TREND FILTER ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    # === 1D DATA FOR ICHIMOKU CLOUD ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # Calculate weekly RSI(14)
-    delta_1w = np.diff(close_1w, prepend=close_1w[0])
-    gain_1w = np.where(delta_1w > 0, delta_1w, 0)
-    loss_1w = np.where(delta_1w < 0, -delta_1w, 0)
-    avg_gain_1w = pd.Series(gain_1w).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss_1w = pd.Series(loss_1w).ewm(alpha=1/14, adjust=False).mean().values
-    rs_1w = avg_gain_1w / (avg_loss_1w + 1e-10)
-    rsi_1w = 100 - (100 / (1 + rs_1w))
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # === DAILY RSI FOR ENTRY TIMING ===
-    # Calculate daily RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Tenkan-sen (Conversion Line): (9-period high + low)/2
+    tenkan_sen = (pd.Series(high_1d).rolling(window=9, min_periods=9).max() + 
+                  pd.Series(low_1d).rolling(window=9, min_periods=9).min()) / 2
+    # Kijun-sen (Base Line): (26-period high + low)/2
+    kijun_sen = (pd.Series(high_1d).rolling(window=26, min_periods=26).max() + 
+                 pd.Series(low_1d).rolling(window=26, min_periods=26).min()) / 2
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
+    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
+    senkou_span_b = ((pd.Series(high_1d).rolling(window=52, min_periods=52).max() + 
+                      pd.Series(low_1d).rolling(window=52, min_periods=52).min()) / 2)
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen.values)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen.values)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a.values)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b.values)
+    
+    # Kumo twist: Senkou Span A crossing above/below Senkou Span B
+    # Bullish twist: Span A > Span B (after previously being below)
+    # Bearish twist: Span A < Span B (after previously being above)
+    span_a_above_b = senkou_span_a_aligned > senkou_span_b_aligned
+    span_a_above_b_prev = np.roll(span_a_above_b, 1)
+    span_a_above_b_prev[0] = False
+    
+    # Kumo twist signals (true at the bar where cross occurs)
+    bullish_twist = span_a_above_b & (~span_a_above_b_prev)
+    bearish_twist = (~span_a_above_b) & span_a_above_b_prev
+    
+    # Align twist signals to 6b
+    bullish_twist_aligned = align_htf_to_ltf(prices, df_1d, bullish_twist.astype(float))
+    bearish_twist_aligned = align_htf_to_ltf(prices, df_1d, bearish_twist.astype(float))
+    
+    # === 6H DATA FOR ENTRY SIGNALS ===
+    # Tenkan/Kijun cross on 6h for entry timing
+    high_6h = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    low_6h = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan_6h = (high_6h + low_6h) / 2
+    
+    high_6h_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    low_6h_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun_6h = (high_6h_26 + low_6h_26) / 2
+    
+    # Tenkan/Kijun cross signals
+    tenkan_above_kijun = tenkan_6h > kijun_6h
+    tenkan_above_kijun_prev = np.roll(tenkan_above_kijun, 1)
+    tenkan_above_kijun_prev[0] = False
+    
+    tk_bullish_cross = tenkan_above_kijun & (~tenkan_above_kijun_prev)
+    tk_bearish_cross = (~tenkan_above_kijun) & tenkan_above_kijun_prev
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(14, n):
+    for i in range(52, n):
         # Skip if not ready
-        if np.isnan(rsi_1w_aligned[i]) or np.isnan(rsi[i]) or np.isnan(rsi[i-1]):
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or
+            np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Weekly RSI trend filter
-        weekly_bullish = rsi_1w_aligned[i] > 50
-        weekly_bearish = rsi_1w_aligned[i] < 50
+        # Get current trend from Kumo twist (need sustained signal)
+        # We consider trend bullish if we've had a bullish twist more recently than bearish
+        # Simplified: use current Span A/B position as trend filter
+        bullish_trend = senkou_span_a_aligned[i] > senkou_span_b_aligned[i]
+        bearish_trend = senkou_span_a_aligned[i] < senkou_span_b_aligned[i]
         
-        # Daily RSI signals
-        rsi_now = rsi[i]
-        rsi_prev = rsi[i-1]
+        # Entry: Tenkan/Kijun cross in direction of Kumo twist trend
+        long_entry = tk_bullish_cross[i] and bullish_trend
+        short_entry = tk_bearish_cross[i] and bearish_trend
         
-        # Long: weekly bullish + daily RSI crosses above 30 from below
-        long_signal = weekly_bullish and (rsi_prev <= 30) and (rsi_now > 30)
-        
-        # Short: weekly bearish + daily RSI crosses below 70 from above
-        short_signal = weekly_bearish and (rsi_prev >= 70) and (rsi_now < 70)
-        
-        # Exit: opposite weekly RSI extreme
-        exit_long = position == 1 and rsi_1w_aligned[i] < 40
-        exit_short = position == -1 and rsi_1w_aligned[i] > 60
+        # Exit: opposite Tenkan/Kijun cross or trend change
+        exit_long = position == 1 and (tk_bearish_cross[i] or not bullish_trend)
+        exit_short = position == -1 and (tk_bullish_cross[i] or not bearish_trend)
         
         # Execute trades
-        if long_signal and position != 1:
+        if long_entry and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_signal and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
