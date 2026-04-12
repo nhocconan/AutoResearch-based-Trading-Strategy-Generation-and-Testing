@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_camarilla_pivot_volume_filter"
-timeframe = "12h"
+name = "4h_1d_ema_convergence_divergence"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,72 +17,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Camarilla pivot levels from weekly data
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    # EMA convergence/divergence from 1d
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
+    ema_fast = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_slow = pd.Series(close_1d).ewm(span=55, adjust=False, min_periods=55).mean().values
+    ema_diff = ema_fast - ema_slow
+    ema_diff_prev = np.roll(ema_diff, 1)
+    ema_diff_prev[0] = np.nan
+    ema_diff_accel = ema_diff - ema_diff_prev
+    ema_diff_accel_prev = np.roll(ema_diff_accel, 1)
+    ema_diff_accel_prev[0] = np.nan
+    ema_diff_accel_aligned = align_htf_to_ltf(prices, df_1d, ema_diff_accel)
     
-    # Calculate Camarilla levels for each week
-    camarilla_h4 = []  # Resistance level 4 (strong resistance)
-    camarilla_l4 = []  # Support level 4 (strong support)
-    camarilla_h3 = []  # Resistance level 3
-    camarilla_l3 = []  # Support level 3
+    # 4h price position relative to EMA50
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    price_above_ema50 = close > ema_50
     
-    for i in range(len(close_1w)):
-        high_val = high_1w[i]
-        low_val = low_1w[i]
-        close_val = close_1w[i]
-        range_val = high_val - low_val
-        
-        # Camarilla formulas
-        h4 = close_val + range_val * 1.5000
-        l4 = close_val - range_val * 1.5000
-        h3 = close_val + range_val * 1.2500
-        l3 = close_val - range_val * 1.2500
-        
-        camarilla_h4.append(h4)
-        camarilla_l4.append(l4)
-        camarilla_h3.append(h3)
-        camarilla_l3.append(l3)
-    
-    camarilla_h4 = np.array(camarilla_h4)
-    camarilla_l4 = np.array(camarilla_l4)
-    camarilla_h3 = np.array(camarilla_h3)
-    camarilla_l3 = np.array(camarilla_l3)
-    
-    # Align to 12h timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l4)
-    h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
-    
-    # Volume filter: current volume > 20-period average (on 12h timeframe)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume filter: current volume > 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_filter = volume > vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i])):
+        if np.isnan(ema_diff_accel_aligned[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Price touching Camarilla levels with volume confirmation
-        # Long when price touches L3/L4 support with volume
-        long_signal = (close[i] <= l3_aligned[i] * 1.001 or close[i] <= l4_aligned[i] * 1.001) and volume_filter[i]
-        # Short when price touches H3/H4 resistance with volume
-        short_signal = (close[i] >= h3_aligned[i] * 0.999 or close[i] >= h4_aligned[i] * 0.999) and volume_filter[i]
+        # Entry conditions
+        bullish_momentum = ema_diff_accel_aligned[i] > 0
+        bearish_momentum = ema_diff_accel_aligned[i] < 0
         
-        # Exit when price moves back toward center (mean reversion completion)
-        pivot_center = (h3_aligned[i] + l3_aligned[i]) / 2
-        exit_long = close[i] >= pivot_center * 0.999  # Price moved back up from support
-        exit_short = close[i] <= pivot_center * 1.001  # Price moved back down from resistance
+        long_signal = bullish_momentum and price_above_ema50[i] and volume_filter[i]
+        short_signal = bearish_momentum and not price_above_ema50[i] and volume_filter[i]
+        
+        # Exit when momentum changes
+        exit_long = ema_diff_accel_aligned[i] <= 0
+        exit_short = ema_diff_accel_aligned[i] >= 0
         
         # Execute trades
         if long_signal and position != 1:
