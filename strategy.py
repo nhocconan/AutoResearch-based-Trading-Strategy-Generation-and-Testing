@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
+# 4h_1d_camarilla_breakout_v32
+# Hypothesis: 4-hour strategy using daily Camarilla levels (H3/L3) with volume confirmation.
+# Targets breakouts in the direction of the prior day's range expansion, using volume > 1.5x 20-period MA as confirmation.
+# Designed for low trade frequency (20-50/year) to minimize fee drag. Works in bull and bear by following price action
+# rather than directional bias, with exits on opposite touch or volatility contraction.
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,95 +19,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR and close
+    # Get daily data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # Calculate daily ATR(14)
+    # Calculate daily Camarilla levels using PREVIOUS day's data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
-    atr_1d = np.zeros_like(tr)
-    for i in range(len(tr)):
-        if i < 14:
-            atr_1d[i] = np.nan
-        else:
-            atr_1d[i] = np.mean(tr[i-13:i+1])
+    # Previous day's values (no look-ahead)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Align daily ATR to 4h timeframe
-    atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Camarilla calculations
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_val = prev_high - prev_low
     
-    # Calculate weekly EMA(21) for trend filter
-    close_1w = df_1w['close'].values
-    ema_21_1w = np.zeros_like(close_1w, dtype=float)
-    ema_21_1w[:] = np.nan
-    if len(close_1w) >= 21:
-        multiplier = 2 / (21 + 1)
-        ema_21_1w[20] = np.mean(close_1w[:21])
-        for i in range(21, len(close_1w)):
-            ema_21_1w[i] = (close_1w[i] - ema_21_1w[i-1]) * multiplier + ema_21_1w[i-1]
+    h3 = pivot + 1.1 * range_val / 2
+    l3 = pivot - 1.1 * range_val / 2
+    h4 = pivot + 1.1 * range_val
+    l4 = pivot - 1.1 * range_val
     
-    # Align weekly EMA to 4h timeframe
-    ema_21_4h = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Align to 4h timeframe
+    h3_4h = align_htf_to_ltf(prices, df_1d, h3)
+    l3_4h = align_htf_to_ltf(prices, df_1d, l3)
+    h4_4h = align_htf_to_ltf(prices, df_1d, h4)
+    l4_4h = align_htf_to_ltf(prices, df_1d, l4)
     
-    # Calculate 4-hour Donchian channels (20-period)
-    high_4h = high
-    low_4h = low
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
+    # Volume confirmation: 20-period moving average
+    vol_ma = np.full(n, np.nan)
     for i in range(20, n):
-        donchian_high[i] = np.max(high_4h[i-20:i])
-        donchian_low[i] = np.min(low_4h[i-20:i])
+        vol_ma[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(atr_4h[i]) or np.isnan(ema_21_4h[i]) or 
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
+        if (np.isnan(h3_4h[i]) or np.isnan(l3_4h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Weekly trend filter: price above/below EMA21
-        price_above_ema = close[i] > ema_21_4h[i]
-        price_below_ema = close[i] < ema_21_4h[i]
+        # Volume filter: current volume > 1.5x 20-period average
+        volume_filter = volume[i] > vol_ma[i] * 1.5
         
-        # Donchian breakout conditions
-        long_breakout = close[i] > donchian_high[i]
-        short_breakout = close[i] < donchian_low[i]
+        # Breakout conditions
+        long_breakout = (close[i] > h3_4h[i]) and volume_filter
+        short_breakout = (close[i] < l3_4h[i]) and volume_filter
         
-        # ATR-based volatility filter: only trade when ATR is expanding
-        atr_expanding = atr_4h[i] > np.mean(atr_4h[max(0, i-20):i]) if i >= 20 else False
+        # Exit conditions
+        long_exit = (close[i] < l3_4h[i])  # Touch opposite L3
+        short_exit = (close[i] > h3_4h[i])  # Touch opposite H3
         
-        # Entry conditions
-        if long_breakout and price_above_ema and atr_expanding and position != 1:
+        if long_breakout and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_breakout and price_below_ema and atr_expanding and position != -1:
+        elif short_breakout and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: opposite Donchian breakout or ATR contraction
-        elif position == 1 and (close[i] < donchian_low[i] or not atr_expanding):
+        elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > donchian_high[i] or not atr_expanding):
+        elif position == -1 and short_exit:
             position = 0
             signals[i] = 0.0
         else:
-            # Hold current position
+            # Hold position
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -111,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1w_donchian_atr_trend_filter_v1"
+name = "4h_1d_camarilla_breakout_v32"
 timeframe = "4h"
 leverage = 1.0
