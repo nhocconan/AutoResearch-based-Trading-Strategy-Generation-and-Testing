@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 80:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,16 +13,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points and ATR
+    # Get weekly data for trend and daily for ATR/volume
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    
+    if len(df_1w) < 20 or len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 14-day ATR on daily data
+    # Weekly close for EMA trend
+    close_1w = df_1w['close'].values
+    ema_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 21:
+        ema_vals = pd.Series(close_1w).ewm(span=21, adjust=False).mean().values
+        ema_1w[:len(ema_vals)] = ema_vals
+    
+    # Daily ATR for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
     tr1 = high_1d[1:] - low_1d[1:]
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
@@ -31,74 +39,50 @@ def generate_signals(prices):
     for i in range(14, len(atr_1d)):
         atr_1d[i] = np.nanmean(tr[i-13:i+1])
     
-    # Align ATR to 6h timeframe
-    atr_6h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Daily volume average
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = np.full(len(vol_1d), np.nan)
+    for i in range(20, len(vol_1d)):
+        vol_ma_1d[i] = np.mean(vol_1d[i-20:i])
     
-    # Calculate daily pivot points using previous day's data
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
-    
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_val = prev_high - prev_low
-    
-    # Key levels: R3, S3, R4, S4 (Camarilla)
-    r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
-    r4 = close_1d + (high_1d - low_1d) * 1.1 / 2
-    s4 = close_1d - (high_1d - low_1d) * 1.1 / 2
-    
-    # Align levels to 6h timeframe
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
-    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
-    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Calculate volume moving average (20-period on 6h)
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
+    # Align to 12h timeframe
+    ema_1w_12h = align_htf_to_ltf(prices, df_1w, ema_1w)
+    atr_1d_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    vol_ma_1d_12h = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(80, n):
         # Skip if data not ready
-        if (np.isnan(atr_6h[i]) or 
-            np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or 
-            np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_1w_12h[i]) or 
+            np.isnan(atr_1d_12h[i]) or np.isnan(vol_ma_1d_12h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.8x 20-period average
-        volume_filter = volume[i] > vol_ma[i] * 1.8
+        # Weekly trend filter: price above/below 21 EMA
+        trend_up = close[i] > ema_1w_12h[i]
+        trend_down = close[i] < ema_1w_12h[i]
         
-        # Entry conditions: R4/S4 breakout with volume confirmation (trend continuation)
-        long_breakout = (close[i] > r4_6h[i]) and volume_filter
-        short_breakout = (close[i] < s4_6h[i]) and volume_filter
+        # Volatility filter: current ATR > 1.5x 20-day average ATR
+        vol_filter = atr_1d_12h[i] > (np.nanmean(atr_1d_12h[max(0,i-20):i]) * 1.5) if i >= 20 else False
         
-        # Entry conditions: R3/S3 fade with volume confirmation (mean reversion)
-        long_fade = (close[i] < s3_6h[i]) and volume_filter
-        short_fade = (close[i] > r3_6h[i]) and volume_filter
+        # Volume filter: current volume > 1.5x 20-day average volume
+        vol_ma_val = vol_ma_1d_12h[i]
+        vol_filter = vol_filter and (volume[i] > vol_ma_val * 1.5) if not np.isnan(vol_ma_val) else False
         
-        # Exit conditions: touch opposite level or ATR stop
-        long_exit = (close[i] < s3_6h[i]) or (close[i] < close[i-1] - 2.0 * atr_6h[i])
-        short_exit = (close[i] > r3_6h[i]) or (close[i] > close[i-1] + 2.0 * atr_6h[i])
+        # Entry conditions: break of weekly EMA with volume/vol confirmation
+        long_entry = trend_up and vol_filter
+        short_entry = trend_down and vol_filter
         
-        # Prioritize fade signals in ranging markets, breakout in trending
-        if long_fade and position != 1:
+        # Exit conditions: opposite EMA cross or volatility drop
+        long_exit = not trend_up or not vol_filter
+        short_exit = not trend_down or not vol_filter
+        
+        if long_entry and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_fade and position != -1:
-            position = -1
-            signals[i] = -0.25
-        elif long_breakout and position != 1:
-            position = 1
-            signals[i] = 0.25
-        elif short_breakout and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
@@ -118,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_camarilla_r3s3_r4s4_volume_filter_v1"
-timeframe = "6h"
+name = "12h_1w_ema_trend_vol_vol_filter_v1"
+timeframe = "12h"
 leverage = 1.0
