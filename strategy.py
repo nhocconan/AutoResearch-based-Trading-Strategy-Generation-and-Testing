@@ -3,21 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_camarilla_breakout_v3
-# Buys when price breaks above daily H4 with volume confirmation in strong trends.
-# Shorts when price breaks below daily L4 with volume confirmation in strong trends.
-# Uses ADX > 20 to allow moderate trends, reducing whipsaw while maintaining trend filter.
-# Uses daily H4/L4 (more extreme than H3/L3) for fewer, higher-quality breakouts.
-# Designed for low trade frequency (target: 20-40 trades/year) to minimize fee drag.
+# Hypothesis: 1h_4h_1d_camarilla_breakout_v1
+# Uses daily high/low to calculate daily Camarilla levels for the next day.
+# Buys when price breaks above daily H3 with volume confirmation and 4h trend filter.
+# Shorts when price breaks below daily L3 with volume confirmation and 4h trend filter.
+# Uses 4h ADX > 25 to filter for strong trends, avoiding false signals in weak trends or ranges.
+# Uses session filter (08-20 UTC) to reduce noise trades.
+# Designed for low trade frequency (target: 15-37 trades/year) to minimize fee drag.
 # Works in bull markets (breakouts continuation) and bear markets (breakdowns continuation).
+# Entry confirmation on 1h timeframe, direction from daily levels, trend filter from 4h.
 
-name = "4h_1d_camarilla_breakout_v3"
-timeframe = "4h"
+name = "1h_4h_1d_camarilla_breakout_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -30,6 +32,11 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
+    # Get 4h data for ADX trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
+        return np.zeros(n)
+    
     # Calculate Camarilla levels from previous day
     high_prev = df_1d['high'].shift(1).values
     low_prev = df_1d['low'].shift(1).values
@@ -37,28 +44,31 @@ def generate_signals(prices):
     
     # Camarilla formulas
     range_prev = high_prev - low_prev
-    camarilla_h4 = close_prev + range_prev * 1.1 / 2
-    camarilla_l4 = close_prev - range_prev * 1.1 / 2
+    camarilla_h3 = close_prev + range_prev * 1.1 / 4
+    camarilla_l3 = close_prev - range_prev * 1.1 / 4
     
-    # Align to 4h timeframe (daily levels update only after daily bar closes)
-    h4_level = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_level = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # Align to 1h timeframe (daily levels update only after daily bar closes)
+    h3_level = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_level = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Volume confirmation: volume > 1.8 * 20-period average (4h timeframe)
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.8)
+    # Volume confirmation: volume > 2.0 * 20-period average (1h timeframe)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma * 2.0)
     
-    # ADX trend filter: only trade when ADX > 20 (moderate trend or stronger)
-    # Calculate True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
+    # Calculate ADX on 4h timeframe
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # True Range
+    tr1 = high_4h[1:] - low_4h[1:]
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
     tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
     
     # Plus and Minus Directional Movement
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    plus_dm = np.where((high_4h[1:] - high_4h[:-1]) > (low_4h[:-1] - low_4h[1:]), np.maximum(high_4h[1:] - high_4h[:-1], 0), 0)
+    minus_dm = np.where((low_4h[:-1] - low_4h[1:]) > (high_4h[1:] - high_4h[:-1]), np.maximum(low_4h[:-1] - low_4h[1:], 0), 0)
     
     # Wilder's smoothing function
     def wilders_smooth(data, period):
@@ -72,58 +82,73 @@ def generate_signals(prices):
             result[i] = (result[i-1] * (period-1) + data[i]) / period
         return result
     
-    atr = wilders_smooth(tr, 14)
-    plus_dm_smooth = wilders_smooth(plus_dm, 14)
-    minus_dm_smooth = wilders_smooth(minus_dm, 14)
+    atr_4h = wilders_smooth(tr, 14)
+    plus_dm_smooth_4h = wilders_smooth(plus_dm, 14)
+    minus_dm_smooth_4h = wilders_smooth(minus_dm, 14)
     
     # Avoid division by zero
-    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
-    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = wilders_smooth(dx, 14)
-    adx_filter = adx > 20  # moderate trend or stronger
+    plus_di_4h = np.where(atr_4h != 0, 100 * plus_dm_smooth_4h / atr_4h, 0)
+    minus_di_4h = np.where(atr_4h != 0, 100 * minus_dm_smooth_4h / atr_4h, 0)
+    dx_4h = np.where((plus_di_4h + minus_di_4h) != 0, 100 * np.abs(plus_di_4h - minus_di_4h) / (plus_di_4h + minus_di_4h), 0)
+    adx_4h = wilders_smooth(dx_4h, 14)
+    
+    # Align 4h ADX to 1h timeframe
+    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
+    adx_filter = adx_4h_aligned > 25  # strong trend only
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # start after warmup
+    for i in range(100, n):  # start after warmup
         # Skip if levels not ready
-        if np.isnan(h4_level[i]) or np.isnan(l4_level[i]) or np.isnan(adx_filter[i]):
+        if np.isnan(h3_level[i]) or np.isnan(l3_level[i]) or np.isnan(adx_filter[i]):
             signals[i] = 0.0
             continue
         
-        # Require both volume and trend filters
+        # Apply session filter
+        if not session_filter[i]:
+            # Outside session: flatten position
+            if position != 0:
+                position = 0
+            signals[i] = 0.0
+            continue
+        
+        # Require both volume and strong trend filters
         if not (vol_confirm[i] and adx_filter[i]):
             # Hold current position if filters fail
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above daily H4 with volume
-        if close[i] > h4_level[i] and position != 1:
+        # Long signal: price breaks above daily H3 with volume
+        if close[i] > h3_level[i] and position != 1:
             position = 1
-            signals[i] = 0.25
-        # Short signal: price breaks below daily L4 with volume
-        elif close[i] < l4_level[i] and position != -1:
+            signals[i] = 0.20
+        # Short signal: price breaks below daily L3 with volume
+        elif close[i] < l3_level[i] and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.20
         # Exit conditions: opposite breakout
-        elif close[i] < l4_level[i] and position == 1:
+        elif close[i] < l3_level[i] and position == 1:
             position = 0
             signals[i] = 0.0
-        elif close[i] > h4_level[i] and position == -1:
+        elif close[i] > h3_level[i] and position == -1:
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
