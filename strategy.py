@@ -1,22 +1,20 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h_1d_vortex_v1
-# Vortex indicator (VI+) and (VI-) identifies trend direction. 
-# Long when VI+ crosses above VI- in uptrend, short when VI- crosses above VI+ in downtrend.
-# Uses 1d timeframe for Vortex calculation to reduce noise. 
-# Includes volume confirmation (volume > 20-period average) and volatility filter (ATR-based).
-# Designed for low trade frequency (<30/year) with strong trend signals.
-# Works in both bull and bear markets by following major trends.
-name = "12h_1d_vortex_v1"
-timeframe = "12h"
+# Hypothesis: 4h_1d_donchian_breakout_volume_trend_v1
+# Breakouts of 4h Donchian(20) with volume confirmation (>1.5x 20-period average) and 1d trend filter (EMA50).
+# Works in both bull and bear markets by capturing strong momentum moves aligned with daily trend.
+# Low trade frequency expected (~20-40/year) due to strict breakout conditions + volume + trend filter.
+name = "4h_1d_donchian_breakout_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,112 +22,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Vortex and ATR
+    # Get 1d data for trend filter (EMA50)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate True Range for 1d
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    # Align 1d EMA50 to 4h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate +DM and -DM for 1d
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # Calculate 4h Donchian channels (20-period)
+    lookback = 20
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
     
-    # Smooth TR, DM+ and DM- using Wilder's smoothing (alpha = 1/period)
-    period = 14
-    alpha = 1.0 / period
+    for i in range(lookback-1, n):
+        highest_high[i] = np.max(high[i-lookback+1:i+1])
+        lowest_low[i] = np.min(low[i-lookback+1:i+1])
     
-    def wilders_smoothing(data, alpha):
-        result = np.full_like(data, np.nan)
-        for i in range(len(data)):
-            if np.isnan(data[i]):
-                if i == 0:
-                    result[i] = np.nan
-                else:
-                    result[i] = result[i-1]
-            else:
-                if i == 0 or np.isnan(result[i-1]):
-                    result[i] = data[i]
-                else:
-                    result[i] = (1 - alpha) * result[i-1] + alpha * data[i]
-        return result
-    
-    tr_smooth = wilders_smoothing(tr, alpha)
-    dm_plus_smooth = wilders_smoothing(dm_plus, alpha)
-    dm_minus_smooth = wilders_smoothing(dm_minus, alpha)
-    
-    # Calculate VI+ and VI-
-    vi_plus = dm_plus_smooth / tr_smooth
-    vi_minus = dm_minus_smooth / tr_smooth
-    
-    # Calculate ATR for volatility filter (14-period ATR)
-    atr = tr_smooth  # Wilder's ATR is the smoothed TR
-    
-    # Calculate 20-period average volume for volume filter
-    vol_avg = np.convolve(volume_1d, np.ones(20)/20, mode='same')
-    vol_avg[:10] = np.nan
-    vol_avg[-10:] = np.nan
-    
-    # Align indicators to 12h timeframe
-    vi_plus_aligned = align_htf_to_ltf(prices, df_1d, vi_plus)
-    vi_minus_aligned = align_htf_to_ltf(prices, df_1d, vi_minus)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
-    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg)
+    # Calculate volume average (20-period)
+    vol_avg = np.full(n, np.nan)
+    for i in range(lookback-1, n):
+        vol_avg[i] = np.mean(volume[i-lookback+1:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):
+    for i in range(lookback, n):
         # Skip if indicators not ready
-        if np.isnan(vi_plus_aligned[i]) or np.isnan(vi_minus_aligned[i]) or np.isnan(atr_aligned[i]) or np.isnan(vol_avg_aligned[i]):
+        if np.isnan(ema_50_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(vol_avg[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume filter: current volume > 20-period average
-        volume_filter = volume[i] > vol_avg_aligned[i]
+        # Breakout conditions
+        bullish_breakout = close[i] > highest_high[i-1]  # break above previous high
+        bearish_breakout = close[i] < lowest_low[i-1]    # break below previous low
         
-        # Volatility filter: avoid extremely low volatility (ATR < 50% of its 50-period average)
-        if i >= 50:
-            atr_ma = np.nanmean(atr_aligned[i-50:i])
-            vol_filter = atr_aligned[i] > 0.5 * atr_ma if not np.isnan(atr_ma) else True
-        else:
-            vol_filter = True
+        # Volume confirmation (>1.5x average volume)
+        volume_confirm = volume[i] > 1.5 * vol_avg[i]
         
-        # Vortex crossover signals
-        vi_plus_cross_above = vi_plus_aligned[i] > vi_minus_aligned[i] and vi_plus_aligned[i-1] <= vi_minus_aligned[i-1]
-        vi_minus_cross_above = vi_minus_aligned[i] > vi_plus_aligned[i] and vi_minus_aligned[i-1] <= vi_plus_aligned[i-1]
+        # Trend filter: align with 1d EMA50
+        uptrend = close[i] > ema_50_aligned[i]
+        downtrend = close[i] < ema_50_aligned[i]
         
-        # Trend strength: only take signal if VI+ or VI- is significantly above the other
-        trend_filter = np.abs(vi_plus_aligned[i] - vi_minus_aligned[i]) > 0.1
+        # Entry signals
+        long_entry = bullish_breakout and volume_confirm and uptrend
+        short_entry = bearish_breakout and volume_confirm and downtrend
         
-        # Long signal: VI+ crosses above VI- with volume and volatility confirmation
-        long_signal = vi_plus_cross_above and volume_filter and vol_filter and trend_filter
+        # Exit conditions: opposite breakout or trend change
+        exit_long = bearish_breakout and volume_confirm
+        exit_short = bullish_breakout and volume_confirm
         
-        # Short signal: VI- crosses above VI+ with volume and volatility confirmation
-        short_signal = vi_minus_cross_above and volume_filter and vol_filter and trend_filter
-        
-        # Exit on opposite crossover
-        exit_long = vi_minus_cross_above
-        exit_short = vi_plus_cross_above
-        
-        if long_signal and position != 1:
+        if long_entry and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_signal and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
