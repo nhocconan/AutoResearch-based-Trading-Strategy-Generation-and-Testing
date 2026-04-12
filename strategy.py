@@ -1,12 +1,10 @@
-#!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_volume_trend_v1
-# Hypothesis: 4-hour Camarilla breakout with volume confirmation and trend filter (using daily EMA)
-# Uses daily EMA trend to filter trades - only long in uptrend, short in downtrend
-# Volume confirmation ensures breakouts have conviction
-# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag
+# 6h_1d_obv_momentum_with_volatility_filter
+# Hypothesis: On-Balance Volume (OBV) divergence with 6h price action and 1d volatility filter.
+# In bull markets: rising OBV confirms accumulation during pullbacks. In bear markets: falling OBV confirms distribution during rallies.
+# Uses 1d ATR to filter low-volatility chop. Target: 15-30 trades/year (60-120 total over 4 years).
 
-name = "4h_1d_camarilla_breakout_volume_trend_v1"
-timeframe = "4h"
+name = "6h_1d_obv_momentum_with_volatility_filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,70 +21,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for calculations
+    # Calculate OBV
+    obv = np.zeros(n)
+    obv[0] = volume[0]
+    for i in range(1, n):
+        if close[i] > close[i-1]:
+            obv[i] = obv[i-1] + volume[i]
+        elif close[i] < close[i-1]:
+            obv[i] = obv[i-1] - volume[i]
+        else:
+            obv[i] = obv[i-1]
+    
+    # Get daily data for ATR filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's range
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    # Calculate ATR(14) on daily
+    tr1 = np.abs(np.subtract(high_1d, low_1d))
+    tr2 = np.abs(np.subtract(high_1d, np.roll(close_1d, 1)))
+    tr3 = np.abs(np.subtract(low_1d, np.roll(close_1d, 1)))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Camarilla levels (based on previous day)
-    range_ = prev_high - prev_low
-    # Resistance levels
-    r3 = prev_close + range_ * 1.1 / 2
-    r4 = prev_close + range_ * 1.1
-    # Support levels
-    s3 = prev_close - range_ * 1.1 / 2
-    s4 = prev_close - range_ * 1.1
+    # Align ATR to 6h timeframe
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
-    # Daily EMA for trend filter (21-period)
-    close_series = pd.Series(close_1d)
-    ema_21 = close_series.ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # Align Camarilla levels and EMA to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    ema_aligned = align_htf_to_ltf(prices, df_1d, ema_21)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    # Calculate 6-period EMA of OBV for momentum
+    obv_series = pd.Series(obv)
+    obv_ema = obv_series.ewm(span=6, adjust=False, min_periods=6).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Skip if data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(ema_aligned[i])):
+    for i in range(30, n):
+        # Skip if ATR not ready
+        if np.isnan(atr_aligned[i]) or atr_aligned[i] <= 0:
             signals[i] = 0.0
             continue
         
-        # Long entry: close breaks above R4 with volume and uptrend (price > EMA)
-        if (close[i] > r4_aligned[i] and vol_confirm[i] and 
-            close[i] > ema_aligned[i] and position != 1):
+        # Long: OBV rising above its EMA (bullish momentum) in non-choppy market
+        if obv[i] > obv_ema[i] and obv[i] > obv[i-1] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short entry: close breaks below S4 with volume and downtrend (price < EMA)
-        elif (close[i] < s4_aligned[i] and vol_confirm[i] and 
-              close[i] < ema_aligned[i] and position != -1):
+        # Short: OBV falling below its EMA (bearish momentum) in non-choppy market
+        elif obv[i] < obv_ema[i] and obv[i] < obv[i-1] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: reverse signal or close crosses back to opposite S3/R3
-        elif position == 1 and close[i] < s3_aligned[i]:
+        # Exit: momentum diverges (OBV crosses EMA in opposite direction)
+        elif position == 1 and obv[i] < obv_ema[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > r3_aligned[i]:
+        elif position == -1 and obv[i] > obv_ema[i]:
             position = 0
             signals[i] = 0.0
         else:
