@@ -1,22 +1,15 @@
-# 12h_1d_camarilla_breakout_v2
-# Hypothesis: 12h timeframe with 1d Camarilla pivot levels, volume confirmation, and ADX trend filter.
-# Uses discrete position sizing (0.25) to limit trade frequency and reduce fee drag.
-# Designed to work in both bull and bear markets by requiring strong trend (ADX>25) for breakouts,
-# avoiding false signals in ranging conditions. Targets 20-50 trades per year to avoid overtrading.
-# Focuses on BTC/ETH as primary assets, with volume and trend filters to reduce false breakouts.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v2"
-timeframe = "12h"
+name = "1d_1w_donchian_breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,29 +17,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    # Get weekly data for Donchian channel calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla pivot levels from daily data
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Calculate weekly Donchian channel (20-period)
+    high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Camarilla levels (using standard multipliers)
-    h3 = pivot + (range_1d * 1.1 / 4)   # Resistance 3
-    l3 = pivot - (range_1d * 1.1 / 4)   # Support 3
+    # Align Donchian levels to daily timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_1w, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1w, low_20)
     
-    # Align Camarilla levels to 12h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    
-    # Volume filter - 20-period average on 12h data
+    # Volume filter - 20-period average on daily data
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
@@ -76,21 +64,22 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if not ready
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(pivot_aligned[i]) or np.isnan(volume_ok[i]) or np.isnan(trend_strong[i])):
+        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or
+            np.isnan(volume_ok[i]) or np.isnan(trend_strong[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: price breaks above H3 with volume confirmation and strong trend
-        long_signal = close[i] > h3_aligned[i] and volume_ok[i] and trend_strong[i]
-        # Short: price breaks below L3 with volume confirmation and strong trend
-        short_signal = close[i] < l3_aligned[i] and volume_ok[i] and trend_strong[i]
+        # Long: price breaks above weekly Donchian high with volume confirmation and strong trend
+        long_signal = close[i] > high_20_aligned[i] and volume_ok[i] and trend_strong[i]
+        # Short: price breaks below weekly Donchian low with volume confirmation and strong trend
+        short_signal = close[i] < low_20_aligned[i] and volume_ok[i] and trend_strong[i]
         
-        # Exit when price returns to pivot
-        exit_long = close[i] < pivot_aligned[i]
-        exit_short = close[i] > pivot_aligned[i]
+        # Exit when price returns to midline
+        midline = (high_20_aligned[i] + low_20_aligned[i]) / 2
+        exit_long = close[i] < midline
+        exit_short = close[i] > midline
         
         # Execute trades
         if long_signal and position != 1:
