@@ -1,102 +1,111 @@
 #!/usr/bin/env python3
 """
-6h_12h_1d_Triple_Pullback_Strategy
-Hypothesis: Enter long on pullbacks to 12h EMA21 when 1d trend is up (price > 1d EMA50) and 12h momentum is bullish (MACD > 0). Enter short on pullbacks to 12h EMA21 when 1d trend is down (price < 1d EMA50) and 12h momentum is bearish (MACD < 0). Uses 1d trend filter to avoid counter-trend trades, and 12h EMA21 as dynamic support/resistance. Designed for low trade frequency (15-30/year) by requiring trend alignment and pullback entries. Works in bull via long bias in uptrends and in bear via short bias in downtrends.
+4h_1d_Volume_Weighted_Close_Breakout
+Hypothesis: 4h breakouts above/below daily Volume Weighted Close (VWC) with volume surge and trend filter using 12h EMA(21). VWC acts as a dynamic equilibrium point. Breakouts with volume indicate institutional interest. Trend filter ensures alignment with medium-term momentum. Designed for low trade frequency (<50/year) by requiring significant volume expansion and clear trend alignment. Works in bull/bear via EMA trend filter and mean-reversion exit at daily VWC.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_1d_Triple_Pullback_Strategy"
-timeframe = "6h"
+name = "4h_1d_Volume_Weighted_Close_Breakout"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # === 1D TREND FILTER ===
+    # === DAILY DATA ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    if len(close_1d) >= 50:
-        ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    else:
-        ema_50_1d = np.full_like(close_1d, np.nan)
+    volume_1d = df_1d['volume'].values
     
-    # === 12H INDICATORS ===
+    # Daily Volume Weighted Close (VWC)
+    vwc_1d = np.zeros_like(close_1d)
+    vwc_sum = 0.0
+    vol_sum = 0.0
+    for i in range(len(close_1d)):
+        vwc_sum += close_1d[i] * volume_1d[i]
+        vol_sum += volume_1d[i]
+        if vol_sum > 0:
+            vwc_1d[i] = vwc_sum / vol_sum
+        else:
+            vwc_1d[i] = close_1d[i]  # fallback
+    
+    # === 12H EMA(21) FOR TREND FILTER ===
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    if len(df_12h) < 2:
         return np.zeros(n)
     
     close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    
-    # 12h EMA21 for pullback entries
     if len(close_12h) >= 21:
-        ema_21_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
+        ema_21_12h = np.zeros_like(close_12h)
+        ema_21_12h[0] = close_12h[0]
+        alpha = 2.0 / (21 + 1)
+        for i in range(1, len(close_12h)):
+            ema_21_12h[i] = alpha * close_12h[i] + (1 - alpha) * ema_21_12h[i-1]
     else:
         ema_21_12h = np.full_like(close_12h, np.nan)
     
-    # 12h MACD for momentum confirmation
-    if len(close_12h) >= 34:
-        ema_12 = pd.Series(close_12h).ewm(span=12, adjust=False, min_periods=12).mean().values
-        ema_26 = pd.Series(close_12h).ewm(span=26, adjust=False, min_periods=26).mean().values
-        macd_line = ema_12 - ema_26
-        signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
-        macd_hist = macd_line - signal_line
-    else:
-        macd_line = np.full_like(close_12h, np.nan)
-        signal_line = np.full_like(close_12h, np.nan)
-        macd_hist = np.full_like(close_12h, np.nan)
-    
-    # Align all 1d and 12h indicators to 6h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align daily and 12h data to 4h timeframe
+    vwc_1d_aligned = align_htf_to_ltf(prices, df_1d, vwc_1d)
     ema_21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_21_12h)
-    macd_hist_aligned = align_htf_to_ltf(prices, df_12h, macd_hist)
+    
+    # Volume average (20-period for 4h = ~1.3 days) for confirmation
+    vol_avg = np.zeros(n)
+    vol_sum = 0.0
+    vol_count = 0
+    for i in range(n):
+        vol_sum += volume[i]
+        vol_count += 1
+        if i >= 20:
+            vol_sum -= volume[i-20]
+            vol_count -= 1
+        if vol_count > 0:
+            vol_avg[i] = vol_sum / vol_count
+        else:
+            vol_avg[i] = 0.0
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):  # start after warmup
         # Skip if indicators not available
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_21_12h_aligned[i]) or 
-            np.isnan(macd_hist_aligned[i])):
+        if (np.isnan(vwc_1d_aligned[i]) or np.isnan(ema_21_12h_aligned[i]) or vol_avg[i] == 0.0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend alignment: 1d price vs 1d EMA50
-        trend_up = close[i] > ema_50_1d_aligned[i]
-        trend_down = close[i] < ema_50_1d_aligned[i]
+        # Volume confirmation: at least 2.0x average
+        vol_confirm = volume[i] > 2.0 * vol_avg[i]
         
-        # Momentum: 12h MACD histogram
-        mom_bullish = macd_hist_aligned[i] > 0
-        mom_bearish = macd_hist_aligned[i] < 0
+        # Trend filter: price above/below 12h EMA(21)
+        price_above_ema = close[i] > ema_21_12h_aligned[i]
+        price_below_ema = close[i] < ema_21_12h_aligned[i]
         
-        # Pullback to 12h EMA21 (within 0.5% for entry zone)
-        near_ema = abs(close[i] - ema_21_12h_aligned[i]) / ema_21_12h_aligned[i] < 0.005
+        # Breakout entries at daily VWC with volume and trend filters
+        long_setup = (close[i] > vwc_1d_aligned[i]) and vol_confirm and price_above_ema
+        short_setup = (close[i] < vwc_1d_aligned[i]) and vol_confirm and price_below_ema
         
-        # Entry conditions
-        long_entry = trend_up and mom_bullish and near_ema
-        short_entry = trend_down and mom_bearish and near_ema
+        # Exit when price returns to daily VWC (mean reversion)
+        exit_long = close[i] < vwc_1d_aligned[i]
+        exit_short = close[i] > vwc_1d_aligned[i]
         
-        # Exit conditions: trend reversal or momentum divergence
-        exit_long = not trend_up or not mom_bullish
-        exit_short = not trend_down or not mom_bearish
-        
-        if long_entry and position != 1:
+        if long_setup and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_entry and position != -1:
+        elif short_setup and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
