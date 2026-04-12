@@ -13,35 +13,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and Donchian channels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 12h data for trend filter and Donchian channels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate daily 10-period EMA (trend filter)
-    close_1d = df_1d['close'].values
-    ema10_1d = pd.Series(close_1d).ewm(span=10, adjust=False, min_periods=10).mean().values
-    ema10_1d_aligned = align_htf_to_ltf(prices, df_1d, ema10_1d)
+    # Calculate 12h 10-period EMA (trend filter)
+    close_12h = df_12h['close'].values
+    ema10_12h = pd.Series(close_12h).ewm(span=10, adjust=False, min_periods=10).mean().values
+    ema10_12h_aligned = align_htf_to_ltf(prices, df_12h, ema10_12h)
     
-    # Calculate daily 20-period high and low for Donchian channels
-    high_20 = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    # Calculate 12h 20-period high and low for Donchian channels
+    high_20 = pd.Series(df_12h['high'].values).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(df_12h['low'].values).rolling(window=20, min_periods=20).min().values
+    high_20_aligned = align_htf_to_ltf(prices, df_12h, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_12h, low_20)
     
-    # Calculate 10-period ATR for volatility filter
+    # Calculate 12-period ATR for volatility filter
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr1[0] = tr2[0] = tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr10 = np.full(n, np.nan)
-    for i in range(9, n):
-        atr10[i] = np.nanmean(tr[i-9:i+1])
+    atr12 = np.full(n, np.nan)
+    for i in range(11, n):
+        atr12[i] = np.nanmean(tr[i-11:i+1])
     
     # Calculate 20-period ATR EMA for volatility regime
     atr_ema20 = np.full(n, np.nan)
-    atr_series = pd.Series(atr10)
+    atr_series = pd.Series(atr12)
     atr_ema20_values = atr_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     atr_ema20[:] = atr_ema20_values
     
@@ -50,29 +50,29 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema10_1d_aligned[i]) or np.isnan(high_20_aligned[i]) or 
-            np.isnan(low_20_aligned[i]) or np.isnan(atr10[i]) or 
+        if (np.isnan(ema10_12h_aligned[i]) or np.isnan(high_20_aligned[i]) or 
+            np.isnan(low_20_aligned[i]) or np.isnan(atr12[i]) or 
             np.isnan(atr_ema20[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: current ATR10 > 1.0x 20-period ATR EMA (elevated volatility)
-        vol_filter = atr10[i] > atr_ema20[i] * 1.0
+        # Volatility filter: current ATR12 > 1.0x 20-period ATR EMA (elevated volatility)
+        vol_filter = atr12[i] > atr_ema20[i] * 1.0
         
-        # Trend filter: price above/below daily 10 EMA
-        price_above_ema10 = close[i] > ema10_1d_aligned[i]
-        price_below_ema10 = close[i] < ema10_1d_aligned[i]
+        # Trend filter: price above/below 12h 10 EMA
+        price_above_ema10 = close[i] > ema10_12h_aligned[i]
+        price_below_ema10 = close[i] < ema10_12h_aligned[i]
         
         # Entry conditions: Donchian breakout in direction of trend with volatility expansion
-        long_breakout = close[i] > high_20_aligned[i]  # break above daily 20-period high
-        short_breakout = close[i] < low_20_aligned[i]  # break below daily 20-period low
+        long_breakout = close[i] > high_20_aligned[i]  # break above 12h 20-period high
+        short_breakout = close[i] < low_20_aligned[i]  # break below 12h 20-period low
         
         long_entry = long_breakout and price_above_ema10 and vol_filter
         short_entry = short_breakout and price_below_ema10 and vol_filter
         
         # Exit conditions: reversal signal or volatility contraction
-        long_exit = (close[i] < ema10_1d_aligned[i]) or (atr10[i] < atr_ema20[i] * 0.8)
-        short_exit = (close[i] > ema10_1d_aligned[i]) or (atr10[i] < atr_ema20[i] * 0.8)
+        long_exit = (close[i] < ema10_12h_aligned[i]) or (atr12[i] < atr_ema20[i] * 0.8)
+        short_exit = (close[i] > ema10_12h_aligned[i]) or (atr12[i] < atr_ema20[i] * 0.8)
         
         if long_entry and position != 1:
             position = 1
@@ -97,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_donchian_ema10_breakout_vol_filter_v1"
-timeframe = "12h"
+name = "4h_12h_donchian_ema10_breakout_vol_filter_v1"
+timeframe = "4h"
 leverage = 1.0
