@@ -3,80 +3,103 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Weekly ATR breakout: Long when price breaks above weekly ATR-based ceiling,
-# Short when breaks below floor. Uses 1d price action with 1w volatility filter.
-# Works in bull (breakouts) and bear (mean-reversion from extremes).
-name = "1d_1w_atr_breakout_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for ATR calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    # Get 1d data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels from previous day
+    # Pivot = (H+L+C)/3
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    
+    # Resistance and support levels
+    r4 = close_1d + range_1d * 1.500
+    r3 = close_1d + range_1d * 1.250
+    r2 = close_1d + range_1d * 1.166
+    r1 = close_1d + range_1d * 1.083
+    s1 = close_1d - range_1d * 1.083
+    s2 = close_1d - range_1d * 1.166
+    s3 = close_1d - range_1d * 1.250
+    s4 = close_1d - range_1d * 1.500
+    
+    # Align Camarilla levels to 12h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Get 1w data for trend filter (EMA 50)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
     close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate ATR(14) on weekly data
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr1[0] = high_1w[0] - low_1w[0]  # first bar
-    tr2[0] = high_1w[0] - close_1w[0]
-    tr3[0] = low_1w[0] - close_1w[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate weekly midpoint
-    mid_1w = (high_1w + low_1w) / 2.0
-    
-    # ATR-based bands: midpoint ± 1.5 * ATR
-    upper_1w = mid_1w + 1.5 * atr_1w
-    lower_1w = mid_1w - 1.5 * atr_1w
-    
-    # Align weekly bands to daily timeframe
-    upper_1w_aligned = align_htf_to_ltf(prices, df_1w, upper_1w)
-    lower_1w_aligned = align_htf_to_ltf(prices, df_1w, lower_1w)
+    # Volume filter - 20-period average on 12h data
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_ok = volume > vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(14, n):
-        # Skip if bands not ready
-        if np.isnan(upper_1w_aligned[i]) or np.isnan(lower_1w_aligned[i]):
+    for i in range(100, n):
+        # Skip if not ready
+        if (np.isnan(r4_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Breakout signals
-        long_breakout = close[i] > upper_1w_aligned[i]
-        short_breakout = close[i] < lower_1w_aligned[i]
+        # Trend from 1w EMA
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
-        # Exit when price returns to weekly midpoint
-        reenter_long = close[i] < mid_1w[i] if not np.isnan(mid_1w[i]) else False
-        reenter_short = close[i] > mid_1w[i] if not np.isnan(mid_1w[i]) else False
+        # Breakout signals with volume confirmation
+        # Long: break above R3 (strong resistance becomes support)
+        long_signal = close[i] > r3_aligned[i] and uptrend and volume_ok[i]
+        # Short: break below S3 (strong support becomes resistance)
+        short_signal = close[i] < s3_aligned[i] and downtrend and volume_ok[i]
+        
+        # Exit when price returns to pivot area
+        exit_long = close[i] < pivot[i]
+        exit_short = close[i] > pivot[i]
         
         # Execute trades
-        if long_breakout and position != 1:
+        if long_signal and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_breakout and position != -1:
+        elif short_signal and position != -1:
             position = -1
             signals[i] = -0.25
-        elif reenter_long and position == 1:
+        elif exit_long and position == 1:
             position = 0
             signals[i] = 0.0
-        elif reenter_short and position == -1:
+        elif exit_short and position == -1:
             position = 0
             signals[i] = 0.0
         else:
