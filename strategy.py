@@ -1,3 +1,10 @@
+# 1d_1w_rsi_momentum_trend_v1
+# Hypothesis: Daily RSI momentum filtered by weekly trend and volatility regime.
+# In bull markets, RSI > 60 with weekly uptrend captures momentum.
+# In bear markets, RSI < 40 with weekly downtrend captures mean-reversion bounces.
+# Weekly trend filter reduces whipsaws; volatility filter avoids chop.
+# Target: 15-25 trades/year, discretionary sizing 0.25.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,17 +20,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for 20-period EMA (trend filter)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate daily 20-period EMA
-    close_1d = df_1d['close'].values
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    # Weekly 20-period EMA for trend
+    close_1w = df_1w['close'].values
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # Calculate 10-period ATR for volatility filter
+    # Daily 14-period RSI
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Daily ATR(10) for volatility filter
     tr1 = np.abs(high - low)
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -33,7 +49,7 @@ def generate_signals(prices):
     for i in range(9, n):
         atr10[i] = np.nanmean(tr[i-9:i+1])
     
-    # Calculate 20-period ATR EMA for volatility regime
+    # ATR(10) EMA(20) for volatility regime
     atr_ema20 = np.full(n, np.nan)
     atr_series = pd.Series(atr10)
     atr_ema20_values = atr_series.ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -42,30 +58,31 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(30, n):  # warmup for RSI and ATR
         # Skip if data not ready
-        if (np.isnan(ema20_1d_aligned[i]) or np.isnan(atr10[i]) or 
-            np.isnan(atr_ema20[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema20_1w_aligned[i]) or 
+            np.isnan(atr10[i]) or np.isnan(atr_ema20[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: current ATR10 > 1.0x 20-period ATR EMA (elevated volatility)
-        vol_filter = atr10[i] > atr_ema20[i] * 1.0
+        # Weekly trend filter
+        weekly_uptrend = close[i] > ema20_1w_aligned[i]
+        weekly_downtrend = close[i] < ema20_1w_aligned[i]
         
-        # Trend filter: price above/below daily 20 EMA
-        price_above_ema20 = close[i] > ema20_1d_aligned[i]
-        price_below_ema20 = close[i] < ema20_1d_aligned[i]
+        # Volatility filter: elevated volatility (avoid chop)
+        vol_filter = atr10[i] > atr_ema20[i] * 0.8
         
-        # Entry conditions: breakout in direction of trend with volatility expansion
-        long_breakout = close[i] > high[i-1]  # break above previous high
-        short_breakout = close[i] < low[i-1]  # break below previous low
+        # RSI momentum conditions
+        rsi_overbought = rsi[i] > 60
+        rsi_oversold = rsi[i] < 40
         
-        long_entry = long_breakout and price_above_ema20 and vol_filter
-        short_entry = short_breakout and price_below_ema20 and vol_filter
+        # Entry logic: align RSI momentum with weekly trend
+        long_entry = rsi_overbought and weekly_uptrend and vol_filter
+        short_entry = rsi_oversold and weekly_downtrend and vol_filter
         
-        # Exit conditions: reversal signal or volatility contraction
-        long_exit = (close[i] < ema20_1d_aligned[i]) or (atr10[i] < atr_ema20[i] * 0.8)
-        short_exit = (close[i] > ema20_1d_aligned[i]) or (atr10[i] < atr_ema20[i] * 0.8)
+        # Exit on RSI mean reversion or volatility collapse
+        long_exit = rsi[i] < 50 or atr10[i] < atr_ema20[i] * 0.6
+        short_exit = rsi[i] > 50 or atr10[i] < atr_ema20[i] * 0.6
         
         if long_entry and position != 1:
             position = 1
@@ -90,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_ema20_breakout_vol_filter_v1"
-timeframe = "4h"
+name = "1d_1w_rsi_momentum_trend_v1"
+timeframe = "1d"
 leverage = 1.0
