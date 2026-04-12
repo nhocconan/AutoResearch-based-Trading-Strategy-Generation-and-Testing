@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h_1d_1w_alligator_elder_ray_v1
-# Uses weekly trend via Alligator (SMAs of median price) and daily Elder Ray (bull/bear power) for entry timing.
-# Long when weekly trend is bullish (price > Alligator's Jaw) AND daily bull power > 0.
-# Short when weekly trend is bearish (price < Alligator's Jaw) AND daily bear power < 0.
-# Exits when Elder Ray signal reverses or price crosses Alligator's Teeth.
-# Designed for low trade frequency (target: 12-37/year) with trend-following in weekly timeframe and precise entry on daily.
-# Works in trending markets via Alligator filter and avoids whipsaws via Elder Ray confirmation.
+# Hypothesis: 12h_1d_donchian_breakout_volume
+# Uses daily Donchian channels (20-period high/low) as breakout levels on 12h chart.
+# Long when price breaks above 20-day high with volume confirmation (volume > 1.5x 20-period avg).
+# Short when price breaks below 20-day low with volume confirmation.
+# Exits when price crosses the 20-day midpoint (mean reversion).
+# Designed for low trade frequency (target: 12-37/year) to minimize fee drag.
+# Focus on BTC/ETH as primary targets.
+# Works in trending markets via breakouts and ranging markets via mean reversion to midpoint.
 
-name = "6h_1d_1w_alligator_elder_ray_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_breakout_volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,71 +24,66 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for Alligator
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 13:
-        return np.zeros(n)
-    
-    # Get daily data for Elder Ray
+    # Get daily data for Donchian channel calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate weekly median price (typical price)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    median_price_1w = (high_1w + low_1w + close_1w) / 3.0
-    
-    # Alligator: SMAs of median price (13, 8, 5) with future shift
-    jaw = pd.Series(median_price_1w).rolling(window=13, min_periods=13).mean().values  # 13-period
-    teeth = pd.Series(median_price_1w).rolling(window=8, min_periods=8).mean().values   # 8-period
-    lips = pd.Series(median_price_1w).rolling(window=5, min_periods=5).mean().values    # 5-period
-    
-    # Align weekly Alligator to 6h timeframe (with proper delay for completed weekly bar)
-    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1w, lips)
-    
-    # Calculate daily Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
+    # Calculate daily Donchian channels (20-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high_1d - ema13_1d
-    bear_power = low_1d - ema13_1d
     
-    # Align daily Elder Ray to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    # 20-period high and low
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Midpoint for exit
+    donchian_mid = (donchian_high + donchian_low) / 2.0
+    
+    # Align daily Donchian levels to 12h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid)
+    
+    # Volume confirmation: volume > 1.5 * 20-period average (12h timeframe)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):  # start after warmup
         # Skip if data not ready
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i])):
+        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(donchian_mid_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Weekly trend filter: price vs Jaw (Alligator's Jaw)
-        price_vs_jaw = close[i] - jaw_aligned[i]
+        # Require volume confirmation for new entries
+        if not vol_confirm[i]:
+            # Hold current position if volume filter fails
+            if position == 1:
+                signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.0
+            continue
         
-        # Long setup: weekly bullish trend AND daily bull power positive
-        if price_vs_jaw > 0 and bull_power_aligned[i] > 0 and position != 1:
+        # Long signal: price breaks above 20-day high
+        if close[i] > donchian_high_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short setup: weekly bearish trend AND daily bear power negative
-        elif price_vs_jaw < 0 and bear_power_aligned[i] < 0 and position != -1:
+        # Short signal: price breaks below 20-day low
+        elif close[i] < donchian_low_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: Elder Ray signal reverses OR price crosses Teeth
-        elif position == 1 and (bull_power_aligned[i] <= 0 or close[i] <= teeth_aligned[i]):
+        # Exit conditions: price crosses 20-day midpoint (mean reversion)
+        elif position == 1 and close[i] <= donchian_mid_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (bear_power_aligned[i] >= 0 or close[i] >= teeth_aligned[i]):
+        elif position == -1 and close[i] >= donchian_mid_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
