@@ -1,9 +1,14 @@
-# 12h_1d_trix_volume_regime
-# Hypothesis: 12-hour TRIX momentum with volume confirmation and 1-day chop regime filter. TRIX filters noise in choppy markets while capturing momentum in trending regimes. Works in both bull and bear by adapting to market conditions via chop filter.
-# Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag.
+#!/usr/bin/env python3
+"""
+4h_1d_vortex_vortex_trend_v1
+Hypothesis: 4-hour Vortex Indicator trend with 1-day volume confirmation and ATR volatility filter.
+Vortex identifies trending markets (VI+ > VI-) and avoids ranging periods. Works in bull/bear by
+filtering trades only when trend is strong. Uses volatility-adjusted position sizing to manage risk.
+Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
+"""
 
-name = "12h_1d_trix_volume_regime"
-timeframe = "12h"
+name = "4h_1d_vortex_vortex_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,72 +25,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for TRIX and chop regime
+    # Get daily data for Vortex calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # TRIX calculation (15-period EMA of EMA of EMA of price)
-    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False, min_periods=15).mean()
-    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
-    trix_raw = ema3.pct_change() * 100
-    trix = trix_raw.values
+    # Vortex Indicator calculation (14-period)
+    # True Range
+    tr1 = np.abs(np.subtract(high_1d, low_1d))
+    tr2 = np.abs(np.subtract(high_1d, np.roll(close_1d, 1)))
+    tr3 = np.abs(np.subtract(low_1d, np.roll(close_1d, 1)))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Chop regime calculation (14-period)
-    def true_range(high, low, close_prev):
-        tr1 = high - low
-        tr2 = np.abs(high - close_prev)
-        tr3 = np.abs(low - close_prev)
-        return np.maximum(tr1, np.maximum(tr2, tr3))
+    # VM+ and VM-
+    vm_plus = np.abs(np.subtract(high_1d, np.roll(low_1d, 1)))
+    vm_minus = np.abs(np.subtract(low_1d, np.roll(high_1d, 1)))
     
-    close_prev_1d = np.roll(close_1d, 1)
-    tr = true_range(high_1d, low_1d, close_prev_1d)
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Sum over 14 periods
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    vm_plus_sum = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
+    vm_minus_sum = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
     
-    # Chop: sum of true ranges over 14 periods / (max(high) - min(low)) over 14 periods
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop_denom = highest_high_14 - lowest_low_14
-    chop = np.where(chop_denom != 0, (pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values / chop_denom) * 100, 50)
+    # VI+ and VI-
+    vi_plus = vm_plus_sum / tr_sum
+    vi_minus = vm_minus_sum / tr_sum
+    
+    # Vortex trend: VI+ > VI- indicates uptrend, VI- > VI+ indicates downtrend
+    vortex_trend = vi_plus - vi_minus  # Positive = uptrend, Negative = downtrend
+    
+    # ATR for volatility filter (14-day ATR)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Volume confirmation: volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.3)
     
-    # Align TRIX and chop to 12h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Align Vortex trend and ATR to 4h timeframe
+    vortex_trend_aligned = align_htf_to_ltf(prices, df_1d, vortex_trend)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(trix_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(vol_confirm[i])):
+        if (np.isnan(vortex_trend_aligned[i]) or 
+            np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: TRIX crosses above 0 with volume confirmation and chop < 61.8 (trending)
-        if (i > 0 and trix_aligned[i-1] <= 0 and trix_aligned[i] > 0 and 
-            vol_confirm[i] and chop_aligned[i] < 61.8 and position != 1):
+        # Long entry: strong uptrend (VI+ > VI-) with volume and volatility filter
+        if (vortex_trend_aligned[i] > 0.1 and vol_confirm[i] and 
+            atr_aligned[i] > 0 and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: TRIX crosses below 0 with volume confirmation and chop < 61.8 (trending)
-        elif (i > 0 and trix_aligned[i-1] >= 0 and trix_aligned[i] < 0 and 
-              vol_confirm[i] and chop_aligned[i] < 61.8 and position != -1):
+        # Short entry: strong downtrend (VI- > VI+) with volume and volatility filter
+        elif (vortex_trend_aligned[i] < -0.1 and vol_confirm[i] and 
+              atr_aligned[i] > 0 and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: TRIX crosses zero in opposite direction or chop > 61.8 (choppy regime)
-        elif position == 1 and (trix_aligned[i] < 0 or chop_aligned[i] > 61.8):
+        # Exit: trend reversal or volatility collapse
+        elif position == 1 and (vortex_trend_aligned[i] < -0.05 or not vol_confirm[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (trix_aligned[i] > 0 or chop_aligned[i] > 61.8):
+        elif position == -1 and (vortex_trend_aligned[i] > 0.05 or not vol_confirm[i]):
             position = 0
             signals[i] = 0.0
         else:
