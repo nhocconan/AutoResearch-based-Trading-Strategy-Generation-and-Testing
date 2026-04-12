@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_camarilla_breakout_volume_v1"
-timeframe = "1h"
+name = "6h_1w_1d_camarilla_breakout_volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,14 +17,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily trend filter: EMA(50) - long-term trend
+    # Weekly trend filter: EMA(21) - long-term trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    ema_21_1w = pd.Series(df_1w['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    
+    # Daily volatility for CAMARILLA calculation (using previous day)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Daily 4-period volatility for CAMARILLA calculation
     prev_close_1d = df_1d['close'].shift(1).values
     prev_high_1d = df_1d['high'].shift(1).values
     prev_low_1d = df_1d['low'].shift(1).values
@@ -36,10 +39,10 @@ def generate_signals(prices):
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # Volume filter: current 1h volume > 24h average volume (1 day)
-    vol_1d_avg = pd.Series(df_1d['volume']).rolling(window=1, min_periods=1).mean().values
-    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d_avg)
-    volume_filter = volume > vol_1d_aligned
+    # Volume filter: current 6h volume > 48h average volume (2 days)
+    vol_2d_avg = pd.Series(df_1d['volume']).rolling(window=2, min_periods=2).mean().values
+    vol_2d_aligned = align_htf_to_ltf(prices, df_1d, vol_2d_avg)
+    volume_filter = volume > vol_2d_aligned
     
     # Session filter: 08-20 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -51,22 +54,22 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if not ready
         if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_filter[i])):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+            np.isnan(ema_21_1w_aligned[i]) or np.isnan(volume_filter[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Apply session filter
         if not session_filter[i]:
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: price breaks above daily R3 with volume and above daily EMA50
-        long_signal = (close[i] > R3_aligned[i] and volume_filter[i] and close[i] > ema_50_1d_aligned[i])
+        # Long: price breaks above daily R3 with volume and above weekly EMA21
+        long_signal = (close[i] > R3_aligned[i] and volume_filter[i] and close[i] > ema_21_1w_aligned[i])
         
-        # Short: price breaks below daily S3 with volume and below daily EMA50
-        short_signal = (close[i] < S3_aligned[i] and volume_filter[i] and close[i] < ema_50_1d_aligned[i])
+        # Short: price breaks below daily S3 with volume and below weekly EMA21
+        short_signal = (close[i] < S3_aligned[i] and volume_filter[i] and close[i] < ema_21_1w_aligned[i])
         
-        # Exit: price returns to midpoint between daily R4/S4 (stronger reversal)
+        # Exit: price returns to midpoint between daily R4/S4
         R4 = prev_close_1d + H_minus_L_1d * 1.1 / 2
         S4 = prev_close_1d - H_minus_L_1d * 1.1 / 2
         R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
@@ -79,10 +82,10 @@ def generate_signals(prices):
         # Execute trades
         if long_signal and position != 1:
             position = 1
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif short_signal and position != -1:
             position = -1
-            signals[i] = -0.20
+            signals[i] = -0.25
         elif exit_long and position == 1:
             position = 0
             signals[i] = 0.0
@@ -91,6 +94,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Hold position
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
