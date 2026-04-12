@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_12h_trix_volume_reversal_v1
-Hypothesis: 4-hour TRIX momentum with volume spike and 12h trend filter.
-Enters long when TRIX crosses above zero with volume spike and 12h uptrend; short when crosses below zero with volume spike and 12h downtrend.
-Uses fixed position sizing to minimize churn. Designed to catch momentum reversals in trending markets.
-Target: 20-35 trades/year (80-140 total over 4 years) to minimize fee drag.
+1h_4h_1d_trend_continuation_v1
+Hypothesis: 1-hour strategy using 4h trend filter and 1d momentum filter.
+Enters long when price closes above 4h EMA20 and 1d ROC > 0, short when below 4h EMA20 and 1d ROC < 0.
+Uses 1h for entry timing only to reduce whipsaw. Target: 15-30 trades/year (60-120 total) to minimize fee drag.
+Works in bull/bear by following higher timeframe trend with momentum confirmation.
 """
 
 import numpy as np
@@ -17,75 +17,53 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Calculate TRIX (15-period EMA of EMA of EMA of close, then ROC)
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix = 100 * (pd.Series(ema3).pct_change(1).values)
-    
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    # 12h EMA50 for trend direction
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    
-    # Calculate ATR for volatility filter
     high = prices['high'].values
     low = prices['low'].values
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(np.roll(high, 1) - close)
-    tr3 = np.abs(np.roll(low, 1) - close)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    # 4h EMA20 for trend direction
+    close_4h = df_4h['close'].values
+    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    
+    # Get 1d data for momentum filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
+        return np.zeros(n)
+    
+    # 1d ROC(5) for momentum
+    close_1d = df_1d['close'].values
+    roc5_1d = np.zeros_like(close_1d)
+    roc5_1d[5:] = (close_1d[5:] - close_1d[:-5]) / close_1d[:-5] * 100
+    roc5_1d_aligned = align_htf_to_ltf(prices, df_1d, roc5_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if data not ready
-        if (np.isnan(trix[i]) or np.isnan(ema50_12h_aligned[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(ema20_4h_aligned[i]) or np.isnan(roc5_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period average
-        if i >= 20:
-            vol_ma = np.mean(volume[max(0, i-20):i])
-            volume_filter = volume[i] > vol_ma * 1.5
-        else:
-            volume_filter = False
+        # Entry conditions: 4h trend + 1d momentum
+        long_entry = close[i] > ema20_4h_aligned[i] and roc5_1d_aligned[i] > 0
+        short_entry = close[i] < ema20_4h_aligned[i] and roc5_1d_aligned[i] < 0
         
-        # Trend filter from 12h EMA50
-        uptrend_12h = close[i] > ema50_12h_aligned[i]
-        downtrend_12h = close[i] < ema50_12h_aligned[i]
-        
-        # Fixed position size
-        position_size = 0.25
-        
-        # TRIX zero cross signals
-        trix_cross_up = trix[i] > 0 and trix[i-1] <= 0
-        trix_cross_down = trix[i] < 0 and trix[i-1] >= 0
-        
-        # Entry conditions: TRIX cross with volume and trend confirmation
-        long_entry = trix_cross_up and volume_filter and uptrend_12h
-        short_entry = trix_cross_down and volume_filter and downtrend_12h
-        
-        # Exit conditions: opposite TRIX cross or trend change
-        long_exit = trix_cross_down or not uptrend_12h
-        short_exit = trix_cross_up or not downtrend_12h
+        # Exit conditions: trend or momentum reversal
+        long_exit = close[i] < ema20_4h_aligned[i] or roc5_1d_aligned[i] <= 0
+        short_exit = close[i] > ema20_4h_aligned[i] or roc5_1d_aligned[i] >= 0
         
         if long_entry and position != 1:
             position = 1
-            signals[i] = position_size
+            signals[i] = 0.20
         elif short_entry and position != -1:
             position = -1
-            signals[i] = -position_size
+            signals[i] = -0.20
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -95,14 +73,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = position_size
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -position_size
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_12h_trix_volume_reversal_v1"
-timeframe = "4h"
+name = "1h_4h_1d_trend_continuation_v1"
+timeframe = "1h"
 leverage = 1.0
