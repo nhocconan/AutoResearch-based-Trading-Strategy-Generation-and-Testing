@@ -1,17 +1,19 @@
+# 2025-06-26 04:30:17
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_camarilla_breakout_v3
-# Buys when price breaks above daily H3 with volume > 1.5x 20-period average and ADX > 20.
-# Shorts when price breaks below daily L3 with same conditions.
-# Exits on opposite breakout or when ADX drops below 15 (trend weakness).
-# Uses discrete position sizes (0.25) to minimize fee churn.
-# Designed for 15-30 trades/year to avoid fee drag while capturing breakout momentum.
+# Hypothesis: 4h_1d_camarilla_breakout_v4
+# Uses daily high/low to calculate daily Camarilla levels for the next day.
+# Buys when price breaks above daily H3 with volume confirmation.
+# Shorts when price breaks below daily L3 with volume confirmation.
+# Uses ADX > 25 to filter for strong trends, avoiding false signals in weak trends or ranges.
+# Designed for low trade frequency (target: 19-50 trades/year) to minimize fee drag.
 # Works in bull markets (breakouts continuation) and bear markets (breakdowns continuation).
+# Added volume spike filter (volume > 2.0 * 20-period average) to increase signal quality.
 
-name = "4h_1d_camarilla_breakout_v3"
+name = "4h_1d_camarilla_breakout_v4"
 timeframe = "4h"
 leverage = 1.0
 
@@ -44,11 +46,11 @@ def generate_signals(prices):
     h3_level = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     l3_level = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Volume confirmation: volume > 1.5 * 20-period average (4h timeframe)
+    # Volume confirmation: volume > 2.0 * 20-period average (4h timeframe)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    vol_confirm = volume > (vol_ma * 2.0)
     
-    # ADX trend filter: enter when ADX > 20, exit when ADX < 15 (hysteresis)
+    # ADX trend filter: only trade when ADX > 25 (strong trend)
     # Calculate True Range
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
@@ -80,29 +82,20 @@ def generate_signals(prices):
     minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
     dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
     adx = wilders_smooth(dx, 14)
+    adx_filter = adx > 25  # strong trend only
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):  # start after warmup
         # Skip if levels not ready
-        if np.isnan(h3_level[i]) or np.isnan(l3_level[i]) or np.isnan(adx[i]):
+        if np.isnan(h3_level[i]) or np.isnan(l3_level[i]) or np.isnan(adx_filter[i]):
             signals[i] = 0.0
             continue
         
-        # Check if we need to exit due to weak trend
-        if position == 1 and adx[i] < 15:
-            position = 0
-            signals[i] = 0.0
-            continue
-        elif position == -1 and adx[i] < 15:
-            position = 0
-            signals[i] = 0.0
-            continue
-        
-        # Require volume confirmation for new entries
-        if not vol_confirm[i]:
-            # Hold current position if volume filter fails
+        # Require both volume and strong trend filters
+        if not (vol_confirm[i] and adx_filter[i]):
+            # Hold current position if filters fail
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -111,12 +104,12 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above daily H3 with volume and ADX > 20
-        if close[i] > h3_level[i] and adx[i] > 20 and position != 1:
+        # Long signal: price breaks above daily H3 with volume
+        if close[i] > h3_level[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below daily L3 with volume and ADX > 20
-        elif close[i] < l3_level[i] and adx[i] > 20 and position != -1:
+        # Short signal: price breaks below daily L3 with volume
+        elif close[i] < l3_level[i] and position != -1:
             position = -1
             signals[i] = -0.25
         # Exit conditions: opposite breakout
