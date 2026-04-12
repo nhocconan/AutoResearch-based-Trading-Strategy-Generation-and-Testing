@@ -8,56 +8,94 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
-    # Uses weekly EMA50 for trend direction and daily Donchian channels for breakouts
-    # Volume spike (>1.5x 20-period average) confirms institutional participation
-    # Designed for very low trade frequency (target: 10-25/year) to minimize fee drag
-    # Trend filter works in bull/bear markets; breakout structure captures momentum
+    # Hypothesis: 6h strategy using 12h Supertrend for trend direction and 12h Donchian(20) breakout
+    # for entry timing, filtered by 1d volume confirmation. Uses discrete position sizing (0.25)
+    # to minimize fee churn. Designed for low trade frequency (target: 12-37/year) to overcome
+    # the 6h timeframe's historically poor keep rate by combining strong trend filter with
+    # structural breakouts and volume confirmation - proven effective in both bull and bear markets.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels and volume MA
+    # Get 12h data for Supertrend and Donchian channels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    
+    # Calculate ATR for Supertrend (10-period)
+    atr_period = 10
+    tr = np.maximum(np.maximum(high_12h[1:] - low_12h[1:], 
+                               np.abs(high_12h[1:] - close_12h[:-1])),
+                    np.abs(low_12h[1:] - close_12h[:-1]))
+    tr = np.concatenate([[np.nan], tr])  # align with index 0
+    atr = np.full(len(df_12h), np.nan)
+    for i in range(atr_period, len(df_12h)):
+        if np.isnan(atr[i-1]):
+            atr[i] = np.nanmean(tr[i-atr_period+1:i+1])
+        else:
+            atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
+    
+    # Calculate Supertrend
+    factor = 3.0
+    hl2 = (high_12h + low_12h) / 2
+    upperband = hl2 + (factor * atr)
+    lowerband = hl2 - (factor * atr)
+    
+    supertrend = np.full(len(df_12h), np.nan)
+    direction = np.full(len(df_12h), np.nan)  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(1, len(df_12h)):
+        if np.isnan(supertrend[i-1]):
+            # Initialize
+            supertrend[i] = lowerband[i]
+            direction[i] = 1
+        else:
+            if close_12h[i] > upperband[i-1]:
+                direction[i] = 1
+            elif close_12h[i] < lowerband[i-1]:
+                direction[i] = -1
+            else:
+                direction[i] = direction[i-1]
+            
+            if direction[i] == 1:
+                supertrend[i] = max(lowerband[i], supertrend[i-1])
+            else:
+                supertrend[i] = min(upperband[i], supertrend[i-1])
+    
+    # Calculate 12h Donchian channels (20-period)
+    donchian_high_12h = np.full(len(df_12h), np.nan)
+    donchian_low_12h = np.full(len(df_12h), np.nan)
+    
+    for i in range(20, len(df_12h)):
+        donchian_high_12h[i] = np.max(high_12h[i-20:i])
+        donchian_low_12h[i] = np.min(low_12h[i-20:i])
+    
+    # Get 1d data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
-    
-    # Calculate 1d Donchian channels (20-period)
-    donchian_high_1d = np.full(len(df_1d), np.nan)
-    donchian_low_1d = np.full(len(df_1d), np.nan)
-    
-    for i in range(20, len(df_1d)):
-        donchian_high_1d[i] = np.max(high_1d[i-20:i])
-        donchian_low_1d[i] = np.min(low_1d[i-20:i])
     
     # Calculate 1d volume MA (20-period) for confirmation
     vol_ma_1d = np.full(len(df_1d), np.nan)
     for i in range(20, len(df_1d)):
         vol_ma_1d[i] = np.mean(volume_1d[i-20:i])
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align HTF indicators to 1d timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_1d)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_1d)
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
     # Volume confirmation: volume > 1.5 * 20-period average (1d)
     volume_spike = volume_1d > (1.5 * vol_ma_1d)
+    
+    # Align all HTF indicators to 6h timeframe
+    supertrend_aligned = align_htf_to_ltf(prices, df_12h, supertrend)
+    direction_aligned = align_htf_to_ltf(prices, df_12h, direction)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high_12h)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low_12h)
     volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
     
     signals = np.zeros(n)
@@ -65,14 +103,14 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
+        if (np.isnan(direction_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
             np.isnan(donchian_low_aligned[i]) or np.isnan(volume_spike_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Determine 1w trend
-        bullish_trend = close[i] > ema50_1w_aligned[i]
-        bearish_trend = close[i] < ema50_1w_aligned[i]
+        # Determine 12h trend from Supertrend direction
+        bullish_trend = direction_aligned[i] == 1
+        bearish_trend = direction_aligned[i] == -1
         
         # Entry logic: Donchian breakout with volume and trend filter
         long_entry = False
@@ -112,6 +150,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_donchian_breakout_ema50_volume_v1"
-timeframe = "1d"
+name = "6h_12h_supertrend_donchian_breakout_volume_v1"
+timeframe = "6h"
 leverage = 1.0
