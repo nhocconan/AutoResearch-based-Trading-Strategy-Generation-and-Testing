@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v1"
-timeframe = "4h"
+name = "12h_1d_cci_trend_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,54 +17,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation (using previous day's data)
+    # Get 1d data for CCI calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels based on previous day's data
-    # Camarilla formulas: 
-    # H4 = close + 1.1*(high-low)*1.1/2
-    # L4 = close - 1.1*(high-low)*1.1/2
-    # H3 = close + 1.1*(high-low)*1.1/4
-    # L3 = close - 1.1*(high-low)*1.1/4
-    # H2 = close + 1.1*(high-low)*1.1/6
-    # L2 = close - 1.1*(high-low)*1.1/6
-    # H1 = close + 1.1*(high-low)*1.1/12
-    # L1 = close - 1.1*(high-low)*1.1/12
+    # Calculate CCI(20) on daily data
+    tp_1d = (high_1d + low_1d + close_1d) / 3.0
+    sma_tp = pd.Series(tp_1d).rolling(window=20, min_periods=20).mean().values
+    mad = pd.Series(tp_1d).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
+    cci_1d = (tp_1d - sma_tp) / (0.015 * mad)
     
-    # Calculate range for previous day
-    prev_high = np.roll(high_1d, 1)  # Previous day's high
-    prev_low = np.roll(low_1d, 1)    # Previous day's low
-    prev_close = np.roll(close_1d, 1) # Previous day's close
+    # Align CCI to 12h timeframe
+    cci_1d_aligned = align_htf_to_ltf(prices, df_1d, cci_1d)
     
-    # Avoid first element (no previous day)
-    prev_high[0] = prev_high[1] if len(prev_high) > 1 else 0
-    prev_low[0] = prev_low[1] if len(prev_low) > 1 else 0
-    prev_close[0] = prev_close[1] if len(prev_close) > 1 else 0
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Calculate Camarilla levels for previous day
-    range_1d = prev_high - prev_low
-    H4 = prev_close + 1.1 * range_1d * 1.1 / 2
-    L4 = prev_close - 1.1 * range_1d * 1.1 / 2
-    H3 = prev_close + 1.1 * range_1d * 1.1 / 4
-    L3 = prev_close - 1.1 * range_1d * 1.1 / 4
-    H2 = prev_close + 1.1 * range_1d * 1.1 / 6
-    L2 = prev_close - 1.1 * range_1d * 1.1 / 6
-    H1 = prev_close + 1.1 * range_1d * 1.1 / 12
-    L1 = prev_close - 1.1 * range_1d * 1.1 / 12
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Align Camarilla levels to 4h timeframe
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    
-    # Volume filter - 20-period average on 4h data
+    # Volume filter - 20-period average on 12h data
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
@@ -74,21 +54,24 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or 
-            np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
+        if (np.isnan(cci_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
             np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Breakout signals with volume confirmation
-        # Long: break above H3 (strong resistance)
-        long_signal = close[i] > H3_aligned[i] and volume_ok[i]
-        # Short: break below L3 (strong support)
-        short_signal = close[i] < L3_aligned[i] and volume_ok[i]
+        # Trend from 1w EMA
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
-        # Exit when price returns to opposite level
-        exit_long = close[i] < L3_aligned[i]
-        exit_short = close[i] > H3_aligned[i]
+        # CCI signals with volume confirmation
+        # Long: CCI > -100 (emerging bullish) in uptrend
+        long_signal = cci_1d_aligned[i] > -100 and uptrend and volume_ok[i]
+        # Short: CCI < 100 (emerging bearish) in downtrend
+        short_signal = cci_1d_aligned[i] < 100 and downtrend and volume_ok[i]
+        
+        # Exit when CCI reverses
+        exit_long = cci_1d_aligned[i] < -100
+        exit_short = cci_1d_aligned[i] > 100
         
         # Execute trades
         if long_signal and position != 1:
