@@ -3,16 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h_1d_camarilla_breakout_volume
-# Uses daily Camarilla pivot levels (based on previous day's range) as support/resistance on 12h chart.
-# Long when price breaks above H4 level with volume confirmation (volume > 1.5x 20-period avg).
-# Short when price breaks below L4 level with volume confirmation.
-# Exits when price crosses the pivot point (mean reversion).
-# Camarilla levels are designed for intraday trading but work well on higher timeframes.
+# Hypothesis: 4h_1d_kama_rsi_chop
+# Uses Kaufman Adaptive Moving Average (KAMA) for trend direction on 4h chart.
+# RSI(14) for momentum confirmation (long: RSI > 50, short: RSI < 50).
+# Choppiness index (CHOP) from 1d to filter regime: only trade when CHOP < 61.8 (trending).
+# Long when KAMA rising, RSI > 50, and 1d CHOP < 61.8.
+# Short when KAMA falling, RSI < 50, and 1d CHOP < 61.8.
+# Exit when KAMA changes direction or RSI crosses 50.
+# Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drag.
+# Works in trending markets via KAMA+RSI and avoids ranging markets via CHOP filter.
 # Focus on BTC/ETH as primary targets.
 
-name = "12h_1d_camarilla_breakout_volume"
-timeframe = "12h"
+name = "4h_1d_kama_rsi_chop"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,89 +28,105 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation
+    # Get daily data for Choppiness Index
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate daily Camarilla levels
-    # Based on previous day's high, low, close
+    # Calculate 14-period Choppiness Index (CHOP)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's values (shift by 1 to avoid look-ahead)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    # First value will be invalid (rolled from last), but we'll handle with min_periods equivalent
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum.reduce([tr1, tr2, tr3])
+    tr = np.concatenate([[np.nan], tr])  # align length
     
-    # Camarilla calculations
-    # Pivot point
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    # Range
-    range_val = prev_high - prev_low
+    # ATR(14)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Resistance levels
-    r4 = prev_close + range_val * 1.500
-    r3 = prev_close + range_val * 1.250
-    r2 = prev_close + range_val * 1.166
-    r1 = prev_close + range_val * 1.083
+    # Highest high and lowest low over 14 periods
+    hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # Support levels
-    s1 = prev_close - range_val * 1.083
-    s2 = prev_close - range_val * 1.166
-    s3 = prev_close - range_val * 1.250
-    s4 = prev_close - range_val * 1.500
+    # Chop = 100 * log10(sum(atr/14) / (hh - ll)) / log10(14)
+    atr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    hh_ll = hh - ll
+    chop = 100 * np.log10(atr_sum / 14 / hh_ll) / np.log10(14)
+    chop = np.where(hh_ll > 0, chop, 100)  # avoid division by zero
     
-    # Primary levels for breakout: H4 (r4) and L4 (s4)
-    camarilla_high = r4
-    camarilla_low = s4
-    camarilla_pivot = pivot
+    # Align daily Chop to 4h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Align daily Camarilla levels to 12h timeframe
-    camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
-    camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    # KAMA on 4h close (ER=10, fast=2, slow=30)
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, k=10))  # 10-period net change
+    change = np.concatenate([[np.nan]*10, change])  # align
     
-    # Volume confirmation: volume > 1.5 * 20-period average (12h timeframe)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    volatility = np.abs(np.diff(close))  # 1-period volatility
+    volatility = pd.Series(volatility).rolling(window=10, min_periods=1).sum().values
+    volatility = np.concatenate([[np.nan], volatility])  # align
+    
+    er = np.where(volatility > 0, change / volatility, 0)
+    sc = (er * (2/2 - 30/30) + 30/30) ** 2  # smooth constant
+    kama = np.full_like(close, np.nan)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        if np.isnan(sc[i]):
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # RSI(14) on 4h
+    delta = np.diff(close)
+    delta = np.concatenate([[np.nan], delta])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # start after warmup
+    for i in range(30, n):  # start after warmup
         # Skip if data not ready
-        if (np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]) or 
-            np.isnan(camarilla_pivot_aligned[i])):
+        if np.isnan(chop_aligned[i]) or np.isnan(kama[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0
             continue
         
-        # Require volume confirmation for new entries
-        if not vol_confirm[i]:
-            # Hold current position if volume filter fails
+        # Only trade in trending market (CHOP < 61.8)
+        if chop_aligned[i] >= 61.8:
+            # Range market: stay flat or reduce position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.15  # reduce long
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.15  # reduce short
             else:
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above H4 level
-        if close[i] > camarilla_high_aligned[i] and position != 1:
+        # KAMA direction: rising if current > previous, falling if current < previous
+        kama_rising = kama[i] > kama[i-1]
+        kama_falling = kama[i] < kama[i-1]
+        
+        # Long signal: KAMA rising and RSI > 50
+        if kama_rising and rsi[i] > 50 and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below L4 level
-        elif close[i] < camarilla_low_aligned[i] and position != -1:
+        # Short signal: KAMA falling and RSI < 50
+        elif kama_falling and rsi[i] < 50 and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: price crosses pivot point (mean reversion)
-        elif position == 1 and close[i] <= camarilla_pivot_aligned[i]:
+        # Exit conditions: KAMA changes direction or RSI crosses 50
+        elif position == 1 and (not kama_rising or rsi[i] < 50):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] >= camarilla_pivot_aligned[i]:
+        elif position == -1 and (not kama_falling or rsi[i] > 50):
             position = 0
             signals[i] = 0.0
         else:
