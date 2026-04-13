@@ -8,27 +8,26 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1h strategy using 4h Donchian breakout + 1d ADX trend filter + volume confirmation
-    # Works in bull/bear: Donchian captures breakouts, 1d ADX > 25 filters chop, volume ensures momentum.
-    # Session filter (08-20 UTC) reduces noise. Discrete sizing (0.20) minimizes fee drag.
-    # Target: 15-30 trades/year to stay within 1h optimal range.
+    # Hypothesis: 6h strategy using weekly Camarilla pivot levels for mean reversion in ranging markets.
+    # Weekly pivot provides structure from higher timeframe, price fading at R3/S3 levels with
+    # volume confirmation and 1d ADX < 20 (ranging) filter works in both bull and bear markets.
+    # Target: 12-25 trades/year to stay within 6h optimal range.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values if 'volume' in prices.columns else np.ones(len(prices))
     
-    # Get 4h data for Donchian channel (HTF for breakout direction)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get weekly data for Camarilla pivot calculation (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values if 'volume' in df_4h.columns else np.ones(len(df_4h))
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Get 1d data for ADX trend filter
+    # Get 1d data for ADX ranging filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -38,11 +37,18 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values if 'volume' in df_1d.columns else np.ones(len(df_1d))
     
-    # Calculate 4h Donchian channel (20-period)
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Calculate weekly Camarilla pivot levels
+    # Camarilla: Pivot = (H+L+C)/3, Range = H-L
+    # R4 = Pivot + (Range * 1.1/2), R3 = Pivot + (Range * 1.1/4)
+    # S3 = Pivot - (Range * 1.1/4), S4 = Pivot - (Range * 1.1/2)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
+    r3_1w = pivot_1w + (range_1w * 1.1 / 4)
+    s3_1w = pivot_1w - (range_1w * 1.1 / 4)
+    r4_1w = pivot_1w + (range_1w * 1.1 / 2)
+    s4_1w = pivot_1w - (range_1w * 1.1 / 2)
     
-    # Calculate 1d ADX (14-period)
+    # Calculate 1d ADX (14-period) for ranging filter
     def calculate_adx(high, low, close, period=14):
         plus_dm = np.zeros_like(high)
         minus_dm = np.zeros_like(high)
@@ -90,61 +96,54 @@ def generate_signals(prices):
     # Get 1d volume for confirmation (20-period average)
     vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all HTF indicators to 1h primary timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    # Align all HTF indicators to 6h primary timeframe
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    r4_1w_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
+    s4_1w_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
     # Track entry price for stoploss
     entry_price = np.full(n, np.nan)
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or
+        if (np.isnan(r3_1w_aligned[i]) or 
+            np.isnan(s3_1w_aligned[i]) or
             np.isnan(adx_1d_aligned[i]) or
             np.isnan(vol_avg_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: only trade during 08-20 UTC
-        if not in_session[i]:
-            signals[i] = 0.0 if position == 0 else (position_size if position == 1 else -position_size)
-            if position != 0:
-                entry_price[i] = entry_price[i-1] if i > 0 else np.nan
-            continue
-        
-        # Volume confirmation: current 1d volume > 1.3x 20-period average
-        idx_1d = i // 24  # 1d bars in 1h timeframe (24 bars per day)
+        # Volume confirmation: current 1d volume > 1.2x 20-period average
+        idx_1d = i // 4  # 4x 6h bars per day
         if idx_1d >= len(volume_1d):
-            signals[i] = 0.0 if position == 0 else (position_size if position == 1 else -position_size)
-            if position != 0:
-                entry_price[i] = entry_price[i-1] if i > 0 else np.nan
+            signals[i] = 0.0
             continue
-        volume_confirmed = volume_1d[idx_1d] > 1.3 * vol_avg_20_1d_aligned[i]
+        volume_confirmed = volume_1d[idx_1d] > 1.2 * vol_avg_20_1d_aligned[i]
         
-        # Trend filter: 1d ADX > 25 indicates trending market
-        trending = adx_1d_aligned[i] > 25
+        # Range filter: 1d ADX < 20 indicates ranging market
+        ranging = adx_1d_aligned[i] < 20
         
-        # Entry conditions: Donchian breakout + trend + volume
-        enter_long = (close[i] > donchian_high_aligned[i]) and trending and volume_confirmed
-        enter_short = (close[i] < donchian_low_aligned[i]) and trending and volume_confirmed
+        # Entry conditions: Fade at R3/S3 with volume confirmation in ranging market
+        enter_long = (close[i] < s3_1w_aligned[i]) and ranging and volume_confirmed
+        enter_short = (close[i] > r3_1w_aligned[i]) and ranging and volume_confirmed
         
-        # Stoploss: 2x ATR based on 4h Donchian width
-        donchian_width = donchian_high_aligned[i] - donchian_low_aligned[i]
-        stop_distance = donchian_width * 0.2  # 20% of channel width
+        # Stoploss: 1.5x ATR based on weekly range (scaled to 6h)
+        weekly_range_6h = (r4_1w_aligned[i] - s4_1w_aligned[i]) / 4  # Approximate 6h range
+        stop_distance = weekly_range_6h * 0.3  # 30% of weekly 6h range
         
         exit_long = position == 1 and not np.isnan(entry_price[i-1]) and close[i] < entry_price[i-1] - stop_distance
         exit_short = position == -1 and not np.isnan(entry_price[i-1]) and close[i] > entry_price[i-1] + stop_distance
+        
+        # Profit target: take profit at opposite S3/R3 level (mean reversion)
+        profit_long = position == 1 and not np.isnan(entry_price[i-1]) and close[i] > r3_1w_aligned[i]
+        profit_short = position == -1 and not np.isnan(entry_price[i-1]) and close[i] < s3_1w_aligned[i]
         
         # Execute signals
         if enter_long and position != 1:
@@ -155,11 +154,11 @@ def generate_signals(prices):
             position = -1
             signals[i] = -position_size
             entry_price[i] = close[i]
-        elif position == 1 and exit_long:
+        elif position == 1 and (exit_long or profit_long):
             position = 0
             signals[i] = 0.0
             entry_price[i] = np.nan
-        elif position == -1 and exit_short:
+        elif position == -1 and (exit_short or profit_short):
             position = 0
             signals[i] = 0.0
             entry_price[i] = np.nan
@@ -177,6 +176,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4h_1d_donchian_breakout_adx_volume_session_v1"
-timeframe = "1h"
+name = "6h_1w_1d_camarilla_pivot_mean_reversion_v1"
+timeframe = "6h"
 leverage = 1.0
