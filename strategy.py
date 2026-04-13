@@ -8,13 +8,12 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Donchian(20) breakout + 12h ADX trend filter + volume confirmation
-    # Long: price breaks above Donchian upper AND 12h ADX > 25 AND volume > 1.5x avg
-    # Short: price breaks below Donchian lower AND 12h ADX > 25 AND volume > 1.5x avg
-    # Exit: price returns to Donchian middle OR ADX < 20 (trend weak)
-    # Using 6h timeframe for balance of trade frequency and noise reduction,
-    # Donchian for clear breakout levels, ADX for trend strength filter,
-    # volume for confirmation of genuine breakouts.
+    # Hypothesis: 12h Williams Alligator + 1d ADX trend filter + volume confirmation
+    # Long: Alligator bullish (jaw < teeth < lips) AND 1d ADX > 25 AND volume > 1.5x avg
+    # Short: Alligator bearish (jaw > teeth > lips) AND 1d ADX > 25 AND volume > 1.5x avg
+    # Exit: Alligator turns flat or ADX < 20
+    # Using 12h timeframe for low trade frequency, Alligator for trend identification,
+    # 1d ADX for regime filter (avoid choppy markets), volume for confirmation.
     # Discrete position sizing (0.25) to minimize fee churn.
     
     close = prices['close'].values
@@ -22,65 +21,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for ADX trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get daily data for ADX regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 12h ADX(14)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate daily ADX(14) for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # True Range
-    tr1 = np.abs(high_12h[1:] - low_12h[1:])
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with close_12h index
+    tr = np.concatenate([[np.nan], tr])  # prepend NaN for first element
     
     # Directional Movement
-    up_move = high_12h[1:] - high_12h[:-1]
-    down_move = low_12h[:-1] - low_12h[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Smoothed TR, +DM, -DM (Wilder's smoothing)
+    # Smoothed values using Wilder's smoothing (equivalent to EMA with alpha=1/period)
     def wilders_smoothing(data, period):
         result = np.full_like(data, np.nan)
         if len(data) < period:
             return result
-        # First value: simple average
-        result[period-1] = np.nanmean(data[1:period])
-        # Subsequent values
+        # First value is simple average
+        result[period-1] = np.nanmean(data[1:period+1])
+        # Subsequent values: smoothed = (prev * (period-1) + current) / period
         for i in range(period, len(data)):
             if not np.isnan(result[i-1]) and not np.isnan(data[i]):
                 result[i] = (result[i-1] * (period-1) + data[i]) / period
         return result
     
-    atr_12h = wilders_smoothing(tr, 14)
-    plus_di_12h = 100 * wilders_smoothing(plus_dm, 14) / atr_12h
-    minus_di_12h = 100 * wilders_smoothing(minus_dm, 14) / atr_12h
-    dx_12h = 100 * np.abs(plus_di_12h - minus_di_12h) / (plus_di_12h + minus_di_12h)
-    adx_12h = wilders_smoothing(dx_12h, 14)
+    period = 14
+    atr = wilders_smoothing(tr, period)
+    dm_plus_smooth = wilders_smoothing(dm_plus, period)
+    dm_minus_smooth = wilders_smoothing(dm_minus, period)
     
-    # Align 12h ADX to 6h
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    # DI+ and DI-
+    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
     
-    # Calculate 6h Donchian(20)
-    lookback = 20
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    middle = np.full(n, np.nan)
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 
+                  100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilders_smoothing(dx, period)
     
-    for i in range(lookback, n):
-        upper[i] = np.max(high[i-lookback:i])
-        lower[i] = np.min(low[i-lookback:i])
-        middle[i] = (upper[i] + lower[i]) / 2
+    # Align daily ADX to 12h
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # 6h volume confirmation (>1.5x 20-period average)
+    # Calculate Williams Alligator on 12h
+    # Jaw: SMMA(13, 8) - Blue line
+    # Teeth: SMMA(8, 5) - Red line  
+    # Lips: SMMA(5, 3) - Green line
+    def smma(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: SMMA = (prev * (period-1) + current) / period
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    jaw = smma(close, 13)
+    teeth = smma(close, 8)
+    lips = smma(close, 5)
+    
+    # Shift jaw, teeth, lips by their respective offsets
+    jaw = np.roll(jaw, 8)
+    teeth = np.roll(teeth, 5)
+    lips = np.roll(lips, 3)
+    
+    # Alligator conditions
+    alligator_bullish = (jaw < teeth) & (teeth < lips)  # Jaw < Teeth < Lips
+    alligator_bearish = (jaw > teeth) & (teeth > lips)  # Jaw > Teeth > Lips
+    alligator_flat = ~(alligator_bullish | alligator_bearish)  # Neither bullish nor bearish
+    
+    # Get 12h volume for confirmation (>1.5x 20-period average)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -89,34 +114,27 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(adx_12h_aligned[i]) or np.isnan(upper[i]) or 
-            np.isnan(lower[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(alligator_bullish[i]) or 
+            np.isnan(alligator_bearish[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: ADX > 25 = strong trend
-        strong_trend = adx_12h_aligned[i] > 25
-        weak_trend = adx_12h_aligned[i] < 20  # exit condition
+        # Regime filter: ADX > 25 = trending market
+        trending_market = adx_aligned[i] > 25
+        choppy_market = adx_aligned[i] < 20
         
         # Volume confirmation
         vol_confirm = volume_spike[i]
         
-        # Breakout conditions
-        long_breakout = close[i] > upper[i]
-        short_breakout = close[i] < lower[i]
+        # Entry logic: Alligator direction + trend filter + volume confirmation
+        long_entry = alligator_bullish[i] and trending_market and vol_confirm
+        short_entry = alligator_bearish[i] and trending_market and vol_confirm
         
-        # Reversion to middle (exit)
-        return_to_middle = (close[i] > lower[i]) and (close[i] < upper[i])
-        
-        # Entry logic: breakout + trend + volume
-        long_entry = long_breakout and strong_trend and vol_confirm
-        short_entry = short_breakout and strong_trend and vol_confirm
-        
-        # Exit logic: return to middle OR weak trend
-        long_exit = return_to_middle or weak_trend
-        short_exit = return_to_middle or weak_trend
+        # Exit logic: Alligator turns flat or choppy market or volume dry-up
+        long_exit = alligator_flat[i] or choppy_market or not vol_confirm
+        short_exit = alligator_flat[i] or choppy_market or not vol_confirm
         
         if long_entry and position != 1:
             position = 1
@@ -141,6 +159,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_donchian_adx_volume_v1"
-timeframe = "6h"
+name = "12h_1d_alligator_adx_volume_v1"
+timeframe = "12h"
 leverage = 1.0
