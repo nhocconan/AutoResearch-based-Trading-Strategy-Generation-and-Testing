@@ -8,17 +8,17 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Camarilla pivot breakout with 1w trend filter and volume confirmation.
-    # Camarilla pivots from 1d provide institutional support/resistance levels.
-    # Breakout above R4 or below S4 with 1w trend alignment and volume spike indicates strong continuation.
-    # Works in both bull and bear markets via trend filter. Target: 50-150 total trades over 4 years.
+    # Hypothesis: 6h Donchian(20) breakout with weekly pivot direction and volume confirmation.
+    # Donchian breakout captures momentum; weekly pivot (PP) provides institutional bias;
+    # volume spike confirms institutional participation. Works in bull/bear via trend filter.
+    # Target: 50-150 total trades over 4 years = 12-37/year.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation (call ONCE before loop)
+    # Get 1d data for weekly pivot calculation (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -28,36 +28,47 @@ def generate_signals(prices):
     if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivot levels
+    # Calculate 1d weekly pivot (PP) and support/resistance
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Pivot point (PP)
+    # Weekly pivot point (PP) = (H + L + C) / 3
     PP = (high_1d + low_1d + close_1d) / 3
-    # Range
+    # Weekly range
     RANGE = high_1d - low_1d
-    # Camarilla levels
-    R4 = PP + RANGE * 1.1 / 2
-    S4 = PP - RANGE * 1.1 / 2
-    R3 = PP + RANGE * 1.1 / 4
-    S3 = PP - RANGE * 1.1 / 4
+    # Weekly R1, S1, R2, S2 levels
+    R1 = 2 * PP - low_1d
+    S1 = 2 * PP - high_1d
+    R2 = PP + RANGE
+    S2 = PP - RANGE
     
     # Calculate 1w EMA(50) for trend filter
     close_1w = df_1w['close'].values
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 6h volume mean (20-period) with min_periods
+    # Calculate 6h Donchian(20) channels
     df_6h = get_htf_data(prices, '6h')
-    volume_6h_series = pd.Series(df_6h['volume'].values)
-    vol_ma_20_6h = volume_6h_series.rolling(window=20, min_periods=20).mean().values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    # Upper band: 20-period high
+    upper_20 = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    # Lower band: 20-period low
+    lower_20 = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 6h volume mean (20-period) with min_periods
+    volume_6h = df_6h['volume'].values
+    vol_ma_20_6h = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
     
     # Align HTF indicators to 6h timeframe
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    PP_aligned = align_htf_to_ltf(prices, df_1d, PP)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
+    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
     ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    upper_20_aligned = align_htf_to_ltf(prices, df_6h, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_6h, lower_20)
     vol_ma_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_20_6h)
     
     signals = np.zeros(n)
@@ -65,8 +76,9 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(PP_aligned[i]) or np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
+            np.isnan(R2_aligned[i]) or np.isnan(S2_aligned[i]) or np.isnan(ema_50_aligned[i]) or
+            np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -74,24 +86,28 @@ def generate_signals(prices):
         volume_6h_raw = df_6h['volume'].values
         vol_6h_aligned = align_htf_to_ltf(prices, df_6h, volume_6h_raw)
         
-        # Volume filter: current 6h volume > 2.0 * 20-period mean (volume spike for confirmation)
-        volume_confirmation = vol_6h_aligned[i] > 2.0 * vol_ma_aligned[i]
+        # Volume filter: current 6h volume > 1.8 * 20-period mean (volume spike for confirmation)
+        volume_confirmation = vol_6h_aligned[i] > 1.8 * vol_ma_aligned[i]
         
         # Trend filter: price above/below weekly EMA50
         price_above_weekly_ema = close[i] > ema_50_aligned[i]
         price_below_weekly_ema = close[i] < ema_50_aligned[i]
         
-        # Camarilla breakout conditions
-        breakout_long = close[i] > R4_aligned[i]  # Break above R4
-        breakout_short = close[i] < S4_aligned[i]  # Break below S4
+        # Donchian breakout conditions
+        breakout_long = close[i] > upper_20_aligned[i]  # Break above upper band
+        breakout_short = close[i] < lower_20_aligned[i]  # Break below lower band
         
-        # Entry conditions: breakout with volume spike and trend alignment
-        long_entry = breakout_long and volume_confirmation and price_above_weekly_ema
-        short_entry = breakout_short and volume_confirmation and price_below_weekly_ema
+        # Weekly pivot bias: long if price > PP, short if price < PP
+        price_above_PP = close[i] > PP_aligned[i]
+        price_below_PP = close[i] < PP_aligned[i]
         
-        # Exit conditions: price returns to R3/S3 levels or loss of volume confirmation
-        long_exit = close[i] < R3_aligned[i] or not volume_confirmation
-        short_exit = close[i] > S3_aligned[i] or not volume_confirmation
+        # Entry conditions: breakout with volume spike and pivot bias alignment
+        long_entry = breakout_long and volume_confirmation and price_above_PP
+        short_entry = breakout_short and volume_confirmation and price_below_PP
+        
+        # Exit conditions: price returns to opposite Donchian band or loss of volume confirmation
+        long_exit = close[i] < lower_20_aligned[i] or not volume_confirmation
+        short_exit = close[i] > upper_20_aligned[i] or not volume_confirmation
         
         if long_entry and position != 1:
             position = 1
@@ -116,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_1w_camarilla_breakout_volume_v1"
+name = "6h_1d_1w_donchian_pivot_volume_v1"
 timeframe = "6h"
 leverage = 1.0
