@@ -8,55 +8,34 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1d Camarilla pivot breakout with 1w trend filter and volume confirmation.
-    # Weekly trend from 1w data determines structural bias: price above weekly EMA20 = bullish bias (long breakouts only),
-    # price below weekly EMA20 = bearish bias (short breakouts only). Camarilla pivot breakouts from 1d provide entry timing.
-    # Volume confirmation ensures breakout validity. Target: 30-100 total trades over 4 years = 7-25/year.
-    # Works in bull markets (long breakouts with bullish bias) and bear markets (short breakouts with bearish bias).
+    # Hypothesis: 6h Williams %R mean reversion with 12h trend filter and volume spike confirmation.
+    # Williams %R identifies overbought/oversold conditions (long when < -80, short when > -20).
+    # 12h EMA50 provides trend filter (long only when price > EMA50, short only when price < EMA50).
+    # Volume spike (current > 1.5 * 20-period MA) confirms momentum behind the move.
+    # Target: 50-150 total trades over 4 years = 12-37/year.
+    # Works in bull markets (long oversold in uptrend) and bear markets (short overbought in downtrend).
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots (call ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for EMA50 trend filter (call ONCE before loop)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Get 1w data for weekly EMA20 trend filter (call ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Calculate 12h EMA50
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Calculate 1d Camarilla pivot levels (based on prior day OHLC)
-    # Camarilla levels: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), etc.
-    # We use R3 and S3 as breakout levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 6h Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
-    # Prior day's range
-    prev_high = pd.Series(high_1d).shift(1).values
-    prev_low = pd.Series(low_1d).shift(1).values
-    prev_close = pd.Series(close_1d).shift(1).values
-    
-    # Calculate Camarilla R3 and S3 levels
-    camarilla_r3 = prev_close + ((prev_high - prev_low) * 1.1 / 4)
-    camarilla_s3 = prev_close - ((prev_high - prev_low) * 1.1 / 4)
-    
-    # Align Camarilla levels to 1d timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Calculate 1w EMA20 for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Align weekly EMA20 to 1d timeframe
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Calculate 1d volume MA(20) for confirmation
+    # Calculate 6h volume MA(20) for spike confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -64,29 +43,29 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(ema_12h_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 20-period MA
-        volume_filter = volume[i] > volume_ma[i]
+        # Volume spike filter: current volume > 1.5 * 20-period MA
+        volume_spike = volume[i] > 1.5 * volume_ma[i]
         
-        # Breakout conditions at Camarilla R3 and S3 levels
-        long_breakout = close[i] > camarilla_r3_aligned[i]  # Break above R3
-        short_breakout = close[i] < camarilla_s3_aligned[i]  # Break below S3
+        # Williams %R conditions
+        oversold = williams_r[i] < -80
+        overbought = williams_r[i] > -20
         
-        # Weekly trend bias: price above weekly EMA20 = bullish bias, below = bearish bias
-        bullish_bias = close[i] > ema_20_1w_aligned[i]
-        bearish_bias = close[i] < ema_20_1w_aligned[i]
+        # Trend filter from 12h EMA50
+        uptrend = close[i] > ema_12h_aligned[i]
+        downtrend = close[i] < ema_12h_aligned[i]
         
-        # Entry conditions: breakout in direction of weekly trend bias
-        long_entry = long_breakout and bullish_bias and volume_filter
-        short_entry = short_breakout and bearish_bias and volume_filter
+        # Entry conditions
+        long_entry = oversold and uptrend and volume_spike
+        short_entry = overbought and downtrend and volume_spike
         
-        # Exit conditions: opposite breakout or loss of bias
-        long_exit = short_breakout or not bullish_bias
-        short_exit = long_breakout or not bearish_bias
+        # Exit conditions: opposite Williams %R extreme or loss of trend
+        long_exit = williams_r[i] > -20 or not uptrend
+        short_exit = williams_r[i] < -80 or not downtrend
         
         if long_entry and position != 1:
             position = 1
@@ -111,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_camarilla_breakout_weekly_ema_v1"
-timeframe = "1d"
+name = "6h_12h_williamsr_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
