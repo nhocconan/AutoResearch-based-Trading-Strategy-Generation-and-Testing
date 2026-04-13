@@ -8,29 +8,19 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h strategy using 12h Donchian channel breakout with 1d ADX trend filter
-    # Works in both bull and bear: Donchian captures breakouts, 1d ADX > 25 filters chop,
-    # volume confirmation ensures momentum. Discrete sizing (0.25) minimizes fee drag.
-    # Target: 12-25 trades/year to stay within 6h optimal range.
+    # Hypothesis: 4h strategy using 1d Camarilla pivot levels with volume confirmation
+    # Works in both bull and bear: Camarilla levels provide structured support/resistance,
+    # volume confirms institutional interest, discrete sizing minimizes fee drag.
+    # Target: 20-40 trades/year to stay within 4h optimal range.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values if 'volume' in prices.columns else np.ones(len(prices))
     
-    # Get 12h data for Donchian channel (primary HTF for breakout)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values if 'volume' in df_12h.columns else np.ones(len(df_12h))
-    
-    # Get 1d data for ADX trend filter
+    # Get 1d data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -38,132 +28,100 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values if 'volume' in df_1d.columns else np.ones(len(df_1d))
     
-    # Calculate 12h Donchian channel (20-period)
-    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d Camarilla pivot levels (based on previous day)
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # L4 = C - Range * 1.1/2
+    # L3 = C - Range * 1.1/4
+    # L2 = C - Range * 1.1/6
+    # L1 = C - Range * 1.1/12
+    # H1 = C + Range * 1.1/12
+    # H2 = C + Range * 1.1/6
+    # H3 = C + Range * 1.1/4
+    # H4 = C + Range * 1.1/2
     
-    # Calculate 1d ADX (14-period)
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(0, high[i] - high[i-1])
-            minus_dm[i] = max(0, low[i-1] - low[i])
-            if plus_dm[i] == minus_dm[i]:
-                plus_dm[i] = 0
-                minus_dm[i] = 0
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Wilder's smoothing
-        atr = np.zeros_like(high)
-        atr[period] = np.mean(tr[1:period+1])
-        for i in range(period+1, len(high)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        
-        plus_di = np.zeros_like(high)
-        minus_di = np.zeros_like(high)
-        dx = np.zeros_like(high)
-        
-        plus_dm_smoothed = np.zeros_like(high)
-        minus_dm_smoothed = np.zeros_like(high)
-        plus_dm_smoothed[period] = np.mean(plus_dm[1:period+1])
-        minus_dm_smoothed[period] = np.mean(minus_dm[1:period+1])
-        
-        for i in range(period+1, len(high)):
-            plus_dm_smoothed[i] = (plus_dm_smoothed[i-1] * (period-1) + plus_dm[i]) / period
-            minus_dm_smoothed[i] = (minus_dm_smoothed[i-1] * (period-1) + minus_dm[i]) / period
-            plus_di[i] = 100 * plus_dm_smoothed[i] / atr[i]
-            minus_di[i] = 100 * minus_dm_smoothed[i] / atr[i]
-            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i]) if (plus_di[i] + minus_di[i]) != 0 else 0
-        
-        adx = np.zeros_like(high)
-        adx[2*period] = np.mean(dx[period+1:2*period+1])
-        for i in range(2*period+1, len(high)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
+    # Use previous day's data (shifted by 1)
+    prev_high = np.concatenate([[np.nan], high_1d[:-1]])
+    prev_low = np.concatenate([[np.nan], low_1d[:-1]])
+    prev_close = np.concatenate([[np.nan], close_1d[:-1]])
     
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    rng = prev_high - prev_low
     
-    # Get 1d volume for confirmation (20-period average)
-    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Camarilla levels
+    L4 = prev_close - rng * 1.1 / 2
+    L3 = prev_close - rng * 1.1 / 4
+    L2 = prev_close - rng * 1.1 / 6
+    L1 = prev_close - rng * 1.1 / 12
+    H1 = prev_close + rng * 1.1 / 12
+    H2 = prev_close + rng * 1.1 / 6
+    H3 = prev_close + rng * 1.1 / 4
+    H4 = prev_close + rng * 1.1 / 2
     
-    # Align all HTF indicators to 6h primary timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    # Get 4h volume for confirmation (20-period average)
+    vol_avg_20_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all HTF indicators to 4h primary timeframe
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    L2_aligned = align_htf_to_ltf(prices, df_1d, L2)
+    L1_aligned = align_htf_to_ltf(prices, df_1d, L1)
+    H1_aligned = align_htf_to_ltf(prices, df_1d, H1)
+    H2_aligned = align_htf_to_ltf(prices, df_1d, H2)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    vol_avg_20_4h_aligned = align_htf_to_ltf(prices, prices, vol_avg_20_4h)  # self-align
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
     
-    # Track entry price for stoploss
-    entry_price = np.full(n, np.nan)
-    
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or
-            np.isnan(adx_1d_aligned[i]) or
-            np.isnan(vol_avg_20_1d_aligned[i])):
+        if (np.isnan(L4_aligned[i]) or np.isnan(H4_aligned[i]) or 
+            np.isnan(vol_avg_20_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.3x 20-period average
-        idx_1d = i // (24 * 2)  # 1d bars in 6h timeframe (4 bars per day)
-        if idx_1d >= len(volume_1d):
-            signals[i] = 0.0
-            continue
-        volume_confirmed = volume_1d[idx_1d] > 1.3 * vol_avg_20_1d_aligned[i]
+        # Volume confirmation: current 4h volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * vol_avg_20_4h_aligned[i]
         
-        # Trend filter: 1d ADX > 25 indicates trending market
-        trending = adx_1d_aligned[i] > 25
+        # Entry conditions: 
+        # Long: price crosses above L3 with volume (bullish bounce from support)
+        # Short: price crosses below H3 with volume (bearish rejection from resistance)
+        enter_long = (close[i] > L3_aligned[i] and close[i-1] <= L3_aligned[i-1]) and volume_confirmed
+        enter_short = (close[i] < H3_aligned[i] and close[i-1] >= H3_aligned[i-1]) and volume_confirmed
         
-        # Entry conditions: Donchian breakout + trend + volume
-        enter_long = (close[i] > donchian_high_aligned[i]) and trending and volume_confirmed
-        enter_short = (close[i] < donchian_low_aligned[i]) and trending and volume_confirmed
-        
-        # Stoploss: 2x ATR based on 6h true range (simplified using Donchian width)
-        donchian_width = donchian_high_aligned[i] - donchian_low_aligned[i]
-        stop_distance = donchian_width * 0.2  # 20% of channel width
-        
-        exit_long = position == 1 and not np.isnan(entry_price[i-1]) and close[i] < entry_price[i-1] - stop_distance
-        exit_short = position == -1 and not np.isnan(entry_price[i-1]) and close[i] > entry_price[i-1] + stop_distance
+        # Exit conditions: 
+        # Long exit: price reaches L1 (strong support) or H3 (resistance)
+        # Short exit: price reaches H1 (strong resistance) or L3 (support)
+        exit_long = position == 1 and (close[i] <= L1_aligned[i] or close[i] >= H3_aligned[i])
+        exit_short = position == -1 and (close[i] >= H1_aligned[i] or close[i] <= L3_aligned[i])
         
         # Execute signals
         if enter_long and position != 1:
             position = 1
             signals[i] = position_size
-            entry_price[i] = close[i]
         elif enter_short and position != -1:
             position = -1
             signals[i] = -position_size
-            entry_price[i] = close[i]
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
-            entry_price[i] = np.nan
         elif position == -1 and exit_short:
             position = 0
             signals[i] = 0.0
-            entry_price[i] = np.nan
         # Hold current position
         else:
             if position == 1:
                 signals[i] = position_size
-                entry_price[i] = entry_price[i-1] if i > 0 else np.nan
             elif position == -1:
                 signals[i] = -position_size
-                entry_price[i] = entry_price[i-1] if i > 0 else np.nan
             else:
                 signals[i] = 0.0
-                entry_price[i] = np.nan
     
     return signals
 
-name = "6h_12h_1d_donchian_breakout_adx_volume_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_pivot_volume_v1"
+timeframe = "4h"
 leverage = 1.0
