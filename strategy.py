@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_1w_Donchian_Breakout_Weekly_Trend_Filter
-Hypothesis: Weekly trend filters 6h Donchian breakouts to avoid counter-trend trades.
-In bull markets (price above weekly SMA50), take long breakouts above 20-period high.
-In bear markets (price below weekly SMA50), take short breakdowns below 20-period low.
-Weekly trend reduces whipsaws during reversals. Volume confirmation ensures institutional participation.
-Works in both bull and bear by adapting direction to weekly trend. Target: 15-25 trades/year.
+12h_1w_1d_Camarilla_Pivot_Breakout_Volume_Confirmation_v1
+Hypothesis: Weekly and daily Camarilla pivot levels (S4/R4) act as major support/resistance.
+Breakouts above weekly R4 or below weekly S4 on 12h chart with volume expansion capture
+institutional moves. Uses daily S3/R3 for additional confluence. Works in both bull and bear
+markets by trading breakouts regardless of direction. Target: 15-25 trades/year per symbol.
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,64 +21,80 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
+    # Get weekly and daily data for Camarilla pivots
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1w) < 2 or len(df_1d) < 2:
         return np.zeros(n)
     
-    # Weekly SMA50 for trend filter
+    # Calculate weekly Camarilla levels (S4/R4)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    sma50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
-    sma50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma50_1w)
+    close_prev_1w = np.roll(close_1w, 1)
+    close_prev_1w[0] = close_1w[0]
+    range_1w = high_1w - low_1w
     
-    # 6h Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Weekly R4 and S4 (strongest levels)
+    R4_1w = close_prev_1w + (range_1w * 1.5000 / 2)  # R4 = close + 1.5*(range)/2
+    S4_1w = close_prev_1w - (range_1w * 1.5000 / 2)  # S4 = close - 1.5*(range)/2
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_expansion = volume > (vol_ma_20 * 1.5)
+    # Calculate daily Camarilla levels (S3/R3 for confluence)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    close_prev_1d = np.roll(close_1d, 1)
+    close_prev_1d[0] = close_1d[0]
+    range_1d = high_1d - low_1d
+    
+    # Daily R3 and S3
+    R3_1d = close_prev_1d + (range_1d * 1.2500 / 4)
+    S3_1d = close_prev_1d - (range_1d * 1.2500 / 4)
+    
+    # Align levels to 12h timeframe
+    R4_1w_aligned = align_htf_to_ltf(prices, df_1w, R4_1w)
+    S4_1w_aligned = align_htf_to_ltf(prices, df_1w, S4_1w)
+    R3_1d_aligned = align_htf_to_ltf(prices, df_1d, R3_1d)
+    S3_1d_aligned = align_htf_to_ltf(prices, df_1d, S3_1d)
+    
+    # Volume confirmation: current volume > 1.8x 30-period average (stricter for 12h)
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean()
+    volume_expansion = volume > (vol_ma_30 * 1.8)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is not ready
-        if (np.isnan(sma50_1w_aligned[i]) or np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or np.isnan(volume_expansion[i])):
+        if (np.isnan(R4_1w_aligned[i]) or np.isnan(S4_1w_aligned[i]) or 
+            np.isnan(R3_1d_aligned[i]) or np.isnan(S3_1d_aligned[i]) or 
+            np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Weekly trend: price above/below weekly SMA50
-        weekly_uptrend = close[i] > sma50_1w_aligned[i]
-        weekly_downtrend = close[i] < sma50_1w_aligned[i]
+        # Long breakout: price breaks above weekly R4 with volume expansion AND above daily R3
+        long_breakout = (close[i] > R4_1w_aligned[i] and 
+                        close[i] > R3_1d_aligned[i] and 
+                        volume_expansion[i])
         
-        # Donchian breakout signals
-        long_breakout = close[i] > high_20[i] and volume_expansion[i]
-        short_breakout = close[i] < low_20[i] and volume_expansion[i]
+        # Short breakdown: price breaks below weekly S4 with volume expansion AND below daily S3
+        short_breakout = (close[i] < S4_1w_aligned[i] and 
+                         close[i] < S3_1d_aligned[i] and 
+                         volume_expansion[i])
         
-        # Enter long only in weekly uptrend
-        if long_breakout and weekly_uptrend and position != 1:
+        if long_breakout and position != 1:
             position = 1
             signals[i] = position_size
-        # Enter short only in weekly downtrend
-        elif short_breakout and weekly_downtrend and position != -1:
+        elif short_breakout and position != -1:
             position = -1
             signals[i] = -position_size
-        # Exit when trend changes or opposite signal
-        elif position == 1 and not weekly_uptrend:
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and not weekly_downtrend:
-            position = 0
-            signals[i] = 0.0
         else:
             # Hold current position
             signals[i] = position_size if position == 1 else (-position_size if position == -1 else 0.0)
     
     return signals
 
-name = "6h_1w_Donchian_Breakout_Weekly_Trend_Filter"
-timeframe = "6h"
+name = "12h_1w_1d_Camarilla_Pivot_Breakout_Volume_Confirmation_v1"
+timeframe = "12h"
 leverage = 1.0
