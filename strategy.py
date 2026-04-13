@@ -3,15 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d trend filter and volume confirmation.
-# Bull Power = High - EMA13, Bear Power = EMA13 - Low (EMA13 on 6h)
-# Trend filter: 1d EMA50 - only go long when price > EMA50, short when price < EMA50
-# Volume confirmation: current volume > 1.3x average volume (20-period)
-# Elder Ray identifies institutional buying/selling pressure
-# EMA50 trend filter ensures we trade with higher timeframe trend
-# Volume confirmation reduces false signals
-# Works in bull markets (strong Bull Power) and bear markets (strong Bear Power)
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
+# Hypothesis: 12h Donchian(20) breakout with 1d Donchian(10) trend filter and volume confirmation.
+# Long: price breaks above 12h Donchian(20) high + price above 1d Donchian(10) high + volume > 1.5x avg volume
+# Short: price breaks below 12h Donchian(20) low + price below 1d Donchian(10) low + volume > 1.5x avg volume
+# Volume confirmation reduces false breakouts
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Works in both bull and bear markets by using higher timeframe Donchian as trend filter
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,37 +20,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 6h EMA13 for Elder Ray
-    ema13 = np.full(n, np.nan)
-    if len(close) >= 13:
-        close_series = pd.Series(close)
-        ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).values
-    
-    # 6h Bull Power and Bear Power
-    bull_power = high - ema13
-    bear_power = ema13 - low
-    
-    # 1d data for EMA50 trend filter
+    # 1-day data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # 1d EMA50 for trend filter
-    ema50_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        close_1d_series = pd.Series(close_1d)
-        ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).values
+    # 12h Donchian(20)
+    donch_high = np.full(n, np.nan)
+    donch_low = np.full(n, np.nan)
+    for i in range(20, n):
+        donch_high[i] = np.max(high[i-20:i])
+        donch_low[i] = np.min(low[i-20:i])
     
-    # Align 1d EMA50 to 6h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # 1d Donchian(10) for trend filter
+    donch_high_1d = np.full(len(high_1d), np.nan)
+    donch_low_1d = np.full(len(low_1d), np.nan)
+    for i in range(10, len(high_1d)):
+        donch_high_1d[i] = np.max(high_1d[i-10:i])
+        donch_low_1d[i] = np.min(low_1d[i-10:i])
     
-    # Average volume (20-period = 20*6h = 5 days) for volume confirmation
+    # Align 1d Donchian to 12h timeframe
+    donch_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
+    donch_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
+    
+    # Average volume (20-period = 20*12h = 10 days) for volume confirmation
     avg_volume = np.full(n, np.nan)
-    if len(volume) >= 20:
-        volume_series = pd.Series(volume)
-        avg_volume = volume_series.rolling(window=20, min_periods=20).mean().values
+    for i in range(20, n):
+        avg_volume[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -61,46 +57,46 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is not ready
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(donch_high_1d_aligned[i]) or np.isnan(donch_low_1d_aligned[i]) or
+            np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        ema50 = ema50_1d_aligned[i]
         
-        # Volume confirmation: current volume > 1.3x average volume
-        volume_confirm = vol > 1.3 * avg_vol
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirm = vol > 1.5 * avg_vol
         
         if position == 0:
-            # Long: Bull Power > 0 (buying pressure) + above EMA50 + volume confirmation
-            if (bull_power[i] > 0 and 
-                price > ema50 and
+            # Long: break above 12h Donchian high + above 1d Donchian high + volume confirmation
+            if (price > donch_high[i] and 
+                price > donch_high_1d_aligned[i] and
                 volume_confirm):
                 position = 1
                 signals[i] = position_size
-            # Short: Bear Power > 0 (selling pressure) + below EMA50 + volume confirmation
-            elif (bear_power[i] > 0 and 
-                  price < ema50 and
+            # Short: break below 12h Donchian low + below 1d Donchian low + volume confirmation
+            elif (price < donch_low[i] and 
+                  price < donch_low_1d_aligned[i] and
                   volume_confirm):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Bear Power > 0 (selling pressure takes over) or below EMA50
-            if (bear_power[i] > 0 or
-                price < ema50):
+            # Exit long: price breaks below 12h Donchian low or below 1d Donchian low
+            if (price < donch_low[i] or
+                price < donch_low_1d_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Bull Power > 0 (buying pressure takes over) or above EMA50
-            if (bull_power[i] > 0 or
-                price > ema50):
+            # Exit short: price breaks above 12h Donchian high or above 1d Donchian high
+            if (price > donch_high[i] or
+                price > donch_high_1d_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -108,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_ElderRay_Trend_Volume"
-timeframe = "6h"
+name = "12h_1d_Donchian_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
