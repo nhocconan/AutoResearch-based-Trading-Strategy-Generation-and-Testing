@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h ATR-based breakout with 1d trend filter and volume confirmation.
-# ATR breakout captures volatility expansion in both bull and bear markets.
-# 1d EMA50 ensures trades align with higher timeframe trend.
-# Volume confirmation filters low-conviction breakouts.
-# Target: 15-30 trades per year (60-120 total over 4 years) for 12h timeframe.
+# Hypothesis: 12h Williams %R mean-reversion with 1d trend filter and volume confirmation.
+# Williams %R identifies overbought/oversold conditions in ranging markets.
+# 1d EMA50 filter ensures trades align with higher timeframe direction.
+# Volume confirmation avoids false signals in low liquidity.
+# Target: 15-40 trades per year (60-160 total over 4 years) for 12h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,22 +19,25 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for trend filter
+    # 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate ATR(14) for breakout levels
-    tr = np.maximum(high[1:] - low[1:], 
-                    np.maximum(np.abs(high[1:] - close[:-1]), 
-                               np.abs(low[1:] - close[:-1])))
-    tr = np.concatenate([[0], tr])  # First TR is 0
-    atr = np.zeros(n)
-    atr[0] = tr[0]
-    for i in range(1, n):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14  # Wilder's smoothing
+    # Calculate Williams %R(14)
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
     
-    # Calculate daily EMA(50) for trend filter
+    for i in range(14, n):
+        highest_high[i] = np.max(high[i-14:i+1])
+        lowest_low[i] = np.min(low[i-14:i+1])
+    
+    williams_r = np.full(n, np.nan)
+    for i in range(14, n):
+        if highest_high[i] - lowest_low[i] != 0:
+            williams_r[i] = (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i]) * -100
+    
+    # Calculate 1d EMA(50) for trend filter
     close_1d = df_1d['close'].values
     ema_1d = np.zeros(len(close_1d))
     ema_multiplier = 2 / (50 + 1)
@@ -52,32 +55,31 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
-    breakout_multiplier = 1.5  # ATR multiplier for breakout
     
     for i in range(20, n):
         # Skip if any required data is not ready
-        if np.isnan(atr[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(avg_volume[i]):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        atr_val = atr[i]
+        wr = williams_r[i]
         daily_ema = ema_1d_aligned[i]
         
         # Volume confirmation: current volume > 1.3x average volume
         volume_confirm = vol > 1.3 * avg_vol
         
         if position == 0:
-            # Long breakout: price > high + ATR*mult + above daily EMA + volume
-            if (price > high[i-1] + breakout_multiplier * atr_val and
+            # Long: Williams %R < -80 (oversold) + above daily EMA + volume confirmation
+            if (wr < -80 and
                 price > daily_ema and
                 volume_confirm):
                 position = 1
                 signals[i] = position_size
-            # Short breakout: price < low - ATR*mult + below daily EMA + volume
-            elif (price < low[i-1] - breakout_multiplier * atr_val and
+            # Short: Williams %R > -20 (overbought) + below daily EMA + volume confirmation
+            elif (wr > -20 and
                   price < daily_ema and
                   volume_confirm):
                 position = -1
@@ -85,15 +87,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price < daily EMA (trend change) or volatility contraction
-            if price < daily_ema:
+            # Exit long: Williams %R > -50 (return from oversold)
+            if wr > -50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price > daily EMA (trend change) or volatility contraction
-            if price > daily_ema:
+            # Exit short: Williams %R < -50 (return from overbought)
+            if wr < -50:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -101,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_ATR_Breakout_DailyTrend_Volume"
+name = "12h_WilliamsR_MeanReversion_1dTrend_Volume"
 timeframe = "12h"
 leverage = 1.0
