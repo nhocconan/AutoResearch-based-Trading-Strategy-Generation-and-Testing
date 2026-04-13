@@ -8,15 +8,15 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and 1w ADX regime filter
-    # Long when price breaks above Camarilla H3 level + 1d volume > 1.5 * 20-period mean + 1w ADX > 20
-    # Short when price breaks below Camarilla L3 level + same filters
-    # Exit when price returns to Camarilla Pivot level
-    # Uses discrete position sizing (0.25) to minimize fee churn and manage drawdown
-    # Target: 80-150 total trades over 4 years (~20-38/year) to avoid excessive fee drag
-    # Camarilla levels provide precise intraday support/resistance from prior day
+    # Hypothesis: 12h Donchian channel breakout with 1d volume confirmation and 1w ADX regime filter
+    # Long when price breaks above 20-period Donchian high + 1d volume > 1.5 * 20-period mean + 1w ADX > 25
+    # Short when price breaks below 20-period Donchian low + same filters
+    # Exit when price returns to 20-period Donchian midpoint
+    # Uses discrete position sizing (0.30) to balance return and drawdown
+    # Target: 80-120 total trades over 4 years (~20-30/year) to avoid excessive fee drag
+    # Donchian channels provide robust trend-following structure
     # Volume confirmation ensures breakouts have institutional participation
-    # Weekly ADX filter ensures we only trade when higher timeframe is trending
+    # Weekly ADX filter ensures we only trade when higher timeframe is strongly trending
     
     close = prices['close'].values
     high = prices['high'].values
@@ -29,17 +29,13 @@ def generate_signals(prices):
     if len(df_1d) < 20 or len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla levels from prior day OHLC
-    # H4 = Close + 1.5*(High-Low), H3 = Close + 1.0*(High-Low), etc.
-    # L4 = Close - 1.5*(High-Low), L3 = Close - 1.0*(High-Low)
-    prior_close = df_1d['close'].shift(1).values
-    prior_high = df_1d['high'].shift(1).values
-    prior_low = df_1d['low'].shift(1).values
-    
-    # Avoid look-ahead: use prior day's data only
-    camarilla_h3 = prior_close + 1.0 * (prior_high - prior_low)
-    camarilla_l3 = prior_close - 1.0 * (prior_high - prior_low)
-    camarilla_pivot = (prior_high + prior_low + prior_close) / 3.0
+    # Calculate 12h Donchian channels (20-period) from primary timeframe
+    # Use rolling window with min_periods
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2.0
     
     # Calculate 1d volume mean (20-period) with min_periods
     volume_1d = df_1d['volume'].values
@@ -87,10 +83,7 @@ def generate_signals(prices):
     
     adx_1w = calculate_adx(df_1w['high'].values, df_1w['low'].values, df_1w['close'].values, 14)
     
-    # Align HTF indicators to 4h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    # Align HTF indicators to 12h timeframe
     vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     adx_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
@@ -99,8 +92,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(vol_ma_aligned[i]) or
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(donchian_mid[i]) or np.isnan(vol_ma_aligned[i]) or
             np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
@@ -112,27 +105,27 @@ def generate_signals(prices):
         # Volume filter: current 1d volume > 1.5 * 20-period mean
         volume_confirmation = vol_1d_aligned[i] > 1.5 * vol_ma_aligned[i]
         
-        # ADX filter: trending market (ADX > 20)
-        trending_market = adx_aligned[i] > 20
+        # ADX filter: strongly trending market (ADX > 25)
+        trending_market = adx_aligned[i] > 25
         
         # Breakout conditions with filters
-        bullish_breakout = (close[i] > camarilla_h3_aligned[i] and 
+        bullish_breakout = (close[i] > donchian_high[i] and 
                            volume_confirmation and 
                            trending_market)
-        bearish_breakout = (close[i] < camarilla_l3_aligned[i] and 
+        bearish_breakout = (close[i] < donchian_low[i] and 
                            volume_confirmation and 
                            trending_market)
         
-        # Exit conditions: return to Camarilla Pivot level
-        long_exit = close[i] < camarilla_pivot_aligned[i]
-        short_exit = close[i] > camarilla_pivot_aligned[i]
+        # Exit conditions: return to Donchian midpoint
+        long_exit = close[i] < donchian_mid[i]
+        short_exit = close[i] > donchian_mid[i]
         
         if bullish_breakout and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.30
         elif bearish_breakout and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.30
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -142,14 +135,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_1d_1w_camarilla_breakout_volume_adx_v1"
-timeframe = "4h"
+name = "12h_1d_1w_donchian_breakout_volume_adx_v1"
+timeframe = "12h"
 leverage = 1.0
