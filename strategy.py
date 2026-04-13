@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h trend following using 12h Ichimoku cloud with volume confirmation.
-# Long: price above 12h Ichimoku cloud (Senkou Span A/B) + Tenkan > Kijun + volume > 1.5x avg volume
-# Short: price below 12h Ichimoku cloud + Tenkan < Kijun + volume > 1.5x avg volume
-# Ichimoku calculated from 12h data: Tenkan = (9-period high + low)/2, Kijun = (26-period high + low)/2
-# Senkou Span A = (Tenkan + Kijun)/2 shifted 26 periods ahead, Senkou Span B = (52-period high + low)/2 shifted 52 periods ahead
-# Cloud acts as dynamic support/resistance; price above/below cloud indicates trend direction
+# Hypothesis: 4h Keltner breakout with 1d ATR filter and volume confirmation.
+# Long: price closes above upper Keltner band + ATR(1d) > median ATR(1d) + volume > 1.5x avg volume
+# Short: price closes below lower Keltner band + ATR(1d) > median ATR(1d) + volume > 1.5x avg volume
+# Keltner channels: EMA(20) ± 2*ATR(10) on 4h data
+# ATR filter ensures trades occur only in volatile regimes, reducing false breakouts in low-volatility periods
 # Volume confirmation reduces false breakouts
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
-# Works in both bull and bear markets by using 12h Ichimoku as trend filter
+# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
+# Works in both bull and bear markets by filtering for volatility regimes
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,46 +22,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12-hour data for Ichimoku
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 52:
+    # 4h EMA20 for Keltner middle line
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # 4h ATR(10) for Keltner width
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]  # First bar has no previous close
+    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    # Keltner bands
+    upper_keltner = ema_20 + 2 * atr_10
+    lower_keltner = ema_20 - 2 * atr_10
+    
+    # 1-day ATR for volatility filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Ichimoku components
-    # Tenkan-sen (Conversion Line): 9-period high-low midpoint
-    tenkan = np.full(len(close_12h), np.nan)
-    for i in range(8, len(close_12h)):
-        tenkan[i] = (np.max(high_12h[i-8:i+1]) + np.min(low_12h[i-8:i+1])) / 2
+    # True range for 1d
+    tr_1d = np.maximum(high_1d - low_1d, np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), np.abs(low_1d - np.roll(close_1d, 1))))
+    tr_1d[0] = high_1d[0] - low_1d[0]
+    atr_1d = pd.Series(tr_1d).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Kijun-sen (Base Line): 26-period high-low midpoint
-    kijun = np.full(len(close_12h), np.nan)
-    for i in range(25, len(close_12h)):
-        kijun[i] = (np.max(high_12h[i-25:i+1]) + np.min(low_12h[i-25:i+1])) / 2
+    # Median ATR(1d) over 50 periods for regime filter
+    median_atr_1d = np.full(len(atr_1d), np.nan)
+    for i in range(50, len(atr_1d)):
+        median_atr_1d[i] = np.median(atr_1d[i-50:i])
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = np.full(len(close_12h), np.nan)
-    for i in range(len(tenkan)):
-        if not np.isnan(tenkan[i]) and not np.isnan(kijun[i]):
-            senkou_a[i] = (tenkan[i] + kijun[i]) / 2
-    # Shift 26 periods ahead (for plotting, but we need current values)
-    # For current cloud, we use unshifted Senkou Span A and B
+    # Align 1d ATR and median ATR to 4h timeframe
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    median_atr_1d_aligned = align_htf_to_ltf(prices, df_1d, median_atr_1d)
     
-    # Senkou Span B (Leading Span B): 52-period high-low midpoint shifted 52 periods ahead
-    senkou_b = np.full(len(close_12h), np.nan)
-    for i in range(51, len(close_12h)):
-        senkou_b[i] = (np.max(high_12h[i-51:i+1]) + np.min(low_12h[i-51:i+1])) / 2
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_aligned = align_htf_to_ltf(prices, df_12h, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, df_12h, kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_12h, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_12h, senkou_b)
-    
-    # Average volume (20-period = 20*6h = 5 days) for volume confirmation
+    # Average volume (20-period = 20*4h = 10 days) for volume confirmation
     avg_volume = np.full(n, np.nan)
     for i in range(20, n):
         avg_volume[i] = np.mean(volume[i-20:i])
@@ -71,10 +66,10 @@ def generate_signals(prices):
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(52, n):
+    for i in range(20, n):
         # Skip if any required data is not ready
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
-            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or 
+        if (np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or 
+            np.isnan(atr_1d_aligned[i]) or np.isnan(median_atr_1d_aligned[i]) or 
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
@@ -82,45 +77,42 @@ def generate_signals(prices):
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        tenkan_val = tenkan_aligned[i]
-        kijun_val = kijun_aligned[i]
-        senkou_a_val = senkou_a_aligned[i]
-        senkou_b_val = senkou_b_aligned[i]
+        atr_1d_val = atr_1d_aligned[i]
+        median_atr_1d_val = median_atr_1d_aligned[i]
+        upper_k = upper_keltner[i]
+        lower_k = lower_keltner[i]
         
-        # Determine cloud boundaries (higher of Senkou A/B for resistance, lower for support)
-        cloud_top = max(senkou_a_val, senkou_b_val)
-        cloud_bottom = min(senkou_a_val, senkou_b_val)
+        # Volatility filter: current ATR(1d) > median ATR(1d) (high volatility regime)
+        vol_filter = atr_1d_val > median_atr_1d_val
         
         # Volume confirmation: current volume > 1.5x average volume
         volume_confirm = vol > 1.5 * avg_vol
         
         if position == 0:
-            # Long: price above cloud + Tenkan > Kijun + volume confirmation
-            if (price > cloud_top and 
-                tenkan_val > kijun_val and
+            # Long: close above upper Keltner + volatility filter + volume confirmation
+            if (price > upper_k and 
+                vol_filter and
                 volume_confirm):
                 position = 1
                 signals[i] = position_size
-            # Short: price below cloud + Tenkan < Kijun + volume confirmation
-            elif (price < cloud_bottom and 
-                  tenkan_val < kijun_val and
+            # Short: close below lower Keltner + volatility filter + volume confirmation
+            elif (price < lower_k and 
+                  vol_filter and
                   volume_confirm):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price falls below cloud or Tenkan < Kijun
-            if (price < cloud_bottom or
-                tenkan_val < kijun_val):
+            # Exit long: price closes below EMA20 (middle line)
+            if price < ema_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price rises above cloud or Tenkan > Kijun
-            if (price > cloud_top or
-                tenkan_val > kijun_val):
+            # Exit short: price closes above EMA20 (middle line)
+            if price > ema_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -128,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_Ichimoku_Cloud_Volume"
-timeframe = "6h"
+name = "4h_1d_Keltner_ATR_Volume"
+timeframe = "4h"
 leverage = 1.0
