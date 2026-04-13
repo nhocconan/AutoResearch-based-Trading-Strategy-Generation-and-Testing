@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_1d_1w_Liquidity_Zone_Breakout
-Hypothesis: Uses daily liquidity zones (previous day high/low) and weekly trend filter to capture breakouts on 6h.
-- Uses daily liquidity zones: long when price breaks above previous day's high, short when below previous day's low.
-- Uses weekly ADX (14) to filter for trending markets only (ADX > 25).
-- Requires volume expansion (current volume > 1.5x 20-period average) for confirmation.
-- Trades in direction of higher timeframe trend to avoid counter-trend whipsaws.
-- Designed to work in both bull and bear markets by following weekly trend.
-- Target: 12-37 trades per year (50-150 total over 4 years) to minimize fee drag.
+12h_1w_1d_Camarilla_Breakout_Volume_v2
+Hypothesis: Uses weekly ADX (14) as trend filter and daily Camarilla pivot levels (H3/L3) for breakouts.
+Trades only when price breaks H3/L3 with volume expansion and strong weekly trend (ADX > 25).
+Exits when price returns to previous day's close.
+Designed to work in both bull and bear markets by capturing breakouts with strong momentum.
+Target: 12-37 trades per year (50-150 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
@@ -24,13 +22,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for liquidity zones (previous day high/low)
+    # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla pivot levels for previous day
+    hl_range = high_1d - low_1d
+    H3 = close_1d + 1.125 * hl_range
+    L3 = close_1d - 1.125 * hl_range
     
     # Get 1w data for ADX trend filter
     df_1w = get_htf_data(prices, '1w')
@@ -61,11 +65,14 @@ def generate_signals(prices):
         
         # Smooth with Wilder's smoothing (alpha = 1/period)
         atr = np.zeros_like(high)
-        plus_dm_smooth = np.zeros_like(high)
-        minus_dm_smooth = np.zeros_like(high)
+        plus_di = np.zeros_like(high)
+        minus_di = np.zeros_like(high)
         dx = np.zeros_like(high)
         
         atr[period-1] = np.mean(tr[1:period]) if period > 1 else tr[1]
+        plus_dm_smooth = np.zeros_like(high)
+        minus_dm_smooth = np.zeros_like(high)
+        
         plus_dm_smooth[period-1] = np.mean(plus_dm[1:period]) if period > 1 else plus_dm[1]
         minus_dm_smooth[period-1] = np.mean(minus_dm[1:period]) if period > 1 else minus_dm[1]
         
@@ -89,12 +96,12 @@ def generate_signals(prices):
     
     adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
     
-    # Align all signals to 6h timeframe
-    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
-    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
+    # Align all signals to 12h timeframe
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
     adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
-    # Volume confirmation: current volume > 1.5x 20-period average on 6h
+    # Volume confirmation: current volume > 1.5x 20-period average on 12h
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_expansion = volume > (vol_ma_20 * 1.5)
     
@@ -104,8 +111,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(high_1d_aligned[i]) or 
-            np.isnan(low_1d_aligned[i]) or 
+        if (np.isnan(H3_aligned[i]) or 
+            np.isnan(L3_aligned[i]) or 
             np.isnan(adx_1w_aligned[i])):
             signals[i] = 0.0
             continue
@@ -113,13 +120,14 @@ def generate_signals(prices):
         # Trend filter: only trade when ADX > 25 (trending market)
         strong_trend = adx_1w_aligned[i] > 25
         
-        # Entry conditions: price breaks daily liquidity zone with volume expansion and trend filter
-        long_entry = (high[i] > high_1d_aligned[i]) and volume_expansion[i] and strong_trend
-        short_entry = (low[i] < low_1d_aligned[i]) and volume_expansion[i] and strong_trend
+        # Entry conditions: price breaks H3/L3 with volume expansion and trend filter
+        long_entry = (high[i] > H3_aligned[i]) and volume_expansion[i] and strong_trend
+        short_entry = (low[i] < L3_aligned[i]) and volume_expansion[i] and strong_trend
         
-        # Exit conditions: return to opposite liquidity zone (mean reversion within the day's range)
-        exit_long = position == 1 and low[i] <= low_1d_aligned[i]
-        exit_short = position == -1 and high[i] >= high_1d_aligned[i]
+        # Exit conditions: return to previous day's close
+        prev_close_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+        exit_long = position == 1 and close[i] <= prev_close_aligned[i]
+        exit_short = position == -1 and close[i] >= prev_close_aligned[i]
         
         # Execute signals
         if long_entry and position != 1:
@@ -142,6 +150,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_1w_Liquidity_Zone_Breakout"
-timeframe = "6h"
+name = "12h_1w_1d_Camarilla_Breakout_Volume_v2"
+timeframe = "12h"
 leverage = 1.0
