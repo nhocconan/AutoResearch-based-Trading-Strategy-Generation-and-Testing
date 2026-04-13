@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Williams %R with 1-day trend filter and volume confirmation.
-Williams %R identifies overbought/oversold conditions. In trending markets (ADX > 25 on 1d),
-we fade extreme readings during pullbacks: long when %R crosses above -80 from below in uptrend,
-short when %R crosses below -20 from above in downtrend. Volume confirmation ensures momentum.
-Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+Hypothesis: 12h 1-week Donchian breakout with 1d volume confirmation and weekly volatility regime.
+Uses 1-week Donchian channels for trend direction, 1d volume spike (volume > 1.5x 20-period average) 
+to confirm breakout strength, and 1-week volatility regime (ATR ratio < 0.8 = low volatility) 
+to avoid false breakouts in high volatility. Long when price breaks above weekly Donchian upper 
+in low volatility with volume spike. Short when price breaks below weekly Donchian lower in 
+low volatility with volume spike. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
 """
 
 import numpy as np
@@ -21,100 +22,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (ADX) and volume confirmation
+    # Get 1d data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1-day ADX for trend strength
+    # Calculate 1d volume spike (volume > 1.5x 20-period average)
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_1d > (vol_ma_20 * 1.5)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
+    
+    # Get 1w data for Donchian channels and volatility regime
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate 1-week Donchian channels (20-period)
+    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    
+    # Calculate 1-week ATR for volatility regime
     # TR = max(high-low, |high-close_prev|, |low-close_prev|)
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], 
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr_1w = np.concatenate([[np.max([high_1w[0] - low_1w[0], np.abs(high_1w[0] - close_1w[0]), np.abs(low_1w[0] - close_1w[0])])], 
                            np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # +DM and -DM
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
     
-    # Smooth TR, +DM, -DM with Wilder's smoothing (alpha = 1/period)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(data[:period])
-        # Subsequent values: smoothed = prev * (1 - 1/period) + current * (1/period)
-        for i in range(period, len(data)):
-            result[i] = result[i-1] * (1 - 1/period) + data[i] * (1/period)
-        return result
+    # Calculate 1-week ATR ratio (current ATR / 50-period average ATR) for volatility regime
+    atr_ma_50 = pd.Series(atr_1w).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr_1w / atr_ma_50
     
-    atr_1d = wilders_smoothing(tr_1d, 14)
-    plus_di_1d = 100 * wilders_smoothing(plus_dm, 14) / atr_1d
-    minus_di_1d = 100 * wilders_smoothing(minus_dm, 14) / atr_1d
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    adx_1d = wilders_smoothing(dx_1d, 14)
+    # Volatility regime: ATR ratio < 0.8 = low volatility (good for breakouts)
+    low_volatility = atr_ratio < 0.8
     
-    # Trend: ADX > 25 = trending market
-    trending = adx_1d > 25
-    
-    # Determine trend direction using +DI/-DI crossover
-    # Uptrend when +DI > -DI
-    uptrend = plus_di_1d > minus_di_1d
-    downtrend = plus_di_1d < minus_di_1d
-    
-    # Calculate 1-day volume confirmation (volume > 1.3x 20-period average)
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume_1d > (vol_ma_20 * 1.3)
-    
-    # Calculate Williams %R on 6h data
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
-    
-    # Align 1d indicators to 6h timeframe
-    trending_aligned = align_htf_to_ltf(prices, df_1d, trending.astype(float))
-    uptrend_aligned = align_htf_to_ltf(prices, df_1d, uptrend.astype(float))
-    downtrend_aligned = align_htf_to_ltf(prices, df_1d, downtrend.astype(float))
-    vol_confirm_aligned = align_htf_to_ltf(prices, df_1d, vol_confirm.astype(float))
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1w, atr_ratio)
+    low_volatility_aligned = align_htf_to_ltf(prices, df_1w, low_volatility.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% of capital
     
-    for i in range(14, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(trending_aligned[i]) or 
-            np.isnan(uptrend_aligned[i]) or 
-            np.isnan(downtrend_aligned[i]) or 
-            np.isnan(vol_confirm_aligned[i]) or 
-            np.isnan(williams_r[i])):
+        if (np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(vol_spike_aligned[i]) or 
+            np.isnan(low_volatility_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: Williams %R extreme + trend + volume
-        # Long: %R crosses above -80 from below in uptrend with volume
-        williams_r_cross_up = (williams_r[i] > -80) and (williams_r[i-1] <= -80) if i > 0 else False
-        long_entry = williams_r_cross_up and trending_aligned[i] and uptrend_aligned[i] and vol_confirm_aligned[i]
+        # Entry conditions: Donchian breakout + volume spike + low volatility
+        breakout_long = close[i] > donchian_high_aligned[i]
+        breakout_short = close[i] < donchian_low_aligned[i]
+        vol_confirm = vol_spike_aligned[i] > 0.5  # True if volume spike
+        vol_regime = low_volatility_aligned[i] > 0.5  # True if low volatility
         
-        # Short: %R crosses below -20 from above in downtrend with volume
-        williams_r_cross_down = (williams_r[i] < -20) and (williams_r[i-1] >= -20) if i > 0 else False
-        short_entry = williams_r_cross_down and trending_aligned[i] and downtrend_aligned[i] and vol_confirm_aligned[i]
+        long_entry = breakout_long and vol_confirm and vol_regime
+        short_entry = breakout_short and vol_confirm and vol_regime
         
-        # Exit when %R returns to opposite extreme (mean reversion within trend)
-        exit_long = position == 1 and williams_r[i] > -20
-        exit_short = position == -1 and williams_r[i] < -80
+        # Exit when price returns to opposite Donchian level (mean reversion within channel)
+        exit_long = position == 1 and close[i] < donchian_low_aligned[i]
+        exit_short = position == -1 and close[i] > donchian_high_aligned[i]
         
         # Execute signals
         if long_entry and position != 1:
@@ -137,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_williams_r_trend_volume"
-timeframe = "6h"
+name = "12h_1w_donchian_vol_volatility"
+timeframe = "12h"
 leverage = 1.0
