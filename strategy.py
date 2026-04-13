@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Pivot_Breakout_With_Volume_Confirmation
-Hypothesis: Camarilla pivot levels from daily timeframe identify key support/resistance levels.
-Price breaking above/below these levels with volume expansion indicates institutional participation.
-Combined with daily trend filter (EMA50) to avoid counter-trend trades. Works in both bull (breakouts in uptrend) and bear (breakdowns in downtrend) markets.
-Target: 15-30 trades/year.
+4h_1d_Camarilla_Pivot_Breakout_With_Volume_Confirmation
+Hypothesis: Camarilla pivot levels from daily timeframe act as strong support/resistance zones.
+A breakout above resistance or below support with volume expansion indicates institutional participation
+and often leads to sustained moves. This strategy works in both bull (breakouts to upside) and bear
+(breakdowns to downside) markets by trading the direction of the breakout.
+Uses volume confirmation and a volatility filter to avoid false breakouts in low-volatility environments.
+Target: 20-40 trades/year.
 """
 
 import numpy as np
@@ -21,83 +23,76 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and trend filter
+    # Get daily data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
-    # Camarilla formulas: based on previous day's high, low, close
+    # Calculate Camarilla pivot levels for each day
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Pivot point and support/resistance levels
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # Camarilla formulas
+    # Resistance levels
+    R1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    R2 = close_1d + (high_1d - low_1d) * 1.1 / 6
+    R3 = close_1d + (high_1d - low_1d) * 1.1 / 4
+    R4 = close_1d + (high_1d - low_1d) * 1.1 / 2
+    # Support levels
+    S1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    S2 = close_1d - (high_1d - low_1d) * 1.1 / 6
+    S3 = close_1d - (high_1d - low_1d) * 1.1 / 4
+    S4 = close_1d - (high_1d - low_1d) * 1.1 / 2
     
-    # Camarilla levels
-    resistance1 = close_1d + (range_1d * 1.1 / 12)
-    resistance2 = close_1d + (range_1d * 1.1 / 6)
-    resistance3 = close_1d + (range_1d * 1.1 / 4)
-    resistance4 = close_1d + (range_1d * 1.1 / 2)
-    
-    support1 = close_1d - (range_1d * 1.1 / 12)
-    support2 = close_1d - (range_1d * 1.1 / 6)
-    support3 = close_1d - (range_1d * 1.1 / 4)
-    support4 = close_1d - (range_1d * 1.1 / 2)
-    
-    # Align all levels to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    resistance1_aligned = align_htf_to_ltf(prices, df_1d, resistance1)
-    resistance2_aligned = align_htf_to_ltf(prices, df_1d, resistance2)
-    resistance3_aligned = align_htf_to_ltf(prices, df_1d, resistance3)
-    resistance4_aligned = align_htf_to_ltf(prices, df_1d, resistance4)
-    support1_aligned = align_htf_to_ltf(prices, df_1d, support1)
-    support2_aligned = align_htf_to_ltf(prices, df_1d, support2)
-    support3_aligned = align_htf_to_ltf(prices, df_1d, support3)
-    support4_aligned = align_htf_to_ltf(prices, df_1d, support4)
-    
-    # Daily trend filter: EMA50
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align each level to lower timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     volume_expansion = volume > (vol_ma_20 * 1.5)
     
+    # Volatility filter: avoid trading in extremely low volatility
+    # Use 20-period ATR percentage
+    tr1 = np.abs(high[1:] - low[1:])
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
+    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean()
+    atr_percent = atr_20 / close * 100
+    # Only trade when volatility is above 20th percentile (avoid choppy low-vol periods)
+    vol_threshold = pd.Series(atr_percent).rolling(window=50, min_periods=20).quantile(0.2)
+    volatility_filter = atr_percent > vol_threshold
+    
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required data is not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(resistance1_aligned[i]) or 
-            np.isnan(support1_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(volume_expansion[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(volume_expansion[i]) or np.isnan(volatility_filter[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions:
-        # 1. Price breaks above resistance3 (strong resistance level)
-        # 2. Price above daily EMA50 (1d trend filter)
-        # 3. Volume expansion
-        breakout_long = close[i] > resistance3_aligned[i]
-        price_above_ema = close[i] > ema_50_1d_aligned[i]
-        long_condition = breakout_long and price_above_ema and volume_expansion[i]
+        # Long breakout: price breaks above R3 with volume expansion
+        long_breakout = close[i] > R3_aligned[i] and volume_expansion[i] and volatility_filter[i]
         
-        # Short conditions:
-        # 1. Price breaks below support3 (strong support level)
-        # 2. Price below daily EMA50 (1d trend filter)
-        # 3. Volume expansion
-        breakdown_short = close[i] < support3_aligned[i]
-        price_below_ema = close[i] < ema_50_1d_aligned[i]
-        short_condition = breakdown_short and price_below_ema and volume_expansion[i]
+        # Short breakdown: price breaks below S3 with volume expansion
+        short_breakdown = close[i] < S3_aligned[i] and volume_expansion[i] and volatility_filter[i]
         
-        if long_condition and position != 1:
+        if long_breakout and position != 1:
             position = 1
             signals[i] = position_size
-        elif short_condition and position != -1:
+        elif short_breakdown and position != -1:
             position = -1
             signals[i] = -position_size
         else:
@@ -106,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_Pivot_Breakout_With_Volume_Confirmation"
-timeframe = "12h"
+name = "4h_1d_Camarilla_Pivot_Breakout_With_Volume_Confirmation"
+timeframe = "4h"
 leverage = 1.0
