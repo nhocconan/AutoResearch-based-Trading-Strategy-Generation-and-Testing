@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d daily Donchian breakout with weekly trend filter and volume confirmation.
-# The strategy uses daily Donchian channel breakouts (20-day high/low) as entry signals,
-# filtered by weekly EMA trend (to avoid counter-trend trades) and volume spikes.
-# Weekly trend filter ensures we only trade in the direction of the higher timeframe trend.
-# Position size: 0.25 (25%) to manage risk during drawdowns.
-# Target: 20-60 total trades over 4 years (5-15/year) for 1d timeframe.
+# Hypothesis: 12h Donchian channel breakout with 1d RSI filter and volume confirmation.
+# The Donchian channel (20-period high/low) identifies breakouts in trending markets.
+# 1d RSI (14) filters momentum extremes: avoid overbought/oversold conditions.
+# Volume confirmation ensures breakouts are supported by participation.
+# Works in both bull and bear markets by using 1d RSI to avoid counter-trend entries.
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,32 +20,46 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # 1-day data for RSI filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # Weekly EMA(20) for trend filter
-    ema20_1w = np.zeros(len(close_1w))
-    ema_multiplier = 2 / (20 + 1)
-    ema20_1w[0] = close_1w[0]
-    for i in range(1, len(close_1w)):
-        ema20_1w[i] = (close_1w[i] - ema20_1w[i-1]) * ema_multiplier + ema20_1w[i-1]
+    close_1d = df_1d['close'].values
+    # Calculate RSI(14) on 1d
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Align weekly EMA to daily timeframe
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    avg_gain = np.zeros_like(close_1d)
+    avg_loss = np.zeros_like(close_1d)
     
-    # Daily Donchian Channel (20-period)
-    # Upper band: 20-day high
-    # Lower band: 20-day low
+    # Initialize first average
+    if len(gain) >= 14:
+        avg_gain[13] = np.mean(gain[:14])
+        avg_loss[13] = np.mean(loss[:14])
+    
+    # Wilder smoothing
+    for i in range(14, len(close_1d)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d[:13] = np.nan  # Not enough data
+    
+    # Align 1d RSI to 12h timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
+    # Donchian channel on 12h timeframe (20-period)
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
+    
     for i in range(20, n):
         donchian_high[i] = np.max(high[i-20:i])
         donchian_low[i] = np.min(low[i-20:i])
     
-    # Average volume (20-period) for volume confirmation
+    # Average volume (20-period) for confirmation
     avg_volume = np.full(n, np.nan)
     for i in range(20, n):
         avg_volume[i] = np.mean(volume[i-20:i])
@@ -57,45 +71,45 @@ def generate_signals(prices):
     for i in range(20, n):
         # Skip if any required data is not ready
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema20_1w_aligned[i]) or np.isnan(avg_volume[i])):
+            np.isnan(rsi_1d_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        weekly_trend = ema20_1w_aligned[i]
+        rsi_val = rsi_1d_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirm = vol > 1.5 * avg_vol
+        # Volume confirmation: current volume > 1.3x average volume
+        volume_confirm = vol > 1.3 * avg_vol
         
         if position == 0:
-            # Long: Price breaks above Donchian high + above weekly EMA + volume confirmation
+            # Long: price breaks above Donchian high + RSI not overbought + volume confirmation
             if (price > donchian_high[i] and
-                price > weekly_trend and
+                rsi_val < 70 and  # Not overbought
                 volume_confirm):
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below Donchian low + below weekly EMA + volume confirmation
+            # Short: price breaks below Donchian low + RSI not oversold + volume confirmation
             elif (price < donchian_low[i] and
-                  price < weekly_trend and
+                  rsi_val > 30 and  # Not oversold
                   volume_confirm):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Price breaks below Donchian low or weekly trend turns bearish
+            # Exit long: price breaks below Donchian low or RSI overbought
             if (price < donchian_low[i] or
-                price < weekly_trend):
+                rsi_val > 70):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Price breaks above Donchian high or weekly trend turns bullish
+            # Exit short: price breaks above Donchian high or RSI oversold
             if (price > donchian_high[i] or
-                price > weekly_trend):
+                rsi_val < 30):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -103,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_Donchian_Trend_Volume"
-timeframe = "1d"
+name = "12h_1d_Donchian_RSI_Volume"
+timeframe = "12h"
 leverage = 1.0
