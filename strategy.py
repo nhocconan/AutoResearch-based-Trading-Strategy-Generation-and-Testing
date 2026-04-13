@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot reversal with 1d volume spike and 4h RSI filter.
-# Camarilla levels act as reversal zones in ranging markets.
-# Volume spikes confirm institutional interest at key levels.
-# RSI filter ensures we trade in the direction of momentum.
-# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag.
+# Hypothesis: 12h Camarilla pivot reversal with weekly trend filter and volume confirmation.
+# Camarilla levels identify intraday support/resistance with high probability reversal zones.
+# Weekly trend filter ensures we trade with the higher timeframe momentum.
+# Volume confirmation validates the rejection at pivot levels.
+# Designed for 12h timeframe to target 50-150 trades over 4 years (12-37/year).
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,118 +19,109 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla and volume analysis
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
+    # Daily data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Calculate weekly EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = np.full(len(close_1w), np.nan)
+    for i in range(49, len(close_1w)):
+        ema_1w[i] = np.mean(close_1w[i-49:i+1])  # Simple MA for efficiency
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # Calculate daily Camarilla levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    camarilla_h5 = np.zeros(len(close_1d))
-    camarilla_h4 = np.zeros(len(close_1d))
+    # Camarilla levels for each day
     camarilla_h3 = np.zeros(len(close_1d))
     camarilla_l3 = np.zeros(len(close_1d))
+    camarilla_h4 = np.zeros(len(close_1d))
     camarilla_l4 = np.zeros(len(close_1d))
-    camarilla_l5 = np.zeros(len(close_1d))
     
-    for i in range(1, len(close_1d)):
-        # Previous day's values
-        ph = high_1d[i-1]
-        pl = low_1d[i-1]
-        pc = close_1d[i-1]
-        rang = ph - pl
-        
-        camarilla_h5[i] = pc + 1.1 * rang / 2
-        camarilla_h4[i] = pc + 1.1 * rang / 4
-        camarilla_h3[i] = pc + 1.1 * rang / 6
-        camarilla_l3[i] = pc - 1.1 * rang / 6
-        camarilla_l4[i] = pc - 1.1 * rang / 4
-        camarilla_l5[i] = pc - 1.1 * rang / 2
-    
-    # Align Camarilla levels to 4h timeframe
-    h5_4h = align_htf_to_ltf(prices, df_1d, camarilla_h5)
-    h4_4h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    h3_4h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_4h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    l4_4h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    l5_4h = align_htf_to_ltf(prices, df_1d, camarilla_l5)
-    
-    # Calculate 20-period average volume for spike detection
-    vol_avg = np.zeros(n)
-    for i in range(20, n):
-        vol_avg[i] = np.mean(volume[i-20:i])
-    
-    # Calculate 4h RSI (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    for i in range(14, n):
-        if i == 14:
-            avg_gain[i] = np.mean(gain[1:15])
-            avg_loss[i] = np.mean(loss[1:15])
+    for i in range(len(close_1d)):
+        if i == 0:
+            camarilla_h3[i] = camarilla_l3[i] = camarilla_h4[i] = camarilla_l4[i] = np.nan
         else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+            # Calculate based on previous day
+            ph = high_1d[i-1]
+            pl = low_1d[i-1]
+            pc = close_1d[i-1]
+            rang = ph - pl
+            
+            camarilla_h3[i] = pc + (rang * 1.1 / 6)
+            camarilla_l3[i] = pc - (rang * 1.1 / 6)
+            camarilla_h4[i] = pc + (rang * 1.1 / 4)
+            camarilla_l4[i] = pc - (rang * 1.1 / 4)
     
-    rs = np.zeros(n)
-    rsi = np.zeros(n)
-    for i in range(14, n):
-        if avg_loss[i] != 0:
-            rs[i] = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs[i]))
-        else:
-            rsi[i] = 100
+    # Align Camarilla levels to 12h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    
+    # Calculate average volume (24-period) for volume confirmation
+    avg_volume = np.full(n, np.nan)
+    for i in range(23, n):
+        avg_volume[i] = np.mean(volume[i-23:i+1])
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(h5_4h[i]) or np.isnan(l5_4h[i]) or 
-            np.isnan(vol_avg[i]) or np.isnan(rsi[i])):
+        if (np.isnan(ema_1w_aligned[i]) or 
+            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
+            np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        avg_vol = vol_avg[i]
-        rsi_val = rsi[i]
+        avg_vol = avg_volume[i]
         
-        # Volume spike: current volume > 2.0x average volume
-        volume_spike = vol > 2.0 * avg_vol
+        # Volume confirmation: current volume > 1.3x average volume
+        volume_confirm = vol > 1.3 * avg_vol
         
         if position == 0:
-            # Long reversal: price touches L3/L4 + volume spike + RSI < 40 (oversold bounce)
-            if (abs(price - l3_4h[i]) < 0.001 * price or abs(price - l4_4h[i]) < 0.001 * price) and \
-               volume_spike and \
-               rsi_val < 40:
+            # Long: price rejects L3/L4 and closes back above, with volume, in uptrend
+            if (price > l3_aligned[i] and 
+                close[i-1] <= l3_aligned[i] and  # Was at or below rejection level
+                volume_confirm and
+                close[i] > ema_1w_aligned[i]):  # Weekly uptrend
                 position = 1
                 signals[i] = position_size
-            # Short reversal: price touches H3/H4 + volume spike + RSI > 60 (overbought reversal)
-            elif (abs(price - h3_4h[i]) < 0.001 * price or abs(price - h4_4h[i]) < 0.001 * price) and \
-                 volume_spike and \
-                 rsi_val > 60:
+            # Short: price rejects H3/H4 and closes back below, with volume, in downtrend
+            elif (price < h3_aligned[i] and 
+                  close[i-1] >= h3_aligned[i] and  # Was at or above rejection level
+                  volume_confirm and
+                  close[i] < ema_1w_aligned[i]):  # Weekly downtrend
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price reaches H3 or RSI > 70
-            if (price >= h3_4h[i] or rsi_val > 70):
+            # Exit long: price reaches H3/H4 or trend changes
+            if (price >= h3_aligned[i] or 
+                close[i] < ema_1w_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price reaches L3 or RSI < 30
-            if (price <= l3_4h[i] or rsi_val < 30):
+            # Exit short: price reaches L3/L4 or trend changes
+            if (price <= l3_aligned[i] or 
+                close[i] > ema_1w_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -138,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_Volume_Spike_RSI_v1"
-timeframe = "4h"
+name = "12h_1w_Camarilla_Pivot_Reversal_Trend_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
