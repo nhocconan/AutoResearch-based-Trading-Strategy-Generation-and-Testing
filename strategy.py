@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_1d_Range_Breakout_With_Volume_Confirmation
-Hypothesis: Trade breakouts from daily high/low ranges on 4h timeframe with volume confirmation and trend filter.
-Daily ranges act as significant support/resistance levels. Breakouts above daily high indicate bullish momentum,
-breakdowns below daily low indicate bearish momentum. Volume > 1.5x 20-period average confirms institutional participation.
-Trend filter: price above/below 50-period EMA on 4h to avoid counter-trend trades.
-Target: 25-35 trades/year to minimize fee drag while maintaining edge.
+1d_1w_KAMA_RSI_Trend_Filter_v3
+Hypothesis: On daily timeframe, use KAMA to determine trend direction, RSI(2) for mean-reversion entries within the trend, and weekly trend filter to avoid counter-trend trades. KAMA adapts to market noise, reducing false signals in chop. RSI(2) captures short-term reversals in trending markets. Weekly trend ensures alignment with higher-timeframe momentum. Designed for low trade frequency (<20/year) to minimize fee drag in both bull and bear markets.
 """
 
 import numpy as np
@@ -22,41 +18,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for range calculation
+    # KAMA trend indicator on daily
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    # Efficiency Ratio
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.abs(np.subtract(close_1d[1:], close_1d[:-1]))
+    volatility = np.append(volatility, 0)  # same length
+    er = np.zeros_like(close_1d, dtype=np.float64)
+    for i in range(len(close_1d)):
+        if i >= 9:
+            direction = np.abs(close_1d[i] - close_1d[i-9])
+            volatility_sum = np.sum(volatility[i-9:i+1])
+            er[i] = direction / volatility_sum if volatility_sum != 0 else 0
+        else:
+            er[i] = 0
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)
+    slow_sc = 2 / (30 + 1)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # KAMA calculation
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
-    # Align daily high/low to 4h
-    daily_high_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
-    daily_low_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
+    # RSI(2) on daily for entry signals
+    rsi_period = 2
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=rsi_period, min_periods=rsi_period).mean().values
+    avg_loss = pd.Series(loss).rolling(window=rsi_period, min_periods=rsi_period).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
-    # Get 4h EMA50 for trend filter
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Weekly trend filter: price above/below weekly EMA20
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 20:
+        return np.zeros(n)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 1.5)
+    close_weekly = df_weekly['close'].values
+    ema_20_weekly = pd.Series(close_weekly).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_20_weekly)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.25
+    position_size = 0.25  # 25% position size
     
-    for i in range(100, n):
+    for i in range(30, n):  # start after warmup
         # Skip if any required data is not ready
-        if (np.isnan(daily_high_aligned[i]) or np.isnan(daily_low_aligned[i]) or 
-            np.isnan(ema_50[i]) or np.isnan(volume_expansion[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(ema_20_weekly_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long: breakout above daily high with volume expansion and price above EMA50
-        long_condition = (close[i] > daily_high_aligned[i]) and volume_expansion[i] and (close[i] > ema_50[i])
+        # Determine trend direction from KAMA
+        uptrend = close[i] > kama_aligned[i]
+        downtrend = close[i] < kama_aligned[i]
         
-        # Short: breakdown below daily low with volume expansion and price below EMA50
-        short_condition = (close[i] < daily_low_aligned[i]) and volume_expansion[i] and (close[i] < ema_50[i])
+        # Long: in uptrend, RSI(2) oversold (<10), price above weekly EMA20
+        long_condition = uptrend and (rsi_aligned[i] < 10) and (close[i] > ema_20_weekly_aligned[i])
+        
+        # Short: in downtrend, RSI(2) overbought (>90), price below weekly EMA20
+        short_condition = downtrend and (rsi_aligned[i] > 90) and (close[i] < ema_20_weekly_aligned[i])
         
         if long_condition and position != 1:
             position = 1
@@ -70,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Range_Breakout_With_Volume_Confirmation"
-timeframe = "4h"
+name = "1d_1w_KAMA_RSI_Trend_Filter_v3"
+timeframe = "1d"
 leverage = 1.0
