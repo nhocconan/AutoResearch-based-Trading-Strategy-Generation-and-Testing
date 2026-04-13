@@ -8,104 +8,74 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Camarilla pivot levels from 1d + volume confirmation + ADX regime filter
-    # Long: price > H3 (Camarilla resistance) AND volume > 1.5x avg AND ADX > 25 (trending)
-    # Short: price < L3 (Camarilla support) AND volume > 1.5x avg AND ADX > 25 (trending)
-    # Exit: price crosses back to H4/L4 (pivot extremes) OR ADX < 20 (range) OR volume dry-up
-    # Using 4h timeframe for optimal trade frequency, Camarilla for precise pivot levels,
-    # ADX for trend regime filter (avoid whipsaws in ranging markets), volume for confirmation.
-    # Discrete position sizing (0.25) to minimize fee churn.
+    # Hypothesis: 1d Donchian(20) breakout with 1w ADX trend filter and volume confirmation
+    # Long: price > Donchian upper(20) AND 1w ADX > 25 (trending) AND volume > 1.5x avg
+    # Short: price < Donchian lower(20) AND 1w ADX > 25 AND volume > 1.5x avg
+    # Exit: price crosses Donchian midpoint OR volume dry-up
+    # Using 1d timeframe for low trade frequency, Donchian for structure,
+    # 1w ADX for regime filter (avoid ranging markets), volume for confirmation.
+    # Discrete position sizing (0.30) to minimize fee churn.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for ADX regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from daily OHLC
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # H4 = Pivot + Range * 1.1/2
-    # H3 = Pivot + Range * 1.1/4
-    # L3 = Pivot - Range * 1.1/4
-    # L4 = Pivot - Range * 1.1/2
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    
-    h4_1d = pivot_1d + range_1d * 1.1 / 2.0
-    h3_1d = pivot_1d + range_1d * 1.1 / 4.0
-    l3_1d = pivot_1d - range_1d * 1.1 / 4.0
-    l4_1d = pivot_1d - range_1d * 1.1 / 2.0
-    
-    # Align daily Camarilla levels to 4h
-    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
-    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
-    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
-    
-    # Calculate ADX(14) on 4h for regime filter
-    # ADX = smoothed DX, where DX = |+DI - -DI| / (+DI + -DI) * 100
-    # +DM = max(high - prev_high, 0) if high - prev_high > prev_low - low else 0
-    # -DM = max(prev_low - low, 0) if prev_low - low > high - prev_high else 0
-    # TR = max(high - low, abs(high - prev_close), abs(low - prev_close))
-    # +DI = smoothed +DM / ATR * 100
-    # -DI = smoothed -DM / ATR * 100
+    # Calculate weekly ADX(14)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # True Range
-    prev_close = np.roll(close, 1)
-    prev_close[0] = close[0]
-    tr1 = high - low
-    tr2 = np.abs(high - prev_close)
-    tr3 = np.abs(low - prev_close)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr1 = np.abs(high_1w[1:] - low_1w[:-1])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
     # Directional Movement
-    prev_high = np.roll(high, 1)
-    prev_high[0] = high[0]
-    prev_low = np.roll(low, 1)
-    prev_low[0] = low[0]
+    up_move = high_1w[1:] - high_1w[:-1]
+    down_move = low_1w[:-1] - low_1w[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
     
-    up_move = high - prev_high
-    down_move = prev_low - low
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Wilder's smoothing (alpha = 1/period)
+    # Wilder's smoothing (14-period)
     def wilders_smoothing(data, period):
         result = np.full_like(data, np.nan)
         if len(data) < period:
             return result
-        # First value is simple average
-        result[period-1] = np.nanmean(data[:period])
-        # Subsequent values: smoothed = prev * (1 - 1/period) + current * (1/period)
-        alpha = 1.0 / period
+        result[period-1] = np.nanmean(data[1:period])
         for i in range(period, len(data)):
-            if not np.isnan(result[i-1]):
-                result[i] = result[i-1] * (1 - alpha) + data[i] * alpha
+            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
         return result
     
-    period = 14
-    atr = wilders_smoothing(tr, period)
-    plus_di_smoothed = wilders_smoothing(plus_dm, period)
-    minus_di_smoothed = wilders_smoothing(minus_dm, period)
+    atr_1w = wilders_smoothing(tr, 14)
+    plus_di_1w = 100 * wilders_smoothing(plus_dm, 14) / atr_1w
+    minus_di_1w = 100 * wilders_smoothing(minus_dm, 14) / atr_1w
+    dx_1w = 100 * np.abs(plus_di_1w - minus_di_1w) / (plus_di_1w + minus_di_1w)
+    adx_1w = wilders_smoothing(dx_1w, 14)
     
-    # Avoid division by zero
-    dx = np.where((plus_di_smoothed + minus_di_smoothed) > 0,
-                  np.abs(plus_di_smoothed - minus_di_smoothed) / (plus_di_smoothed + minus_di_smoothed) * 100,
-                  0)
-    adx = wilders_smoothing(dx, period)
+    # Align weekly ADX to 1d
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
-    # Volume confirmation: >1.5x 20-period average
+    # Calculate daily Donchian channels (20-period)
+    upper_20 = np.full(n, np.nan)
+    lower_20 = np.full(n, np.nan)
+    mid_20 = np.full(n, np.nan)
+    
+    for i in range(20, n):
+        upper_20[i] = np.max(high[i-20:i])
+        lower_20[i] = np.min(low[i-20:i])
+        mid_20[i] = (upper_20[i] + lower_20[i]) / 2
+    
+    # Get daily volume for confirmation (>1.5x 20-period average)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -116,31 +86,31 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
-            np.isnan(adx[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(adx_1w_aligned[i]) or np.isnan(upper_20[i]) or 
+            np.isnan(lower_20[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         # Regime filter: ADX > 25 = trending market
-        trending = adx[i] > 25
+        trending = adx_1w_aligned[i] > 25
         
         # Volume confirmation
         vol_confirm = volume_spike[i]
         
-        # Entry logic: Camarilla level break + trend + volume
-        long_entry = (close[i] > h3_1d_aligned[i]) and trending and vol_confirm
-        short_entry = (close[i] < l3_1d_aligned[i]) and trending and vol_confirm
+        # Entry logic: Donchian breakout + trend filter + volume confirmation
+        long_entry = (close[i] > upper_20[i]) and trending and vol_confirm
+        short_entry = (close[i] < lower_20[i]) and trending and vol_confirm
         
-        # Exit logic: price crosses H4/L4 OR ADX < 20 (range) OR volume dry-up
-        long_exit = (close[i] >= h4_1d_aligned[i]) or (adx[i] < 20) or not vol_confirm
-        short_exit = (close[i] <= l4_1d_aligned[i]) or (adx[i] < 20) or not vol_confirm
+        # Exit logic: price crosses midpoint OR volume dry-up
+        long_exit = (close[i] < mid_20[i]) or not vol_confirm
+        short_exit = (close[i] > mid_20[i]) or not vol_confirm
         
         if long_entry and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.30
         elif short_entry and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.30
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -150,14 +120,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_1d_camarilla_adx_volume_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_adx_volume_v1"
+timeframe = "1d"
 leverage = 1.0
