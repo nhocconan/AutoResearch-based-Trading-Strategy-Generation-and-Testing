@@ -5,31 +5,33 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Hypothesis: 6h Elder Ray + ADX regime filter
-    # Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
-    # Long when Bull Power > 0 and ADX > 25 (trending up)
-    # Short when Bear Power > 0 and ADX > 25 (trending down)
-    # Uses 1d HTF for EMA(13) and ADX to reduce noise and avoid whipsaw
-    # Works in bull (catch trends) and bear (catch downtrends) with regime filter
+    # Hypothesis: 12h Donchian breakout with 1d volume and chop regime filter
+    # Enter long when price breaks above Donchian(20) high with volume > 1.5x avg and chop < 61.8
+    # Enter short when price breaks below Donchian(20) low with volume > 1.5x avg and chop < 61.8
+    # Exit when price touches Donchian midpoint (mean reversion in choppy markets)
+    # Uses 1d HTF for Donchian calculation (more stable) and 12h for entry/exit timing
+    # Donchian channels provide clear structure, volume confirms participation, chop filter avoids whipsaws
+    # Works in bull (continuation breaks) and bear (mean reversion at extremes)
     # Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 6h data for primary timeframe
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
+    # Get 12h data for primary timeframe
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Get 1d data for HTF indicators (EMA and ADX)
+    # Get 1d data for Donchian calculation (HTF)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -38,79 +40,57 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA(13) for Elder Ray
-    close_1d_series = pd.Series(close_1d)
-    ema13_1d = close_1d_series.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate 1d Donchian channels (20-period)
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Calculate 1d ADX(14)
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with index 0
+    # Align 1d Donchian levels to 12h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid)
     
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
+    # Volume confirmation: volume > 1.5x 20-bar average volume
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirmed = volume > (1.5 * avg_volume)
     
-    # Smoothed TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
-    def wilder_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # first value is simple average
-        result[period-1] = np.nanmean(data[:period])
-        # subsequent values: Wilder's smoothing
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
-    
-    atr1d = wilder_smooth(tr, 14)
-    plus_dm1d = wilder_smooth(plus_dm, 14)
-    minus_dm1d = wilder_smooth(minus_dm, 14)
-    
-    # Avoid division by zero
-    plus_di1d = np.where(atr1d != 0, (plus_dm1d / atr1d) * 100, 0)
-    minus_di1d = np.where(atr1d != 0, (minus_dm1d / atr1d) * 100, 0)
-    
-    dx1d = np.where((plus_di1d + minus_di1d) != 0, 
-                    np.abs((plus_di1d - minus_di1d) / (plus_di1d + minus_di1d)) * 100, 0)
-    adx1d = wilder_smooth(dx1d, 14)
-    
-    # Align 1d indicators to 6h timeframe
-    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
-    adx1d_aligned = align_htf_to_ltf(prices, df_1d, adx1d)
-    
-    # Calculate Elder Ray on 6h using 1d EMA(13)
-    bull_power = high_6h - ema13_1d_aligned
-    bear_power = ema13_1d_aligned - low_6h
+    # Choppiness Index regime filter (avoid whipsaws in choppy markets)
+    # CHOP = 100 * log10(sum(ATR(14)) / log10((max(high, n) - min(low, n)) * sqrt(n))
+    # Simplified: CHOP > 61.8 = choppy (range), CHOP < 38.2 = trending
+    # We want trending markets for breakouts: CHOP < 61.8
+    tr1 = np.maximum(high[1:], low[:-1]) - np.minimum(low[1:], high[:-1])  # True Range
+    tr1 = np.concatenate([[0], tr1])  # align length
+    atr14 = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop_denom = np.log10((max_high - min_low) * np.sqrt(14))
+    chop_denom = np.where(chop_denom == 0, np.nan, chop_denom)
+    chop = 100 * np.log10(pd.Series(atr14).rolling(window=14, min_periods=14).sum().values / chop_denom)
+    chop = np.where(np.isnan(chop) | (chop_denom == 0), 50, chop)  # default to neutral
+    chop_filter = chop < 61.8  # allow breakouts in less choppy (more trending) markets
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
     
-    for i in range(1, n):  # start from 1 to access previous bar
+    for i in range(20, n):  # start from 20 to allow for Donchian calculation
         # Skip if data not ready
-        if (np.isnan(ema13_1d_aligned[i]) or np.isnan(adx1d_aligned[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(donchian_mid_aligned[i]) or
+            np.isnan(avg_volume[i]) or np.isnan(chop_filter[i])):
             signals[i] = 0.0
             continue
         
-        # Regime: ADX > 25 indicates trending market
-        is_trending = adx1d_aligned[i] > 25
+        # Donchian breakout conditions
+        breakout_up = close[i] > donchian_high_aligned[i]  # break above upper band
+        breakout_down = close[i] < donchian_low_aligned[i]  # break below lower band
         
-        # Entry conditions
-        long_entry = is_trending and (bull_power[i] > 0) and (position != 1)
-        short_entry = is_trending and (bear_power[i] > 0) and (position != -1)
+        # Entry conditions with volume and chop confirmation
+        long_entry = breakout_up and volume_confirmed[i] and chop_filter[i] and position != 1
+        short_entry = breakout_down and volume_confirmed[i] and chop_filter[i] and position != -1
         
-        # Exit conditions: reverse signal or ADX weakens
-        exit_long = (position == 1 and (bull_power[i] <= 0 or adx1d_aligned[i] < 20))
-        exit_short = (position == -1 and (bear_power[i] <= 0 or adx1d_aligned[i] < 20))
+        # Exit conditions: return to midpoint (mean reversion)
+        exit_long = (position == 1 and close[i] < donchian_mid_aligned[i])
+        exit_short = (position == -1 and close[i] > donchian_mid_aligned[i])
         
         # Execute signals
         if long_entry:
@@ -136,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_elder_ray_adx_regime_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_volume_chop_filter_v1"
+timeframe = "12h"
 leverage = 1.0
