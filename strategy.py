@@ -8,72 +8,70 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Camarilla Pivot Breakout + 12h Volume Spike + 1d Chop Regime Filter
-    # Long: Price breaks above Camarilla R4 (12h) AND 12h volume > 1.5x 20-period avg AND 1d chop < 61.8 (trending)
-    # Short: Price breaks below Camarilla S4 (12h) AND 12h volume > 1.5x 20-period avg AND 1d chop < 61.8 (trending)
-    # Exit: Price retreats to Camarilla PP (12h) OR chop > 61.8 (ranging)
-    # Uses 12h for Camarilla pivots (structure), 12h for volume confirmation, 1d for chop regime (trend vs range)
+    # Hypothesis: 4h Donchian(20) breakout + 1d ADX regime filter + volume confirmation
+    # Long: price breaks above Donchian(20) high AND 1d ADX > 25 AND volume > 1.5 * avg_volume
+    # Short: price breaks below Donchian(20) low AND 1d ADX > 25 AND volume > 1.5 * avg_volume
+    # Exit: price crosses Donchian midline OR 1d ADX < 20
+    # Uses 4h for price action/volume, 1d for ADX regime filter
     # Discrete position sizing (0.25) to minimize fee churn
-    # Target: 50-150 total trades over 4 years (~12-37/year) to stay within limits
+    # Target: 75-200 total trades over 4 years (~19-50/year) to stay within limits
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla pivots and volume (call ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 4h data for Donchian and volume (call ONCE before loop)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # Get 1d data for chop regime (call ONCE before loop)
+    # Get 1d data for ADX (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 12h Camarilla levels (based on previous 12h bar)
-    # Camarilla: PP = (H+L+C)/3, R4 = C + ((H-L)*1.1/2), S4 = C - ((H-L)*1.1/2)
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Calculate 4h Donchian(20) channels
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Previous bar values for Camarilla calculation (no look-ahead)
-    prev_close_12h = np.roll(close_12h, 1)
-    prev_high_12h = np.roll(high_12h, 1)
-    prev_low_12h = np.roll(low_12h, 1)
-    # First bar will have NaN due to roll, handled later
+    # Donchian high and low (20-period)
+    donch_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high + donch_low) / 2.0
     
-    # Camarilla calculations
-    pp_12h = (prev_high_12h + prev_low_12h + prev_close_12h) / 3.0
-    r4_12h = prev_close_12h + ((prev_high_12h - prev_low_12h) * 1.1 / 2.0)
-    s4_12h = prev_close_12h - ((prev_high_12h - prev_low_12h) * 1.1 / 2.0)
+    # Align 4h Donchian to 4h timeframe (no additional delay for price-based indicators)
+    donch_high_aligned = align_htf_to_ltf(prices, df_4h, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_4h, donch_low)
+    donch_mid_aligned = align_htf_to_ltf(prices, df_4h, donch_mid)
     
-    # Align 12h Camarilla levels to 6h (wait for completed 12h bar)
-    pp_aligned = align_htf_to_ltf(prices, df_12h, pp_12h)
-    r4_aligned = align_htf_to_ltf(prices, df_12h, r4_12h)
-    s4_aligned = align_htf_to_ltf(prices, df_12h, s4_12h)
+    # Calculate 4h volume average (20-period)
+    volume_4h = df_4h['volume'].values
+    avg_volume = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    avg_volume_aligned = align_htf_to_ltf(prices, df_4h, avg_volume)
     
-    # Calculate 12h volume and 20-period average (for volume spike)
-    vol_12h = df_12h['volume'].values
-    vol_ma_20 = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = vol_12h / vol_ma_20  # Current volume / 20-period average
-    vol_ratio_aligned = align_htf_to_ltf(prices, df_12h, vol_ratio)
-    
-    # Calculate 1d Chop Index (Ehler's Chop: measures trend vs ranging)
-    # Chop = 100 * log10(sum(ATR1) / (n * (HHV - LLV))) / log10(n)
-    # Simplified: Chop > 61.8 = ranging, Chop < 38.2 = strong trend
+    # Calculate 1d ADX (Average Directional Index)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range for 1d
+    # True Range
     tr1 = np.abs(high_1d[1:] - low_1d[1:])
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
     tr = np.concatenate([[np.nan], tr])  # align with index 0
     
-    # ATR14 (using Wilder's smoothing)
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Wilder's smoothing for TR, DM+, DM-
     def wilders_smoothing(data, period):
         alpha = 1.0 / period
         result = np.full_like(data, np.nan)
@@ -85,57 +83,56 @@ def generate_signals(prices):
         return result
     
     atr_1d = wilders_smoothing(tr, 14)
+    dm_plus_smoothed = wilders_smoothing(dm_plus, 14)
+    dm_minus_smoothed = wilders_smoothing(dm_minus, 14)
     
-    # Sum of ATR1 over 14 periods (already smoothed)
-    sum_atr = atr_1d  # ATR14 is already the smoothed average true range
+    # DI+ and DI-
+    di_plus = np.full_like(atr_1d, np.nan)
+    di_minus = np.full_like(atr_1d, np.nan)
+    mask = ~np.isnan(atr_1d) & (atr_1d > 0)
+    di_plus[mask] = 100 * dm_plus_smoothed[mask] / atr_1d[mask]
+    di_minus[mask] = 100 * dm_minus_smoothed[mask] / atr_1d[mask]
     
-    # 14-period highest high and lowest low
-    hh_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # DX and ADX
+    dx = np.full_like(atr_1d, np.nan)
+    dx_mask = mask & ~np.isnan(di_plus) & ~np.isnan(di_minus) & ((di_plus + di_minus) > 0)
+    dx[dx_mask] = 100 * np.abs(di_plus[dx_mask] - di_minus[dx_mask]) / (di_plus[dx_mask] + di_minus[dx_mask])
     
-    # Chop calculation
-    numerator = np.nansum(sum_atr)  # This needs to be rolling sum - fix below
-    # Recalculate properly: rolling sum of ATR14 over 14 periods
-    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
-    hh_ll_diff = hh_1d - ll_1d
+    adx_1d = wilders_smoothing(dx, 14)
     
-    # Avoid division by zero
-    chop_raw = np.full_like(close_1d, np.nan)
-    valid_mask = (~np.isnan(sum_atr_14)) & (~np.isnan(hh_ll_diff)) & (hh_ll_diff > 0)
-    chop_raw[valid_mask] = 100 * np.log10(sum_atr_14[valid_mask] / hh_ll_diff[valid_mask]) / np.log10(14)
-    
-    # Align 1d Chop to 6h (wait for completed 1d bar)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_raw)
+    # Align 1d ADX to 4h (wait for completed 1d bar)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(pp_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(vol_ratio_aligned[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(donch_mid_aligned[i]) or np.isnan(volume[i]) or 
+            np.isnan(avg_volume_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade when 1d chop < 61.8 (trending market)
-        trending_regime = chop_aligned[i] < 61.8
-        # Exit regime: chop > 61.8 (ranging market)
-        ranging_regime = chop_aligned[i] > 61.8
+        # Regime filter: only trade when 1d ADX > 25 (strong trend)
+        strong_trend = adx_aligned[i] > 25
+        # Exit regime: ADX < 20 (weak trend/no trend)
+        weak_trend = adx_aligned[i] < 20
         
-        # Volume confirmation: volume spike > 1.5x average
-        volume_spike = vol_ratio_aligned[i] > 1.5
+        # Volume confirmation: current volume > 1.5 * average volume
+        volume_confirmed = volume[i] > 1.5 * avg_volume_aligned[i]
         
-        # Breakout conditions
-        long_breakout = close[i] > r4_aligned[i]
-        short_breakout = close[i] < s4_aligned[i]
+        # Donchian breakout signals
+        breakout_high = close[i] > donch_high_aligned[i]
+        breakout_low = close[i] < donch_low_aligned[i]
         
-        # Entry logic: Breakout + volume spike + trending regime
-        long_entry = long_breakout and volume_spike and trending_regime
-        short_entry = short_breakout and volume_spike and trending_regime
+        # Entry logic: Donchian breakout + strong trend regime + volume confirmation
+        long_entry = breakout_high and strong_trend and volume_confirmed
+        short_entry = breakout_low and strong_trend and volume_confirmed
         
-        # Exit logic: Price retreats to PP OR regime shifts to ranging
-        long_exit = (close[i] < pp_aligned[i]) or ranging_regime
-        short_exit = (close[i] > pp_aligned[i]) or ranging_regime
+        # Exit logic: price crosses Donchian midline OR regime shifts to weak trend
+        long_exit = close[i] < donch_mid_aligned[i] or weak_trend
+        short_exit = close[i] > donch_mid_aligned[i] or weak_trend
         
         if long_entry and position != 1:
             position = 1
@@ -160,6 +157,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_1d_camarilla_breakout_volume_chop_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_breakout_adx_volume_v2"
+timeframe = "4h"
 leverage = 1.0
