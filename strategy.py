@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h timeframe with 12h Supertrend trend filter and Donchian breakout.
-# Long: Price breaks above Donchian(20) upper band + 12h Supertrend = bullish + volume > 1.5x average.
-# Short: Price breaks below Donchian(20) lower band + 12h Supertrend = bearish + volume > 1.5x average.
-# Uses Donchian channels for breakouts, Supertrend for trend filtering, volume for confirmation.
-# Time filter: 00-23 UTC (all hours).
-# Target: 80-180 total trades over 4 years (20-45/year) for 4h timeframe.
+# Hypothesis: 6h timeframe with 1w Ichimoku Cloud and Tenkan/Kijun cross.
+# Long: Price above Kumo cloud + Tenkan > Kijun (bullish cross)
+# Short: Price below Kumo cloud + Tenkan < Kijun (bearish cross)
+# Uses 1w Ichimoku for trend regime, 6h for execution.
+# Ichimoku works in both bull/bear via cloud filter; cross signals capture momentum within trend.
+# Target: 60-150 total trades over 4 years (15-38/year) for 6h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,132 +20,103 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    donchian_up = np.full(n, np.nan)
-    donchian_down = np.full(n, np.nan)
-    for i in range(20, n):
-        donchian_up[i] = np.max(high[i-20:i])
-        donchian_down[i] = np.min(low[i-20:i])
-    
-    # Average volume (20-period) for volume confirmation
-    avg_volume = np.full(n, np.nan)
-    for i in range(20, n):
-        avg_volume[i] = np.mean(volume[i-20:i])
-    
-    # 12h data for Supertrend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # 1w data for Ichimoku
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 52:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Supertrend parameters
-    atr_period = 10
-    multiplier = 3.0
+    # Ichimoku parameters
+    tenkan_period = 9
+    kijun_period = 26
+    senkou_span_b_period = 52
     
-    # Calculate ATR for 12h
-    tr_12h = np.maximum(
-        high_12h[1:] - low_12h[1:],
-        np.maximum(
-            np.abs(high_12h[1:] - close_12h[:-1]),
-            np.abs(low_12h[1:] - close_12h[:-1])
-        )
-    )
-    tr_12h = np.concatenate([[np.nan], tr_12h])
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan_sen = np.full(len(close_1w), np.nan)
+    for i in range(tenkan_period - 1, len(close_1w)):
+        period_high = np.max(high_1w[i - tenkan_period + 1:i + 1])
+        period_low = np.min(low_1w[i - tenkan_period + 1:i + 1])
+        tenkan_sen[i] = (period_high + period_low) / 2
     
-    atr_12h = np.full(len(close_12h), np.nan)
-    for i in range(atr_period, len(close_12h)):
-        atr_12h[i] = np.nanmean(tr_12h[i-atr_period+1:i+1])
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun_sen = np.full(len(close_1w), np.nan)
+    for i in range(kijun_period - 1, len(close_1w)):
+        period_high = np.max(high_1w[i - kijun_period + 1:i + 1])
+        period_low = np.min(low_1w[i - kijun_period + 1:i + 1])
+        kijun_sen[i] = (period_high + period_low) / 2
     
-    # Supertrend calculation
-    supertrend_12h = np.full(len(close_12h), np.nan)
-    direction_12h = np.full(len(close_12h), np.nan)  # 1 for up, -1 for down
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 plotted 26 periods ahead
+    senkou_span_a = np.full(len(close_1w), np.nan)
+    for i in range(len(close_1w)):
+        if not np.isnan(tenkan_sen[i]) and not np.isnan(kijun_sen[i]):
+            idx = i + kijun_period
+            if idx < len(close_1w):
+                senkou_span_a[idx] = (tenkan_sen[i] + kijun_sen[i]) / 2
     
-    # Initialize
-    if not np.isnan(atr_12h[atr_period]):
-        hl2_12h = (high_12h[atr_period] + low_12h[atr_period]) / 2
-        upper_band_12h = hl2_12h + multiplier * atr_12h[atr_period]
-        lower_band_12h = hl2_12h - multiplier * atr_12h[atr_period]
-        supertrend_12h[atr_period] = upper_band_12h
-        direction_12h[atr_period] = -1  # start with down
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 plotted 26 periods ahead
+    senkou_span_b = np.full(len(close_1w), np.nan)
+    for i in range(senkou_span_b_period - 1, len(close_1w)):
+        period_high = np.max(high_1w[i - senkou_span_b_period + 1:i + 1])
+        period_low = np.min(low_1w[i - senkou_span_b_period + 1:i + 1])
+        senkou_span_b[i] = (period_high + period_low) / 2
+        idx = i + kijun_period
+        if idx < len(close_1w):
+            senkou_span_b[idx] = senkou_span_b[i]
     
-    for i in range(atr_period + 1, len(close_12h)):
-        hl2 = (high_12h[i] + low_12h[i]) / 2
-        
-        upper_band = hl2 + multiplier * atr_12h[i]
-        lower_band = hl2 - multiplier * atr_12h[i]
-        
-        if i == atr_period + 1:
-            prev_supertrend = supertrend_12h[i-1]
-            prev_direction = direction_12h[i-1]
-        else:
-            prev_supertrend = supertrend_12h[i-1]
-            prev_direction = direction_12h[i-1]
-        
-        if not np.isnan(prev_supertrend):
-            if prev_direction == 1:  # was uptrend
-                supertrend_12h[i] = max(lower_band, prev_supertrend)
-                if close_12h[i] > supertrend_12h[i]:
-                    direction_12h[i] = 1
-                else:
-                    direction_12h[i] = -1
-                    supertrend_12h[i] = upper_band
-            else:  # was downtrend
-                supertrend_12h[i] = min(upper_band, prev_supertrend)
-                if close_12h[i] < supertrend_12h[i]:
-                    direction_12h[i] = -1
-                else:
-                    direction_12h[i] = 1
-                    supertrend_12h[i] = lower_band
-        else:
-            supertrend_12h[i] = np.nan
-            direction_12h[i] = np.nan
-    
-    # Align 12h Supertrend direction to 4h
-    direction_12h_aligned = align_htf_to_ltf(prices, df_12h, direction_12h)
+    # Align Ichimoku components to 6h
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1w, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1w, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_b)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(20, n):
+    for i in range(52, n):  # Start after Ichimoku warmup
         # Skip if any required data is not ready
-        if (np.isnan(donchian_up[i]) or np.isnan(donchian_down[i]) or 
-            np.isnan(avg_volume[i]) or np.isnan(direction_12h_aligned[i])):
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol = volume[i]
-        avg_vol = avg_volume[i]
-        trend = direction_12h_aligned[i]
+        tenkan = tenkan_sen_aligned[i]
+        kijun = kijun_sen_aligned[i]
+        span_a = senkou_span_a_aligned[i]
+        span_b = senkou_span_b_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirm = vol > 1.5 * avg_vol
+        # Kumo cloud boundaries
+        upper_cloud = max(span_a, span_b)
+        lower_cloud = min(span_a, span_b)
+        
+        # Bullish conditions: price above cloud + Tenkan > Kijun
+        bullish = (price > upper_cloud) and (tenkan > kijun)
+        # Bearish conditions: price below cloud + Tenkan < Kijun
+        bearish = (price < lower_cloud) and (tenkan < kijun)
         
         if position == 0:
-            # Long: price breaks above Donchian up + bullish trend + volume
-            if (price > donchian_up[i] and trend == 1 and volume_confirm):
+            if bullish:
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below Donchian down + bearish trend + volume
-            elif (price < donchian_down[i] and trend == -1 and volume_confirm):
+            elif bearish:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below Donchian down
-            if price < donchian_down[i]:
+            # Exit long: price closes below cloud OR Tenkan < Kijun (trend weakening)
+            if (price < lower_cloud) or (tenkan < kijun):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes above Donchian up
-            if price > donchian_up[i]:
+            # Exit short: price closes above cloud OR Tenkan > Kijun (trend weakening)
+            if (price > upper_cloud) or (tenkan > kijun):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -153,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_Supertrend_Donchian_Breakout_Volume"
-timeframe = "4h"
+name = "6h_1w_Ichimoku_Cloud_TK_Cross"
+timeframe = "6h"
 leverage = 1.0
