@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Pivot_Breakout_With_Volume_Confirmation
-Hypothesis: Camarilla pivot levels from daily candles provide robust support/resistance. 
-Breakouts above R4 or below S4 with volume expansion and alignment to 12h trend (via EMA50) capture institutional moves. 
-Works in bull/bear by following trend direction. Target: 12-30 trades/year.
+4h_12h_Camarilla_Pivot_Breakout_Volume
+Hypothesis: Camarilla pivot levels derived from 12h candles provide strong support/resistance.
+Breakouts above R3 or below S3 with volume confirmation indicate institutional participation.
+Works in both bull and bear markets by capturing breakouts in the direction of momentum.
+Target: 20-30 trades/year per symbol.
 """
 
 import numpy as np
@@ -20,41 +21,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data for Camarilla pivots
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h < 2):
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each daily bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Camarilla levels for each 12h bar
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Previous close for pivot calculation
-    close_prev = np.roll(close_1d, 1)
-    close_prev[0] = close_1d[0]
+    # Camarilla formulas
+    close_prev = np.roll(close_12h, 1)
+    close_prev[0] = close_12h[0]
     
-    range_1d = high_1d - low_1d
+    range_12h = high_12h - low_12h
     
     # Resistance levels
-    R1 = close_prev + (range_1d * 1.0833 / 12)
-    R2 = close_prev + (range_1d * 1.1666 / 6)
-    R3 = close_prev + (range_1d * 1.2500 / 4)
-    R4 = close_prev + (range_1d * 1.5000 / 2)
+    R3 = close_prev + (range_12h * 1.2500 / 4)
+    R4 = close_prev + (range_12h * 1.5000 / 2)
     
     # Support levels
-    S1 = close_prev - (range_1d * 1.0833 / 12)
-    S2 = close_prev - (range_1d * 1.1666 / 6)
-    S3 = close_prev - (range_1d * 1.2500 / 4)
-    S4 = close_prev - (range_1d * 1.5000 / 2)
+    S3 = close_prev - (range_12h * 1.2500 / 4)
+    S4 = close_prev - (range_12h * 1.5000 / 2)
     
-    # Align Camarilla levels to 12h timeframe
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
-    
-    # Daily EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align levels to 4h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_12h, R3)
+    R4_aligned = align_htf_to_ltf(prices, df_12h, R4)
+    S3_aligned = align_htf_to_ltf(prices, df_12h, S3)
+    S4_aligned = align_htf_to_ltf(prices, df_12h, S4)
     
     # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -64,18 +59,18 @@ def generate_signals(prices):
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required data is not ready
-        if (np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_expansion[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Long breakout: price above R4, volume expansion, and above daily EMA50 (uptrend)
-        long_breakout = (close[i] > R4_aligned[i]) and volume_expansion[i] and (close[i] > ema50_1d_aligned[i])
+        # Long breakout: price breaks above R3 with volume expansion
+        long_breakout = close[i] > R3_aligned[i] and volume_expansion[i]
         
-        # Short breakdown: price below S4, volume expansion, and below daily EMA50 (downtrend)
-        short_breakout = (close[i] < S4_aligned[i]) and volume_expansion[i] and (close[i] < ema50_1d_aligned[i])
+        # Short breakdown: price breaks below S3 with volume expansion
+        short_breakout = close[i] < S3_aligned[i] and volume_expansion[i]
         
         if long_breakout and position != 1:
             position = 1
@@ -89,6 +84,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_Pivot_Breakout_With_Volume_Confirmation"
-timeframe = "12h"
+name = "4h_12h_Camarilla_Pivot_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
