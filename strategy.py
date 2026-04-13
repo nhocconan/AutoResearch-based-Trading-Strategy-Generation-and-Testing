@@ -3,15 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Donchian breakout (trend direction) and 1d volume spike (momentum filter)
-# Uses 4h for signal direction (reduces trade frequency), 1h only for entry timing.
-# Volume spike on 1d confirms institutional interest. Session filter (08-20 UTC) avoids low-volume hours.
-# Position size fixed at 0.20 to manage drawdown. Target: 15-35 trades/year.
-# Works in bull (breakouts continue) and bear (volume spikes during capitulation/reversals).
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,67 +13,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian channel (trend direction)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    
-    # Calculate 20-period Donchian channels on 4h
-    highest_20_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lowest_20_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    
-    # Get 1d data for volume spike filter
+    # Get 1d data for calculations
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    volume_1d = df_1d['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    vol_1d = df_1d['volume'].values
     
-    # Calculate 20-period average volume on 1d
-    avg_vol_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate 10-period EMA on 1d (trend filter)
+    close_1d_series = pd.Series(close_1d)
+    ema_10_1d = close_1d_series.ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Align indicators to 1h timeframe
-    highest_20_4h_aligned = align_htf_to_ltf(prices, df_4h, highest_20_4h)
-    lowest_20_4h_aligned = align_htf_to_ltf(prices, df_4h, lowest_20_4h)
-    avg_vol_20_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_20_1d)
+    # Calculate RSI(14) on 1d
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_14 = 100 - (100 / (1 + rs))
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Get 1w data for trend confirmation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    # Calculate 20-period SMA on 1w
+    sma_20_1w = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
+    
+    # Align indicators to 12h timeframe
+    ema_10_aligned = align_htf_to_ltf(prices, df_1d, ema_10_1d)
+    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
+    sma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_20_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.20
+    position_size = 0.25
     
-    for i in range(200, n):
-        # Skip if data not ready or outside session
-        if (np.isnan(highest_20_4h_aligned[i]) or 
-            np.isnan(lowest_20_4h_aligned[i]) or
-            np.isnan(avg_vol_20_1d_aligned[i]) or
-            not in_session[i]):
+    for i in range(100, n):
+        # Skip if data not ready
+        if (np.isnan(ema_10_aligned[i]) or 
+            np.isnan(rsi_14_aligned[i]) or
+            np.isnan(sma_20_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Donchian breakout conditions
-        breakout_high = close[i] > highest_20_4h_aligned[i]
-        breakout_low = close[i] < lowest_20_4h_aligned[i]
+        # Trend filter: price above/below EMA10
+        above_ema = close[i] > ema_10_aligned[i]
+        below_ema = close[i] < ema_10_aligned[i]
         
-        # Volume spike condition: current 1h volume > 1.5x 20-day average volume (scaled to 1h)
-        # Approximate 1h volume as 1/6 of daily volume (6 x 1h in 1d)
-        vol_1h = volume[i]
-        vol_threshold = avg_vol_20_1d_aligned[i] / 6.0 * 1.5  # 1.5x average hourly volume
-        volume_spike = vol_1h > vol_threshold
+        # RSI conditions: avoid extreme levels
+        rsi_not_overbought = rsi_14_aligned[i] < 80
+        rsi_not_oversold = rsi_14_aligned[i] > 20
+        
+        # Weekly trend filter: price above/below weekly SMA20
+        above_weekly_sma = close[i] > sma_20_1w_aligned[i]
+        below_weekly_sma = close[i] < sma_20_1w_aligned[i]
         
         # Entry conditions
-        long_entry = breakout_high and volume_spike
-        short_entry = breakout_low and volume_spike
+        long_entry = above_ema and rsi_not_overbought and above_weekly_sma
+        short_entry = below_ema and rsi_not_oversold and below_weekly_sma
         
-        # Exit conditions: opposite breakout
-        exit_long = position == 1 and breakout_low
-        exit_short = position == -1 and breakout_high
+        # Exit conditions: opposite signal or RSI extreme
+        exit_long = position == 1 and (below_ema or rsi_14_aligned[i] > 85)
+        exit_short = position == -1 and (above_ema or rsi_14_aligned[i] < 15)
         
         # Execute signals
         if long_entry and position != 1:
@@ -102,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4h_donchian_breakout_vol_spike"
-timeframe = "1h"
+name = "12h_ema10_rsi14_weekly_sma20_filter"
+timeframe = "12h"
 leverage = 1.0
