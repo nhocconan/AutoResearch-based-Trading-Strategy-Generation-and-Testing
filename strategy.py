@@ -11,6 +11,7 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     # Get daily data for HTF calculations
     df_1d = get_htf_data(prices, '1d')
@@ -20,46 +21,61 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 10-period Donchian channels on daily
-    high_10 = np.full(len(close_1d), np.nan)
-    low_10 = np.full(len(close_1d), np.nan)
-    for i in range(10, len(close_1d)):
-        high_10[i] = np.max(high_1d[i-10:i])
-        low_10[i] = np.min(low_1d[i-10:i])
+    # Calculate 20-period Donchian channels on daily
+    high_20 = np.full(len(close_1d), np.nan)
+    low_20 = np.full(len(close_1d), np.nan)
+    for i in range(20, len(close_1d)):
+        high_20[i] = np.max(high_1d[i-20:i])
+        low_20[i] = np.min(low_1d[i-20:i])
     
-    # Calculate 34-period EMA on daily (trend filter)
+    # Calculate volume ratio: current volume / 20-day average volume
+    vol_ma = np.full(len(volume_1d), np.nan)
+    for i in range(20, len(volume_1d)):
+        vol_ma[i] = np.mean(volume_1d[i-20:i])
+    vol_ratio = np.full(len(volume_1d), np.nan)
+    for i in range(20, len(volume_1d)):
+        if vol_ma[i] > 0:
+            vol_ratio[i] = volume_1d[i] / vol_ma[i]
+    
+    # Calculate 50-period EMA on daily (trend filter)
     close_1d_series = pd.Series(close_1d)
-    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align indicators to 4h timeframe
-    high_10_aligned = align_htf_to_ltf(prices, df_1d, high_10)
-    low_10_aligned = align_htf_to_ltf(prices, df_1d, low_10)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align indicators to 6h timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.30  # 30% of capital
+    position_size = 0.25  # 25% of capital
     
     for i in range(60, n):
         # Skip if data not ready
-        if (np.isnan(high_10_aligned[i]) or 
-            np.isnan(low_10_aligned[i]) or 
-            np.isnan(ema_34_aligned[i])):
+        if (np.isnan(high_20_aligned[i]) or 
+            np.isnan(low_20_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or
+            np.isnan(vol_ratio_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below EMA34
-        above_ema = close[i] > ema_34_aligned[i]
-        below_ema = close[i] < ema_34_aligned[i]
+        # Trend filter: price above/below EMA50
+        above_ema = close[i] > ema_50_aligned[i]
+        below_ema = close[i] < ema_50_aligned[i]
         
         # Donchian breakout conditions
-        long_breakout = close[i] > high_10_aligned[i]
-        short_breakout = close[i] < low_10_aligned[i]
+        long_breakout = close[i] > high_20_aligned[i]
+        short_breakout = close[i] < low_20_aligned[i]
         
-        # Entry conditions: breakout in direction of trend
-        long_entry = long_breakout and above_ema
-        short_entry = short_breakout and below_ema
+        # Volume confirmation: volume > 1.5x average
+        vol_confirm = vol_ratio_aligned[i] > 1.5
+        
+        # Entry conditions: breakout in direction of trend with volume
+        long_entry = long_breakout and above_ema and vol_confirm
+        short_entry = short_breakout and below_ema and vol_confirm
         
         # Exit conditions: opposite breakout or trend reversal
         exit_long = position == 1 and (short_breakout or below_ema)
@@ -86,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_ema34_breakout"
-timeframe = "4h"
+name = "6h_1d_donchian_ema50_vol_breakout"
+timeframe = "6h"
 leverage = 1.0
