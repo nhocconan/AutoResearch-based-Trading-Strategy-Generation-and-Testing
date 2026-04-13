@@ -8,140 +8,136 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian channel breakout with 1d volume spike and ATR filter
-    # Long: price breaks above 20-period Donchian high + volume > 2.0x 20-period average + ATR(14) > ATR(50)
-    # Short: price breaks below 20-period Donchian low + volume > 2.0x 20-period average + ATR(14) > ATR(50)
-    # Uses discrete sizing (0.25) to minimize fee drag and ATR-based stoploss (2x ATR)
-    # Target: 12-30 trades/year to stay within 12h optimal range
+    # Hypothesis: 4h Donchian(20) breakout + 1d volume confirmation + ATR trailing stop
+    # Long: price breaks above 20-period high + volume > 1.5x 20-period average
+    # Short: price breaks below 20-period low + volume > 1.5x 20-period average
+    # Uses ATR-based trailing stop (highest high - 3*ATR for long, lowest low + 3*ATR for short)
+    # Discrete sizing (0.25) to minimize fee drag
+    # Target: 20-50 trades/year to stay within 4h optimal range
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume confirmation and ATR filter
+    # Get 1d data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 12h Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 20-period Donchian channels (using 4h data)
+    high_rolling_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_rolling_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Calculate 1d volume average (20-period) for confirmation
     vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate 1d ATR(14) and ATR(50) for volatility regime filter
-    # True range for 1d
-    tr_1d = np.zeros(len(high_1d))
-    for i in range(1, len(high_1d)):
-        tr_1d[i] = max(
-            high_1d[i] - low_1d[i],
-            abs(high_1d[i] - close_1d[i-1]),
-            abs(low_1d[i] - close_1d[i-1])
-        )
-    # ATR(14) and ATR(50) using Wilder's smoothing
-    atr_14_1d = np.zeros(len(high_1d))
-    atr_50_1d = np.zeros(len(high_1d))
-    for i in range(1, len(high_1d)):
-        if i < 14:
-            atr_14_1d[i] = np.mean(tr_1d[1:i+1]) if i > 0 else tr_1d[i]
-            atr_50_1d[i] = np.mean(tr_1d[1:i+1]) if i > 0 else tr_1d[i]
-        else:
-            atr_14_1d[i] = 0.93 * atr_14_1d[i-1] + 0.07 * tr_1d[i]
-            atr_50_1d[i] = 0.98 * atr_50_1d[i-1] + 0.02 * tr_1d[i]
-    
-    # Volatility filter: ATR(14) > ATR(50) indicates increasing volatility (good for breakouts)
-    vol_filter = atr_14_1d > atr_50_1d
-    
-    # Align all indicators to 12h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
-    vol_filter_aligned = align_htf_to_ltf(prices, df_1d, vol_filter.astype(float))
+    
+    # Calculate ATR (14-period) for trailing stop
+    atr = np.zeros(n)
+    tr = np.zeros(n)
+    for i in range(1, n):
+        tr[i] = max(
+            high[i] - low[i],
+            abs(high[i] - close[i-1]),
+            abs(low[i] - close[i-1])
+        )
+    # Wilder's smoothing for ATR
+    atr[13] = np.mean(tr[1:14])  # Seed with first 14 values
+    for i in range(14, n):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
     
-    # Track entry price for stoploss
-    entry_price = np.full(n, np.nan)
+    # Track highest high since entry for trailing stop (long)
+    # Track lowest low since entry for trailing stop (short)
+    highest_since_entry = np.full(n, np.nan)
+    lowest_since_entry = np.full(n, np.nan)
     
-    # Calculate 12h ATR for stoploss
-    tr_12h = np.zeros(n)
-    for i in range(1, n):
-        tr_12h[i] = max(
-            high[i] - low[i],
-            abs(high[i] - close[i-1]),
-            abs(low[i] - close[i-1])
-        )
-    atr_12h = np.zeros(n)
-    for i in range(1, n):
-        if i < 14:
-            atr_12h[i] = np.mean(tr_12h[1:i+1]) if i > 0 else tr_12h[i]
-        else:
-            atr_12h[i] = 0.93 * atr_12h[i-1] + 0.07 * tr_12h[i]
-    
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or
+        if (np.isnan(high_rolling_max[i]) or 
+            np.isnan(low_rolling_min[i]) or
             np.isnan(vol_avg_20_1d_aligned[i]) or
-            np.isnan(vol_filter_aligned[i])):
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 2.0x 20-period average (using 12h volume directly)
-        vol_avg_20_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        if np.isnan(vol_avg_20_12h[i]):
+        # Volume confirmation: current 4h volume > 1.5x 20-period average
+        vol_avg_20_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        if np.isnan(vol_avg_20_4h[i]):
             signals[i] = 0.0
             continue
-        volume_confirmed = volume[i] > 2.0 * vol_avg_20_12h[i]
+        volume_confirmed = volume[i] > 1.5 * vol_avg_20_4h[i]
         
-        # Breakout conditions: price breaks Donchian levels with volume and volatility filter
-        breakout_long = (close[i] > donchian_high_aligned[i]) and volume_confirmed and (vol_filter_aligned[i] > 0.5)
-        breakout_short = (close[i] < donchian_low_aligned[i]) and volume_confirmed and (vol_filter_aligned[i] > 0.5)
+        # Breakout conditions
+        breakout_long = (close[i] > high_rolling_max[i-1]) and volume_confirmed
+        breakout_short = (close[i] < low_rolling_min[i-1]) and volume_confirmed
         
-        # Stoploss: 2x ATR below/above entry
-        exit_long = position == 1 and not np.isnan(entry_price[i-1]) and close[i] < entry_price[i-1] - 2.0 * atr_12h[i]
-        exit_short = position == -1 and not np.isnan(entry_price[i-1]) and close[i] > entry_price[i-1] + 2.0 * atr_12h[i]
+        # Trailing stop conditions
+        exit_long = False
+        exit_short = False
+        
+        if position == 1:
+            # Update highest high since entry
+            if np.isnan(highest_since_entry[i-1]):
+                highest_since_entry[i] = high[i]
+            else:
+                highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
+            # Exit if price drops below highest high - 3*ATR
+            exit_long = close[i] < (highest_since_entry[i] - 3.0 * atr[i])
+        
+        elif position == -1:
+            # Update lowest low since entry
+            if np.isnan(lowest_since_entry[i-1]):
+                lowest_since_entry[i] = low[i]
+            else:
+                lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
+            # Exit if price rises above lowest low + 3*ATR
+            exit_short = close[i] > (lowest_since_entry[i] + 3.0 * atr[i])
         
         # Execute signals
         if breakout_long and position != 1:
             position = 1
             signals[i] = position_size
-            entry_price[i] = close[i]
+            highest_since_entry[i] = high[i]  # Reset tracking
+            lowest_since_entry[i] = np.nan
         elif breakout_short and position != -1:
             position = -1
             signals[i] = -position_size
-            entry_price[i] = close[i]
+            lowest_since_entry[i] = low[i]  # Reset tracking
+            highest_since_entry[i] = np.nan
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
-            entry_price[i] = np.nan
+            highest_since_entry[i] = np.nan
+            lowest_since_entry[i] = np.nan
         elif position == -1 and exit_short:
             position = 0
             signals[i] = 0.0
-            entry_price[i] = np.nan
+            highest_since_entry[i] = np.nan
+            lowest_since_entry[i] = np.nan
         # Hold current position
         else:
             if position == 1:
                 signals[i] = position_size
-                entry_price[i] = entry_price[i-1] if i > 0 else np.nan
+                highest_since_entry[i] = highest_since_entry[i-1]
+                lowest_since_entry[i] = lowest_since_entry[i-1]
             elif position == -1:
                 signals[i] = -position_size
-                entry_price[i] = entry_price[i-1] if i > 0 else np.nan
+                highest_since_entry[i] = highest_since_entry[i-1]
+                lowest_since_entry[i] = lowest_since_entry[i-1]
             else:
                 signals[i] = 0.0
-                entry_price[i] = np.nan
+                highest_since_entry[i] = np.nan
+                lowest_since_entry[i] = np.nan
     
     return signals
 
-name = "12h_1d_donchian_volume_volatility_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_volume_trailing_v1"
+timeframe = "4h"
 leverage = 1.0
