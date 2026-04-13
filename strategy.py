@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation
-Hypothesis: Daily Camarilla pivot levels (S3/R3) provide strong support/resistance.
-Breakouts above R3 or below S3 on 12h chart with volume expansion capture institutional moves.
+6h_12h_Range_Breakout_With_Volume_Confirmation
+Hypothesis: The 12-hour range provides stronger support/resistance than daily due to fewer false breaks.
+Breakouts above the 12h high or below the 12h low with volume expansion capture momentum.
 Works in both bull and bear markets by trading breakouts regardless of direction.
-Target: 12-37 trades/year per symbol (50-150 total over 4 years).
+Target: 15-25 trades/year per symbol.
 """
 
 import numpy as np
@@ -21,31 +21,18 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data for range calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each daily bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 12h high and low
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Camarilla formulas
-    close_prev = np.roll(close_1d, 1)
-    close_prev[0] = close_1d[0]  # first bar uses its own close
-    
-    range_1d = high_1d - low_1d
-    
-    # Resistance levels (R3 used)
-    R3 = close_prev + (range_1d * 1.2500 / 4)
-    
-    # Support levels (S3 used)
-    S3 = close_prev - (range_1d * 1.2500 / 4)
-    
-    # Align levels to 12h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # Align 12h high/low to 6h timeframe
+    high_12h_aligned = align_htf_to_ltf(prices, df_12h, high_12h)
+    low_12h_aligned = align_htf_to_ltf(prices, df_12h, low_12h)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -57,16 +44,16 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+        if (np.isnan(high_12h_aligned[i]) or np.isnan(low_12h_aligned[i]) or 
             np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Long breakout: price breaks above R3 with volume expansion
-        long_breakout = close[i] > R3_aligned[i] and volume_expansion[i]
+        # Long breakout: price breaks above 12h high with volume expansion
+        long_breakout = close[i] > high_12h_aligned[i] and volume_expansion[i]
         
-        # Short breakdown: price breaks below S3 with volume expansion
-        short_breakout = close[i] < S3_aligned[i] and volume_expansion[i]
+        # Short breakdown: price breaks below 12h low with volume expansion
+        short_breakout = close[i] < low_12h_aligned[i] and volume_expansion[i]
         
         if long_breakout and position != 1:
             position = 1
@@ -80,6 +67,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation"
-timeframe = "12h"
+name = "6h_12h_Range_Breakout_With_Volume_Confirmation"
+timeframe = "6h"
 leverage = 1.0
