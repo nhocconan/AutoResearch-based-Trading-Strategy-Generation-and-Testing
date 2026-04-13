@@ -3,91 +3,91 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h timeframe with 4h Bollinger Band mean reversion + 1d trend filter
-# Strategy: Long when price touches lower 4h Bollinger Band (20,2) and closes above open (bullish candle)
-#           Short when price touches upper 4h Bollinger Band (20,2) and closes below open (bearish candle)
-#           Only in direction of 1d EMA50 trend (price > EMA50 for longs, price < EMA50 for shorts)
-#           Uses Bollinger Bands for mean reversion in ranging markets and EMA for trend filter
-#           Target: 60-150 total trades over 4 years (15-37/year) to minimize fee drag
-#           Session filter: 08-20 UTC to avoid low-volume Asian session
+# Hypothesis: 6h timeframe with 1w Ichimoku cloud filter and 1d TK cross for trend direction
+# Long when price above 1w Kumo (cloud) and TK cross bullish on 1d
+# Short when price below 1w Kumo (cloud) and TK cross bearish on 1d
+# Uses weekly Ichimoku for major trend filter and daily TK cross for entry timing
+# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
-    open_prices = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get 4h data for Bollinger Bands
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get 1w data for Ichimoku cloud
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 52:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Calculate 4h Bollinger Bands (20,2)
-    sma_20_4h = pd.Series(close_4h).rolling(window=20, min_periods=20).mean().values
-    std_20_4h = pd.Series(close_4h).rolling(window=20, min_periods=20).std().values
-    upper_bb_4h = sma_20_4h + 2 * std_20_4h
-    lower_bb_4h = sma_20_4h - 2 * std_20_4h
+    # Calculate Ichimoku components on weekly
+    # Tenkan-sen (Conversion Line): (9-period high + low)/2
+    tenkan_sen = (pd.Series(high_1w).rolling(window=9, min_periods=9).max() + 
+                  pd.Series(low_1w).rolling(window=9, min_periods=9).min()) / 2
+    # Kijun-sen (Base Line): (26-period high + low)/2
+    kijun_sen = (pd.Series(high_1w).rolling(window=26, min_periods=26).max() + 
+                 pd.Series(low_1w).rolling(window=26, min_periods=26).min()) / 2
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(26)
+    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
+    senkou_span_b = ((pd.Series(high_1w).rolling(window=52, min_periods=52).max() + 
+                      pd.Series(low_1w).rolling(window=52, min_periods=52).min()) / 2).shift(26)
     
-    # Get 1d data for EMA50 trend filter
+    # Get 1d data for TK cross
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 26:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Align indicators to 1h timeframe
-    upper_bb_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_bb_4h)
-    lower_bb_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_bb_4h)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate TK cross on daily
+    tenkan_sen_1d = (pd.Series(high_1d).rolling(window=9, min_periods=9).max() + 
+                     pd.Series(low_1d).rolling(window=9, min_periods=9).min()) / 2
+    kijun_sen_1d = (pd.Series(high_1d).rolling(window=26, min_periods=26).max() + 
+                    pd.Series(low_1d).rolling(window=26, min_periods=26).min()) / 2
+    tk_cross = tenkan_sen_1d - kijun_sen_1d  # Positive = bullish cross
+    
+    # Align indicators to 6h timeframe
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_a.values)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_b.values)
+    tk_cross_aligned = align_htf_to_ltf(prices, df_1d, tk_cross.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.20  # 20% of capital
+    position_size = 0.25  # 25% of capital
     
-    # Pre-calculate session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    
-    for i in range(50, n):
-        # Session filter: 08-20 UTC
-        if not (8 <= hours[i] <= 20):
-            signals[i] = 0.0
-            continue
-        
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(upper_bb_4h_aligned[i]) or 
-            np.isnan(lower_bb_4h_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(senkou_span_a_aligned[i]) or 
+            np.isnan(senkou_span_b_aligned[i]) or 
+            np.isnan(tk_cross_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Bollinger Band touch conditions
-        bb_touch_low = low[i] <= lower_bb_4h_aligned[i]
-        bb_touch_high = high[i] >= upper_bb_4h_aligned[i]
+        # Determine if price is above or below Kumo (cloud)
+        cloud_top = np.maximum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        cloud_bottom = np.minimum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        price_above_cloud = close[i] > cloud_top
+        price_below_cloud = close[i] < cloud_bottom
         
-        # Candlestick confirmation
-        bullish_candle = close[i] > open_prices[i]
-        bearish_candle = close[i] < open_prices[i]
-        
-        # Trend filter from 1d EMA50
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # TK cross signals
+        tk_bullish = tk_cross_aligned[i] > 0
+        tk_bearish = tk_cross_aligned[i] < 0
         
         # Entry logic
-        long_entry = bb_touch_low and bullish_candle and uptrend
-        short_entry = bb_touch_high and bearish_candle and downtrend
+        long_entry = price_above_cloud and tk_bullish
+        short_entry = price_below_cloud and tk_bearish
         
-        # Exit conditions: opposite BB touch or trend change
-        exit_long = position == 1 and (bb_touch_high or not uptrend)
-        exit_short = position == -1 and (bb_touch_low or not downtrend)
+        # Exit conditions: opposite signal
+        exit_long = position == 1 and (price_below_cloud or tk_bearish)
+        exit_short = position == -1 and (price_above_cloud or tk_bullish)
         
         # Execute signals
         if long_entry and position != 1:
@@ -110,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4h_1d_bollinger_mean_reversion_trend_filter_v1"
-timeframe = "1h"
+name = "6h_1w_1d_ichimoku_tk_cross_v1"
+timeframe = "6h"
 leverage = 1.0
