@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Camarilla Pivot Reversal with Volume Spike and 1-day ADX Trend Filter.
-Trades reversals at Camarilla pivot levels (S3/S4 for long, R3/R4 for short) 
-confirmed by volume spikes, only in trending markets (1-day ADX > 25) to avoid 
-false signals in ranging conditions. Designed for 4h timeframe to target 75-200 
-total trades over 4 years (19-50/year). Works in both bull and bear markets by 
-trading reversals in the direction of the trend.
+4h Donchian Breakout with Volume Spike and ADX Trend Filter.
+Trades breakouts above/below Donchian channels (20-period) confirmed by volume spikes,
+only in trending markets (1-day ADX > 25) to avoid false breakouts in ranging conditions.
+Designed for 4h timeframe to target 75-200 total trades over 4 years (19-50/year).
+Works in both bull and bear markets by following the trend direction.
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,7 +21,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Camarilla pivot calculation
+    # Get 4h data for Donchian calculation
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 30:
         return np.zeros(n)
@@ -31,42 +30,17 @@ def generate_signals(prices):
     low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
     
-    # Calculate Camarilla levels using previous day's OHLC
-    # Camarilla formulas: 
-    # H4 = close + 1.5 * (high - low)
-    # L4 = close - 1.5 * (high - low)
-    # H3 = close + 1.25 * (high - low)
-    # L3 = close - 1.25 * (high - low)
-    # H3 = close + 1.1 * (high - low)
-    # L3 = close - 1.1 * (high - low)
-    # We'll use H3/L3 and H4/L4 for entries
+    # Donchian Channel (20-period)
+    upper_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Calculate daily range from previous day
-    prev_close = np.concatenate([[close_4h[0]], close_4h[:-1]])
-    prev_high = np.concatenate([[high_4h[0]], high_4h[:-1]])
-    prev_low = np.concatenate([[low_4h[0]], low_4h[:-1]])
-    
-    # Camarilla levels
-    H4 = prev_close + 1.5 * (prev_high - prev_low)
-    L4 = prev_close - 1.5 * (prev_high - prev_low)
-    H3 = prev_close + 1.1 * (prev_high - prev_low)
-    L3 = prev_close - 1.1 * (prev_high - prev_low)
-    
-    # Reversal conditions: price touches H3/L4 (short) or L3/H4 (long) with rejection
-    # We'll use touches as entry signals
-    touch_H3 = (high_4h >= H3) & (close_4h < H3)  # touched H3 but closed below
-    touch_L3 = (low_4h <= L3) & (close_4h > L3)   # touched L3 but closed above
-    touch_H4 = (high_4h >= H4) & (close_4h < H4)  # touched H4 but closed below
-    touch_L4 = (low_4h <= L4) & (close_4h > L4)   # touched L4 but closed above
-    
-    # Short signals: touch resistance levels
-    short_signal = touch_H3 | touch_H4
-    # Long signals: touch support levels  
-    long_signal = touch_L3 | touch_L4
+    # Breakout conditions
+    breakout_up = high_4h > upper_20
+    breakout_down = low_4h < lower_20
     
     # Align signals to 4h timeframe
-    short_signal_aligned = align_htf_to_ltf(prices, df_4h, short_signal.astype(float))
-    long_signal_aligned = align_htf_to_ltf(prices, df_4h, long_signal.astype(float))
+    breakout_up_aligned = align_htf_to_ltf(prices, df_4h, breakout_up.astype(float))
+    breakout_down_aligned = align_htf_to_ltf(prices, df_4h, breakout_down.astype(float))
     
     # Get 1d data for volume and ADX
     df_1d = get_htf_data(prices, '1d')
@@ -78,9 +52,9 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Volume spike: volume > 2.0x 20-period average (strong confirmation)
+    # Volume spike: volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_1d > (vol_ma_20 * 2.0)
+    vol_spike = volume_1d > (vol_ma_20 * 1.8)
     vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
     
     # 1-day ADX (14-period) for trend filter
@@ -114,7 +88,7 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) > 0, dx, 0)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # ADX > 25 = trending market (good for reversals with trend)
+    # ADX > 25 = trending market
     trending = adx > 25
     trending_aligned = align_htf_to_ltf(prices, df_1d, trending.astype(float))
     
@@ -122,29 +96,29 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% of capital
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if data not ready
-        if (np.isnan(long_signal_aligned[i]) or 
-            np.isnan(short_signal_aligned[i]) or 
+        if (np.isnan(breakout_up_aligned[i]) or 
+            np.isnan(breakout_down_aligned[i]) or 
             np.isnan(vol_spike_aligned[i]) or 
             np.isnan(trending_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: Camarilla touch + volume spike + trending market
-        long_entry = (long_signal_aligned[i] > 0.5 and 
+        # Entry conditions: Donchian breakout + volume spike + trending market
+        long_entry = (breakout_up_aligned[i] > 0.5 and 
                       vol_spike_aligned[i] > 0.5 and 
                       trending_aligned[i] > 0.5)
-        short_entry = (short_signal_aligned[i] > 0.5 and 
+        short_entry = (breakout_down_aligned[i] > 0.5 and 
                        vol_spike_aligned[i] > 0.5 and 
                        trending_aligned[i] > 0.5)
         
-        # Exit when price reaches opposite Camarilla level or midpoint
-        mid_point = (H3 + L3) / 2
-        mid_point_aligned = align_htf_to_ltf(prices, df_4h, np.full_like(close_4h, mid_point))
+        # Exit when price returns to middle of Donchian channel
+        middle = (upper_20 + lower_20) / 2
+        middle_aligned = align_htf_to_ltf(prices, df_4h, np.full_like(close_4h, middle))
         
-        exit_long = position == 1 and close[i] <= mid_point_aligned[i]
-        exit_short = position == -1 and close[i] >= mid_point_aligned[i]
+        exit_long = position == 1 and close[i] <= middle_aligned[i]
+        exit_short = position == -1 and close[i] >= middle_aligned[i]
         
         # Execute signals
         if long_entry and position != 1:
@@ -167,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_camarilla_pivot_reversal"
+name = "4h_donchian_breakout_volume_trend"
 timeframe = "4h"
 leverage = 1.0
