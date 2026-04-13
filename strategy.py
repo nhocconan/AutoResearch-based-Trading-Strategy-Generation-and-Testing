@@ -3,11 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h ADX + Supertrend with 1d regime filter
-# Uses ADX(14) to identify trending markets, Supertrend for direction,
-# and 1d ADX regime filter to avoid chop. Works in both bull and bear
-# by only taking trades when higher timeframe confirms strong trend.
-# Target: 15-35 trades per year (60-140 total over 4 years) for 6h timeframe.
+# Hypothesis: 12h Williams Alligator with 1w EMA trend filter and volume confirmation.
+# Williams Alligator uses three smoothed moving averages (Jaw, Teeth, Lips) to identify trends.
+# When the three lines are intertwined, the market is ranging (Alligator sleeping).
+# When they diverge, a trend is forming (Alligator waking up and feeding).
+# Combined with 1-week EMA trend filter and volume spikes, it avoids whipsaws and trades with momentum.
+# Works in both bull and bear markets by taking long signals only when Alligator is bullish (Lips > Teeth > Jaw) 
+# and price above 1w EMA, and short when bearish (Lips < Teeth < Jaw) and price below 1w EMA.
+# Target: 12-37 trades per year (50-150 total over 4 years) for 12h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,150 +22,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 6h ADX(14) for trend strength
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high - low
-        tr2 = np.abs(high - np.concatenate([[np.nan], close[:-1]]))
-        tr3 = np.abs(low - np.concatenate([[np.nan], close[:-1]]))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        
-        # Directional Movement
-        dm_plus = np.where((high - np.concatenate([[np.nan], high[:-1]])) > 
-                          (np.concatenate([[np.nan], low[:-1]]) - low),
-                          np.maximum(high - np.concatenate([[np.nan], high[:-1]]), 0), 0)
-        dm_minus = np.where((np.concatenate([[np.nan], low[:-1]]) - low) > 
-                           (high - np.concatenate([[np.nan], high[:-1]])),
-                           np.maximum(np.concatenate([[np.nan], low[:-1]]) - low, 0), 0)
-        
-        # Smoothed values
-        atr = np.full_like(tr, np.nan)
-        dm_plus_smooth = np.full_like(dm_plus, np.nan)
-        dm_minus_smooth = np.full_like(dm_minus, np.nan)
-        
-        # Wilder's smoothing
-        atr[period-1] = np.nansum(tr[:period])
-        dm_plus_smooth[period-1] = np.nansum(dm_plus[:period])
-        dm_minus_smooth[period-1] = np.nansum(dm_minus[:period])
-        
-        for i in range(period, len(tr)):
-            atr[i] = atr[i-1] - (atr[i-1] / period) + tr[i]
-            dm_plus_smooth[i] = dm_plus_smooth[i-1] - (dm_plus_smooth[i-1] / period) + dm_plus[i]
-            dm_minus_smooth[i] = dm_minus_smooth[i-1] - (dm_minus_smooth[i-1] / period) + dm_minus[i]
-        
-        # DI and DX
-        di_plus = np.full_like(atr, np.nan)
-        di_minus = np.full_like(atr, np.nan)
-        dx = np.full_like(atr, np.nan)
-        
-        di_plus[atr != 0] = (dm_plus_smooth[atr != 0] / atr[atr != 0]) * 100
-        di_minus[atr != 0] = (dm_minus_smooth[atr != 0] / atr[atr != 0]) * 100
-        dx[(di_plus + di_minus) != 0] = (np.abs(di_plus - di_minus) / (di_plus + di_minus))[ (di_plus + di_minus) != 0] * 100
-        
-        # ADX
-        adx = np.full_like(dx, np.nan)
-        adx[2*period-1] = np.nansum(dx[period:2*period]) / period
-        for i in range(2*period, len(dx)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-            
-        return adx
+    # Daily data for Williams Alligator
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Calculate 6h Supertrend
-    def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-        # ATR
-        tr1 = high - low
-        tr2 = np.abs(high - np.concatenate([[np.nan], close[:-1]]))
-        tr3 = np.abs(low - np.concatenate([[np.nan], close[:-1]]))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        atr = np.full_like(tr, np.nan)
-        atr[period-1] = np.nansum(tr[:period])
-        for i in range(period, len(tr)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        
-        # Basic Upper and Lower Bands
-        hl2 = (high + low) / 2
-        upper_band = hl2 + multiplier * atr
-        lower_band = hl2 - multiplier * atr
-        
-        # Final Upper and Lower Bands
-        final_upper = np.full_like(upper_band, np.nan)
-        final_lower = np.full_like(lower_band, np.nan)
-        supertrend = np.full_like(close, np.nan)
-        
-        final_upper[period-1] = upper_band[period-1]
-        final_lower[period-1] = lower_band[period-1]
-        supertrend[period-1] = hl2[period-1]
-        
-        for i in range(period, len(close)):
-            final_upper[i] = upper_band[i] if (upper_band[i] < final_upper[i-1] or close[i-1] > final_upper[i-1]) else final_upper[i-1]
-            final_lower[i] = lower_band[i] if (lower_band[i] > final_lower[i-1] or close[i-1] < final_lower[i-1]) else final_lower[i-1]
-            
-            if i == period:
-                supertrend[i] = final_upper[i]
-            else:
-                if supertrend[i-1] == final_upper[i-1]:
-                    supertrend[i] = final_lower[i] if close[i] <= final_lower[i] else final_upper[i]
-                else:
-                    supertrend[i] = final_upper[i] if close[i] >= final_upper[i] else final_lower[i]
-        
-        return supertrend, atr
+    # Calculate 1-week EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema50_1w = np.zeros(len(close_1w))
+    ema_multiplier50 = 2 / (50 + 1)
+    ema50_1w[0] = close_1w[0]
+    for i in range(1, len(close_1w)):
+        ema50_1w[i] = (close_1w[i] - ema50_1w[i-1]) * ema_multiplier50 + ema50_1w[i-1]
     
-    # Calculate 1d ADX for regime filter
-    def calculate_adx_simple(high, low, close, period=14):
-        tr1 = high - low
-        tr2 = np.abs(high - np.concatenate([[np.nan], close[:-1]]))
-        tr3 = np.abs(low - np.concatenate([[np.nan], close[:-1]]))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        
-        dm_plus = np.where((high - np.concatenate([[np.nan], high[:-1]])) > 
-                          (np.concatenate([[np.nan], low[:-1]]) - low),
-                          np.maximum(high - np.concatenate([[np.nan], high[:-1]]), 0), 0)
-        dm_minus = np.where((np.concatenate([[np.nan], low[:-1]]) - low) > 
-                           (high - np.concatenate([[np.nan], high[:-1]])),
-                           np.maximum(np.concatenate([[np.nan], low[:-1]]) - low, 0), 0)
-        
-        atr = np.full_like(tr, np.nan)
-        dm_plus_smooth = np.full_like(dm_plus, np.nan)
-        dm_minus_smooth = np.full_like(dm_minus, np.nan)
-        
-        atr[period-1] = np.nansum(tr[:period])
-        dm_plus_smooth[period-1] = np.nansum(dm_plus[:period])
-        dm_minus_smooth[period-1] = np.nansum(dm_minus[:period])
-        
-        for i in range(period, len(tr)):
-            atr[i] = atr[i-1] - (atr[i-1] / period) + tr[i]
-            dm_plus_smooth[i] = dm_plus_smooth[i-1] - (dm_plus_smooth[i-1] / period) + dm_plus[i]
-            dm_minus_smooth[i] = dm_minus_smooth[i-1] - (dm_minus_smooth[i-1] / period) + dm_minus[i]
-        
-        di_plus = np.full_like(atr, np.nan)
-        di_minus = np.full_like(atr, np.nan)
-        dx = np.full_like(atr, np.nan)
-        
-        di_plus[atr != 0] = (dm_plus_smooth[atr != 0] / atr[atr != 0]) * 100
-        di_minus[atr != 0] = (dm_minus_smooth[atr != 0] / atr[atr != 0]) * 100
-        dx[(di_plus + di_minus) != 0] = (np.abs(di_plus - di_minus) / (di_plus + di_minus))[ (di_plus + di_minus) != 0] * 100
-        
-        adx = np.full_like(dx, np.nan)
-        adx[2*period-1] = np.nansum(dx[period:2*period]) / period
-        for i in range(2*period, len(dx)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-            
-        return adx
+    # Calculate Williams Alligator on daily timeframe
+    # Jaw: Blue line, 13-period SMMA shifted 8 bars ahead
+    # Teeth: Red line, 8-period SMMA shifted 5 bars ahead  
+    # Lips: Green line, 5-period SMMA shifted 3 bars ahead
+    close_1d = df_1d['close'].values
     
-    # Calculate indicators
-    adx_6h = calculate_adx(high, low, close, 14)
-    supertrend_6h, atr_6h = calculate_supertrend(high, low, close, 10, 3.0)
-    adx_1d = calculate_adx_simple(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
+    # Smoothed Moving Average (SMMA) calculation
+    def smma(data, period):
+        sma = np.full(len(data), np.nan)
+        if len(data) < period:
+            return sma
+        # First value is simple average
+        sma[period-1] = np.mean(data[:period])
+        # Subsequent values: SMMA = (PREV_SMMA * (PERIOD-1) + CLOSE) / PERIOD
+        for i in range(period, len(data)):
+            sma[i] = (sma[i-1] * (period-1) + data[i]) / period
+        return sma
     
-    # Align 1d ADX to 6h
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    smma_13 = smma(close_1d, 13)
+    smma_8 = smma(close_1d, 8)
+    smma_5 = smma(close_1d, 5)
     
-    # Calculate average volume (24-period = 6 days) for volume confirmation
+    # Shift the SMMA lines as per Alligator specification
+    jaw = np.full_like(smma_13, np.nan)
+    teeth = np.full_like(smma_8, np.nan)
+    lips = np.full_like(smma_5, np.nan)
+    
+    # Jaw: 13-period SMMA shifted 8 bars ahead
+    if len(smma_13) > 8:
+        jaw[8:] = smma_13[:-8]
+    # Teeth: 8-period SMMA shifted 5 bars ahead
+    if len(smma_8) > 5:
+        teeth[5:] = smma_8[:-5]
+    # Lips: 5-period SMMA shifted 3 bars ahead
+    if len(smma_5) > 3:
+        lips[3:] = smma_5[:-3]
+    
+    # Align all indicators to 12h timeframe
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    
+    # Calculate average volume (24-period = 12 days) for volume confirmation
     avg_volume = np.full(n, np.nan)
     for i in range(24, n):
         avg_volume[i] = np.mean(volume[i-24:i])
@@ -171,55 +92,58 @@ def generate_signals(prices):
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(30, n):
+    for i in range(24, n):
         # Skip if any required data is not ready
-        if (np.isnan(adx_6h[i]) or np.isnan(supertrend_6h[i]) or 
-            np.isnan(adx_1d_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(jaw_aligned[i]) or 
+            np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
+            np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        adx_val = adx_6h[i]
-        st_val = supertrend_6h[i]
-        adx_1d_val = adx_1d_aligned[i]
+        ema_trend = ema50_1w_aligned[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
         
-        # Volume confirmation: current volume > 1.3x average volume
-        volume_confirm = vol > 1.3 * avg_vol
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirm = vol > 1.5 * avg_vol
         
-        # Regime filter: 1d ADX > 20 indicates trending market
-        regime_filter = adx_1d_val > 20
+        # Alligator conditions:
+        # Bullish: Lips > Teeth > Jaw (all lines aligned upward)
+        # Bearish: Lips < Teeth < Jaw (all lines aligned downward)
+        bullish_alligator = (lips_val > teeth_val) and (teeth_val > jaw_val)
+        bearish_alligator = (lips_val < teeth_val) and (teeth_val < jaw_val)
         
         if position == 0:
-            # Long: ADX > 25 (strong trend) + price above Supertrend + volume confirmation + regime filter
-            if (adx_val > 25 and
-                price > st_val and
-                volume_confirm and
-                regime_filter):
+            # Long: Bullish Alligator + above weekly EMA50 + volume confirmation
+            if (bullish_alligator and
+                price > ema_trend and
+                volume_confirm):
                 position = 1
                 signals[i] = position_size
-            # Short: ADX > 25 (strong trend) + price below Supertrend + volume confirmation + regime filter
-            elif (adx_val > 25 and
-                  price < st_val and
-                  volume_confirm and
-                  regime_filter):
+            # Short: Bearish Alligator + below weekly EMA50 + volume confirmation
+            elif (bearish_alligator and
+                  price < ema_trend and
+                  volume_confirm):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: ADX weakens (<20) or price crosses below Supertrend
-            if (adx_val < 20 or
-                price < st_val):
+            # Exit long: Alligator turns bearish or trend turns down
+            if (not bullish_alligator or
+                price < ema_trend):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: ADX weakens (<20) or price crosses above Supertrend
-            if (adx_val < 20 or
-                price > st_val):
+            # Exit short: Alligator turns bullish or trend turns up
+            if (not bearish_alligator or
+                price > ema_trend):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -227,6 +151,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_ADX_Supertrend_Regime"
-timeframe = "6h"
+name = "12h_1w_WilliamsAlligator_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
