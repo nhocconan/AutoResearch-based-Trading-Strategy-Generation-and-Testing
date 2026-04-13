@@ -1,23 +1,31 @@
 #!/usr/bin/env python3
 """
-4h_1d_Volume_Weighted_Pivot_Breakout
-Hypothesis: Trade breakouts from 1d Volume Weighted Average Price (VWAP) on 4h timeframe with volume confirmation and volatility filter.
-VWAP acts as dynamic support/resistance where institutional traders operate. Breakouts above VWAP with volume expansion indicate
-bullish momentum; breakdowns below VWAP indicate bearish momentum. Volatility filter avoids low-momentum chop. Designed to work
-in both bull and bear markets by following momentum. Target: 25-35 trades/year.
+12h_1w_1d_Combined_Breakout
+Hypothesis: Trade 12h breakouts from weekly and daily price extremes (weekly high/low, daily H4/L4) with volume confirmation.
+Uses weekly range for trend context and daily Camarilla levels for precise entry. Works in bull (breakouts above weekly high + daily H4)
+and bear (breakdowns below weekly low + daily L4). Volume filter ensures institutional participation. Target: 15-30 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_vwap(high, low, close, volume):
-    """Calculate VWAP for given period."""
-    typical_price = (high + low + close) / 3.0
-    vwap_numerator = typical_price * volume
-    vwap_denominator = volume
-    vwap = np.cumsum(vwap_numerator) / np.cumsum(vwap_denominator)
-    return vwap
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels."""
+    range_val = high - low
+    range_val = np.where(range_val == 0, 1e-10, range_val)
+    C = close
+    H = high
+    L = low
+    R1 = C + ((H - L) * 1.0833)
+    R2 = C + ((H - L) * 1.1666)
+    R3 = C + ((H - L) * 1.2500)
+    R4 = C + ((H - L) * 1.5000)
+    S1 = C - ((H - L) * 1.0833)
+    S2 = C - ((H - L) * 1.1666)
+    S3 = C - ((H - L) * 1.2500)
+    S4 = C - ((H - L) * 1.5000)
+    return R1, R2, R3, R4, S1, S2, S3, S4
 
 def generate_signals(prices):
     n = len(prices)
@@ -29,36 +37,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for VWAP calculation
+    # Get weekly data for trend context
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    # Get daily data for precise entry levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d VWAP
-    vwap_1d = calculate_vwap(high_1d, low_1d, close_1d, volume_1d)
-    vwap_1d_last = vwap_1d[-1] if len(vwap_1d) > 0 else np.nan
+    # Calculate weekly high/low
+    weekly_high = high_1w
+    weekly_low = low_1w
     
-    # Align VWAP to 4h timeframe
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, np.full_like(close_1d, vwap_1d_last))
+    # Calculate daily Camarilla levels (H4/L4)
+    _, _, _, R4_1d, _, _, _, S4_1d = calculate_camarilla(high_1d, low_1d, close_1d)
     
-    # Volume confirmation: current volume > 2.0x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 2.0)
+    # Align weekly and daily data to 12h timeframe
+    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
+    R4_1d_aligned = align_htf_to_ltf(prices, df_1d, R4_1d)
+    S4_1d_aligned = align_htf_to_ltf(prices, df_1d, S4_1d)
     
-    # Volatility filter: ATR ratio > 0.8 (avoid low volatility chop)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma_50 = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    volatility_filter = atr > (atr_ma_50 * 0.8)
+    # Volume confirmation: current volume > 2.0x 30-period average
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean()
+    volume_expansion = volume > (vol_ma_30 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -66,17 +77,17 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(vwap_1d_aligned[i]) or 
-            np.isnan(volume_expansion[i]) or 
-            np.isnan(volatility_filter[i])):
+        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or
+            np.isnan(R4_1d_aligned[i]) or np.isnan(S4_1d_aligned[i]) or
+            np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Long: price above VWAP with volume expansion and sufficient volatility
-        long_condition = (close[i] > vwap_1d_aligned[i]) and volume_expansion[i] and volatility_filter[i]
+        # Long: breakout above weekly high AND daily H4 with volume expansion
+        long_condition = (close[i] > weekly_high_aligned[i]) and (close[i] > R4_1d_aligned[i]) and volume_expansion[i]
         
-        # Short: price below VWAP with volume expansion and sufficient volatility
-        short_condition = (close[i] < vwap_1d_aligned[i]) and volume_expansion[i] and volatility_filter[i]
+        # Short: breakdown below weekly low AND daily L4 with volume expansion
+        short_condition = (close[i] < weekly_low_aligned[i]) and (close[i] < S4_1d_aligned[i]) and volume_expansion[i]
         
         if long_condition and position != 1:
             position = 1
@@ -90,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Volume_Weighted_Pivot_Breakout"
-timeframe = "4h"
+name = "12h_1w_1d_Combined_Breakout"
+timeframe = "12h"
 leverage = 1.0
