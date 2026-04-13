@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h Williams Alligator (Jaw/Teeth/Lips) with 1w ADX trend filter and volume confirmation.
-In ranging markets (ADX < 25), price crossing above/below Alligator lines signals mean reversion.
-Volume spike confirms participation. Uses 12h timeframe to target 50-150 total trades over 4 years.
-Works in bull/bear via trend filter: only trade when market is ranging (ADX < 25).
+Hypothesis: 4h Williams %R + 1-day volume spike + 1-week ADX trend filter.
+Williams %R identifies overbought/oversold conditions. Entry when %R crosses above -20 (oversold bounce) or below -80 (overbought reversal), confirmed by 1-day volume spike and 1-week ADX < 25 (low trend strength). Targets 20-50 trades/year to minimize fee drag while capturing mean reversion in ranging markets.
 """
 
 import numpy as np
@@ -20,40 +18,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Williams Alligator
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Get 1d data for Williams %R and volume
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Williams Alligator: SMoothed Moving Average (SMMA)
-    # Jaw: SMMA(13, 8) of median price
-    # Teeth: SMMA(8, 5) of median price
-    # Lips: SMMA(5, 3) of median price
-    median_price_12h = (high_12h + low_12h) / 2.0
+    # Calculate Williams %R (14-period)
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
     
-    def smma(series, period):
-        # Smoothed Moving Average: similar to Wilder's smoothing
-        sma = pd.Series(series).rolling(window=period, min_periods=period).mean().values
-        # First value is SMA, then smooth: SMMA(t) = (SMMA(t-1)*(period-1) + price(t)) / period
-        smoothed = np.full_like(series, np.nan, dtype=float)
-        if len(series) >= period:
-            smoothed[period-1] = sma[period-1]
-            for i in range(period, len(series)):
-                if not np.isnan(smoothed[i-1]):
-                    smoothed[i] = (smoothed[i-1] * (period-1) + series[i]) / period
-        return smoothed
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    jaw = smma(median_price_12h, 13)
-    teeth = smma(median_price_12h, 8)
-    lips = smma(median_price_12h, 5)
-    
-    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
+    # Calculate 1-day volume spike (volume > 1.5x 20-period average)
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_1d > (vol_ma_20 * 1.5)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
     
     # Get 1w data for ADX trend filter
     df_1w = get_htf_data(prices, '1w')
@@ -69,8 +54,8 @@ def generate_signals(prices):
     tr1 = high_1w[1:] - low_1w[1:]
     tr2 = np.abs(high_1w[1:] - close_1w[:-1])
     tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr0 = np.max([high_1w[0] - low_1w[0], np.abs(high_1w[0] - close_1w[0]), np.abs(low_1w[0] - close_1w[0])])
-    tr = np.concatenate([[tr0], np.maximum(tr1, np.maximum(tr2, tr3))])
+    tr = np.concatenate([[np.max([high_1w[0] - low_1w[0], np.abs(high_1w[0] - close_1w[0]), np.abs(low_1w[0] - close_1w[0])])], 
+                        np.maximum(tr1, np.maximum(tr2, tr3))])
     
     # Directional Movement
     dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
@@ -80,23 +65,10 @@ def generate_signals(prices):
     dm_plus = np.concatenate([[0], dm_plus])
     dm_minus = np.concatenate([[0], dm_minus])
     
-    # Smoothed values (Wilder's smoothing = EMA with alpha=1/period)
-    def wilders_smooth(series, period):
-        alpha = 1.0 / period
-        smoothed = np.full_like(series, np.nan, dtype=float)
-        if len(series) >= 1:
-            # First value is the first non-nan
-            first_idx = np.where(~np.isnan(series))[0]
-            if len(first_idx) > 0:
-                smoothed[first_idx[0]] = series[first_idx[0]]
-                for i in range(first_idx[0]+1, len(series)):
-                    if not np.isnan(series[i]):
-                        smoothed[i] = alpha * series[i] + (1 - alpha) * smoothed[i-1]
-        return smoothed
-    
-    tr_14 = wilders_smooth(tr, 14)
-    dm_plus_14 = wilders_smooth(dm_plus, 14)
-    dm_minus_14 = wilders_smooth(dm_minus, 14)
+    # Smoothed values
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
     
     # DI+ and DI-
     di_plus = 100 * dm_plus_14 / tr_14
@@ -104,7 +76,7 @@ def generate_signals(prices):
     
     # DX and ADX
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = wilders_smooth(dx, 14)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
     # ADX < 25 = low trend strength (good for mean reversion)
     low_trend = adx < 25
@@ -112,58 +84,36 @@ def generate_signals(prices):
     adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     low_trend_aligned = align_htf_to_ltf(prices, df_1w, low_trend.astype(float))
     
-    # Get 12h data for volume confirmation
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma_20 * 1.5)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% of capital
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(jaw_aligned[i]) or 
-            np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or 
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(vol_spike_aligned[i]) or 
             np.isnan(low_trend_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Alligator lines: Lips (fastest), Teeth, Jaw (slowest)
-        # In ranging market: price > Lips and Lips > Teeth and Teeth > Jaw = uptrend
-        #                  price < Lips and Lips < Teeth and Teeth < Jaw = downtrend
-        # We trade reversals: when price crosses Lips in opposite direction of alignment
+        # Entry conditions: Williams %R reversal + volume spike + low trend
+        # Long: %R crosses above -20 from below (oversold bounce)
+        # Short: %R crosses below -80 from above (overbought reversal)
+        wr = williams_r_aligned[i]
+        wr_prev = williams_r_aligned[i-1]
         
-        lips = lips_aligned[i]
-        teeth = teeth_aligned[i]
-        jaw = jaw_aligned[i]
+        long_entry = (wr > -20) and (wr_prev <= -20) and vol_spike_aligned[i] > 0.5 and low_trend_aligned[i] > 0.5
+        short_entry = (wr < -80) and (wr_prev >= -80) and vol_spike_aligned[i] > 0.5 and low_trend_aligned[i] > 0.5
         
-        # Check for Alligator alignment (all three lines ordered)
-        aligned_up = lips > teeth and teeth > jaw
-        aligned_down = lips < teeth and teeth < jaw
-        
-        # Price relative to Lips
-        price_above_lips = close[i] > lips
-        price_below_lips = close[i] < lips
-        
-        # Entry conditions: price crosses Lips in opposite direction of alignment + volume + low trend
-        # When aligned up but price crosses below Lips = potential down reversal (short)
-        # When aligned down but price crosses above Lips = potential up reversal (long)
-        vol_confirm = vol_spike[i]
-        trend_filter = low_trend_aligned[i] > 0.5
-        
-        short_setup = aligned_up and price_below_lips and vol_confirm and trend_filter
-        long_setup = aligned_down and price_above_lips and vol_confirm and trend_filter
-        
-        # Exit when price crosses Lips in direction of alignment (trend resumption)
-        exit_long = position == 1 and price_below_lips and aligned_down
-        exit_short = position == -1 and price_above_lips and aligned_up
+        # Exit when %R returns to neutral zone (-50) or opposite extreme
+        exit_long = position == 1 and wr < -50
+        exit_short = position == -1 and wr > -50
         
         # Execute signals
-        if long_setup and position != 1:
+        if long_entry and position != 1:
             position = 1
             signals[i] = position_size
-        elif short_setup and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -position_size
         elif exit_long or exit_short:
@@ -180,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_alligator_adx_volume"
-timeframe = "12h"
+name = "4h_1d_1w_williams_r"
+timeframe = "4h"
 leverage = 1.0
