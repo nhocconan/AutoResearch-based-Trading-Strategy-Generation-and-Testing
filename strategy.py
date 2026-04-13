@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h timeframe with 1d Choppiness Index regime filter and Donchian(20) breakout.
-# Long: Price breaks above Donchian high(20) + Choppiness Index < 38.2 (trending regime).
-# Short: Price breaks below Donchian low(20) + Choppiness Index < 38.2 (trending regime).
-# Uses 1d Choppiness Index to filter for trending markets, avoiding whipsaws in ranging conditions.
-# Position size: 0.25 (25%) to balance risk and return.
-# Target: 20-50 trades/year (80-200 over 4 years) to minimize fee drag.
+# Hypothesis: 4h Donchian breakout with 1d trend filter and volume confirmation.
+# Long: Price breaks above Donchian(20) high + 1d EMA(50) uptrend + volume > 1.5x average.
+# Short: Price breaks below Donchian(20) low + 1d EMA(50) downtrend + volume > 1.5x average.
+# Uses Donchian channels for breakout signals, 1d EMA for trend filter, volume for confirmation.
+# Time filter: None (all hours). Target: 20-50 trades/year for 4h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,55 +17,36 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # 1d data for Choppiness Index
+    # 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate True Range and ADX-like components for Choppiness Index
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    # Calculate 1d EMA(50) for trend filter
+    ema_50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema_50_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_50_1d[i] = (close_1d[i] * 2/51) + (ema_50_1d[i-1] * 49/51)
     
-    atr_period = 14
-    atr = np.full(len(close_1d), np.nan)
-    for i in range(atr_period, len(close_1d)):
-        atr[i] = np.nanmean(tr[i-atr_period+1:i+1])
+    # Align 1d EMA to 4h
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Sum of True Range over period
-    sum_tr = np.full(len(close_1d), np.nan)
-    for i in range(atr_period, len(close_1d)):
-        sum_tr[i] = np.nansum(tr[i-atr_period+1:i+1])
-    
-    # Max and min close over period
-    max_hh = np.full(len(close_1d), np.nan)
-    min_ll = np.full(len(close_1d), np.nan)
-    for i in range(atr_period, len(close_1d)):
-        max_hh[i] = np.nanmax(high_1d[i-atr_period+1:i+1])
-        min_ll[i] = np.nanmin(low_1d[i-atr_period+1:i+1])
-    
-    # Choppiness Index: 100 * log10(sum_tr / (max_hh - min_ll)) / log10(atr_period)
-    chop = np.full(len(close_1d), np.nan)
-    for i in range(atr_period, len(close_1d)):
-        if max_hh[i] > min_ll[i]:  # Avoid division by zero
-            chop[i] = 100 * np.log10(sum_tr[i] / (max_hh[i] - min_ll[i])) / np.log10(atr_period)
-    
-    # Donchian channels (20-period) on 4h data
+    # Donchian(20) channels
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     for i in range(20, n):
         donchian_high[i] = np.max(high[i-20:i])
         donchian_low[i] = np.min(low[i-20:i])
     
-    # Align 1d Choppiness Index to 4h
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Average volume (20-period) for volume confirmation
+    avg_volume = np.full(n, np.nan)
+    for i in range(20, n):
+        avg_volume[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -75,25 +55,31 @@ def generate_signals(prices):
     for i in range(20, n):
         # Skip if any required data is not ready
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(chop_aligned[i])):
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        vol = volume[i]
+        avg_vol = avg_volume[i]
+        ema_50 = ema_50_1d_aligned[i]
         upper = donchian_high[i]
         lower = donchian_low[i]
-        chop_val = chop_aligned[i]
         
-        # Trending regime filter: Choppiness Index < 38.2
-        trending_regime = chop_val < 38.2
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirm = vol > 1.5 * avg_vol
+        
+        # Trend filter: uptrend if price > EMA50, downtrend if price < EMA50
+        uptrend = price > ema_50
+        downtrend = price < ema_50
         
         if position == 0:
-            # Long: price breaks above Donchian high + trending regime
-            if price > upper and trending_regime:
+            # Long: break above Donchian high + uptrend + volume confirmation
+            if (price > upper and uptrend and volume_confirm):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below Donchian low + trending regime
-            elif price < lower and trending_regime:
+            # Short: break below Donchian low + downtrend + volume confirmation
+            elif (price < lower and downtrend and volume_confirm):
                 position = -1
                 signals[i] = -position_size
             else:
@@ -115,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Chop_Donchian_Breakout"
+name = "4h_1d_Donchian_Breakout_Trend_Volume"
 timeframe = "4h"
 leverage = 1.0
