@@ -8,12 +8,12 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with 1d ATR-based volume filter and ADX regime
-    # Long when price > upper Donchian + volume > 2.0 * ATR(20) + ADX > 25
-    # Short when price < lower Donchian + volume > 2.0 * ATR(20) + ADX > 25
-    # Exit when price crosses middle Donchian OR ADX < 20
-    # Discrete position sizing: 0.25 to balance return and drawdown
-    # Target: 50-120 total trades over 4 years (~12-30/year) to avoid fee drag
+    # Hypothesis: 4h Donchian(20) breakout with 1d volume expansion (volume > 2.0 * ATR) and ADX > 25 trend filter
+    # Long when price > upper Donchian + volume expansion + ADX > 25
+    # Short when price < lower Donchian + volume expansion + ADX > 25
+    # Exit when price crosses middle Donchian OR ADX < 20 (trend weakening)
+    # Discrete position sizing: 0.25 to limit drawdown and reduce fee churn
+    # Target: 50-150 total trades over 4 years (~12-38/year) to avoid fee drag
     
     close = prices['close'].values
     high = prices['high'].values
