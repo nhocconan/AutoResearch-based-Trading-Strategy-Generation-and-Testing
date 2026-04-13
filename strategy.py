@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_12h_Range_Breakout_With_Volume_Confirmation
-Hypothesis: The 12-hour range provides stronger support/resistance than daily due to fewer false breaks.
-Breakouts above the 12h high or below the 12h low with volume expansion capture momentum.
-Works in both bull and bear markets by trading breakouts regardless of direction.
-Target: 15-25 trades/year per symbol.
+1d_1w_Ichimoku_Bullish_Trend_Following
+Hypothesis: Ichimoku Cloud on daily chart with weekly trend filter captures major trends.
+Price above/below Cloud + weekly Senkou Span filter gives high-probability trend trades.
+Works in bull (trend following) and bear (short when price below Cloud + weekly filter).
 """
 
 import numpy as np
@@ -13,52 +12,73 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 52:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get 12h data for range calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 52:
         return np.zeros(n)
     
-    # Calculate 12h high and low
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Calculate Ichimoku components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    high_9 = pd.Series(high).rolling(window=9, min_periods=9).mean()
+    low_9 = pd.Series(low).rolling(window=9, min_periods=9).mean()
+    tenkan = (high_9 + low_9) / 2
     
-    # Align 12h high/low to 6h timeframe
-    high_12h_aligned = align_htf_to_ltf(prices, df_12h, high_12h)
-    low_12h_aligned = align_htf_to_ltf(prices, df_12h, low_12h)
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    high_26 = pd.Series(high).rolling(window=26, min_periods=26).mean()
+    low_26 = pd.Series(low).rolling(window=26, min_periods=26).mean()
+    kijun = (high_26 + low_26) / 2
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 1.5)
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods
+    senkou_a = ((tenkan + kijun) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 52 periods
+    high_52 = pd.Series(high).rolling(window=52, min_periods=52).mean()
+    low_52 = pd.Series(low).rolling(window=52, min_periods=52).mean()
+    senkou_b = ((high_52 + low_52) / 2)
+    
+    # Get weekly Senkou Span B for trend filter
+    high_52_w = pd.Series(df_1w['high']).rolling(window=52, min_periods=52).mean()
+    low_52_w = pd.Series(df_1w['low']).rolling(window=52, min_periods=52).mean()
+    senkou_b_w = ((high_52_w + low_52_w) / 2).values
+    senkou_b_w_aligned = align_htf_to_ltf(prices, df_1w, senkou_b_w)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25
     
-    for i in range(50, n):
+    for i in range(52, n):
         # Skip if any required data is not ready
-        if (np.isnan(high_12h_aligned[i]) or np.isnan(low_12h_aligned[i]) or 
-            np.isnan(volume_expansion[i])):
+        if (np.isnan(tenkan.iloc[i]) or np.isnan(kijun.iloc[i]) or 
+            np.isnan(senkou_a.iloc[i]) or np.isnan(senkou_b.iloc[i]) or
+            np.isnan(senkou_b_w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long breakout: price breaks above 12h high with volume expansion
-        long_breakout = close[i] > high_12h_aligned[i] and volume_expansion[i]
+        # Cloud top and bottom
+        cloud_top = max(senkou_a.iloc[i], senkou_b.iloc[i])
+        cloud_bottom = min(senkou_a.iloc[i], senkou_b.iloc[i])
         
-        # Short breakdown: price breaks below 12h low with volume expansion
-        short_breakout = close[i] < low_12h_aligned[i] and volume_expansion[i]
+        # Weekly trend filter: price relative to weekly Senkou B
+        weekly_uptrend = close[i] > senkou_b_w_aligned[i]
+        weekly_downtrend = close[i] < senkou_b_w_aligned[i]
         
-        if long_breakout and position != 1:
+        # Long signal: price above Cloud + weekly uptrend
+        long_signal = (close[i] > cloud_top) and weekly_uptrend
+        
+        # Short signal: price below Cloud + weekly downtrend
+        short_signal = (close[i] < cloud_bottom) and weekly_downtrend
+        
+        if long_signal and position != 1:
             position = 1
             signals[i] = position_size
-        elif short_breakout and position != -1:
+        elif short_signal and position != -1:
             position = -1
             signals[i] = -position_size
         else:
@@ -67,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_Range_Breakout_With_Volume_Confirmation"
-timeframe = "6h"
+name = "1d_1w_Ichimoku_Bullish_Trend_Following"
+timeframe = "1d"
 leverage = 1.0
