@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_12h_1d_Camarilla_Pullback_Strategy
-Hypothesis: On 4h timeframe, enters long when price pulls back to L3 after breaking above H3 (bullish), 
-and short when price pulls back to H3 after breaking below L3 (bearish), with volume confirmation. 
-Uses 12h trend (EMA21) for direction filter and 1d volatility (ATR14) to avoid choppy markets. 
-Designed to work in both bull and bear markets by requiring pullbacks within established trends.
+4h_1d_Camarilla_Breakout_40726
+Hypothesis: Uses daily Camarilla levels (H4/L4) on 4h timeframe with volume confirmation and ADX regime filter.
+Enters long when 4h close > daily H4 and volume > 1.5x 20-period volume average and ADX > 20.
+Enters short when 4h close < daily L4 and volume > 1.5x 20-period volume average and ADX > 20.
+Exits when price returns to prior 4h close or ADX < 15 (trend weakening).
+Designed for 4h timeframe to target 20-50 trades/year (80-200 total over 4 years).
+Works in both bull and bear markets by requiring volume expansion on breakouts and trend presence via ADX.
 """
 
 import numpy as np
@@ -21,49 +23,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR and Camarilla levels
+    # Get daily data for Camarilla levels and ADX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ATR(14) on 1d for volatility filter
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
-    tr2 = np.maximum(np.abs(low_1d[1:] - close_1d[:-1]), tr1)
-    tr = np.concatenate([[np.inf], tr2])  # first TR undefined
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate Camarilla pivot levels for previous daily bar
+    hl_range = high_1d - low_1d
+    H4 = close_1d + 1.125 * hl_range
+    L4 = close_1d - 1.125 * hl_range
     
-    # Calculate Camarilla levels for previous 1d bar
-    hl_range_1d = high_1d - low_1d
-    H3 = close_1d + 1.100 * hl_range_1d  # H3 level
-    L3 = close_1d - 1.100 * hl_range_1d  # L3 level
-    H4 = close_1d + 1.125 * hl_range_1d  # Stop level
-    L4 = close_1d - 1.125 * hl_range_1d  # Stop level
+    # Calculate 20-period volume average on daily
+    vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
     
-    # Get 12h data for trend filter (EMA21)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
+    # Calculate ADX(14) on daily
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(0, high[i] - high[i-1])
+            minus_dm[i] = max(0, low[i-1] - low[i])
+            if plus_dm[i] < minus_dm[i]:
+                plus_dm[i] = 0
+            if minus_dm[i] < plus_dm[i]:
+                minus_dm[i] = 0
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        atr = np.zeros_like(high)
+        atr[period-1] = np.mean(tr[1:period+1]) if period+1 <= len(tr) else np.mean(tr[1:])
+        for i in range(period, len(tr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        plus_di = 100 * pd.Series(plus_dm).rolling(window=period, min_periods=period).sum().values / (atr * period)
+        minus_di = 100 * pd.Series(minus_dm).rolling(window=period, min_periods=period).sum().values / (atr * period)
+        dx = np.zeros_like(high)
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+        adx = pd.Series(dx).rolling(window=period, min_periods=period).mean().values
+        return adx
     
-    close_12h = df_12h['close'].values
-    ema21_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    # Align all 1d signals to 4h timeframe
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    # Align all signals to 4h timeframe
     H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
     L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14)
-    
-    # Align 12h EMA to 4h timeframe
-    ema21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema21_12h)
-    
-    # Calculate volume spike (2x 20-period average on 4h)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma_20 * 2.0)
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -71,32 +81,29 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or 
-            np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or
-            np.isnan(atr14_aligned[i]) or np.isnan(ema21_12h_aligned[i])):
+        if (np.isnan(H4_aligned[i]) or 
+            np.isnan(L4_aligned[i]) or 
+            np.isnan(vol_ma_20_1d_aligned[i]) or 
+            np.isnan(adx_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: avoid extremely high volatility (potential chop)
-        vol_filter = atr14_aligned[i] < (np.mean(atr14_aligned[max(0, i-50):i+1]) * 2.0)
+        # Volume confirmation: current 4h volume > 1.5x daily volume MA
+        volume_expansion = volume[i] > (vol_ma_20_1d_aligned[i] * 1.5)
         
-        # Trend filter: price above/below 12h EMA21
-        uptrend = close[i] > ema21_12h_aligned[i]
-        downtrend = close[i] < ema21_12h_aligned[i]
+        # Regime filter: ADX > 20 for trend presence
+        strong_trend = adx_1d_aligned[i] > 20
+        weak_trend = adx_1d_aligned[i] < 15
         
-        # Pullback conditions: price returns to L3/H3 after breaking H4/L4
-        # Long: price pulled back to L3 after being above H4 (bullish continuation)
-        long_setup = (close[i-1] > H4_aligned[i-1]) and (low[i] <= L3_aligned[i])
-        # Short: price pulled back to H3 after being below L4 (bearish continuation)
-        short_setup = (close[i-1] < L4_aligned[i-1]) and (high[i] >= H3_aligned[i])
+        # Entry conditions: price CLOSES beyond H4/L4 with volume expansion and strong trend
+        long_entry = (close[i] > H4_aligned[i]) and volume_expansion and strong_trend
+        short_entry = (close[i] < L4_aligned[i]) and volume_expansion and strong_trend
         
-        # Entry with volume expansion and filters
-        long_entry = long_setup and volume_spike[i] and uptrend and vol_filter
-        short_entry = short_setup and volume_spike[i] and downtrend and vol_filter
-        
-        # Stop loss: H4 for longs, L4 for shorts
-        stop_long = position == 1 and high[i] >= H4_aligned[i]
-        stop_short = position == -1 and low[i] <= L4_aligned[i]
+        # Exit conditions: return to prior 4h close OR trend weakening
+        prev_close = np.roll(close, 1)
+        prev_close[0] = close[0]
+        exit_long = position == 1 and (close[i] <= prev_close[i] or weak_trend)
+        exit_short = position == -1 and (close[i] >= prev_close[i] or weak_trend)
         
         # Execute signals
         if long_entry and position != 1:
@@ -105,7 +112,7 @@ def generate_signals(prices):
         elif short_entry and position != -1:
             position = -1
             signals[i] = -position_size
-        elif stop_long or stop_short:
+        elif exit_long or exit_short:
             position = 0
             signals[i] = 0.0
         # Hold current position
@@ -119,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_1d_Camarilla_Pullback_Strategy"
+name = "4h_1d_Camarilla_Breakout_40726"
 timeframe = "4h"
 leverage = 1.0
