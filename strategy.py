@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with weekly volume confirmation and RSI filter.
-# Uses weekly Donchian channels and RSI to avoid whipsaws in both bull and bear markets.
-# Timeframe 1d reduces trade frequency to minimize fee drag while capturing medium-term trends.
-# Volume confirmation ensures breakouts have conviction. RSI filter avoids overextended moves.
-# Target: 30-100 total trades over 4 years (7-25/year) to stay within profitable range.
+# Hypothesis: 12h Camarilla pivot reversal with daily volume spike and weekly trend filter.
+# Uses daily Camarilla levels (H4/L4) for mean reversion entries, confirmed by volume spikes
+# and filtered by weekly trend direction to avoid counter-trend trades. Weekly trend avoids
+# whipsaws in ranging markets. 12h timeframe targets 50-150 total trades over 4 years.
+# Camarilla reversals work in both bull and bear markets as price reverts to mean.
+# Volume spike ensures institutional participation. Weekly trend filter improves win rate.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,37 +20,50 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for multi-timeframe analysis
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Daily data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 20-week Donchian channel on weekly
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
     
-    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Calculate daily Camarilla levels (based on previous day)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly RSI for overbought/oversold conditions
-    delta = pd.Series(df_1w['close']).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Previous day's values (shift by 1 to avoid look-ahead)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Calculate weekly volume and its 20-period average
-    volume_1w = df_1w['volume'].values
-    volume_ma_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
+    # Camarilla levels
+    range_ = prev_high - prev_low
+    camarilla_h4 = prev_close + 1.1 * range_ / 2  # H4 level
+    camarilla_l4 = prev_close - 1.1 * range_ / 2  # L4 level
     
-    # Align all data to daily timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
-    rsi_aligned = align_htf_to_ltf(prices, df_1w, rsi_values)
-    volume_ma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_ma_20_1w)
+    # Weekly trend: EMA crossover
+    close_1w = df_1w['close'].values
+    ema_fast = pd.Series(close_1w).ewm(span=10, adjust=False, min_periods=10).mean().values
+    ema_slow = pd.Series(close_1w).ewm(span=30, adjust=False, min_periods=30).mean().values
+    weekly_uptrend = ema_fast > ema_slow
+    
+    # Daily volume spike detection
+    volume_1d = df_1d['volume'].values
+    volume_ma_20 = pd.Series(volume_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = volume_1d > (volume_ma_20 * 2.0)  # 2x average volume
+    
+    # Align all data to 12-hour timeframe
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -57,45 +71,39 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(rsi_aligned[i]) or np.isnan(volume_ma_20_1w_aligned[i])):
+        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or
+            np.isnan(weekly_uptrend_aligned[i]) or np.isnan(volume_spike_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current daily volume > 1.5x weekly volume MA (adjusted for daily)
-        # ~7 daily periods per week, so weekly MA/7 = approximate daily period MA
-        volume_daily_approx_ma = volume_ma_20_1w_aligned[i] / 7
-        volume_condition = volume[i] > (volume_daily_approx_ma * 1.5)
-        
-        # RSI conditions: avoid extreme overbought/oversold
-        rsi_not_overbought = rsi_aligned[i] < 70
-        rsi_not_oversold = rsi_aligned[i] > 30
-        
-        # Entry conditions: Donchian breakout with volume and RSI filter
-        # Long when price breaks above Donchian high with volume and not overbought
-        # Short when price breaks below Donchian low with volume and not oversold
-        breakout_long = close[i] > donchian_high_aligned[i]
-        breakout_short = close[i] < donchian_low_aligned[i]
+        # Mean reversion at Camarilla H4/L4 levels with volume spike and trend filter
+        # Short near H4 in uptrend, Long near L4 in downtrend (fade the extreme)
+        near_h4 = close[i] >= camarilla_h4_aligned[i] * 0.999  # Within 0.1% of H4
+        near_l4 = close[i] <= camarilla_l4_aligned[i] * 1.001  # Within 0.1% of L4
         
         if position == 0:
-            if breakout_long and volume_condition and rsi_not_overbought:
-                position = 1
-                signals[i] = position_size
-            elif breakout_short and volume_condition and rsi_not_oversold:
+            # Short when near H4, weekly uptrend, and volume spike
+            if near_h4 and weekly_uptrend_aligned[i] >= 0.5 and volume_spike_aligned[i] >= 0.5:
                 position = -1
                 signals[i] = -position_size
+            # Long when near L4, weekly downtrend, and volume spike
+            elif near_l4 and weekly_uptrend_aligned[i] < 0.5 and volume_spike_aligned[i] >= 0.5:
+                position = 1
+                signals[i] = position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit when price breaks below Donchian low or RSI becomes overbought
-            if close[i] < donchian_low_aligned[i] or rsi_aligned[i] >= 70:
+            # Exit long when price moves back toward midpoint or weekly trend changes
+            midpoint = (camarilla_h4_aligned[i] + camarilla_l4_aligned[i]) / 2
+            if close[i] >= midpoint or weekly_uptrend_aligned[i] >= 0.5:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit when price breaks above Donchian high or RSI becomes oversold
-            if close[i] > donchian_high_aligned[i] or rsi_aligned[i] <= 30:
+            # Exit short when price moves back toward midpoint or weekly trend changes
+            midpoint = (camarilla_h4_aligned[i] + camarilla_l4_aligned[i]) / 2
+            if close[i] <= midpoint or weekly_uptrend_aligned[i] < 0.5:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -103,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_Donchian_Breakout_Volume_RSI_Filter_v1"
-timeframe = "1d"
+name = "12h_1d_1w_Camarilla_Reversal_Volume_Trend_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
