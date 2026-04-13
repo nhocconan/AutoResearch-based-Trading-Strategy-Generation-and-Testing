@@ -1,6 +1,11 @@
-# 6h_1d_Camarilla_Pivot_Breakout_With_Volume_Filter_v1
-# Hypothesis: Camarilla pivot levels from 1d act as strong support/resistance. Breakout above R4 or below S4 with volume > 1.5x 20-period average triggers continuation. Uses 60% position size to manage risk. Works in bull via R4 breakouts and bear via S4 breakdowns.
-# Target: 20-50 trades/year per symbol.
+#!/usr/bin/env python3
+"""
+4h_12h_Camarilla_Pivot_Breakout_Volume_Confirmation
+Hypothesis: Camarilla pivot levels on 12h with volume confirmation on 4h capture institutional breakouts.
+Works in bull markets via breaks above H4 resistance and in bear markets via breaks below L4 support.
+Uses 12h Camarilla levels, 4h volume > 1.5x 20-period average, and price close confirmation.
+Target: 20-40 trades/year per symbol.
+"""
 
 import numpy as np
 import pandas as pd
@@ -8,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -16,53 +21,51 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate ATR for volatility filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[0], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate 12h Camarilla pivot levels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        h4 = l4 = h3 = l3 = np.full(len(prices), np.nan)
+    else:
+        high_12h = df_12h['high'].values
+        low_12h = df_12h['low'].values
+        close_12h = df_12h['close'].values
+        
+        # Calculate pivot and ranges
+        pivot = (high_12h + low_12h + close_12h) / 3
+        range_ = high_12h - low_12h
+        
+        # Camarilla levels
+        h3 = pivot + (range_ * 1.1 / 6)
+        l3 = pivot - (range_ * 1.1 / 6)
+        h4 = pivot + (range_ * 1.1 / 2)
+        l4 = pivot - (range_ * 1.1 / 2)
+        
+        # Align to 4h timeframe
+        h3 = align_htf_to_ltf(prices, df_12h, h3)
+        l3 = align_htf_to_ltf(prices, df_12h, l3)
+        h4 = align_htf_to_ltf(prices, df_12h, h4)
+        l4 = align_htf_to_ltf(prices, df_12h, l4)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     volume_expansion = volume > (vol_ma_20 * 1.5)
     
-    # Get 1d data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        camarilla_r4 = np.full(n, np.nan)
-        camarilla_s4 = np.full(n, np.nan)
-    else:
-        # Previous day's OHLC
-        prev_close = df_1d['close'].shift(1).values
-        prev_high = df_1d['high'].shift(1).values
-        prev_low = df_1d['low'].shift(1).values
-        
-        # Camarilla calculations
-        camarilla_r4 = prev_close + (prev_high - prev_low) * 1.1 / 2
-        camarilla_s4 = prev_close - (prev_high - prev_low) * 1.1 / 2
-        
-        # Align to 6h timeframe (wait for 1d bar to close)
-        camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-        camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.60  # 60% position size
+    position_size = 0.25  # 25% position size
     
-    for i in range(30, n):
+    for i in range(50, n):  # warmup period
         # Skip if any required data is not ready
-        if (np.isnan(camarilla_r4_aligned[i]) if len(df_1d) >= 2 else True or
-            np.isnan(camarilla_s4_aligned[i]) if len(df_1d) >= 2 else True or
+        if (np.isnan(h4[i]) or np.isnan(l4[i]) or 
             np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Long signal: break above R4 with volume expansion
-        long_signal = (high[i] > camarilla_r4_aligned[i] and volume_expansion[i])
+        # Long signal: break above H4 with volume expansion
+        long_signal = (close[i] > h4[i] and volume_expansion[i])
         
-        # Short signal: break below S4 with volume expansion
-        short_signal = (low[i] < camarilla_s4_aligned[i] and volume_expansion[i])
+        # Short signal: break below L4 with volume expansion
+        short_signal = (close[i] < l4[i] and volume_expansion[i])
         
         if long_signal and position != 1:
             position = 1
@@ -76,6 +79,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Camarilla_Pivot_Breakout_With_Volume_Filter_v1"
-timeframe = "6h"
+name = "4h_12h_Camarilla_Pivot_Breakout_Volume_Confirmation"
+timeframe = "4h"
 leverage = 1.0
