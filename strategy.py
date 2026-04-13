@@ -8,11 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Bollinger Band squeeze + 1d Camarilla pivot breakout
-    # Long: BB squeeze (BW < 20th percentile) + price breaks above R3 Camarilla (1d)
-    # Short: BB squeeze + price breaks below S3 Camarilla (1d)
-    # Exit: BB expansion (BW > 50th percentile) OR price reverts to mean (close to BB middle)
-    # Uses 6h for volatility squeeze detection, 1d for Camarilla pivot structure
+    # Hypothesis: 12h Donchian breakout with 1w ADX regime filter
+    # Long: price > Donchian(20) high AND 1w ADX > 25 (strong trend)
+    # Short: price < Donchian(20) low AND 1w ADX > 25 (strong trend)
+    # Exit: price crosses Donchian midpoint OR 1w ADX < 20 (weak trend)
+    # Uses 12h for Donchian channels, 1w for ADX regime filter
     # Discrete position sizing (0.25) to minimize fee churn
     # Target: 50-150 total trades over 4 years (~12-37/year) to stay within limits
     
@@ -20,118 +20,120 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get 6h data for Bollinger Bands (call ONCE before loop)
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 50:
+    # Get 12h data for Donchian channels (call ONCE before loop)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Get 1d data for Camarilla pivots (call ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 1w data for ADX (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 6h Bollinger Bands (20, 2)
-    close_6h = df_6h['close'].values
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
+    # Calculate 12h Donchian channels (20-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # BB middle (SMA20)
-    sma20_6h = pd.Series(close_6h).rolling(window=20, min_periods=20).mean().values
+    # Rolling max/min for Donchian channels
+    def rolling_max(arr, window):
+        result = np.full_like(arr, np.nan)
+        for i in range(window-1, len(arr)):
+            result[i] = np.max(arr[i-window+1:i+1])
+        return result
     
-    # BB standard deviation
-    bb_std_6h = pd.Series(close_6h).rolling(window=20, min_periods=20).std().values
+    def rolling_min(arr, window):
+        result = np.full_like(arr, np.nan)
+        for i in range(window-1, len(arr)):
+            result[i] = np.min(arr[i-window+1:i+1])
+        return result
     
-    # BB upper/lower bands
-    bb_upper_6h = sma20_6h + 2 * bb_std_6h
-    bb_lower_6h = sma20_6h - 2 * bb_std_6h
+    donchian_high = rolling_max(high_12h, 20)
+    donchian_low = rolling_min(low_12h, 20)
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Bollinger Band Width (BW)
-    bb_width_6h = (bb_upper_6h - bb_lower_6h) / sma20_6h
+    # Align 12h Donchian to 12h timeframe (no additional delay for price-based indicators)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_12h, donchian_mid)
     
-    # Align 6h Bollinger Band Width to 6h (no additional delay for price-based indicators)
-    bb_width_aligned = align_htf_to_ltf(prices, df_6h, bb_width_6h)
-    bb_middle_aligned = align_htf_to_ltf(prices, df_6h, sma20_6h)
+    # Calculate 1w ADX (Average Directional Index)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d Camarilla pivot levels (based on previous day)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # True Range
+    tr1 = np.abs(high_1w[1:] - low_1w[1:])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.nan], tr])  # align with index 0
     
-    # Camarilla levels (using previous day's OHLC)
-    camarilla_h4 = np.full_like(close_1d, np.nan)
-    camarilla_l4 = np.full_like(close_1d, np.nan)
-    camarilla_h3 = np.full_like(close_1d, np.nan)
-    camarilla_l3 = np.full_like(close_1d, np.nan)
+    # Directional Movement
+    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Calculate for each day (starting from index 1 as we need previous day)
-    for i in range(1, len(close_1d)):
-        # Previous day's OHLC
-        phigh = high_1d[i-1]
-        plow = low_1d[i-1]
-        pclose = close_1d[i-1]
-        pivot = (phigh + plow + pclose) / 3
-        range_ = phigh - plow
-        
-        # Camarilla levels
-        camarilla_h4[i] = pclose + range_ * 1.1 / 2
-        camarilla_l4[i] = pclose - range_ * 1.1 / 2
-        camarilla_h3[i] = pclose + range_ * 1.1 / 4
-        camarilla_l3[i] = pclose - range_ * 1.1 / 4
+    # Wilder's smoothing for TR, DM+, DM-
+    def wilders_smoothing(data, period):
+        alpha = 1.0 / period
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            result[period-1] = np.nanmean(data[:period])
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    # For first bar, use NaN (no previous day)
-    camarilla_h4[0] = np.nan
-    camarilla_l4[0] = np.nan
-    camarilla_h3[0] = np.nan
-    camarilla_l3[0] = np.nan
+    atr_1w = wilders_smoothing(tr, 14)
+    dm_plus_smoothed = wilders_smoothing(dm_plus, 14)
+    dm_minus_smoothed = wilders_smoothing(dm_minus, 14)
     
-    # Align 1d Camarilla levels to 6h (wait for completed 1d bar)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # DI+ and DI-
+    di_plus = np.full_like(atr_1w, np.nan)
+    di_minus = np.full_like(atr_1w, np.nan)
+    mask = ~np.isnan(atr_1w) & (atr_1w > 0)
+    di_plus[mask] = 100 * dm_plus_smoothed[mask] / atr_1w[mask]
+    di_minus[mask] = 100 * dm_minus_smoothed[mask] / atr_1w[mask]
+    
+    # DX and ADX
+    dx = np.full_like(atr_1w, np.nan)
+    dx_mask = mask & ~np.isnan(di_plus) & ~np.isnan(di_minus) & ((di_plus + di_minus) > 0)
+    dx[dx_mask] = 100 * np.abs(di_plus[dx_mask] - di_minus[dx_mask]) / (di_plus[dx_mask] + di_minus[dx_mask])
+    
+    adx_1w = wilders_smoothing(dx, 14)
+    
+    # Align 1w ADX to 12h (wait for completed 1w bar)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Percentile lookback for BB width regime (50 bars ~ 6h*50 = 12.5 days)
-    lookback = 50
-    
-    for i in range(lookback, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(bb_width_aligned[i]) or np.isnan(bb_middle_aligned[i]) or 
-            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(donchian_mid_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # BB squeeze detection: BB width below 20th percentile (low volatility)
-        bb_width_slice = bb_width_aligned[i-lookback:i+1]
-        valid_bw = bb_width_slice[~np.isnan(bb_width_slice)]
-        if len(valid_bw) < 10:  # Need minimum valid data
-            signals[i] = 0.0
-            continue
-            
-        bw_percentile_20 = np.percentile(valid_bw, 20)
-        bw_percentile_50 = np.percentile(valid_bw, 50)
+        # Regime filter: only trade when 1w ADX > 25 (strong trend)
+        strong_trend = adx_aligned[i] > 25
+        # Exit regime: ADX < 20 (weak trend/no trend)
+        weak_trend = adx_aligned[i] < 20
         
-        bb_squeeze = bb_width_aligned[i] < bw_percentile_20
-        bb_expansion = bb_width_aligned[i] > bw_percentile_50
+        # Donchian breakout signals
+        long_signal = close[i] > donchian_high_aligned[i]
+        short_signal = close[i] < donchian_low_aligned[i]
         
-        # Price relative to BB middle
-        price_to_middle = (close[i] - bb_middle_aligned[i]) / bb_middle_aligned[i]
-        price_at_mean = np.abs(price_to_middle) < 0.005  # Within 0.5% of BB middle
+        # Entry logic: Donchian breakout + strong trend regime
+        long_entry = long_signal and strong_trend
+        short_entry = short_signal and strong_trend
         
-        # Camarilla breakout conditions
-        long_breakout = close[i] > h3_aligned[i]  # Break above H3
-        short_breakout = close[i] < l3_aligned[i]  # Break below L3
-        
-        # Exit conditions
-        long_exit = bb_expansion or price_at_mean
-        short_exit = bb_expansion or price_at_mean
-        
-        # Entry logic: BB squeeze + Camarilla breakout
-        long_entry = bb_squeeze and long_breakout
-        short_entry = bb_squeeze and short_breakout
+        # Exit logic: price crosses Donchian midpoint OR regime shifts to weak trend
+        long_exit = (close[i] < donchian_mid_aligned[i]) or weak_trend
+        short_exit = (close[i] > donchian_mid_aligned[i]) or weak_trend
         
         if long_entry and position != 1:
             position = 1
@@ -156,6 +158,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_bb_squeeze_camarilla_breakout_v1"
-timeframe = "6h"
+name = "12h_1w_donchian_breakout_adx_regime_v1"
+timeframe = "12h"
 leverage = 1.0
