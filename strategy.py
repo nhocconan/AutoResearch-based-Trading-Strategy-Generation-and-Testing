@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Pivot_Breakout_SMVolume_Confirmation_v1
-Hypothesis: Combines daily Camarilla pivot breakouts with smoothed volume confirmation (3-period SMA of volume ratio) to reduce whipsaws.
-Uses breakout logic only when volume confirmation is above threshold, reducing false signals. Works in both bull and bear markets
-by trading breakouts in either direction. Target: 15-25 trades/year per symbol.
+12h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation
+Hypothesis: Daily Camarilla pivot levels (S3/R3) provide strong support/resistance on 12h chart.
+Breakouts above R3 or below S3 with volume expansion capture institutional moves. Works in both bull and bear markets by trading breakouts regardless of direction. Target: 15-30 trades/year per symbol.
 """
 
 import numpy as np
@@ -12,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -30,43 +29,42 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous close for pivot calculation
+    # Camarilla formulas
     close_prev = np.roll(close_1d, 1)
-    close_prev[0] = close_1d[0]
+    close_prev[0] = close_1d[0]  # first bar uses its own close
     
     range_1d = high_1d - low_1d
     
-    # Resistance (R3) and Support (S3) levels
+    # Resistance levels (R3 used)
     R3 = close_prev + (range_1d * 1.2500 / 4)
+    
+    # Support levels (S3 used)
     S3 = close_prev - (range_1d * 1.2500 / 4)
     
-    # Align to 4h timeframe
+    # Align levels to 12h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # Smoothed volume confirmation: 3-period SMA of volume / 20-period volume average
-    vol_series = pd.Series(volume)
-    vol_ma_20 = vol_series.rolling(window=20, min_periods=20).mean()
-    vol_ratio = vol_series / vol_ma_20
-    vol_ratio_smooth = vol_ratio.rolling(window=3, min_periods=3).mean()
-    volume_confirm = vol_ratio_smooth > 1.3  # Require sustained volume strength
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volume_expansion = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25
     
-    for i in range(200, n):
+    for i in range(50, n):
         # Skip if any required data is not ready
         if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(volume_confirm[i])):
+            np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Long breakout: price crosses above R3 with volume confirmation
-        long_breakout = close[i] > R3_aligned[i] and volume_confirm[i]
+        # Long breakout: price breaks above R3 with volume expansion
+        long_breakout = close[i] > R3_aligned[i] and volume_expansion[i]
         
-        # Short breakdown: price crosses below S3 with volume confirmation
-        short_breakout = close[i] < S3_aligned[i] and volume_confirm[i]
+        # Short breakdown: price breaks below S3 with volume expansion
+        short_breakout = close[i] < S3_aligned[i] and volume_expansion[i]
         
         if long_breakout and position != 1:
             position = 1
@@ -80,6 +78,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_Pivot_Breakout_SMVolume_Confirmation_v1"
-timeframe = "4h"
+name = "12h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation"
+timeframe = "12h"
 leverage = 1.0
