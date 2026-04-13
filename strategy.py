@@ -8,13 +8,13 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter + volume confirmation
+    # Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter + volume confirmation
     # Long: price > Donchian(20) high + price > 1d EMA34 + volume > 2.0x 20-period average
     # Short: price < Donchian(20) low + price < 1d EMA34 + volume > 2.0x 20-period average
     # Exit: opposite Donchian breakout OR price crosses 1d EMA34
-    # Tight volume filter (2.0x) reduces trades to ~30-40/year for low fee drag
+    # Tight volume filter (2.0x) reduces trades to ~12-37/year for low fee drag
     # Works in bull via long bias, in bear via short bias from 1d EMA34 filter
-    # Proven pattern: 4h/1d Donchian+volume+trend (see DB top performers)
+    # Proven pattern: 12h/1d Donchian+volume+trend (adapted from DB top performers)
     
     close = prices['close'].values
     high = prices['high'].values
@@ -36,7 +36,7 @@ def generate_signals(prices):
         for i in range(34, len(close_1d)):
             ema_1d[i] = (close_1d[i] * multiplier) + (ema_1d[i-1] * (1 - multiplier))
     
-    # Get 4h Donchian(20) for breakout with min_periods
+    # Get 12h Donchian(20) for breakout with min_periods
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     
@@ -44,13 +44,13 @@ def generate_signals(prices):
         donchian_high[i] = np.max(high[i-20:i])
         donchian_low[i] = np.min(low[i-20:i])
     
-    # Get 4h volume for confirmation (>2.0x 20-period average) - tighter filter
+    # Get 12h volume for confirmation (>2.0x 20-period average) - tighter filter
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     volume_spike = volume > (2.0 * vol_ma)
     
-    # Align 1d EMA34 to 4h
+    # Align 1d EMA34 to 12h
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     signals = np.zeros(n)
@@ -102,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_breakout_ema34_volume_v1"
-timeframe = "4h"
+name = "12h_1d_donchian_breakout_ema34_volume_v1"
+timeframe = "12h"
 leverage = 1.0
