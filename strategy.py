@@ -13,33 +13,11 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d OHLC from daily data (for Camarilla pivot calculation)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla pivot levels for 1d (using previous day's data)
-    # Resistance levels
-    R4 = close_1d + ((high_1d - low_1d) * 1.1 / 2)
-    R3 = close_1d + ((high_1d - low_1d) * 1.1 / 4)
-    R2 = close_1d + ((high_1d - low_1d) * 1.1 / 6)
-    R1 = close_1d + ((high_1d - low_1d) * 1.1 / 12)
-    # Support levels
-    S1 = close_1d - ((high_1d - low_1d) * 1.1 / 12)
-    S2 = close_1d - ((high_1d - low_1d) * 1.1 / 6)
-    S3 = close_1d - ((high_1d - low_1d) * 1.1 / 4)
-    S4 = close_1d - ((high_1d - low_1d) * 1.1 / 2)
-    
-    # Align Camarilla levels to 4h timeframe (using previous day's values)
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    # 1d Donchian channels (20-period) - use previous bar's high/low
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
+    lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
     # 1d average volume (20-period) - previous bar
     vol_series = pd.Series(volume)
@@ -62,7 +40,7 @@ def generate_signals(prices):
     
     start = max(20, 200, 14)
     for i in range(start, n):
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
             np.isnan(avg_vol[i]) or np.isnan(ema_200_1d[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -71,32 +49,28 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long: price touches S1 level + volume confirmation + price above EMA200
-            if (price <= S1_aligned[i] * 1.001 and price >= S1_aligned[i] * 0.999 and 
-                vol > 2.0 * avg_vol[i] and price > ema_200_1d[i]):
+            # Long: breakout above upper band + volume confirmation + price above EMA200
+            if (price > upper[i] and vol > 2.0 * avg_vol[i] and price > ema_200_1d[i]):
                 position = 1
                 signals[i] = position_size
-            # Short: price touches R1 level + volume confirmation + price below EMA200
-            elif (price >= R1_aligned[i] * 0.999 and price <= R1_aligned[i] * 1.001 and 
-                  vol > 2.0 * avg_vol[i] and price < ema_200_1d[i]):
+            # Short: breakout below lower band + volume confirmation + price below EMA200
+            elif (price < lower[i] and vol > 2.0 * avg_vol[i] and price < ema_200_1d[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price touches R1 level OR below EMA200 OR stop-loss hit
-            if (price >= R1_aligned[i] * 0.999 and price <= R1_aligned[i] * 1.001) or \
-               price < ema_200_1d[i] or \
-               price < (entry_price := entry_price_long) - 2.0 * atr[i]:
+            # Exit long: price closes below lower band OR below EMA200 OR stop-loss hit
+            if (price < lower[i] or price < ema_200_1d[i] or 
+                price < (entry_price := entry_price_long) - 2.0 * atr[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price touches S1 level OR above EMA200 OR stop-loss hit
-            if (price <= S1_aligned[i] * 1.001 and price >= S1_aligned[i] * 0.999) or \
-               price > ema_200_1d[i] or \
-               price > (entry_price := entry_price_short) + 2.0 * atr[i]:
+            # Exit short: price closes above upper band OR above EMA200 OR stop-loss hit
+            if (price > upper[i] or price > ema_200_1d[i] or 
+                price > (entry_price := entry_price_short) + 2.0 * atr[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -111,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_Touch_Volume_EMA200Trend_ATR"
-timeframe = "4h"
+name = "12h_1d_Donchian_Volume_EMA200Trend_ATR"
+timeframe = "12h"
 leverage = 1.0
