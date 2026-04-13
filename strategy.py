@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams %R mean reversion with 1w trend filter.
-# Williams %R identifies overbought/oversold conditions for mean reversion.
-# 1w EMA filter ensures trades align with higher timeframe trend.
-# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe.
+# Hypothesis: 12h Camarilla pivot + volume spike + RSI mean reversion.
+# Camarilla levels provide high-probability reversal points in ranging markets.
+# Volume spike confirms institutional interest at key levels.
+# RSI <30 for long, >70 for short to avoid buying strength/selling weakness.
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,37 +19,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for multi-timeframe trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Daily data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Williams %R (14-period)
-    willr_period = 14
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
+    # Calculate RSI (14-period)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    for i in range(willr_period-1, n):
-        highest_high[i] = np.max(high[i-willr_period+1:i+1])
-        lowest_low[i] = np.min(low[i-willr_period+1:i+1])
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    for i in range(14, n):
+        avg_gain[i] = np.mean(gain[i-13:i+1])
+        avg_loss[i] = np.mean(loss[i-13:i+1])
     
-    willr = np.full(n, np.nan)
-    for i in range(willr_period-1, n):
-        if highest_high[i] != lowest_low[i]:
-            willr[i] = -100 * (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i])
-        else:
-            willr[i] = -50  # neutral when no range
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate 20-period EMA on weekly close for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = np.zeros(len(close_1w))
-    alpha = 2.0 / (20 + 1)
-    for i in range(len(close_1w)):
-        if i == 0:
-            ema_1w[i] = close_1w[i]
-        else:
-            ema_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_1w[i-1]
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate average volume (20-period) for volume spike detection
+    avg_volume = np.zeros(n)
+    for i in range(20, n):
+        avg_volume[i] = np.mean(volume[i-20:i])
+    
+    # Calculate Camarilla levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    camarilla_h4 = np.zeros(len(close_1d))
+    camarilla_l4 = np.zeros(len(close_1d))
+    camarilla_h3 = np.zeros(len(close_1d))
+    camarilla_l3 = np.zeros(len(close_1d))
+    camarilla_h2 = np.zeros(len(close_1d))
+    camarilla_l2 = np.zeros(len(close_1d))
+    camarilla_h1 = np.zeros(len(close_1d))
+    camarilla_l1 = np.zeros(len(close_1d))
+    
+    for i in range(1, len(close_1d)):
+        ph = high_1d[i-1]
+        pl = low_1d[i-1]
+        pc = close_1d[i-1]
+        range_val = ph - pl
+        
+        camarilla_h4[i] = pc + range_val * 1.1/2
+        camarilla_l4[i] = pc - range_val * 1.1/2
+        camarilla_h3[i] = pc + range_val * 1.1/4
+        camarilla_l3[i] = pc - range_val * 1.1/4
+        camarilla_h2[i] = pc + range_val * 1.1/6
+        camarilla_l2[i] = pc - range_val * 1.1/6
+        camarilla_h1[i] = pc + range_val * 1.1/12
+        camarilla_l1[i] = pc - range_val * 1.1/12
+    
+    # Align Camarilla levels to 12h timeframe
+    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    h2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h2)
+    l2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l2)
+    h1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h1)
+    l1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l1)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -56,39 +88,53 @@ def generate_signals(prices):
     
     for i in range(30, n):
         # Skip if any required data is not ready
-        if (np.isnan(willr[i]) or np.isnan(ema_1w_aligned[i])):
+        if (np.isnan(rsi[i]) or np.isnan(avg_volume[i]) or 
+            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
+            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+            np.isnan(h2_aligned[i]) or np.isnan(l2_aligned[i]) or
+            np.isnan(h1_aligned[i]) or np.isnan(l1_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        willr_val = willr[i]
-        ema_1w_val = ema_1w_aligned[i]
+        vol = volume[i]
+        avg_vol = avg_volume[i]
+        rsi_val = rsi[i]
+        
+        # Volume spike: current volume > 2x average volume
+        volume_spike = vol > 2.0 * avg_vol
         
         if position == 0:
-            # Long: Williams %R oversold (< -80) + price above weekly EMA
-            if (willr_val < -80 and 
-                price > ema_1w_val):
+            # Long: price at L3/L4 + volume spike + RSI oversold
+            if ((abs(price - l3_aligned[i]) < 0.001 * price or 
+                 abs(price - l4_aligned[i]) < 0.001 * price) and
+                volume_spike and
+                rsi_val < 30):
                 position = 1
                 signals[i] = position_size
-            # Short: Williams %R overbought (> -20) + price below weekly EMA
-            elif (willr_val > -20 and 
-                  price < ema_1w_val):
+            # Short: price at H3/H4 + volume spike + RSI overbought
+            elif ((abs(price - h3_aligned[i]) < 0.001 * price or 
+                   abs(price - h4_aligned[i]) < 0.001 * price) and
+                  volume_spike and
+                  rsi_val > 70):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Williams %R returns to neutral (> -50) or trend change
-            if (willr_val > -50 or 
-                price < ema_1w_val):
+            # Exit long: price reaches H1/H2 or RSI overbought
+            if (abs(price - h1_aligned[i]) < 0.001 * price or
+                abs(price - h2_aligned[i]) < 0.001 * price or
+                rsi_val > 70):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Williams %R returns to neutral (< -50) or trend change
-            if (willr_val < -50 or 
-                price > ema_1w_val):
+            # Exit short: price reaches L1/L2 or RSI oversold
+            if (abs(price - l1_aligned[i]) < 0.001 * price or
+                abs(price - l2_aligned[i]) < 0.001 * price or
+                rsi_val < 30):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -96,6 +142,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_WilliamsR_MeanReversion_Trend_Filter_v1"
-timeframe = "1d"
+name = "12h_1d_Camarilla_Pivot_Volume_RSI_v1"
+timeframe = "12h"
 leverage = 1.0
