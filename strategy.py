@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Pullback_Trend_v2
-Hypothesis: Buy pullbacks to S3 in uptrend, sell rallies to R3 in downtrend using 1d
-trend filter (price above/below 200-period EMA). Works in bull markets via pullbacks to
-support and bear markets via rallies to resistance. Volume confirmation ensures
-institutional participation. Uses tighter conditions to reduce trade frequency.
+12h_1d_1w_Camarilla_Pullback_Trend
+Hypothesis: Buy pullbacks to S3/S4 in weekly uptrend (price above 200-week EMA) and
+sell rallies to R3/R4 in weekly downtrend (price below 200-week EMA) using daily
+timeframe for entry timing. Weekly trend filter ensures we trade with the higher
+timeframe momentum. Daily price action provides precise entry on pullbacks to
+Camarilla levels. Volume confirmation on daily ensures institutional participation.
+Designed for low trade frequency (12-37/year) to minimize fee drag on 12h chart.
+Works in bull markets via buying dips and bear markets via selling rallies.
 """
 
 import numpy as np
@@ -38,7 +41,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and Camarilla levels
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    
+    # Weekly trend filter: price above/below 200 EMA
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    uptrend_1w = close_1w > ema_200_1w
+    downtrend_1w = close_1w < ema_200_1w
+    
+    # Get daily data for entry timing and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -46,24 +61,23 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # 1d trend filter: price above/below 200 EMA
-    ema_200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    uptrend = close_1d > ema_200
-    downtrend = close_1d < ema_200
+    volume_1d = df_1d['volume'].values
     
     # Calculate Camarilla levels on daily
-    R1_1d, R2_1d, R3_1d, R4_1d, S1_1d, S2_1d, S3_1d, S4_1d = calculate_camarilla(high_1d, low_1d, close_1d)
+    R3_1d, R4_1d, S3_1d, S4_1d = calculate_camarilla(high_1d, low_1d, close_1d)[2:10]
     
-    # Align all data to 4h timeframe
+    # Volume confirmation: current daily volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean()
+    volume_expansion = volume_1d > (vol_ma_20 * 1.5)
+    
+    # Align all data to 12h timeframe
+    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w.astype(float))
+    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w.astype(float))
     R3_1d_aligned = align_htf_to_ltf(prices, df_1d, R3_1d)
+    R4_1d_aligned = align_htf_to_ltf(prices, df_1d, R4_1d)
     S3_1d_aligned = align_htf_to_ltf(prices, df_1d, S3_1d)
-    uptrend_aligned = align_htf_to_ltf(prices, df_1d, uptrend.astype(float))
-    downtrend_aligned = align_htf_to_ltf(prices, df_1d, downtrend.astype(float))
-    
-    # Volume confirmation: current volume > 1.5x 20-period average (stricter)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 1.5)
+    S4_1d_aligned = align_htf_to_ltf(prices, df_1d, S4_1d)
+    volume_expansion_aligned = align_htf_to_ltf(prices, df_1d, volume_expansion.astype(float))
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -71,17 +85,26 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(R3_1d_aligned[i]) or np.isnan(S3_1d_aligned[i]) or 
-            np.isnan(uptrend_aligned[i]) or np.isnan(downtrend_aligned[i]) or
-            np.isnan(volume_expansion[i])):
+        if (np.isnan(uptrend_1w_aligned[i]) or np.isnan(downtrend_1w_aligned[i]) or
+            np.isnan(R3_1d_aligned[i]) or np.isnan(R4_1d_aligned[i]) or
+            np.isnan(S3_1d_aligned[i]) or np.isnan(S4_1d_aligned[i]) or
+            np.isnan(volume_expansion_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long: pullback to S3 in uptrend with volume expansion
-        long_condition = (low[i] <= S3_1d_aligned[i]) and uptrend_aligned[i] > 0.5 and volume_expansion[i]
+        # Long: pullback to S3 or S4 in weekly uptrend with volume expansion
+        long_condition = (
+            (low[i] <= S3_1d_aligned[i] or low[i] <= S4_1d_aligned[i]) and
+            uptrend_1w_aligned[i] > 0.5 and
+            volume_expansion_aligned[i]
+        )
         
-        # Short: rally to R3 in downtrend with volume expansion
-        short_condition = (high[i] >= R3_1d_aligned[i]) and downtrend_aligned[i] > 0.5 and volume_expansion[i]
+        # Short: rally to R3 or R4 in weekly downtrend with volume expansion
+        short_condition = (
+            (high[i] >= R3_1d_aligned[i] or high[i] >= R4_1d_aligned[i]) and
+            downtrend_1w_aligned[i] > 0.5 and
+            volume_expansion_aligned[i]
+        )
         
         if long_condition and position != 1:
             position = 1
@@ -95,10 +118,10 @@ def generate_signals(prices):
             signals[i] = -position_size
         else:
             # Exit conditions: reverse signal or loss of trend/volume
-            if position == 1 and (not uptrend_aligned[i] > 0.5 or not volume_expansion[i]):
+            if position == 1 and (not uptrend_1w_aligned[i] > 0.5 or not volume_expansion_aligned[i]):
                 position = 0
                 signals[i] = 0.0
-            elif position == -1 and (not downtrend_aligned[i] > 0.5 or not volume_expansion[i]):
+            elif position == -1 and (not downtrend_1w_aligned[i] > 0.5 or not volume_expansion_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -106,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_Pullback_Trend_v2"
-timeframe = "4h"
+name = "12h_1d_1w_Camarilla_Pullback_Trend"
+timeframe = "12h"
 leverage = 1.0
