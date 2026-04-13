@@ -8,12 +8,12 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian breakout with 1d volume confirmation and 1d ADX regime filter
-    # Long when price breaks above Donchian upper (20) + 1d volume > 1.5 * 20-period mean + 1d ADX > 25
-    # Short when price breaks below Donchian lower (20) + same filters
-    # Exit when price returns to Donchian middle (midpoint of upper/lower)
-    # Uses discrete position sizing (0.30) to balance return and drawdown
-    # Target: 80-120 total trades over 4 years (~20-30/year) to avoid excessive fee drag
+    # Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and 1d ADX regime filter
+    # Long when price breaks above 4h Donchian upper (20) + 1d volume > 1.5 * 20-period mean + 1d ADX > 25
+    # Short when price breaks below 4h Donchian lower (20) + same filters
+    # Exit when price returns to 4h Donchian middle (midpoint of upper/lower)
+    # Uses discrete position sizing (0.25) to balance return and drawdown
+    # Target: 80-150 total trades over 4 years (~20-38/year) to avoid excessive fee drag
     # Donchian channels provide clear trend-following structure
     # Volume confirmation ensures breakouts have institutional participation
     # Daily ADX filter ensures we only trade when higher timeframe is trending
@@ -23,18 +23,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h and 1d data (call ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
+    # Get 4h and 1d data (call ONCE before loop)
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_12h) < 20 or len(df_1d) < 20:
+    if len(df_4h) < 20 or len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 12h Donchian channels (20-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Calculate 4h Donchian channels (20-period)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    high_series = pd.Series(high_12h)
-    low_series = pd.Series(low_12h)
+    high_series = pd.Series(high_4h)
+    low_series = pd.Series(low_4h)
     
     donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
     donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
@@ -86,10 +86,10 @@ def generate_signals(prices):
     
     adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
     
-    # Align HTF indicators to 12h timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
-    donchian_middle_aligned = align_htf_to_ltf(prices, df_12h, donchian_middle)
+    # Align HTF indicators to 4h timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
+    donchian_middle_aligned = align_htf_to_ltf(prices, df_4h, donchian_middle)
     vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
@@ -128,10 +128,10 @@ def generate_signals(prices):
         
         if bullish_breakout and position != 1:
             position = 1
-            signals[i] = 0.30
+            signals[i] = 0.25
         elif bearish_breakout and position != -1:
             position = -1
-            signals[i] = -0.30
+            signals[i] = -0.25
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -141,14 +141,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_1d_donchian_breakout_volume_adx_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_breakout_volume_adx_v1"
+timeframe = "4h"
 leverage = 1.0
