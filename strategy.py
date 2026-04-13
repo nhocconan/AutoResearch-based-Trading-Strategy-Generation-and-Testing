@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with Volume Spike and Daily Trend Filter.
-Trades breakouts above/below 20-period Donchian channels confirmed by volume spikes,
+4h Camarilla Pivot Breakout with Volume Spike and Daily Trend Filter.
+Trades breakouts above/below daily Camarilla pivot levels (H4/L4) confirmed by volume spikes,
 only when daily price is above/below 50-period EMA to filter range-bound conditions.
 Designed for 4h timeframe to target 75-200 total trades over 4 years (19-50/year).
-Uses price action at key levels with volume confirmation for institutional participation.
+Uses price action at key institutional levels with volume confirmation.
 """
 
 import numpy as np
@@ -21,7 +21,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian calculation
+    # Get daily data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -29,14 +29,26 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Donchian Channels (20-period)
-    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla pivot levels for previous day (H4/L4)
+    # Using previous day's data to avoid look-ahead
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    # Set first day values to NaN (no previous day)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Breakout conditions
-    breakout_up = high_1d > upper_20
-    breakout_down = low_1d < lower_20
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_val = prev_high - prev_low
+    h4 = pivot + (range_val * 1.1 / 2)  # H4 level
+    l4 = pivot - (range_val * 1.1 / 2)  # L4 level
+    
+    # Breakout conditions: price breaks H4/L4 of previous day
+    breakout_up = high_1d > h4
+    breakout_down = low_1d < l4
     
     # Align signals to 4h timeframe
     breakout_up_aligned = align_htf_to_ltf(prices, df_1d, breakout_up.astype(float))
@@ -53,12 +65,9 @@ def generate_signals(prices):
     uptrend_aligned = align_htf_to_ltf(prices, df_1d, uptrend.astype(float))
     downtrend_aligned = align_htf_to_ltf(prices, df_1d, downtrend.astype(float))
     
-    # Get daily volume for confirmation
-    volume_1d = df_1d['volume'].values
-    
-    # Volume spike: volume > 1.8x 20-period average
+    # Volume spike: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_1d > (vol_ma_20 * 1.8)
+    vol_spike = volume_1d > (vol_ma_20 * 2.0)
     vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
     
     signals = np.zeros(n)
@@ -75,7 +84,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: Donchian breakout + volume spike + daily trend
+        # Entry conditions: Camarilla breakout + volume spike + daily trend
         long_entry = (breakout_up_aligned[i] > 0.5 and 
                       vol_spike_aligned[i] > 0.5 and 
                       uptrend_aligned[i] > 0.5)
@@ -83,12 +92,11 @@ def generate_signals(prices):
                        vol_spike_aligned[i] > 0.5 and 
                        downtrend_aligned[i] > 0.5)
         
-        # Exit when price returns to middle of Donchian channel
-        middle_20 = (upper_20 + lower_20) / 2
-        middle_20_aligned = align_htf_to_ltf(prices, df_1d, middle_20)
+        # Exit when price returns to pivot point
+        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
         
-        exit_long = position == 1 and close[i] <= middle_20_aligned[i]
-        exit_short = position == -1 and close[i] >= middle_20_aligned[i]
+        exit_long = position == 1 and close[i] <= pivot_aligned[i]
+        exit_short = position == -1 and close[i] >= pivot_aligned[i]
         
         # Execute signals
         if long_entry and position != 1:
@@ -111,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_breakout_v1"
+name = "4h_1d_camarilla_breakout_v1"
 timeframe = "4h"
 leverage = 1.0
