@@ -1,15 +1,14 @@
-# -*- coding: utf-8 -*-
-#!/usr/bin/env python3
-
+#/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h 1-week Donchian channel breakout with 1-day volume confirmation and 1-day ADX trend filter.
-# In bull markets: Buy when price breaks above weekly Donchian high (20-period) with volume > 1.5x average and ADX > 25.
-# In bear markets: Sell when price breaks below weekly Donchian low (20-period) with volume > 1.5x average and ADX > 25.
-# Weekly structure captures major trend, daily volume confirms institutional participation, ADX filters choppy markets.
-# Target: 12-37 trades per year (50-150 total over 4 years) for 12h timeframe.
+# Hypothesis: Daily Chaikin Money Flow (CMF) with weekly trend filter and volume confirmation.
+# CMF measures institutional buying/selling pressure by combining price and volume.
+# Weekly trend (EMA50) filters for direction, avoiding counter-trend trades.
+# Volume confirmation ensures institutional participation. Works in both bull/bear markets
+# by taking long signals only in weekly uptrend and short in downtrend.
+# Target: 7-25 trades per year (30-100 total over 4 years) for 1d timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,129 +20,79 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for Donchian channel and ADX
+    # Weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Daily data for volume confirmation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Calculate weekly EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema50_1w = np.zeros(len(close_1w))
+    ema_multiplier = 2 / (50 + 1)
+    ema50_1w[0] = close_1w[0]
+    for i in range(1, len(close_1w)):
+        ema50_1w[i] = (close_1w[i] - ema50_1w[i-1]) * ema_multiplier + ema50_1w[i-1]
     
-    # Calculate weekly Donchian channel (20-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    donchian_high = np.full(len(high_1w), np.nan)
-    donchian_low = np.full(len(low_1w), np.nan)
-    
-    for i in range(20, len(high_1w)):
-        donchian_high[i] = np.max(high_1w[i-20:i])
-        donchian_low[i] = np.min(low_1w[i-20:i])
-    
-    # Calculate weekly ADX (14-period) for trend strength
-    # ADX requires +DI, -DI, and TR
-    tr = np.maximum(
-        high_1w[1:] - low_1w[1:],
-        np.maximum(
-            np.abs(high_1w[1:] - high_1w[:-1]),
-            np.abs(low_1w[1:] - low_1w[:-1])
-        )
-    )
-    # Prepend first TR as 0 for alignment
-    tr = np.concatenate([[0], tr])
-    
-    plus_dm = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
-                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    minus_dm = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
-                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
-    # Prepend first values as 0
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    
-    # Smooth with Wilder's smoothing (EMA-like with alpha=1/period)
-    def wilder_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        alpha = 1.0 / period
-        # First value is simple average
-        if len(data) >= period:
-            result[period-1] = np.mean(data[:period])
-            for i in range(period, len(data)):
-                result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
-        return result
-    
-    atr = wilder_smoothing(tr, 14)
-    plus_di_smoothed = wilder_smoothing(plus_dm, 14)
-    minus_di_smoothed = wilder_smoothing(minus_dm, 14)
+    # Daily Chaikin Money Flow (CMF) calculation
+    # CMF = Sum((Close - Low) - (High - Close)) * Volume / (High - Low) over period / Sum(Volume)
+    # Using 20-day period as standard
+    period = 20
+    mfm = np.zeros(n)  # Money Flow Multiplier
+    mfv = np.zeros(n)  # Money Flow Volume
     
     # Avoid division by zero
-    dx = np.where((plus_di_smoothed + minus_di_smoothed) != 0,
-                  100 * np.abs(plus_di_smoothed - minus_di_smoothed) / (plus_di_smoothed + minus_di_smoothed),
-                  0)
-    adx = wilder_smoothing(dx, 14)
+    hl_range = high - low
+    hl_range[hl_range == 0] = 1e-10
     
-    # Calculate daily average volume (20-period)
-    avg_volume = np.full(len(volume), np.nan)
-    for i in range(20, len(volume)):
-        avg_volume[i] = np.mean(volume[i-20:i])
+    mfm = ((close - low) - (high - close)) / hl_range
+    mfv = mfm * volume
     
-    # Align all indicators to 12h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    avg_volume_aligned = align_htf_to_ltf(prices, df_1d, avg_volume)
+    # Calculate CMF using rolling sum
+    cmf = np.full(n, np.nan)
+    for i in range(period - 1, n):
+        sum_mfv = np.sum(mfv[i - period + 1:i + 1])
+        sum_volume = np.sum(volume[i - period + 1:i + 1])
+        if sum_volume > 0:
+            cmf[i] = sum_mfv / sum_volume
+    
+    # Align weekly EMA50 to daily timeframe
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(30, n):  # Start after warmup period
+    for i in range(period - 1, n):
         # Skip if any required data is not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(avg_volume_aligned[i])):
+        if np.isnan(cmf[i]) or np.isnan(ema50_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol = volume[i]
-        avg_vol = avg_volume_aligned[i]
-        adx_val = adx_aligned[i]
-        upper = donchian_high_aligned[i]
-        lower = donchian_low_aligned[i]
-        
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirm = vol > 1.5 * avg_vol
-        # Trend filter: ADX > 25 indicates strong trend
-        strong_trend = adx_val > 25
+        ema_trend = ema50_1w_aligned[i]
+        cmf_val = cmf[i]
         
         if position == 0:
-            # Long: Price breaks above Donchian high + volume confirmation + strong trend
-            if (price > upper and
-                volume_confirm and
-                strong_trend):
+            # Long: CMF > 0 (buying pressure) + above weekly EMA50
+            if cmf_val > 0 and price > ema_trend:
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below Donchian low + volume confirmation + strong trend
-            elif (price < lower and
-                  volume_confirm and
-                  strong_trend):
+            # Short: CMF < 0 (selling pressure) + below weekly EMA50
+            elif cmf_val < 0 and price < ema_trend:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Price breaks below Donchian low or trend weakens
-            if (price < lower or
-                adx_val < 20):  # Exit when trend weakens
+            # Exit long: CMF turns negative or trend turns down
+            if cmf_val <= 0 or price < ema_trend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Price breaks above Donchian high or trend weakens
-            if (price > upper or
-                adx_val < 20):  # Exit when trend weakens
+            # Exit short: CMF turns positive or trend turns up
+            if cmf_val >= 0 or price > ema_trend:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -151,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1w_Donchian_ADX_Volume"
-timeframe = "12h"
+name = "1d_1w_CMF_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
