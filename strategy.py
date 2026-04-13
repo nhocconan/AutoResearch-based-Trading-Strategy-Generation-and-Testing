@@ -1,3 +1,4 @@
+# 40150
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,80 +6,55 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
-    
-    # Hypothesis: 4h 12-hour KAMA trend with 1d RSI filter and volume confirmation
-    # Long: KAMA rising + RSI > 50 + volume > 1.5x 20-period average
-    # Short: KAMA falling + RSI < 50 + volume > 1.5x 20-period average
-    # Uses discrete sizing (0.25) to minimize fee drag and ATR-based stoploss
-    # Target: 20-50 trades/year to stay within 4h optimal range (80-200 total over 4 years)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time']
     
-    # Get 1d data for RSI filter
+    # Get 1d data for daily indicators
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d RSI(14)
-    delta = np.diff(close_1d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.zeros_like(close_1d)
-    avg_loss = np.zeros_like(close_1d)
-    for i in range(len(close_1d)):
+    # Calculate 200-day EMA for trend filter
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Calculate daily ATR for volatility filter
+    tr_1d = np.maximum(
+        high_1d - low_1d,
+        np.maximum(
+            np.abs(high_1d - np.roll(close_1d, 1)),
+            np.abs(low_1d - np.roll(close_1d, 1))
+        )
+    )
+    tr_1d[0] = high_1d[0] - low_1d[0]
+    atr_1d = np.zeros_like(tr_1d)
+    for i in range(len(tr_1d)):
         if i < 14:
-            if i == 0:
-                avg_gain[i] = np.nan
-                avg_loss[i] = np.nan
-            else:
-                avg_gain[i] = np.mean(gain[1:i+1]) if i >= 1 else 0
-                avg_loss[i] = np.mean(loss[1:i+1]) if i >= 1 else 0
+            atr_1d[i] = np.mean(tr_1d[:i+1])
         else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d = np.insert(rsi_1d, 0, np.nan)  # align with close_1d index
+            atr_1d[i] = 0.93 * atr_1d[i-1] + 0.07 * tr_1d[i]
     
-    # Align 1d RSI to 4h timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Get 1w data for weekly trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Calculate KAMA(10,2,30) on 4h close
-    # ER = |close - close[10]| / sum|close[i] - close[i-1]| for i=1 to 10
-    change = np.abs(close - np.roll(close, 10))
-    change[0:10] = np.nan  # not enough data
-    volatility = np.zeros(n)
-    for i in range(1, n):
-        volatility[i] = volatility[i-1] + np.abs(close[i] - close[i-1])
-    volatility = np.abs(np.diff(volatility, n=10))  # 10-period sum of absolute changes
-    volatility = np.insert(volatility, 0, [np.nan]*10)  # align indices
-    er = np.divide(change, volatility, out=np.full_like(change, np.nan), where=volatility!=0)
-    # Smooth constant: SC = [ER * (fastest - slowest) + slowest]^2
-    fastest = 2/(2+1)  # EMA(2)
-    slowest = 2/(30+1) # EMA(30)
-    sc = (er * (fastest - slowest) + slowest) ** 2
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        if np.isnan(sc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate volume average for confirmation (using 4h data)
-    vol_avg_20 = np.zeros(n)
-    for i in range(n):
-        if i < 20:
-            vol_avg_20[i] = np.mean(volume[max(0, i-19):i+1]) if i >= 0 else 0
-        else:
-            vol_avg_20[i] = np.mean(volume[i-19:i+1])
+    # Align all indicators to daily timeframe
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -87,60 +63,47 @@ def generate_signals(prices):
     # Track entry price for stoploss
     entry_price = np.full(n, np.nan)
     
-    # Calculate ATR using true range approximation for 4h timeframe
-    atr_4h = np.zeros(n)
-    for i in range(1, n):
-        tr = max(
-            high[i] - low[i],
-            abs(high[i] - close[i-1]),
-            abs(low[i] - close[i-1])
-        )
-        if i < 14:
-            atr_4h[i] = tr  # Simple average for warmup
-        else:
-            atr_4h[i] = 0.93 * atr_4h[i-1] + 0.07 * tr  # Wilder's smoothing
-    
-    for i in range(30, n):
+    for i in range(200, n):
         # Skip if data not ready
-        if (np.isnan(kama[i-1]) or 
-            np.isnan(rsi_1d_aligned[i]) or
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(ema_200_1d_aligned[i]) or 
+            np.isnan(atr_1d_aligned[i]) or
+            np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # KAMA direction: rising/falling
-        kama_rising = kama[i] > kama[i-1]
-        kama_falling = kama[i] < kama[i-1]
+        # Trend filter: daily close above/below EMA200
+        uptrend = close[i] > ema_200_1d_aligned[i]
+        downtrend = close[i] < ema_200_1d_aligned[i]
         
-        # RSI filter: >50 for long, <50 for short
-        rsi_long = rsi_1d_aligned[i] > 50
-        rsi_short = rsi_1d_aligned[i] < 50
+        # Weekly trend filter: weekly EMA50 slope
+        weekly_uptrend = ema_50_1w_aligned[i] > ema_50_1w_aligned[i-5] if i >= 5 else False
+        weekly_downtrend = ema_50_1w_aligned[i] < ema_50_1w_aligned[i-5] if i >= 5 else False
         
-        # Volume confirmation: current 4h volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * vol_avg_20[i]
+        # Volatility filter: avoid extremely low volatility days
+        low_vol_filter = atr_1d_aligned[i] > 0.01 * close[i]  # ATR > 1% of price
         
-        # Entry conditions
-        enter_long = kama_rising and rsi_long and volume_confirmed
-        enter_short = kama_falling and rsi_short and volume_confirmed
+        # Entry conditions: aligned weekly and daily trend with volatility filter
+        long_entry = uptrend and weekly_uptrend and low_vol_filter
+        short_entry = downtrend and weekly_downtrend and low_vol_filter
         
-        # Stoploss: 2x ATR below/above entry
-        exit_long = position == 1 and not np.isnan(entry_price[i-1]) and close[i] < entry_price[i-1] - 2.0 * atr_4h[i]
-        exit_short = position == -1 and not np.isnan(entry_price[i-1]) and close[i] > entry_price[i-1] + 2.0 * atr_4h[i]
+        # Exit conditions: trend reversal
+        long_exit = not uptrend or not weekly_uptrend
+        short_exit = not downtrend or not weekly_downtrend
         
         # Execute signals
-        if enter_long and position != 1:
+        if long_entry and position != 1:
             position = 1
             signals[i] = position_size
             entry_price[i] = close[i]
-        elif enter_short and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -position_size
             entry_price[i] = close[i]
-        elif position == 1 and exit_long:
+        elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
             entry_price[i] = np.nan
-        elif position == -1 and exit_short:
+        elif position == -1 and short_exit:
             position = 0
             signals[i] = 0.0
             entry_price[i] = np.nan
@@ -158,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_kama_rsi_volume_v1"
-timeframe = "4h"
+name = "1d_1w_ema_trend_filter_v1"
+timeframe = "1d"
 leverage = 1.0
