@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with weekly trend filter and volume confirmation.
-# Donchian breakouts capture momentum in trending markets while avoiding whipsaws in ranges.
-# Weekly trend filter ensures alignment with higher timeframe direction.
-# Volume confirmation ensures breakouts have institutional participation.
-# Target: 20-40 trades per year (80-160 total over 4 years) for 4h timeframe.
+# Hypothesis: 1d CCI mean-reversion with weekly trend filter and volume confirmation.
+# CCI(14) identifies overbought/oversold conditions in ranging markets.
+# Weekly trend filter ensures trades align with higher timeframe direction.
+# Volume confirmation avoids false signals in low liquidity.
+# Target: 10-25 trades per year (40-100 total over 4 years) for 1d timeframe.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,23 +24,29 @@ def generate_signals(prices):
     if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate weekly EMA trend filter
+    # Calculate daily CCI(14)
+    typical_price = (high + low + close) / 3.0
+    sma_tp = np.full(n, np.nan)
+    mad = np.full(n, np.nan)
+    
+    for i in range(14, n):
+        sma_tp[i] = np.mean(typical_price[i-14:i+1])
+        mad[i] = np.mean(np.abs(typical_price[i-14:i+1] - sma_tp[i]))
+    
+    cci = np.full(n, np.nan)
+    for i in range(14, n):
+        if mad[i] > 0:
+            cci[i] = (typical_price[i] - sma_tp[i]) / (0.015 * mad[i])
+    
+    # Calculate weekly EMA(20) for trend filter
     close_1w = df_1w['close'].values
     ema_1w = np.zeros(len(close_1w))
-    ema_multiplier = 2 / (21 + 1)
+    ema_multiplier = 2 / (20 + 1)
     ema_1w[0] = close_1w[0]
     for i in range(1, len(close_1w)):
         ema_1w[i] = (close_1w[i] - ema_1w[i-1]) * ema_multiplier + ema_1w[i-1]
     
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Calculate Donchian channels (20-period)
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    
-    for i in range(20, n):
-        highest_high[i] = np.max(high[i-20:i])
-        lowest_low[i] = np.min(low[i-20:i])
     
     # Calculate average volume (20-period) for volume confirmation
     avg_volume = np.full(n, np.nan)
@@ -53,46 +59,46 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(avg_volume[i]) or np.isnan(ema_1w_aligned[i])):
+        if (np.isnan(cci[i]) or np.isnan(ema_1w_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
+        cci_val = cci[i]
         weekly_ema = ema_1w_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirm = vol > 1.5 * avg_vol
+        # Volume confirmation: current volume > 1.2x average volume
+        volume_confirm = vol > 1.2 * avg_vol
         
         if position == 0:
-            # Long: price breaks above Donchian upper band with volume + above weekly EMA
-            if (price > highest_high[i] and 
-                volume_confirm and
-                price > weekly_ema):
+            # Long: CCI < -100 (oversold) + above weekly EMA + volume confirmation
+            if (cci_val < -100 and
+                price > weekly_ema and
+                volume_confirm):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below Donchian lower band with volume + below weekly EMA
-            elif (price < lowest_low[i] and
-                  volume_confirm and
-                  price < weekly_ema):
+            # Short: CCI > 100 (overbought) + below weekly EMA + volume confirmation
+            elif (cci_val > 100 and
+                  price < weekly_ema and
+                  volume_confirm):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to Donchian middle or weekly EMA acts as dynamic support
-            if (price < (highest_high[i] + lowest_low[i]) / 2 or
-                price < weekly_ema):
+            # Exit long: CCI > -100 (exit oversold) or CCI > 0 (return to neutral)
+            if (cci_val > -100 or
+                cci_val > 0):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to Donchian middle or weekly EMA acts as dynamic resistance
-            if (price > (highest_high[i] + lowest_low[i]) / 2 or
-                price > weekly_ema):
+            # Exit short: CCI < 100 (exit overbought) or CCI < 0 (return to neutral)
+            if (cci_val < 100 or
+                cci_val < 0):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -100,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1w_Donchian_Breakout_Volume_Trend_v1"
-timeframe = "4h"
+name = "1d_CCI_MeanReversion_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
