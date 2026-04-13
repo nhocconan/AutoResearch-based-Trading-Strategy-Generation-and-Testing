@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_12h_EMA_Crossover_Trend_With_Volume_Filter
-Hypothesis: Uses 12h EMA crossover (50/200) on 6h timeframe with volume confirmation to reduce whipsaws.
-Enters long when 12h EMA50 crosses above EMA200 and 6h volume > 1.5x 20-period average.
-Enters short when 12h EMA50 crosses below EMA200 and 6h volume > 1.5x 20-period average.
-Exits on opposite crossover.
-Designed for 6h timeframe to target 12-37 trades/year (50-150 total over 4 years).
-Works in both bull and bear markets by requiring volume expansion on trend changes.
+4h_1d_Camarilla_Breakout_Trend_4h
+Hypothesis: Combines 1d Camarilla pivot levels with 4h EMA trend and volume confirmation.
+Enters long when 4h close > H4 (1d) and 4h EMA20 > EMA50 with volume expansion.
+Enters short when 4h close < L4 (1d) and 4h EMA20 < EMA50 with volume expansion.
+Uses discrete position sizing (0.25) to limit turnover. Designed for 4h timeframe
+to target 20-50 trades/year (80-200 total over 4 years). Works in bull markets via
+trend-following breakouts and in bear markets via mean-reversion off extreme levels.
 """
 
 import numpy as np
@@ -15,57 +15,70 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 200:
+    # Get 1d data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 12h EMA50 and EMA200
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema200_12h = pd.Series(close_12h).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate Camarilla pivot levels for previous 1d bar
+    hl_range = high_1d - low_1d
+    H4 = close_1d + 1.125 * hl_range
+    L4 = close_1d - 1.125 * hl_range
     
-    # Calculate 20-period volume average on 12h
-    vol_ma_20_12h = pd.Series(df_12h['volume'].values).rolling(window=20, min_periods=20).mean().values
+    # Calculate 4h EMA20 and EMA50 for trend
+    close_series = pd.Series(close)
+    ema20 = close_series.ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema50 = close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Align all signals to 6h timeframe
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    ema200_12h_aligned = align_htf_to_ltf(prices, df_12h, ema200_12h)
-    vol_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20_12h)
+    # Calculate 20-period volume average on 1d
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Detect crossovers
-    ema50_above_200 = ema50_12h_aligned > ema200_12h_aligned
-    ema50_below_200 = ema50_12h_aligned < ema200_12h_aligned
+    # Align all signals to 4h timeframe
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% of capital
     
-    for i in range(200, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema50_12h_aligned[i]) or 
-            np.isnan(ema200_12h_aligned[i]) or 
-            np.isnan(vol_ma_20_12h_aligned[i])):
+        if (np.isnan(H4_aligned[i]) or 
+            np.isnan(L4_aligned[i]) or 
+            np.isnan(vol_ma_20_1d_aligned[i]) or
+            np.isnan(ema20[i]) or
+            np.isnan(ema50[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 6h volume > 1.5x 12h volume MA
-        volume_expansion = volume[i] > (vol_ma_20_12h_aligned[i] * 1.5)
+        # Volume expansion: current 4h volume > 1.5x 1d volume MA
+        volume_expansion = volume[i] > (vol_ma_20_1d_aligned[i] * 1.5)
         
-        # Entry conditions: EMA crossover with volume expansion
-        long_entry = ema50_above_200[i] and not ema50_above_200[i-1] and volume_expansion
-        short_entry = ema50_below_200[i] and not ema50_below_200[i-1] and volume_expansion
+        # Trend condition: EMA20 > EMA50 for long, EMA20 < EMA50 for short
+        uptrend = ema20[i] > ema50[i]
+        downtrend = ema20[i] < ema50[i]
         
-        # Exit conditions: opposite crossover
-        exit_long = position == 1 and ema50_below_200[i] and not ema50_below_200[i-1]
-        exit_short = position == -1 and ema50_above_200[i] and not ema50_above_200[i-1]
+        # Entry conditions: price breaks H4/L4 with volume expansion and trend alignment
+        long_entry = (close[i] > H4_aligned[i]) and volume_expansion and uptrend
+        short_entry = (close[i] < L4_aligned[i]) and volume_expansion and downtrend
+        
+        # Exit conditions: price returns to opposite Camarilla level (H4 for shorts, L4 for longs)
+        exit_long = position == 1 and close[i] <= L4_aligned[i]
+        exit_short = position == -1 and close[i] >= H4_aligned[i]
         
         # Execute signals
         if long_entry and position != 1:
@@ -88,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_EMA_Crossover_Trend_With_Volume_Filter"
-timeframe = "6h"
+name = "4h_1d_Camarilla_Breakout_Trend_4h"
+timeframe = "4h"
 leverage = 1.0
