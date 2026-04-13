@@ -1,17 +1,38 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Breakout_Volume
-Hypothesis: Uses daily Camarilla pivot levels with volume confirmation and monthly volatility regime filter.
-Long when price breaks above H4 with volume > 1.5x 20-period average and monthly volatility > 50th percentile.
-Short when price breaks below L4 with volume confirmation and monthly volatility > 50th percentile.
-Exit when price returns to Pivot point or volatility regime shifts.
-Works in both bull and bear markets by trading institutional levels with volume confirmation.
-Target: 20-50 trades/year on 4h (80-200 total over 4 years).
+6h_1d_1w_Camarilla_Range_Bound
+Hypothesis: Uses Camarilla pivot levels from daily timeframe to identify range-bound conditions.
+In ranging markets (price between S3 and R3), fades extreme moves toward S1/R1 with confirmation from weekly trend filter.
+Weekly trend determines bias: only take long signals when weekly close > weekly open, short when weekly close < weekly open.
+Works in both bull and bear markets by adapting to ranging conditions which occur frequently during consolidation periods.
+Target: 10-25 trades/year on 6h (40-100 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for given high, low, close arrays."""
+    range_val = high - low
+    if np.any(range_val == 0):
+        range_val = np.where(range_val == 0, 1e-10, range_val)  # Avoid division by zero
+    
+    C = close
+    H = high
+    L = low
+    
+    # Camarilla levels
+    R4 = C + ((H - L) * 1.5000)
+    R3 = C + ((H - L) * 1.2500)
+    R2 = C + ((H - L) * 1.1666)
+    R1 = C + ((H - L) * 1.0833)
+    S1 = C - ((H - L) * 1.0833)
+    S2 = C - ((H - L) * 1.1666)
+    S3 = C - ((H - L) * 1.2500)
+    S4 = C - ((H - L) * 1.5000)
+    
+    return R1, R2, R3, R4, S1, S2, S3, S4
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,102 +44,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots
+    # Get daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily Camarilla levels: H4, L4, Pivot
-    # H4 = Close + 1.5 * (High - Low)
-    # L4 = Close - 1.5 * (High - Low)
-    # Pivot = (High + Low + Close) / 3
-    hl_range = high_1d - low_1d
-    H4 = close_1d + 1.5 * hl_range
-    L4 = close_1d - 1.5 * hl_range
-    Pivot = (high_1d + low_1d + close_1d) / 3.0
+    # Calculate Camarilla levels on daily
+    R1_1d, R2_1d, R3_1d, R4_1d, S1_1d, S2_1d, S3_1d, S4_1d = calculate_camarilla(high_1d, low_1d, close_1d)
     
-    # Get monthly data for volatility regime filter
-    df_1M = get_htf_data(prices, '1M')
-    if len(df_1M) < 20:
-        # Fallback to daily volatility if monthly not available
-        returns = np.diff(np.log(close_1d))
-        vol = pd.Series(returns).rolling(window=20, min_periods=20).std() * np.sqrt(252)
-        vol_percentile = pd.Series(vol).rolling(window=50, min_periods=20).apply(
-            lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-        ).values
-        vol_regime = vol_percentile > 50.0
-    else:
-        # Use monthly volatility
-        close_1M = df_1M['close'].values
-        returns_1M = np.diff(np.log(close_1M))
-        vol_1M = pd.Series(returns_1M).rolling(window=12, min_periods=12).std() * np.sqrt(12)
-        vol_percentile_1M = pd.Series(vol_1M).rolling(window=24, min_periods=12).apply(
-            lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-        ).values
-        vol_regime = align_htf_to_ltf(prices, df_1M, vol_percentile_1M > 50.0)
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    # Align Camarilla levels to 4h timeframe
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    Pivot_aligned = align_htf_to_ltf(prices, df_1d, Pivot)
+    # Weekly trend: bullish if weekly close > weekly open, bearish if weekly close < weekly open
+    weekly_open = df_1w['open'].values
+    weekly_close = df_1w['close'].values
+    weekly_bullish = weekly_close > weekly_open
     
-    # Volume confirmation on 4h
-    vol_ma_20_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20_4h * 1.5)
+    # Align all data to 6h timeframe
+    R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
+    R2_1d_aligned = align_htf_to_ltf(prices, df_1d, R2_1d)
+    R3_1d_aligned = align_htf_to_ltf(prices, df_1d, R3_1d)
+    R4_1d_aligned = align_htf_to_ltf(prices, df_1d, R4_1d)
+    S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
+    S2_1d_aligned = align_htf_to_ltf(prices, df_1d, S2_1d)
+    S3_1d_aligned = align_htf_to_ltf(prices, df_1d, S3_1d)
+    S4_1d_aligned = align_htf_to_ltf(prices, df_1d, S4_1d)
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
     
-    # Session filter: 08:00-20:00 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_mask = (hours >= 8) & (hours <= 20)
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volume_expansion = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% of capital
     
-    for i in range(50, n):
-        # Skip if not in session or data not ready
-        if not session_mask[i] or \
-           np.isnan(H4_aligned[i]) or \
-           np.isnan(L4_aligned[i]) or \
-           np.isnan(Pivot_aligned[i]) or \
-           (hasattr(vol_regime, '__len__') and len(vol_regime) > i and np.isnan(vol_regime[i])) or \
-           (not hasattr(vol_regime, '__len__') and np.isnan(vol_regime)):
+    for i in range(20, n):
+        # Skip if any required data is not ready
+        if (np.isnan(R1_1d_aligned[i]) or np.isnan(R3_1d_aligned[i]) or 
+            np.isnan(S1_1d_aligned[i]) or np.isnan(S3_1d_aligned[i]) or
+            np.isnan(weekly_bullish_aligned[i]) or np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Get volatility regime value
-        if hasattr(vol_regime, '__len__'):
-            vol_ok = vol_regime[i] if i < len(vol_regime) else False
-        else:
-            vol_ok = vol_regime
+        # Range condition: price between S3 and R3 (defines the trading range)
+        in_range = (low[i] >= S3_1d_aligned[i]) and (high[i] <= R3_1d_aligned[i])
         
-        # Entry conditions: volatility regime + volume expansion + Camarilla breakout
-        if vol_ok and volume_expansion[i]:
-            # Long: price breaks above H4
-            if close[i] > H4_aligned[i]:
-                if position != 1:
-                    position = 1
-                    signals[i] = position_size
-                else:
-                    signals[i] = position_size
-            # Short: price breaks below L4
-            elif close[i] < L4_aligned[i]:
-                if position != -1:
-                    position = -1
-                    signals[i] = -position_size
-                else:
-                    signals[i] = -position_size
-            # Exit to pivot when price returns
-            elif position == 1 and close[i] <= Pivot_aligned[i]:
-                position = 0
-                signals[i] = 0.0
-            elif position == -1 and close[i] >= Pivot_aligned[i]:
-                position = 0
-                signals[i] = 0.0
-            # Hold position
+        if in_range:
+            # Fade extreme moves toward S1/R1 with volume expansion and weekly trend filter
+            
+            # Long setup: price touches or goes below S1 with volume expansion, weekly bullish
+            long_condition = (low[i] <= S1_1d_aligned[i]) and volume_expansion[i] and weekly_bullish_aligned[i] > 0.5
+            
+            # Short setup: price touches or goes above R1 with volume expansion, weekly bearish
+            short_condition = (high[i] >= R1_1d_aligned[i]) and volume_expansion[i] and weekly_bullish_aligned[i] < 0.5
+            
+            if long_condition and position != 1:
+                position = 1
+                signals[i] = position_size
+            elif long_condition and position == 1:
+                signals[i] = position_size
+            elif short_condition and position != -1:
+                position = -1
+                signals[i] = -position_size
+            elif short_condition and position == -1:
+                signals[i] = -position_size
             elif position == 1:
                 signals[i] = position_size
             elif position == -1:
@@ -126,7 +122,7 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         else:
-            # Exit positions when conditions not met
+            # Outside range - exit any position
             if position != 0:
                 position = 0
                 signals[i] = 0.0
@@ -135,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_Breakout_Volume"
-timeframe = "4h"
+name = "6h_1d_1w_Camarilla_Range_Bound"
+timeframe = "6h"
 leverage = 1.0
