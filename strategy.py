@@ -8,17 +8,28 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h strategy using 1d Donchian channel breakouts with volume confirmation and chop regime filter
-    # Works in bull/bear: Donchian breakouts capture strong moves, volume confirms institutional participation,
-    # chop filter avoids whipsaws in ranging markets. Discrete sizing (0.25) minimizes fee drag.
-    # Target: 20-40 trades/year to stay within 4h optimal range.
+    # Hypothesis: 6h Camarilla pivot breakout with 12h/1d volume confirmation
+    # Uses 12h Camarilla levels (R3/S3, R4/S4) for breakout/fade logic
+    # Volume confirmation from 1d to avoid false breakouts
+    # Discrete sizing (0.25) to minimize fee drag
+    # Target: 12-30 trades/year to stay within 6h optimal range
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values if 'volume' in prices.columns else np.ones(len(prices))
+    open_time = prices['open_time']
     
-    # Get 1d data for Donchian channels and volume
+    # Get 12h data for Camarilla pivot calculation (HTF for structure)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
+    
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # Get 1d data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -28,45 +39,34 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values if 'volume' in df_1d.columns else np.ones(len(df_1d))
     
-    # Get 1d data for choppiness index calculation
-    if len(df_1d) < 14:
-        return np.zeros(n)
+    # Calculate 12h Camarilla pivot levels (based on previous 12h bar)
+    # Camarilla: Pivot = (H + L + C)/3
+    # R4 = Pivot + (H-L)*1.1/2, R3 = Pivot + (H-L)*1.1/4
+    # S3 = Pivot - (H-L)*1.1/4, S4 = Pivot - (H-L)*1.1/2
+    prev_high = np.roll(high_12h, 1)
+    prev_low = np.roll(low_12h, 1)
+    prev_close = np.roll(close_12h, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Calculate 1d Donchian channels (20-period)
-    highest_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    pivot_12h = (prev_high + prev_low + prev_close) / 3.0
+    range_12h = prev_high - prev_low
     
-    # Calculate 1d True Range for choppiness index
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_close_1d[0] = np.nan
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - prev_close_1d)
-    tr3 = np.abs(low_1d - prev_close_1d)
-    true_range = np.maximum(np.maximum(tr1, tr2), tr3)
-    atr_14 = pd.Series(true_range).rolling(window=14, min_periods=14).mean().values
+    r3_12h = pivot_12h + range_12h * 1.1 / 4.0
+    r4_12h = pivot_12h + range_12h * 1.1 / 2.0
+    s3_12h = pivot_12h - range_12h * 1.1 / 4.0
+    s4_12h = pivot_12h - range_12h * 1.1 / 2.0
     
-    # Calculate 1d ADX for trend strength (simplified chop filter)
-    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    plus_dm[0] = minus_dm[0] = 0
+    # Align Camarilla levels to 6h timeframe
+    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
+    r4_12h_aligned = align_htf_to_ltf(prices, df_12h, r4_12h)
+    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
+    s4_12h_aligned = align_htf_to_ltf(prices, df_12h, s4_12h)
     
-    atr_14_for_dx = pd.Series(true_range).rolling(window=14, min_periods=14).mean().values
-    plus_di_14 = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_14_for_dx
-    minus_di_14 = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_14_for_dx
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
-    dx = np.where((plus_di_14 + minus_di_14) == 0, 0, dx)
-    adx_14 = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate 1d volume average for confirmation
+    # Calculate 1d volume average (20-period) for confirmation
     vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all HTF indicators to 4h primary timeframe
-    highest_high_20_aligned = align_htf_to_ltf(prices, df_1d, highest_high_20)
-    lowest_low_20_aligned = align_htf_to_ltf(prices, df_1d, lowest_low_20)
     vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
-    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -77,31 +77,34 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(highest_high_20_aligned[i]) or 
-            np.isnan(lowest_low_20_aligned[i]) or
-            np.isnan(vol_avg_20_1d_aligned[i]) or
-            np.isnan(adx_14_aligned[i])):
+        if (np.isnan(r3_12h_aligned[i]) or 
+            np.isnan(r4_12h_aligned[i]) or
+            np.isnan(s3_12h_aligned[i]) or
+            np.isnan(s4_12h_aligned[i]) or
+            np.isnan(vol_avg_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current 1d volume > 1.3x 20-period average
-        idx_1d = i // (24 * 6)  # 1d bars in 4h timeframe (6 bars per day)
+        idx_1d = i // 4  # 1d bars in 6h timeframe (4 bars per day)
         if idx_1d >= len(volume_1d):
             signals[i] = 0.0
             continue
         volume_confirmed = volume_1d[idx_1d] > 1.3 * vol_avg_20_1d_aligned[i]
         
-        # Trend filter: ADX > 20 indicates trending market (avoid chop)
-        trending_market = adx_14_aligned[i] > 20
+        # Breakout conditions: price breaks R4/S4 with volume
+        breakout_long = (close[i] > r4_12h_aligned[i]) and volume_confirmed
+        breakout_short = (close[i] < s4_12h_aligned[i]) and volume_confirmed
         
-        # Entry conditions: Donchian breakout + volume + trend filter
-        enter_long = (close[i] > highest_high_20_aligned[i]) and volume_confirmed and trending_market
-        enter_short = (close[i] < lowest_low_20_aligned[i]) and volume_confirmed and trending_market
+        # Fade conditions: price rejects R3/S3 with volume
+        fade_long = (close[i] < s3_12h_aligned[i]) and volume_confirmed
+        fade_short = (close[i] > r3_12h_aligned[i]) and volume_confirmed
         
-        # Stoploss: 1.5x ATR based on 1d true range
-        if idx_1d < len(true_range):
-            atr_value = true_range[idx_1d]
-            stop_distance = atr_value * 1.5
+        # Stoploss: based on 12h ATR (simplified using daily range from 12h)
+        idx_12h = i // 2  # 12h bars in 6h timeframe (2 bars per 12h)
+        if idx_12h < len(high_12h) and idx_12h < len(low_12h):
+            daily_range_12h = high_12h[idx_12h] - low_12h[idx_12h]
+            stop_distance = daily_range_12h * 0.3  # 30% of 12h range
         else:
             stop_distance = 0
         
@@ -109,13 +112,21 @@ def generate_signals(prices):
         exit_short = position == -1 and not np.isnan(entry_price[i-1]) and close[i] > entry_price[i-1] + stop_distance
         
         # Execute signals
-        if enter_long and position != 1:
+        if breakout_long and position != 1:
             position = 1
             signals[i] = position_size
             entry_price[i] = close[i]
-        elif enter_short and position != -1:
+        elif breakout_short and position != -1:
             position = -1
             signals[i] = -position_size
+            entry_price[i] = close[i]
+        elif fade_long and position != -1:
+            position = -1
+            signals[i] = -position_size
+            entry_price[i] = close[i]
+        elif fade_short and position != 1:
+            position = 1
+            signals[i] = position_size
             entry_price[i] = close[i]
         elif position == 1 and exit_long:
             position = 0
@@ -139,6 +150,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_breakout_volume_adx_v1"
-timeframe = "4h"
+name = "6h_12h_1d_camarilla_breakout_volume_v1"
+timeframe = "6h"
 leverage = 1.0
