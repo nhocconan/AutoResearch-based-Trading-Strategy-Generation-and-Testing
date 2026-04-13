@@ -13,20 +13,17 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12h Donchian channels (20-period) - use previous bar's high/low
+    # 1d Donchian channels (20-period) - use previous bar's high/low
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
     lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    # 12h average volume (20-period) - previous bar
+    # 1d average volume (20-period) - previous bar
     vol_series = pd.Series(volume)
     avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
-    # 12h EMA200 trend filter
-    ema_200_12h = pd.Series(close).ewm(span=200, min_periods=200, adjust=False).mean().values
-    
-    # 12h ATR (14-period) for stop-loss
+    # 1d ATR (14-period) for stop-loss
     high_low = high - low
     high_close = np.abs(high - np.roll(close, 1))
     low_close = np.abs(low - np.roll(close, 1))
@@ -50,7 +47,7 @@ def generate_signals(prices):
     start = max(20, 200, 14)
     for i in range(start, n):
         if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(avg_vol[i]) or np.isnan(ema_200_12h[i]) or np.isnan(atr[i]) or
+            np.isnan(avg_vol[i]) or np.isnan(atr[i]) or
             np.isnan(ema_50_1w_aligned[i]) or np.isnan(ema_200_1w_aligned[i])):
             signals[i] = 0.0
             continue
@@ -59,29 +56,29 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long: breakout above upper band + volume confirmation + price above EMA200_12h + EMA50_1w > EMA200_1w (bullish)
+            # Long: breakout above upper band + volume confirmation + price above EMA200_1w (bullish)
             if (price > upper[i] and vol > 2.0 * avg_vol[i] and 
-                price > ema_200_12h[i] and ema_50_1w_aligned[i] > ema_200_1w_aligned[i]):
+                price > ema_200_1w_aligned[i]):
                 position = 1
                 signals[i] = position_size
-            # Short: breakout below lower band + volume confirmation + price below EMA200_12h + EMA50_1w < EMA200_1w (bearish)
+            # Short: breakout below lower band + volume confirmation + price below EMA200_1w (bearish)
             elif (price < lower[i] and vol > 2.0 * avg_vol[i] and 
-                  price < ema_200_12h[i] and ema_50_1w_aligned[i] < ema_200_1w_aligned[i]):
+                  price < ema_200_1w_aligned[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below lower band OR below EMA200_12h OR stop-loss hit
-            if (price < lower[i] or price < ema_200_12h[i] or 
+            # Exit long: price closes below lower band OR stop-loss hit
+            if (price < lower[i] or 
                 price < entry_price_long - 2.0 * atr[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes above upper band OR above EMA200_12h OR stop-loss hit
-            if (price > upper[i] or price > ema_200_12h[i] or 
+            # Exit short: price closes above upper band OR stop-loss hit
+            if (price > upper[i] or 
                 price > entry_price_short + 2.0 * atr[i]):
                 position = 0
                 signals[i] = 0.0
@@ -97,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1w_Donchian_Volume_EMA200Trend_EMA50Filter"
-timeframe = "12h"
+name = "1d_1w_Donchian_Volume_EMA200Trend"
+timeframe = "1d"
 leverage = 1.0
