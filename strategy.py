@@ -8,33 +8,42 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h price breaking 1d Donchian channel (20) with volume spike (2.0x 20-bar mean) and ADX>30.
-    # Long on upper band breakout, short on lower band breakout. Exit on opposite band touch.
-    # Uses discrete sizing (0.25) to minimize fee churn. Donchian provides objective structure,
-    # volume confirms institutional participation, ADX filters choppy markets.
-    # Target: 80-150 total trades over 4 years to balance opportunity and fee drag.
+    # Hypothesis: 4h Camarilla pivot (H3/L3) from 1d + volume spike (1.5x) + ADX>25.
+    # Long when price crosses above H3 with filters, short when below L3.
+    # Exit on opposite Camarilla level (L3 for long, H3 for short) or close below/above open.
+    # Camarilla provides mean-reversion structure in ranges, breakout structure in trends.
+    # Volume confirms participation, ADX filters chop. Discrete size 0.25 minimizes fee churn.
+    # Target: 100-180 total trades over 4 years (25-45/year) to balance opportunity and cost.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_ = prices['open'].values
     
-    # Get 4h and 1d data (call ONCE before loop)
-    df_4h = get_htf_data(prices, '4h')
+    # Get 1d data (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d Donchian channels (20-period)
-    # Upper band = highest high over 20 periods
-    # Lower band = lowest low over 20 periods
-    high_series = pd.Series(df_1d['high'].values)
-    low_series = pd.Series(df_1d['low'].values)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate 1d Camarilla levels (based on previous day's OHLC)
+    # H3 = close + 1.1 * (high - low) / 2
+    # L3 = close - 1.1 * (high - low) / 2
+    # H4 = close + 1.1 * (high - low)
+    # L4 = close - 1.1 * (high - low)
+    # We use H3/L3 for entry, H4/L4 for stronger breakout confirmation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 2
+    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 2
+    camarilla_h4 = close_1d + 1.1 * (high_1d - low_1d)
+    camarilla_l4 = close_1d - 1.1 * (high_1d - low_1d)
     
     # Calculate 1d volume mean (20-period) with min_periods
-    volume_series = pd.Series(df_1d['volume'].values)
+    volume_1d = df_1d['volume'].values
+    volume_series = pd.Series(volume_1d)
     vol_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     
     # Calculate 1d ADX (14-period) with min_periods
@@ -76,11 +85,13 @@ def generate_signals(prices):
         
         return adx
     
-    adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
     # Align HTF indicators to 4h timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
@@ -89,31 +100,31 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
             np.isnan(vol_ma_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Get current 1d volume (aligned)
-        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)
+        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
         
-        # Volume filter: current 1d volume > 2.0 * 20-period mean (volume spike)
-        volume_confirmation = vol_1d_aligned[i] > 2.0 * vol_ma_aligned[i]
+        # Volume filter: current 1d volume > 1.5 * 20-period mean (volume spike)
+        volume_confirmation = vol_1d_aligned[i] > 1.5 * vol_ma_aligned[i]
         
-        # ADX filter: trending market (ADX > 30)
-        trending_market = adx_aligned[i] > 30
+        # ADX filter: trending market (ADX > 25)
+        trending_market = adx_aligned[i] > 25
         
-        # Entry conditions: price breaks Donchian bands with filters
-        long_entry = (close[i] > donchian_upper_aligned[i] and 
+        # Entry conditions: price crosses Camarilla H3/L3 with filters
+        long_entry = (close[i] > h3_aligned[i] and 
                      volume_confirmation and 
                      trending_market)
-        short_entry = (close[i] < donchian_lower_aligned[i] and 
+        short_entry = (close[i] < l3_aligned[i] and 
                       volume_confirmation and 
                       trending_market)
         
-        # Exit conditions: price touches opposite Donchian band
-        long_exit = close[i] <= donchian_lower_aligned[i]
-        short_exit = close[i] >= donchian_upper_aligned[i]
+        # Exit conditions: price crosses opposite Camarilla level (L3 for long, H3 for short)
+        long_exit = close[i] < l3_aligned[i]
+        short_exit = close[i] > h3_aligned[i]
         
         if long_entry and position != 1:
             position = 1
@@ -138,6 +149,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_breakout_volume_adx_v2"
+name = "4h_1d_camarilla_pivot_volume_adx_v1"
 timeframe = "4h"
 leverage = 1.0
