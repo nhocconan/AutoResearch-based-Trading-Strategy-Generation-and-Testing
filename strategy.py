@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_1d_1w_CamarillaBreakout_TrendFilter
-Hypothesis: In both bull and bear markets, price breaking above daily R4 or below daily S4 Camarilla pivot levels 
-with weekly volume confirmation and filtered by weekly ADX trend strength captures strong momentum moves. 
-Daily pivots act as strong support/resistance; breaks indicate institutional interest. 
-Weekly volume and trend filters ensure we only trade in strong momentum environments, reducing false breakouts. 
-This strategy targets 20-40 trades per year by requiring confluence of multiple timeframes.
+4h_1d_1w_CamarillaBreakout_TrendFilter_v2
+Hypothesis: Price breaking above daily R4 or below daily S4 Camarilla pivot levels with weekly volume expansion and filtered by weekly ADX trend strength captures strong momentum moves in both bull and bear markets. Daily pivots act as strong support/resistance; breaks indicate institutional interest. Weekly volume and trend filters reduce false breakouts. Target: 20-40 trades/year by requiring confluence.
 """
 
 import numpy as np
@@ -32,10 +28,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate daily Camarilla pivot points
-    # Camarilla: R4 = C + ((H-L) * 1.1/2), S4 = C - ((H-L) * 1.1/2)
-    # Actually: R4 = C + ((H-L) * 1.1), S4 = C - ((H-L) * 1.1)
-    # Standard Camarilla: R4 = Close + ((High-Low) * 1.1/2) * 2? Let's use correct formula
-    # Correct: R4 = Close + ((High-Low) * 1.1), S4 = Close - ((High-Low) * 1.1)
+    # Correct formula: R4 = Close + ((High-Low) * 1.1), S4 = Close - ((High-Low) * 1.1)
     diff = high_1d - low_1d
     camarilla_r4 = close_1d + (diff * 1.1)
     camarilla_s4 = close_1d - (diff * 1.1)
@@ -142,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_1w_CamarillaBreakout_TrendFilter"
+name = "4h_1d_1w_CamarillaBreakout_TrendFilter_v2"
 timeframe = "4h"
 leverage = 1.0
