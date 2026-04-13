@@ -3,75 +3,78 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h timeframe with 1-day Williams %R mean reversion + 1-week trend filter
-# Long when 1d Williams %R < -80 (oversold) and price > 1w EMA200 (bullish long-term trend)
-# Short when 1d Williams %R > -20 (overbought) and price < 1w EMA200 (bearish long-term trend)
-# Exit when Williams %R crosses -50 (mean reversion complete)
-# Williams %R identifies exhaustion points; EMA200 filter ensures alignment with major trend
-# Target: 60-120 total trades over 4 years (15-30/year) to balance opportunity and cost
-# Uses weekly EMA to avoid counter-trend trades in strong trends, improving win rate
+# Hypothesis: 4h timeframe with 1-day Donchian breakout + volume confirmation + 1-day EMA trend filter
+# Long when price breaks above 1-day Donchian upper channel with volume > 1.5x average and price > 1-day EMA50
+# Short when price breaks below 1-day Donchian lower channel with volume > 1.5x average and price < 1-day EMA50
+# Exit on opposite Donchian breakout or when price crosses 1-day EMA50
+# Uses daily timeframe for structure to reduce noise and false breakouts
+# Target: 80-180 total trades over 4 years (20-45/year) to balance opportunity and cost
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1-day data for Williams %R
+    # Get 1d data for Donchian channels and EMA
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 14-period Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
+    # Calculate 1d Donchian channels (20-period)
+    donchian_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Get 1-week data for EMA200 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
-        return np.zeros(n)
+    # Calculate 1d EMA50
+    ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    close_1w = df_1w['close'].values
-    ema200_1w = pd.Series(close_1w).ewm(span=200, min_periods=200, adjust=False).mean().values
+    # Align 1d indicators to 4h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_1d)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_1d)
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align 1-day Williams %R to 6h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    
-    # Align 1-week EMA200 to 6h timeframe
-    ema200_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # Volume average (20-period)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% of capital
     
-    for i in range(30, n):
+    for i in range(60, n):
         # Skip if data not ready
-        if (np.isnan(williams_r_aligned[i]) or 
-            np.isnan(ema200_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(ema50_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        wr = williams_r_aligned[i]
-        price = close[i]
-        ema200 = ema200_aligned[i]
+        # Volume surge condition
+        volume_surge = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Entry conditions
-        long_entry = (wr < -80) and (price > ema200)
-        short_entry = (wr > -20) and (price < ema200)
+        # Donchian breakout conditions
+        long_breakout = close[i] > donchian_high_aligned[i]
+        short_breakout = close[i] < donchian_low_aligned[i]
         
-        # Exit conditions: Williams %R crosses -50 (mean reversion midpoint)
-        exit_long = (position == 1) and (wr > -50)
-        exit_short = (position == -1) and (wr < -50)
+        # EMA trend filter
+        above_ema = close[i] > ema50_aligned[i]
+        below_ema = close[i] < ema50_aligned[i]
+        
+        # Entry logic: breakout + volume + trend filter
+        long_entry = long_breakout and volume_surge and above_ema
+        short_entry = short_breakout and volume_surge and below_ema
+        
+        # Exit conditions: opposite breakout or EMA cross
+        exit_long = position == 1 and (short_breakout or close[i] < ema50_aligned[i])
+        exit_short = position == -1 and (long_breakout or close[i] > ema50_aligned[i])
         
         # Execute signals
         if long_entry and position != 1:
@@ -94,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_1w_williams_r_mean_reversion_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_ema50_volume_filter_v2"
+timeframe = "4h"
 leverage = 1.0
