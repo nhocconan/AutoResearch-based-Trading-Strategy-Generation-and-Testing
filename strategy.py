@@ -3,13 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe with 1d ATR-based breakout and volume confirmation.
-# Long: Price closes above (1d high + 0.5 * 14-day ATR) with volume > 1.3x 20-period average.
-# Short: Price closes below (1d low - 0.5 * 14-day ATR) with volume > 1.3x 20-period average.
-# Uses volatility-adjusted breakout levels from daily timeframe to filter noise.
-# Volume confirmation ensures breakouts have institutional participation.
-# Conservative position sizing (0.25) to manage drawdown in volatile markets.
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+# Hypothesis: 4h timeframe with 12h Donchian breakout (20-period) + volume confirmation + 12h EMA trend filter.
+# Long: Price breaks above Donchian(20) high + volume > 1.5x avg volume + price > 12h EMA(50).
+# Short: Price breaks below Donchian(20) low + volume > 1.5x avg volume + price < 12h EMA(50).
+# Uses 12h Donchian for structure, 4h for execution with volume and trend confirmation.
+# Exit: Opposite Donchian break or trend reversal. Target: 75-200 trades over 4 years (19-50/year).
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,44 +19,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for ATR and price levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 15:
+    # 12h data for Donchian and EMA
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 14-day ATR on daily timeframe
-    tr1 = np.zeros(len(high_1d))
-    tr2 = np.zeros(len(high_1d))
-    tr3 = np.zeros(len(high_1d))
-    tr1[1:] = np.abs(high_1d[1:] - low_1d[1:])
-    tr2[1:] = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3[1:] = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Donchian channels (20-period) on 12h
+    donch_high = np.full(len(high_12h), np.nan)
+    donch_low = np.full(len(low_12h), np.nan)
+    for i in range(20, len(high_12h)):
+        donch_high[i] = np.max(high_12h[i-20:i])
+        donch_low[i] = np.min(low_12h[i-20:i])
     
-    atr_14 = np.full(len(high_1d), np.nan)
-    for i in range(14, len(tr)):
-        atr_14[i] = np.mean(tr[i-13:i+1])
+    # EMA(50) on 12h close
+    close_12h_series = pd.Series(close_12h)
+    ema_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate breakout levels: ±0.5 * ATR from daily high/low
-    breakout_up = np.full(len(high_1d), np.nan)
-    breakout_down = np.full(len(high_1d), np.nan)
-    for i in range(len(high_1d)):
-        if not np.isnan(atr_14[i]):
-            breakout_up[i] = high_1d[i] + 0.5 * atr_14[i]
-            breakout_down[i] = low_1d[i] - 0.5 * atr_14[i]
-    
-    # Average volume (20-period) for volume confirmation
+    # Average volume (20-period) on 4h
     avg_volume = np.full(n, np.nan)
     for i in range(20, n):
         avg_volume[i] = np.mean(volume[i-20:i])
     
-    # Align 1d breakout levels to 12h
-    breakout_up_aligned = align_htf_to_ltf(prices, df_1d, breakout_up)
-    breakout_down_aligned = align_htf_to_ltf(prices, df_1d, breakout_down)
+    # Align 12h indicators to 4h
+    donch_high_aligned = align_htf_to_ltf(prices, df_12h, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_12h, donch_low)
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -66,41 +55,42 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is not ready
-        if (np.isnan(breakout_up_aligned[i]) or np.isnan(breakout_down_aligned[i]) or 
-            np.isnan(avg_volume[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(ema_12h_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        up_level = breakout_up_aligned[i]
-        down_level = breakout_down_aligned[i]
+        upper = donch_high_aligned[i]
+        lower = donch_low_aligned[i]
+        ema = ema_12h_aligned[i]
         
-        # Volume confirmation: current volume > 1.3x average volume
-        volume_confirm = vol > 1.3 * avg_vol
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirm = vol > 1.5 * avg_vol
         
         if position == 0:
-            # Long: price closes above breakout_up + volume confirmation
-            if (price > up_level and volume_confirm):
+            # Long: break above Donchian high + volume + above EMA
+            if (price > upper and volume_confirm and price > ema):
                 position = 1
                 signals[i] = position_size
-            # Short: price closes below breakout_down + volume confirmation
-            elif (price < down_level and volume_confirm):
+            # Short: break below Donchian low + volume + below EMA
+            elif (price < lower and volume_confirm and price < ema):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below breakout_down (opposite level)
-            if price < down_level:
+            # Exit long: break below Donchian low OR price below EMA
+            if price < lower or price < ema:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes above breakout_up (opposite level)
-            if price > up_level:
+            # Exit short: break above Donchian high OR price above EMA
+            if price > upper or price > ema:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -108,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_ATR_Breakout_Volume"
-timeframe = "12h"
+name = "4h_12h_Donchian_EMA_Volume_v2"
+timeframe = "4h"
 leverage = 1.0
