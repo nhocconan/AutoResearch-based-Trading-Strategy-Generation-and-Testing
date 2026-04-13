@@ -8,11 +8,12 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Camarilla H3/L3 breakout with 1d trend filter (EMA50) and volume confirmation.
-    # Long when price breaks above Camarilla H3 AND 1d close > 1d EMA50 AND 4h volume > 1.5x 20-period MA.
-    # Short when price breaks below Camarilla L3 AND 1d close < 1d EMA50 AND 4h volume > 1.5x 20-period MA.
+    # Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA50 trend filter and volume spike confirmation.
+    # Long when price breaks above H3 AND 1d close > EMA50 AND 4h volume > 2.0x 20-period MA.
+    # Short when price breaks below L3 AND 1d close < EMA50 AND 4h volume > 2.0x 20-period MA.
     # Exit when price re-enters H3-L3 range.
-    # Uses discrete position sizing (0.25) to minimize fee churn. Target: 75-200 total trades over 4 years.
+    # Uses discrete position sizing (0.25) and strict volume filter (2.0x) to target 75-200 trades over 4 years.
+    # Works in bull/bear via trend filter and volume confirmation reducing false breakouts.
     
     close = prices['close'].values
     high = prices['high'].values
@@ -71,9 +72,9 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x 20-period average
+        # Volume confirmation: current 4h volume > 2.0x 20-period average (strict filter)
         volume_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_4h)
-        volume_spike = volume_4h_aligned[i] > 1.5 * vol_ma_4h_aligned[i]
+        volume_spike = volume_4h_aligned[i] > 2.0 * vol_ma_4h_aligned[i]
         
         # Price relative to Camarilla levels
         price_above_h3 = close_4h_aligned[i] > h3_1d_aligned[i]
@@ -106,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_camarilla_pivot_breakout_ema_volume_v2"
+name = "4h_1d_camarilla_breakout_ema_volume_spike_v2"
 timeframe = "4h"
 leverage = 1.0
