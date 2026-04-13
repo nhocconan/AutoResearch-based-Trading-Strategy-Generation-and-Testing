@@ -8,38 +8,38 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and 1w ADX regime filter
-    # Long: price breaks above upper band AND 1w ADX > 25 (strong trend) AND volume > 2.0x avg
-    # Short: price breaks below lower band AND 1w ADX > 25 (strong trend) AND volume > 2.0x avg
-    # Exit: price touches opposite band or retests midpoint of channel
-    # Using 4h timeframe for optimal trade frequency (target 20-50/year), Donchian for structure,
-    # 1w ADX to filter weak/choppy markets, and volume confirmation to avoid false breakouts.
-    # Discrete position sizing (0.30) to balance return and drawdown.
+    # Hypothesis: 12h Donchian(20) breakout with 1d ADX regime filter and volume confirmation
+    # Long: price breaks above upper band AND 1d ADX > 25 (strong trend) AND volume > 1.8x avg
+    # Short: price breaks below lower band AND 1d ADX > 25 (strong trend) AND volume > 1.8x avg
+    # Exit: price touches opposite band (reversal signal)
+    # Using 12h timeframe for low trade frequency (target 12-37/year), Donchian for structure,
+    # 1d ADX to filter weak/choppy markets, and volume spike to confirm institutional interest.
+    # Discrete position sizing (0.25) to minimize fee churn.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for ADX regime filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data for ADX regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly ADX(14) for trend strength filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate daily ADX(14) for trend strength filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # True Range
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
     # Directional Movement
-    up_move = high_1w[1:] - high_1w[:-1]
-    down_move = low_1w[:-1] - low_1w[1:]
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     plus_dm = np.concatenate([[np.nan], plus_dm])
@@ -71,64 +71,60 @@ def generate_signals(prices):
                   np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14) * 100, 0)
     adx = wilders_smoothing(dx, 14)
     
-    # Align weekly ADX to 4h
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    # Align daily ADX to 12h
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Calculate 4h Donchian channels (20-period)
-    # Upper band = highest high over past 20 periods
-    # Lower band = lowest low over past 20 periods
+    # Calculate 12h Donchian channels (20-period)
+    # Upper band = highest high over past 20 bars
+    # Lower band = lowest low over past 20 bars
     upper_band = np.full(n, np.nan)
     lower_band = np.full(n, np.nan)
-    midpoint = np.full(n, np.nan)
     
     for i in range(20, n):
         upper_band[i] = np.max(high[i-20:i])
         lower_band[i] = np.min(low[i-20:i])
-        midpoint[i] = (upper_band[i] + lower_band[i]) / 2.0
     
-    # Get 4h volume for confirmation (>2.0x 20-period average)
+    # Get 12h volume for confirmation (>1.8x 20-period average)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(adx_1w_aligned[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
             np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         # Regime filter: ADX > 25 indicates strong trending market
-        strong_trend = adx_1w_aligned[i] > 25
+        strong_trend = adx_1d_aligned[i] > 25
         
         # Donchian breakout conditions
         breakout_upper = close[i] > upper_band[i]
         breakout_lower = close[i] < lower_band[i]
         
-        # Exit conditions: touch opposite band or retest midpoint
+        # Exit conditions: touch opposite band (reversal signal)
         touch_lower = close[i] < lower_band[i]  # Exit long on lower band touch
         touch_upper = close[i] > upper_band[i]  # Exit short on upper band touch
-        retest_mid_long = close[i] < midpoint[i] and position == 1  # Long exit on midpoint retest
-        retest_mid_short = close[i] > midpoint[i] and position == -1  # Short exit on midpoint retest
         
         # Entry logic: Donchian breakout + strong trend + volume confirmation
         long_entry = breakout_upper and strong_trend and volume_spike[i]
         short_entry = breakout_lower and strong_trend and volume_spike[i]
         
-        # Exit logic: opposite band touch or midpoint retest
-        long_exit = touch_lower or retest_mid_long
-        short_exit = touch_upper or retest_mid_short
+        # Exit logic: opposite band touch
+        long_exit = touch_lower
+        short_exit = touch_upper
         
         if long_entry and position != 1:
             position = 1
-            signals[i] = 0.30
+            signals[i] = 0.25
         elif short_entry and position != -1:
             position = -1
-            signals[i] = -0.30
+            signals[i] = -0.25
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -138,14 +134,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_1w_donchian_breakout_adx_volume_v1"
-timeframe = "4h"
+name = "12h_1d_donchian_breakout_adx_volume_v1"
+timeframe = "12h"
 leverage = 1.0
