@@ -1,10 +1,12 @@
-# 25-04-2025 04:30:00 UTC
-# 1d_1w_PriceAction_Volume_Regime
-# Hypothesis: Daily price action (close > open) combined with weekly trend (weekly close > weekly open)
-# and volume confirmation (volume > 1.5x 20-day average) filters for high-probability momentum trades.
-# Works in bull markets via trend continuation and in bear markets via mean-reversion bounces
-# at weekly support/resistance. Uses weekly timeframe for trend filter to avoid overtrading.
-# Target: 15-25 trades/year on daily timeframe.
+#!/usr/bin/env python3
+"""
+4h_1d_Camarilla_Pullback_Bounce
+Hypothesis: Combines Camarilla pivot levels from daily timeframe with pullback entries on 4h.
+In trending markets, price often pulls back to key pivot levels (L3, L4, H3, H4) before continuing.
+We enter long when price pulls back to L3/L4 in uptrend, short when pulls back to H3/H4 in downtrend.
+Trend determined by 4h EMA(50) vs EMA(200). Works in both bull and bear markets by trading mean reversion within the trend.
+Target: 20-50 trades/year on 4h (80-200 total over 4 years).
+"""
 
 import numpy as np
 import pandas as pd
@@ -20,86 +22,105 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for price action and volume
+    # Get daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    # Calculate Camarilla levels for each daily bar
+    # H4 = close + 1.1 * (high - low)
+    # H3 = close + 0.55 * (high - low)
+    # L3 = close - 0.55 * (high - low)
+    # L4 = close - 1.1 * (high - low)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    open_1d = df_1d['open'].values
-    volume_1d = df_1d['volume'].values
     
-    # Daily bullish candle: close > open
-    daily_bullish = close_1d > open_1d
-    daily_bearish = close_1d < open_1d
+    camarilla_h4 = close_1d + 1.1 * (high_1d - low_1d)
+    camarilla_h3 = close_1d + 0.55 * (high_1d - low_1d)
+    camarilla_l3 = close_1d - 0.55 * (high_1d - low_1d)
+    camarilla_l4 = close_1d - 1.1 * (high_1d - low_1d)
     
-    # Volume filter: volume > 1.5x 20-day average
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean()
-    volume_filter = volume_1d > (vol_ma_20 * 1.5)
-    
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get 4h data for trend and entry
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    open_1w = df_1w['open'].values
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Weekly trend: close > open (bullish trend)
-    weekly_bullish = close_1w > open_1w
-    weekly_bearish = close_1w < open_1w
+    # Calculate trend: EMA(50) vs EMA(200) on 4h
+    ema_50 = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200 = pd.Series(close_4h).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Align signals to daily timeframe
-    daily_bullish_aligned = align_htf_to_ltf(prices, df_1d, daily_bullish)
-    daily_bearish_aligned = align_htf_to_ltf(prices, df_1d, daily_bearish)
-    volume_filter_aligned = align_htf_to_ltf(prices, df_1d, volume_filter)
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish)
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish)
+    # Align all signals to 4h timeframe
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50)
+    ema_200_aligned = align_htf_to_ltf(prices, df_4h, ema_200)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% of capital
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if np.isnan(daily_bullish_aligned[i]) or np.isnan(daily_bearish_aligned[i]) or \
-           np.isnan(volume_filter_aligned[i]) or np.isnan(weekly_bullish_aligned[i]) or \
-           np.isnan(weekly_bearish_aligned[i]):
+        if np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or \
+           np.isnan(camarilla_l3_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or \
+           np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Long entry: daily bullish candle + volume + weekly bullish trend
-        if daily_bullish_aligned[i] and volume_filter_aligned[i] and weekly_bullish_aligned[i]:
-            if position != 1:
-                position = 1
+        # Determine trend
+        uptrend = ema_50_aligned[i] > ema_200_aligned[i]
+        downtrend = ema_50_aligned[i] < ema_200_aligned[i]
+        
+        # Entry conditions: pullback to Camarilla levels in direction of trend
+        if uptrend:
+            # Long when price touches or crosses L3/L4 from above
+            if low[i] <= camarilla_l3_aligned[i] or low[i] <= camarilla_l4_aligned[i]:
+                if position != 1:
+                    position = 1
+                    signals[i] = position_size
+                else:
+                    signals[i] = position_size
+            # Exit long if trend changes or price reaches H3
+            elif position == 1 and (not uptrend or high[i] >= camarilla_h3_aligned[i]):
+                position = 0
+                signals[i] = 0.0
+            elif position == 1:
                 signals[i] = position_size
             else:
-                signals[i] = position_size
-        
-        # Short entry: daily bearish candle + volume + weekly bearish trend
-        elif daily_bearish_aligned[i] and volume_filter_aligned[i] and weekly_bearish_aligned[i]:
-            if position != -1:
-                position = -1
+                signals[i] = 0.0
+        elif downtrend:
+            # Short when price touches or crosses H3/H4 from below
+            if high[i] >= camarilla_h3_aligned[i] or high[i] >= camarilla_h4_aligned[i]:
+                if position != -1:
+                    position = -1
+                    signals[i] = -position_size
+                else:
+                    signals[i] = -position_size
+            # Exit short if trend changes or price reaches L3
+            elif position == -1 and (not downtrend or low[i] <= camarilla_l3_aligned[i]):
+                position = 0
+                signals[i] = 0.0
+            elif position == -1:
                 signals[i] = -position_size
             else:
-                signals[i] = -position_size
-        
-        # Exit conditions: contrary signal or loss of weekly trend
-        elif position == 1 and (daily_bearish_aligned[i] or not weekly_bullish_aligned[i]):
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and (daily_bullish_aligned[i] or not weekly_bearish_aligned[i]):
-            position = 0
-            signals[i] = 0.0
-        elif position == 1:
-            signals[i] = position_size
-        elif position == -1:
-            signals[i] = -position_size
+                signals[i] = 0.0
         else:
-            signals[i] = 0.0
+            # No clear trend - stay flat
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
     
     return signals
 
-name = "1d_1w_PriceAction_Volume_Regime"
-timeframe = "1d"
+name = "4h_1d_Camarilla_Pullback_Bounce"
+timeframe = "4h"
 leverage = 1.0
