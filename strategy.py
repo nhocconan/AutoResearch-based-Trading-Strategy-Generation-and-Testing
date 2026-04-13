@@ -8,18 +8,18 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h primary with 1d HTF - Camarilla pivot breakout with volume confirmation
-    # Camarilla R4/S4 levels act as strong intraday support/resistance from institutional order flow
-    # Breakouts beyond R4/S4 with volume confirmation capture genuine institutional moves
-    # Works in both bull/bear markets by trading breakouts in direction of 1d trend
-    # Target: 50-150 total trades over 4 years (12-37/year) for low fee drag
+    # Hypothesis: 12h primary with 1d HTF - Camarilla pivot breakout with 1d volume confirmation and ATR volatility filter
+    # Camarilla pivots from 1d provide institutional support/resistance levels
+    # Breakouts on high volume with sufficient volatility capture strong trends
+    # Works in bull (breakouts up) and bear (breakouts down) markets
+    # Target: 50-150 trades over 4 years (12-37/year) for low fee drag
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values if 'volume' in prices.columns else np.ones(len(prices))
     
-    # Get 1d data for HTF Camarilla pivots and trend
+    # Get 1d data for HTF Camarilla pivots, volume, and ATR
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -27,38 +27,34 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values if 'volume' in df_1d.columns else np.ones(len(df_1d))
     
-    # Calculate 1d Camarilla levels (based on previous day)
-    # Camarilla: R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, etc.
-    # We use previous day's range to calculate today's levels
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
+    # Calculate 1d Camarilla pivot levels (based on previous day)
+    # Camarilla: H4 = Close + 1.1*(High-Low)*1.1/2, L4 = Close - 1.1*(High-Low)*1.1/2
+    # Using simplified version: H3 = Close + 1.1*(High-Low)/2, L3 = Close - 1.1*(High-Low)/2
+    camarilla_high = close_1d + 1.1 * (high_1d - low_1d) / 2
+    camarilla_low = close_1d - 1.1 * (high_1d - low_1d) / 2
+    camarilla_mid = (camarilla_high + camarilla_low) / 2
     
-    # Avoid division by zero and handle first bar
-    prev_high_1d[0] = prev_high_1d[1] if len(prev_high_1d) > 1 else prev_high_1d[0]
-    prev_low_1d[0] = prev_low_1d[1] if len(prev_low_1d) > 1 else prev_low_1d[0]
-    prev_close_1d[0] = prev_close_1d[1] if len(prev_close_1d) > 1 else prev_close_1d[0]
+    # Calculate 1d ATR (14-period) for volatility filter
+    def calculate_atr(high, low, close, window=14):
+        tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - np.roll(close, 1)[1:]))
+        tr1 = np.maximum(tr1, np.abs(low[1:] - np.roll(close, 1)[1:]))
+        tr = np.concatenate([[np.nan], tr1])
+        return pd.Series(tr).rolling(window=window, min_periods=window).mean().values
     
-    range_1d = prev_high_1d - prev_low_1d
-    camarilla_r4 = prev_close_1d + range_1d * 1.1 / 2
-    camarilla_s4 = prev_close_1d - range_1d * 1.1 / 2
-    camarilla_r3 = prev_close_1d + range_1d * 1.1 / 4
-    camarilla_s3 = prev_close_1d - range_1d * 1.1 / 4
+    atr_1d = calculate_atr(high_1d, low_1d, close_1d, window=14)
+    atr_ma_10 = pd.Series(atr_1d).rolling(window=10, min_periods=10).mean().values
     
-    # 1d trend filter: EMA(21) - only trade breakouts in direction of daily trend
-    ema_21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Calculate 1d volume average (20-period)
+    vol_avg_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 6h volume average (20-period) for confirmation
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all HTF indicators to 6h primary timeframe
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    ema_21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
-    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)  # volume uses 1d alignment for daily average
+    # Align all HTF indicators to 12h primary timeframe
+    camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
+    camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
+    camarilla_mid_aligned = align_htf_to_ltf(prices, df_1d, camarilla_mid)
+    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
+    atr_ma_10_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_10)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,33 +62,31 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_r4_aligned[i]) or 
-            np.isnan(camarilla_s4_aligned[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(ema_21_1d_aligned[i]) or
-            np.isnan(vol_avg_20_aligned[i])):
+        if (np.isnan(camarilla_high_aligned[i]) or 
+            np.isnan(camarilla_low_aligned[i]) or 
+            np.isnan(camarilla_mid_aligned[i]) or 
+            np.isnan(vol_avg_20_aligned[i]) or
+            np.isnan(atr_ma_10_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 6h volume > 1.8x 20-period average
-        volume_confirmed = volume[i] > 1.8 * vol_avg_20_aligned[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume_1d[i] > 1.5 * vol_avg_20_aligned[i]
         
-        # Breakout conditions beyond R4/S4 (strong institutional levels)
-        breakout_up = close[i] > camarilla_r4_aligned[i]
-        breakout_down = low[i] < camarilla_s4_aligned[i]  # use low for downside breakout
+        # Volatility filter: avoid extremely low volatility (choppy markets)
+        vol_filter = atr_1d[i] > 0.3 * atr_ma_10_aligned[i]
         
-        # Trend filter: only trade breakouts in direction of 1d EMA
-        trend_up = close[i] > ema_21_1d_aligned[i]
-        trend_down = close[i] < ema_21_1d_aligned[i]
+        # Breakout conditions
+        breakout_up = close_1d[i] > camarilla_high_aligned[i]
+        breakout_down = close_1d[i] < camarilla_low_aligned[i]
         
         # Entry conditions
-        enter_long = breakout_up and volume_confirmed and trend_up
-        enter_short = breakout_down and volume_confirmed and trend_down
+        enter_long = breakout_up and volume_confirmed and vol_filter
+        enter_short = breakout_down and volume_confirmed and vol_filter
         
-        # Exit conditions: price returns to Camarilla R3/S3 levels (profit taking)
-        exit_long = position == 1 and close[i] < camarilla_r3_aligned[i]
-        exit_short = position == -1 and close[i] > camarilla_s3_aligned[i]
+        # Exit conditions: price returns to 1d Camarilla middle
+        exit_long = position == 1 and close_1d[i] <= camarilla_mid_aligned[i]
+        exit_short = position == -1 and close_1d[i] >= camarilla_mid_aligned[i]
         
         # Execute signals
         if enter_long and position != 1:
@@ -118,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_camarilla_breakout_volume_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_volume_atr_v1"
+timeframe = "12h"
 leverage = 1.0
