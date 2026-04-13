@@ -1,31 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Range_Breakout
-Hypothesis: Trade breakouts from 1d Camarilla pivot levels (H4/L4) on 4h timeframe with volume confirmation.
-Uses 1d Camarilla levels as strong support/resistance that institutions respect. Works in bull (breakouts above H4)
-and bear (breakdowns below L4) markets. Volume filter ensures institutional participation. Target: 25-35 trades/year.
+1d_1w_Momentum_Reversal
+Hypothesis: Capture reversals at weekly extremes using 1d RSI and volume confirmation.
+In bull markets, buy dips when weekly trend is up but daily RSI is oversold.
+In bear markets, sell rallies when weekly trend is down but daily RSI is overbought.
+Weekly trend filter avoids counter-trend trades. Target: 15-25 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels."""
-    range_val = high - low
-    range_val = np.where(range_val == 0, 1e-10, range_val)
-    C = close
-    H = high
-    L = low
-    R1 = C + ((H - L) * 1.0833)
-    R2 = C + ((H - L) * 1.1666)
-    R3 = C + ((H - L) * 1.2500)
-    R4 = C + ((H - L) * 1.5000)
-    S1 = C - ((H - L) * 1.0833)
-    S2 = C - ((H - L) * 1.1666)
-    S3 = C - ((H - L) * 1.2500)
-    S4 = C - ((H - L) * 1.5000)
-    return R1, R2, R3, R4, S1, S2, S3, S4
 
 def generate_signals(prices):
     n = len(prices)
@@ -37,25 +21,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly EMA for trend (50-period)
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate 1d Camarilla levels
-    R1_1d, R2_1d, R3_1d, R4_1d, S1_1d, S2_1d, S3_1d, S4_1d = calculate_camarilla(high_1d, low_1d, close_1d)
+    # Daily RSI for entry signal (14-period)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    # Align all data to 4h timeframe
-    R4_1d_aligned = align_htf_to_ltf(prices, df_1d, R4_1d)
-    S4_1d_aligned = align_htf_to_ltf(prices, df_1d, S4_1d)
-    
-    # Volume confirmation: current volume > 1.8x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-day average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 1.8)
+    volume_expansion = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -63,16 +51,16 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(R4_1d_aligned[i]) or np.isnan(S4_1d_aligned[i]) or 
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(rsi[i]) or 
             np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Long: breakout above R4 with volume expansion
-        long_condition = (close[i] > R4_1d_aligned[i]) and volume_expansion[i]
+        # Long: weekly uptrend + daily oversold + volume
+        long_condition = (close[i] > ema_50_1w_aligned[i]) and (rsi[i] < 30) and volume_expansion[i]
         
-        # Short: breakdown below S4 with volume expansion
-        short_condition = (close[i] < S4_1d_aligned[i]) and volume_expansion[i]
+        # Short: weekly downtrend + daily overbought + volume
+        short_condition = (close[i] < ema_50_1w_aligned[i]) and (rsi[i] > 70) and volume_expansion[i]
         
         if long_condition and position != 1:
             position = 1
@@ -86,6 +74,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_Range_Breakout"
-timeframe = "4h"
+name = "1d_1w_Momentum_Reversal"
+timeframe = "1d"
 leverage = 1.0
