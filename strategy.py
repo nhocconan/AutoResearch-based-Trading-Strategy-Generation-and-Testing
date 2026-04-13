@@ -3,106 +3,113 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band squeeze + 1d VWAP mean reversion
-# In low volatility regimes (BB width < 20th percentile), price tends to revert to mean.
-# Use 1d VWAP as dynamic mean: long when price < VWAP, short when price > VWAP.
-# Exit when BB width expands above 50th percentile (volatility expansion) or price crosses VWAP.
-# Works in both bull and bear markets as it captures mean reversion during low volatility periods.
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
+# Hypothesis: 12h 14-period RSI with 1d trend filter and volume confirmation.
+# RSI identifies overbought/oversold conditions for mean reversion.
+# Combined with 1d EMA trend filter (only trade in direction of trend) and volume spikes,
+# it filters false signals in ranging markets.
+# Target: 12-37 trades per year (50-150 total over 4 years) for 12h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2) on 6h
-    bb_period = 20
-    bb_std = 2
-    sma = np.full(n, np.nan)
-    bb_upper = np.full(n, np.nan)
-    bb_lower = np.full(n, np.nan)
-    bb_width = np.full(n, np.nan)
-    
-    # Calculate SMA with proper min_periods
-    for i in range(bb_period - 1, n):
-        sma[i] = np.mean(close[i - bb_period + 1:i + 1])
-    
-    # Calculate BB bands
-    for i in range(bb_period - 1, n):
-        if not np.isnan(sma[i]):
-            std_dev = np.std(close[i - bb_period + 1:i + 1])
-            bb_upper[i] = sma[i] + bb_std * std_dev
-            bb_lower[i] = sma[i] - bb_std * std_dev
-            bb_width[i] = bb_upper[i] - bb_lower[i]
-    
-    # Percentile lookback for BB width (use 50 periods lookback)
-    bb_width_percentile = np.full(n, np.nan)
-    lookback = 50
-    for i in range(lookback, n):
-        if not np.isnan(bb_width[i]):
-            window = bb_width[i - lookback:i + 1]
-            valid_vals = window[~np.isnan(window)]
-            if len(valid_vals) > 0:
-                # Calculate percentile of current value
-                bb_width_percentile[i] = (np.sum(valid_vals <= bb_width[i]) / len(valid_vals)) * 100
-    
-    # 1-day VWAP
+    # 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate typical price and VWAP components
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    vwap_numerator = (typical_price * df_1d['volume']).cumsum()
-    vwap_denominator = df_1d['volume'].cumsum()
-    vwap = vwap_numerator / vwap_denominator
+    close_1d = df_1d['close'].values
+    # EMA(50) for 1d trend filter
+    ema50_1d = np.zeros(len(close_1d))
+    ema_multiplier = 2 / (50 + 1)
+    ema50_1d[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        ema50_1d[i] = (close_1d[i] - ema50_1d[i-1]) * ema_multiplier + ema50_1d[i-1]
     
-    # Align 1d VWAP to 6h timeframe
-    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap.values)
+    # Align 1d EMA to 12h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # RSI(14) on 12h timeframe
+    def calculate_rsi(data, period):
+        rsi = np.full(len(data), np.nan)
+        if len(data) < period:
+            return rsi
+        delta = np.diff(data)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.zeros(len(data))
+        avg_loss = np.zeros(len(data))
+        avg_gain[period] = np.mean(gain[:period])
+        avg_loss[period] = np.mean(loss[:period])
+        
+        for i in range(period+1, len(data)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+        
+        rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+    
+    rsi = calculate_rsi(close, 14)
+    
+    # Average volume (24-period = 12 hours) for volume confirmation
+    avg_volume = np.full(n, np.nan)
+    for i in range(24, n):
+        avg_volume[i] = np.mean(volume[i-24:i])
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(50, n):  # Start after lookback period
-        # Skip if required data not ready
-        if (np.isnan(bb_width_percentile[i]) or 
-            np.isnan(vwap_aligned[i]) or
-            np.isnan(sma[i])):
+    for i in range(24, n):
+        # Skip if any required data is not ready
+        if (np.isnan(rsi[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        bw_percentile = bb_width_percentile[i]
-        vwap_price = vwap_aligned[i]
+        vol = volume[i]
+        avg_vol = avg_volume[i]
+        ema_trend = ema50_1d_aligned[i]
+        rsi_val = rsi[i]
         
-        # Entry conditions: low volatility (squeeze) + price deviation from VWAP
+        # Volume confirmation: current volume > 2.0x average volume
+        volume_confirm = vol > 2.0 * avg_vol
+        
         if position == 0:
-            # Long: squeeze + price below VWAP
-            if bw_percentile < 20 and price < vwap_price:
+            # Long: Oversold (RSI < 30) + above 1d EMA50 + volume confirmation
+            if (rsi_val < 30 and
+                price > ema_trend and
+                volume_confirm):
                 position = 1
                 signals[i] = position_size
-            # Short: squeeze + price above VWAP
-            elif bw_percentile < 20 and price > vwap_price:
+            # Short: Overbought (RSI > 70) + below 1d EMA50 + volume confirmation
+            elif (rsi_val > 70 and
+                  price < ema_trend and
+                  volume_confirm):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: volatility expansion or price crosses above VWAP
-            if bw_percentile > 50 or price > vwap_price:
+            # Exit long: RSI returns to neutral (>= 50) or price breaks below 1d EMA
+            if (rsi_val >= 50 or
+                price < ema_trend):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: volatility expansion or price crosses below VWAP
-            if bw_percentile > 50 or price < vwap_price:
+            # Exit short: RSI returns to neutral (<= 50) or price breaks above 1d EMA
+            if (rsi_val <= 50 or
+                price > ema_trend):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -110,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_BB_Squeeze_VWAP_MeanReversion"
-timeframe = "6h"
+name = "12h_1d_RSI_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
