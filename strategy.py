@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,11 +23,11 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     vol_1d = df_1d['volume'].values
     
-    # Calculate 1d Donchian channels (20-period)
-    high_20_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate 10-period EMA on 1d (trend filter)
+    close_1d_series = pd.Series(close_1d)
+    ema_10_1d = close_1d_series.ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Calculate 1d RSI(14) for overbought/oversold
+    # Calculate RSI(14) on 1d
     delta = np.diff(close_1d, prepend=close_1d[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -36,47 +36,50 @@ def generate_signals(prices):
     rs = avg_gain / (avg_loss + 1e-10)
     rsi_14 = 100 - (100 / (1 + rs))
     
-    # Calculate 1d volume ratio (current vs 20-period average)
-    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = vol_1d / (vol_ma_20 + 1e-10)
+    # Calculate Bollinger Bands (20, 2) on 1d
+    sma_20 = close_1d_series.rolling(window=20, min_periods=20).mean().values
+    std_20 = close_1d_series.rolling(window=20, min_periods=20).std().values
+    bb_upper = sma_20 + 2 * std_20
+    bb_lower = sma_20 - 2 * std_20
     
-    # Align indicators to 12h timeframe
-    high_20_1d_aligned = align_htf_to_ltf(prices, df_1d, high_20_1d)
-    low_20_1d_aligned = align_htf_to_ltf(prices, df_1d, low_20_1d)
+    # Align indicators to 4h timeframe
+    ema_10_aligned = align_htf_to_ltf(prices, df_1d, ema_10_1d)
     rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
-    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.25
+    position_size = 0.30  # 30% position size
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if data not ready
-        if (np.isnan(high_20_1d_aligned[i]) or 
-            np.isnan(low_20_1d_aligned[i]) or
+        if (np.isnan(ema_10_aligned[i]) or 
             np.isnan(rsi_14_aligned[i]) or
-            np.isnan(vol_ratio_aligned[i])):
+            np.isnan(bb_upper_aligned[i]) or
+            np.isnan(bb_lower_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Price breaking above/below 1d Donchian channels
-        breakout_up = close[i] > high_20_1d_aligned[i]
-        breakout_down = close[i] < low_20_1d_aligned[i]
+        # Trend filter: price above/below EMA10
+        above_ema = close[i] > ema_10_aligned[i]
+        below_ema = close[i] < ema_10_aligned[i]
         
-        # Volume confirmation (volume > 1.5x average)
-        vol_confirm = vol_ratio_aligned[i] > 1.5
-        
-        # RSI filter to avoid extremes
+        # RSI conditions: not overbought/oversold
         rsi_not_overbought = rsi_14_aligned[i] < 70
         rsi_not_oversold = rsi_14_aligned[i] > 30
         
-        # Entry conditions
-        long_entry = breakout_up and vol_confirm and rsi_not_overbought
-        short_entry = breakout_down and vol_confirm and rsi_not_oversold
+        # Bollinger Band conditions: price near bands
+        near_upper_band = close[i] > bb_upper_aligned[i] * 0.98
+        near_lower_band = close[i] < bb_lower_aligned[i] * 1.02
         
-        # Exit conditions: opposite breakout
-        exit_long = position == 1 and breakout_down
-        exit_short = position == -1 and breakout_up
+        # Entry conditions
+        long_entry = above_ema and rsi_not_overbought and near_lower_band
+        short_entry = below_ema and rsi_not_oversold and near_upper_band
+        
+        # Exit conditions: opposite signal or RSI extreme
+        exit_long = position == 1 and (below_ema or rsi_14_aligned[i] > 75)
+        exit_short = position == -1 and (above_ema or rsi_14_aligned[i] < 25)
         
         # Execute signals
         if long_entry and position != 1:
@@ -99,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_donchian_breakout_volume"
-timeframe = "12h"
+name = "4h_1d_ema_rsi_bb"
+timeframe = "4h"
 leverage = 1.0
