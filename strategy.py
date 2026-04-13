@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d timeframe with 1w exponential moving average (EMA) trend filter and volume confirmation.
-# Long: Price crosses above 1w EMA(34) + volume > 1.5x average volume (30-period).
-# Short: Price crosses below 1w EMA(34) + volume > 1.5x average volume.
-# Uses 1w EMA for long-term trend direction, 1d for execution with volume confirmation.
-# Volume filter prevents whipsaws in choppy markets.
-# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe.
+# Hypothesis: 4h timeframe with 1d Donchian channel breakout and volume confirmation.
+# Long: Price breaks above 1d Donchian upper channel (20-period high) + volume > 1.3x 20-period average volume.
+# Short: Price breaks below 1d Donchian lower channel (20-period low) + volume > 1.3x 20-period average volume.
+# Exit: Price closes back inside the Donchian channel (between upper and lower bands).
+# Uses daily structure for major support/resistance, 4h for timely execution with volume filter.
+# Position size: 0.25 (25%) to balance risk and return. Target: 20-50 trades/year.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,67 +20,71 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1w data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # 1d data for Donchian channels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # Calculate EMA(34) on weekly close
-    ema_34_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 34:
-        ema_34_1w[33] = np.mean(close_1w[:34])  # SMA for first value
-        alpha = 2 / (34 + 1)
-        for i in range(34, len(close_1w)):
-            ema_34_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_34_1w[i-1]
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Average volume (30-period) for volume confirmation
+    # Calculate 1d Donchian channels (20-period)
+    donchian_high = np.full(len(close), np.nan)
+    donchian_low = np.full(len(close), np.nan)
+    for i in range(20, len(high_1d)):
+        donchian_high[i] = np.max(high_1d[i-20:i])
+        donchian_low[i] = np.min(low_1d[i-20:i])
+    
+    # Average volume (20-period) for volume confirmation
     avg_volume = np.full(n, np.nan)
-    for i in range(30, n):
-        avg_volume[i] = np.mean(volume[i-30:i])
+    for i in range(20, n):
+        avg_volume[i] = np.mean(volume[i-20:i])
     
-    # Align 1w EMA to 1d
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Align 1d Donchian channels to 4h
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if any required data is not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        ema_34 = ema_34_1w_aligned[i]
+        upper = donchian_high_aligned[i]
+        lower = donchian_low_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirm = vol > 1.5 * avg_vol
+        # Volume confirmation: current volume > 1.3x average volume
+        volume_confirm = vol > 1.3 * avg_vol
         
         if position == 0:
-            # Long: price crosses above EMA + volume confirmation
-            if (price > ema_34 and volume_confirm):
+            # Long: price breaks above upper Donchian band + volume confirmation
+            if (price > upper and volume_confirm):
                 position = 1
                 signals[i] = position_size
-            # Short: price crosses below EMA + volume confirmation
-            elif (price < ema_34 and volume_confirm):
+            # Short: price breaks below lower Donchian band + volume confirmation
+            elif (price < lower and volume_confirm):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below EMA
-            if price < ema_34:
+            # Exit long: price closes back inside the channel (below upper band)
+            if price < upper:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes above EMA
-            if price > ema_34:
+            # Exit short: price closes back inside the channel (above lower band)
+            if price > lower:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -88,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_EMA34_Volume_Filter"
-timeframe = "1d"
+name = "4h_1d_Donchian_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
