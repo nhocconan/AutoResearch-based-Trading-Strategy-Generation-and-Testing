@@ -5,13 +5,18 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # 12h data for ATR and price action
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
     
     # Daily data for pivot levels and volume
     df_1d = get_htf_data(prices, '1d')
@@ -28,89 +33,83 @@ def generate_signals(prices):
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     
-    # Pivot levels
+    # Camarilla levels
     pivot = (prev_high + prev_low + prev_close) / 3
     range_hl = prev_high - prev_low
     
     # Resistance levels
-    r1 = pivot + (range_hl * 1.1 / 12)
-    r2 = pivot + (range_hl * 1.1 / 6)
     r3 = pivot + (range_hl * 1.1 / 4)
     r4 = pivot + (range_hl * 1.1 / 2)
     
     # Support levels
-    s1 = pivot - (range_hl * 1.1 / 12)
-    s2 = pivot - (range_hl * 1.1 / 6)
     s3 = pivot - (range_hl * 1.1 / 4)
     s4 = pivot - (range_hl * 1.1 / 2)
+    
+    # 12h ATR for volatility filter
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Weekly EMA for trend filter
     ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean()
     
-    # Align all data to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    # Align all data to 6h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w.values)
-    
-    # Daily volume and its 20-period average
-    volume_1d = df_1d['volume'].values
-    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean()
-    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d.values)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or
-            np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(s2_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(s4_aligned[i]) or np.isnan(atr_12h_aligned[i]) or np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current 12h volume > 1.8x 20-period average (stricter)
-        volume_12h_approx = volume[i]  # Current 12h bar volume
-        volume_ma_20_12h = volume_ma_20_1d_aligned[i] / 2  # Approximate 20-period average for 12h
-        volume_condition = volume_12h_approx > (volume_ma_20_12h * 1.8)
+        # Volatility filter: only trade when ATR is above its 50-period average (avoid low volatility)
+        atr_ma_50 = pd.Series(atr_12h_aligned).rolling(window=50, min_periods=50).mean()[i]
+        vol_filter = atr_12h_aligned[i] > atr_ma_50
         
         # Trend filter: only long when price > weekly EMA50, short when price < weekly EMA50
         long_trend = close[i] > ema_50_1w_aligned[i]
         short_trend = close[i] < ema_50_1w_aligned[i]
         
-        # Entry conditions: price near Camarilla levels with volume and trend confirmation
-        # Long when price touches or crosses above S1/S2 with volume and uptrend
-        # Short when price touches or crosses below R1/R2 with volume and downtrend
-        near_support = (close[i] <= s1_aligned[i] * 1.002) or (close[i] <= s2_aligned[i] * 1.002)
-        near_resistance = (close[i] >= r1_aligned[i] * 0.998) or (close[i] >= r2_aligned[i] * 0.998)
+        # Entry conditions: breakout of S3/R3 with volume and trend confirmation
+        # Long when price breaks above S3 with volatility and uptrend
+        # Short when price breaks below R3 with volatility and downtrend
+        long_breakout = close[i] > s3_aligned[i] and close[i-1] <= s3_aligned[i-1]
+        short_breakout = close[i] < r3_aligned[i] and close[i-1] >= r3_aligned[i-1]
         
         if position == 0:
-            if near_support and volume_condition and long_trend:
+            if long_breakout and vol_filter and long_trend:
                 position = 1
                 signals[i] = position_size
-            elif near_resistance and volume_condition and short_trend:
+            elif short_breakout and vol_filter and short_trend:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit when price reaches pivot or shows reversal signs
-            if close[i] >= pivot_aligned[i] * 0.998:
+            # Exit when price reaches S4 (strong support) or shows reversal
+            if close[i] <= s4_aligned[i] or close[i] < ema_50_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit when price reaches pivot or shows reversal signs
-            if close[i] <= pivot_aligned[i] * 1.002:
+            # Exit when price reaches R4 (strong resistance) or shows reversal
+            if close[i] >= r4_aligned[i] or close[i] > ema_50_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -118,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d1w_Camarilla_Pivot_Breakout_With_Volume_Confirmation_v4"
-timeframe = "12h"
+name = "6h_12h_1d1w_Camarilla_Breakout_ATR_Volume_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
