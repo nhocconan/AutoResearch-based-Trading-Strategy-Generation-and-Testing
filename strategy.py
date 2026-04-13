@@ -48,7 +48,7 @@ def generate_signals(prices):
     # Weekly EMA for trend filter
     ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean()
     
-    # Align all data to 1d timeframe
+    # Align all data to 12h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
@@ -78,8 +78,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current daily volume > 1.5x 20-period average
-        volume_condition = volume[i] > (volume_ma_20_1d_aligned[i] * 1.5)
+        # Volume condition: current 12h volume > 1.5x 20-period average
+        # Approximate 12h volume from daily volume (assuming 2x 12h periods per day)
+        volume_12h_approx = volume[i]  # Current 12h bar volume
+        volume_ma_20_12h = volume_ma_20_1d_aligned[i] / 2  # Approximate 20-period average for 12h
+        volume_condition = volume_12h_approx > (volume_ma_20_12h * 1.5)
         
         # Trend filter: only long when price > weekly EMA50, short when price < weekly EMA50
         long_trend = close[i] > ema_50_1w_aligned[i]
@@ -117,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_Camarilla_Pivot_Breakout_With_Volume_Confirmation_v5"
-timeframe = "1d"
+name = "12h_1d1w_Camarilla_Pivot_Breakout_With_Volume_Confirmation_v3"
+timeframe = "12h"
 leverage = 1.0
