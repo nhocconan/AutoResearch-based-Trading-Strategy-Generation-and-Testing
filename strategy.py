@@ -11,7 +11,7 @@ def generate_signals(prices):
     # Hypothesis: 4h Donchian(20) breakout with 1d ADX regime filter and volume confirmation
     # Long: price breaks above Donchian upper AND ADX(14) > 25 (trending) AND volume > 1.5x avg
     # Short: price breaks below Donchian lower AND ADX(14) > 25 (trending) AND volume > 1.5x avg
-    # Exit: opposite Donchian breakout OR ATR-based stoploss (signal -> 0)
+    # Exit: price touches opposite Donchian level OR ATR-based trailing stop (via signal=0 on close)
     # Using 4h timeframe for optimal trade frequency (target 19-50/year), Donchian for structure,
     # ADX to filter ranging markets, and volume confirmation to avoid false breakouts.
     # Discrete position sizing (0.25) to minimize fee churn.
@@ -76,11 +76,11 @@ def generate_signals(prices):
     
     # Calculate 4h Donchian channels (20-period)
     lookback = 20
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    for i in range(lookback, n):
-        upper[i] = np.max(high[i-lookback:i])
-        lower[i] = np.min(low[i-lookback:i])
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    for i in range(lookback-1, n):
+        highest_high[i] = np.max(high[i-lookback+1:i+1])
+        lowest_low[i] = np.min(low[i-lookback+1:i+1])
     
     # Get 4h volume for confirmation (>1.5x 20-period average)
     vol_ma = np.full(n, np.nan)
@@ -93,7 +93,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
             np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
@@ -102,12 +102,12 @@ def generate_signals(prices):
         trending_market = adx_1d_aligned[i] > 25
         
         # Donchian breakout conditions
-        breakout_upper = close[i] > upper[i]
-        breakout_lower = close[i] < lower[i]
+        breakout_upper = close[i] > highest_high[i]
+        breakout_lower = close[i] < lowest_low[i]
         
-        # Exit: opposite Donchian breakout
-        exit_long = breakout_lower
-        exit_short = breakout_upper
+        # Exit conditions: touch opposite Donchian level
+        exit_long = close[i] < lowest_low[i]
+        exit_short = close[i] > highest_high[i]
         
         # Entry logic: Donchian breakout + trending market + volume confirmation
         long_entry = breakout_upper and trending_market and volume_spike[i]
