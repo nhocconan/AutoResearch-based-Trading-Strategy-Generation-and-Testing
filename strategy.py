@@ -62,7 +62,7 @@ def generate_signals(prices):
         elif position == 1:
             # Exit long: price closes below lower band OR below EMA200 OR stop-loss hit
             if (price < lower[i] or price < ema_200_1d[i] or 
-                price < entry_price_long - 2.0 * atr[i]):
+                price < (entry_price := entry_price_long) - 2.0 * atr[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -70,7 +70,7 @@ def generate_signals(prices):
         elif position == -1:
             # Exit short: price closes above upper band OR above EMA200 OR stop-loss hit
             if (price > upper[i] or price > ema_200_1d[i] or 
-                price > entry_price_short + 2.0 * atr[i]):
+                price > (entry_price := entry_price_short) + 2.0 * atr[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -85,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian_Volume_EMA200Trend_ATR"
-timeframe = "1d"
+name = "12h_1d_Donchian_Volume_EMA200Trend_ATR"
+timeframe = "12h"
 leverage = 1.0
