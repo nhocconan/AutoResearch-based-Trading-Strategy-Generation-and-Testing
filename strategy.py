@@ -5,48 +5,37 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1d Donchian(20) breakout with 1w weekly pivot alignment
-    # Weekly pivot from previous 5 trading days provides institutional bias
-    # Volume > 1.5x 20-period average confirms breakout validity
-    # Target: 30-100 total trades over 4 years (7-25/year) for low fee drag
-    # Works in both bull and bear via directional pivot bias and breakout confirmation
+    # Hypothesis: 6h Donchian(20) breakout with 12h trend filter (EMA50) and volume confirmation
+    # Uses 12h EMA50 for trend direction (HTF) to avoid counter-trend trades
+    # Donchian breakout on 6h for entry timing
+    # Volume > 1.3x 20-period average confirms breakout strength
+    # Target: 12-30 trades/year (50-120 total over 4 years) for low fee drag
+    # Works in bull via long bias, in bear via short bias from 12h EMA50 filter
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for weekly pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate previous week's pivot (using previous 5 trading days ~ 1 week)
-    # Weekly high/low/close from 5d ago to 1d ago
-    weekly_high = np.full(len(high_1d), np.nan)
-    weekly_low = np.full(len(low_1d), np.nan)
-    weekly_close = np.full(len(close_1d), np.nan)
+    # Calculate 12h EMA50
+    ema_12h = np.full(len(close_12h), np.nan)
+    if len(close_12h) >= 50:
+        ema_12h[49] = np.mean(close_12h[:50])  # SMA50 as seed
+        multiplier = 2 / (50 + 1)
+        for i in range(50, len(close_12h)):
+            ema_12h[i] = (close_12h[i] * multiplier) + (ema_12h[i-1] * (1 - multiplier))
     
-    for i in range(5, len(high_1d)):
-        weekly_high[i] = np.max(high_1d[i-5:i])   # Previous 5 days high
-        weekly_low[i] = np.min(low_1d[i-5:i])     # Previous 5 days low
-        weekly_close[i] = close_1d[i-1]           # Previous day close
-    
-    # Weekly pivot points (standard calculation)
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    weekly_s1 = 2 * weekly_pivot - weekly_high
-    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
-    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
-    
-    # Get 1d Donchian(20) for breakout
+    # Get 6h Donchian(20) for breakout
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     
@@ -54,26 +43,21 @@ def generate_signals(prices):
         donchian_high[i] = np.max(high[i-20:i])
         donchian_low[i] = np.min(low[i-20:i])
     
-    # Get 1d volume for confirmation (>1.5x 20-period average)
+    # Get 6h volume for confirmation (>1.3x 20-period average)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (1.3 * vol_ma)
     
-    # Align all indicators to LTF (1d)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, weekly_r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, weekly_s2)
+    # Align 12h EMA50 to 6h
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(donchian_high[i]) or 
+        if (np.isnan(ema_12h_aligned[i]) or np.isnan(donchian_high[i]) or 
             np.isnan(donchian_low[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
@@ -82,21 +66,17 @@ def generate_signals(prices):
         long_breakout = close[i] > donchian_high[i]
         short_breakout = close[i] < donchian_low[i]
         
-        # Weekly pivot bias
-        bullish_bias = close[i] > pivot_aligned[i]
-        bearish_bias = close[i] < pivot_aligned[i]
+        # Trend filter from 12h EMA50
+        bullish_trend = close[i] > ema_12h_aligned[i]
+        bearish_trend = close[i] < ema_12h_aligned[i]
         
-        # Strong bullish/bearish conditions (beyond R1/S1)
-        strong_bullish = close[i] > r1_aligned[i]
-        strong_bearish = close[i] < s1_aligned[i]
+        # Entry logic: Breakout + trend alignment + volume confirmation
+        long_entry = long_breakout and bullish_trend and volume_spike[i]
+        short_entry = short_breakout and bearish_trend and volume_spike[i]
         
-        # Entry logic: Breakout + pivot alignment + volume confirmation
-        long_entry = long_breakout and bullish_bias and strong_bullish and volume_spike[i]
-        short_entry = short_breakout and bearish_bias and strong_bearish and volume_spike[i]
-        
-        # Exit logic: price returns to weekly pivot or opposite breakout
-        long_exit = close[i] <= pivot_aligned[i] or short_breakout
-        short_exit = close[i] >= pivot_aligned[i] or long_breakout
+        # Exit logic: opposite breakout or trend reversal
+        long_exit = short_breakout or (close[i] < ema_12h_aligned[i])
+        short_exit = long_breakout or (close[i] > ema_12h_aligned[i])
         
         if long_entry and position != 1:
             position = 1
@@ -121,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_donchian_breakout_weekly_pivot_volume_v1"
-timeframe = "1d"
+name = "6h_12h_donchian_breakout_ema50_volume_v1"
+timeframe = "6h"
 leverage = 1.0
