@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1-day price action with 1-week trend filter for mean reversion.
-Uses 1-day RSI extremes (overbought/oversold) confirmed by 1-day volume spike
-and 1-week ADX < 20 (very weak trend) to enter mean-reversion trades.
-Targets 30-80 total trades over 4 years (7-20/year) to minimize fee drag.
-Works in both bull and bear markets by fading extremes in ranging conditions.
+Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1-day EMA200 filter and volume confirmation.
+Uses Elder Ray to measure bull/bear power relative to EMA13, enters long when bull power > 0 and price > EMA200(1d),
+short when bear power < 0 and price < EMA200(1d). Volume confirmation filters low-momentum entries.
+Trades only in alignment with higher timeframe trend (1-day EMA200) to avoid counter-trend whipsaws.
+Targets 60-120 total trades over 4 years (15-30/year) with controlled risk via trend alignment.
 """
 
 import numpy as np
@@ -21,71 +21,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for RSI and volume
+    # Calculate EMA13 for Elder Ray (6-period EMA equivalent for 6h? Actually use 13)
+    close_s = pd.Series(close)
+    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).values
+    
+    # Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema13
+    bear_power = low - ema13
+    
+    # Get 1d data for EMA200 trend filter and volume
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1-day RSI (14-period)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate 1-day EMA200 for trend filter
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).values
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Calculate 1-day volume spike (volume > 1.8x 20-period average)
+    # Calculate 1-day volume spike (volume > 1.5x 20-period average)
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_1d > (vol_ma_20 * 1.8)
+    vol_spike = volume_1d > (vol_ma_20 * 1.5)
     
-    # Get 1w data for ADX trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate 1-week ADX (14-period)
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr0 = np.max([high_1w[0] - low_1w[0], np.abs(high_1w[0] - close_1w[0]), np.abs(low_1w[0] - close_1w[0])])
-    tr = np.concatenate([[tr0], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
-                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
-                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
-    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
-    
-    di_plus = 100 * dm_plus_14 / (tr_14 + 1e-10)
-    di_minus = 100 * dm_minus_14 / (tr_14 + 1e-10)
-    
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # ADX < 20 = very weak trend (ideal for mean reversion)
-    low_trend = adx < 20
-    
-    # Align HTF data to 1d timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Align 1d indicators to 6h timeframe
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    low_trend_aligned = align_htf_to_ltf(prices, df_1w, low_trend.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -93,24 +54,22 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(rsi_aligned[i]) or 
-            np.isnan(vol_spike_aligned[i]) or 
-            np.isnan(low_trend_aligned[i])):
+        if (np.isnan(ema200_1d_aligned[i]) or 
+            np.isnan(vol_spike_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: RSI extreme + volume spike + very weak trend
-        rsi_oversold = rsi_aligned[i] < 25
-        rsi_overbought = rsi_aligned[i] > 75
-        vol_confirm = vol_spike_aligned[i] > 0.5
-        trend_filter = low_trend_aligned[i] > 0.5
+        # Entry conditions: Elder Ray power aligned with 1d trend + volume
+        bullish = bull_power[i] > 0 and close[i] > ema200_1d_aligned[i]
+        bearish = bear_power[i] < 0 and close[i] < ema200_1d_aligned[i]
+        vol_confirm = vol_spike_aligned[i] > 0.5  # True if volume spike
         
-        long_entry = rsi_oversold and vol_confirm and trend_filter
-        short_entry = rsi_overbought and vol_confirm and trend_filter
+        long_entry = bullish and vol_confirm
+        short_entry = bearish and vol_confirm
         
-        # Exit when RSI returns to neutral zone (40-60)
-        exit_long = position == 1 and rsi_aligned[i] > 40
-        exit_short = position == -1 and rsi_aligned[i] < 60
+        # Exit when Elder Ray power reverses
+        exit_long = position == 1 and bull_power[i] <= 0
+        exit_short = position == -1 and bear_power[i] >= 0
         
         # Execute signals
         if long_entry and position != 1:
@@ -133,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_rsi_extreme_mean_reversion"
-timeframe = "1d"
+name = "6h_1d_elder_ray_power_volume"
+timeframe = "6h"
 leverage = 1.0
