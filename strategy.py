@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h breakout strategy using 4h Donchian channels (20-period) and 1d volume confirmation.
-# Breakouts from price channels capture momentum in trending markets while avoiding ranging whipsaws.
-# Volume filter ensures breakouts have institutional participation.
-# Uses 4h for signal direction (trend/channel) and 1h for precise entry timing.
-# Session filter (08-20 UTC) reduces noise during low-volume hours.
-# Position size fixed at 0.20 to control drawdown and enable multiple positions.
-# Target: 60-150 total trades over 4 years (15-37/year) to stay within profitable range for 1h timeframe.
+# Hypothesis: 12h Williams Alligator with volume confirmation and momentum filter.
+# The Alligator (Jaw/Teeth/Lips) identifies trends when lines are aligned and separated.
+# In trending markets (JAW < TEETH < LIPS for uptrend, reverse for downtrend),
+# we enter with volume confirmation and exit when lines re-intertwine.
+# Uses 12h primary timeframe with 1-day trend filter for higher reliability.
+# Target: 50-150 total trades over 4 years (12-37/year) to stay within profitable range.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,98 +20,128 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian channels (primary signal direction)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    # Get 1d data for volume confirmation (trend strength filter)
+    # 1-day data for multi-timeframe analysis
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 4h Donchian channels (20-period high/low)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Calculate Williams Alligator on 12h data
+    # Jaw: 13-period SMMA, shifted 8 bars forward
+    # Teeth: 8-period SMMA, shifted 5 bars forward  
+    # Lips: 5-period SMMA, shifted 3 bars forward
+    def smma(arr, period):
+        """Smoothed Moving Average"""
+        result = np.full_like(arr, np.nan, dtype=np.float64)
+        if len(arr) < period:
+            return result
+        # First value is simple SMA
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (PREV_SMMA * (N-1) + CURRENT) / N
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Upper band: highest high over last 20 periods
-    upper_4h = np.full(len(high_4h), np.nan)
-    # Lower band: lowest low over last 20 periods
-    lower_4h = np.full(len(low_4h), np.nan)
+    jaw = smma(close, 13)
+    teeth = smma(close, 8)
+    lips = smma(close, 5)
     
-    for i in range(20, len(high_4h)):
-        upper_4h[i] = np.max(high_4h[i-20:i+1])
-        lower_4h[i] = np.min(low_4h[i-20:i+1])
+    # Apply shifts (Jaw +8, Teeth +5, Lips +3)
+    jaw_shifted = np.full_like(jaw, np.nan)
+    teeth_shifted = np.full_like(teeth, np.nan)
+    lips_shifted = np.full_like(lips, np.nan)
     
-    # Calculate 1d average volume (20-period) for volume filter
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = np.full(len(vol_1d), np.nan)
-    for i in range(20, len(vol_1d)):
-        vol_ma_1d[i] = np.mean(vol_1d[i-20:i+1])
+    if len(jaw) > 8:
+        jaw_shifted[8:] = jaw[:-8]
+    if len(teeth) > 5:
+        teeth_shifted[5:] = teeth[:-5]
+    if len(lips) > 3:
+        lips_shifted[3:] = lips[:-3]
     
-    # Current 1d volume (most recent)
-    vol_current_1d = np.full(len(vol_1d), np.nan)
-    for i in range(len(vol_1d)):
-        vol_current_1d[i] = vol_1d[i]
+    # Calculate average true range for volatility filter
+    def atr(high, low, close, period=14):
+        tr = np.zeros_like(high)
+        tr[0] = high[0] - low[0]
+        for i in range(1, len(high)):
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Smoothed ATR
+        atr_result = np.zeros_like(tr)
+        if len(tr) >= period:
+            atr_result[period-1] = np.mean(tr[:period])
+            for i in range(period, len(tr)):
+                atr_result[i] = (atr_result[i-1] * (period-1) + tr[i]) / period
+        return atr_result
     
-    # Align 4h Donchian levels to 1h timeframe
-    upper_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_4h)
-    lower_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_4h)
+    atr_values = atr(high, low, close, 14)
     
-    # Align 1d volume data to 1h timeframe
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    vol_current_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_current_1d)
+    # Volume moving average for confirmation
+    def sma(arr, period):
+        result = np.full_like(arr, np.nan, dtype=np.float64)
+        if len(arr) < period:
+            return result
+        for i in range(period-1, len(arr)):
+            result[i] = np.mean(arr[i-period+1:i+1])
+        return result
     
-    # Pre-calculate session hours (08-20 UTC) for filtering
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    volume_ma = sma(volume, 20)
+    
+    # Align all indicators to main timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_shifted)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_shifted)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_shifted)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_values)
+    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.20  # Fixed 20% position size
+    position_size = 0.25  # 25% position size
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if any required data is not ready
-        if (np.isnan(upper_4h_aligned[i]) or np.isnan(lower_4h_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(vol_current_1d_aligned[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(atr_aligned[i]) or 
+            np.isnan(volume_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: only trade during active hours (08-20 UTC)
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
+        atr_val = atr_aligned[i]
+        vol_val = volume[i]
+        vol_ma_val = volume_ma_aligned[i]
         
-        price = close[i]
-        upper = upper_4h_aligned[i]
-        lower = lower_4h_aligned[i]
-        vol_ma = vol_ma_1d_aligned[i]
-        vol_current = vol_current_1d_aligned[i]
+        # Alligator alignment conditions
+        bullish_alignment = (jaw_val < teeth_val) and (teeth_val < lips_val)
+        bearish_alignment = (jaw_val > teeth_val) and (teeth_val > lips_val)
         
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_filter = vol_current > 1.5 * vol_ma
+        # Volume confirmation (volume above average)
+        volume_confirmed = vol_val > vol_ma_val
+        
+        # Volatility filter (avoid extremely low volatility periods)
+        vol_filter = atr_val > 0
         
         if position == 0:
-            # Long breakout: price closes above upper Donchian band with volume confirmation
-            if price > upper and volume_filter:
+            # Long: bullish alignment + volume confirmation
+            if bullish_alignment and volume_confirmed and vol_filter:
                 position = 1
                 signals[i] = position_size
-            # Short breakdown: price closes below lower Donchian band with volume confirmation
-            elif price < lower and volume_filter:
+            # Short: bearish alignment + volume confirmation
+            elif bearish_alignment and volume_confirmed and vol_filter:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below lower Donchian band (reversal signal)
-            if price < lower:
+            # Exit long: alignment breaks or volume dries up
+            if not bullish_alignment or not volume_confirmed:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes above upper Donchian band (reversal signal)
-            if price > upper:
+            # Exit short: alignment breaks or volume dries up
+            if not bearish_alignment or not volume_confirmed:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -120,6 +149,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4h_1d_Donchian_Volume_Breakout"
-timeframe = "1h"
+name = "12h_1d_Alligator_Volume_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
