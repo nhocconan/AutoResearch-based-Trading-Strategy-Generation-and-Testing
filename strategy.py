@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for calculations
+    # Get daily data for calculations
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -23,64 +23,73 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     vol_1d = df_1d['volume'].values
     
-    # Calculate 20-period EMA on 1d (trend filter)
-    close_1d_series = pd.Series(close_1d)
-    ema_20_1d = close_1d_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate daily pivot points (PP, R1, S1, R2, S2)
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
+    r2 = pivot + (high_1d - low_1d)
+    s2 = pivot - (high_1d - low_1d)
     
-    # Calculate RSI(14) on 1d
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14 = 100 - (100 / (1 + rs))
+    # Align pivot levels to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
-    # Get 1w data for trend confirmation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    # Calculate 10-period EMA on 4h close (trend filter)
+    close_series = pd.Series(close)
+    ema_10 = close_series.ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    close_1w = df_1w['close'].values
-    # Calculate 20-period SMA on 1w
-    sma_20_1w = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
-    
-    # Align indicators to 6h timeframe
-    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
-    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
-    sma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_20_1w)
+    # Calculate volume ratio (current volume / 20-period average)
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / (vol_ma + 1e-10)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema_20_aligned[i]) or 
-            np.isnan(rsi_14_aligned[i]) or
-            np.isnan(sma_20_1w_aligned[i])):
+        if (np.isnan(pivot_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or
+            np.isnan(s2_aligned[i]) or
+            np.isnan(ema_10[i]) or
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below EMA20
-        above_ema = close[i] > ema_20_aligned[i]
-        below_ema = close[i] < ema_20_aligned[i]
+        # Trend filter: price above/below EMA10
+        above_ema = close[i] > ema_10[i]
+        below_ema = close[i] < ema_10[i]
         
-        # RSI conditions: avoid extreme levels
-        rsi_not_overbought = rsi_14_aligned[i] < 80
-        rsi_not_oversold = rsi_14_aligned[i] > 20
+        # Volume filter: require above average volume
+        vol_filter = vol_ratio[i] > 1.2
         
-        # Weekly trend filter: price above/below weekly SMA20
-        above_weekly_sma = close[i] > sma_20_1w_aligned[i]
-        below_weekly_sma = close[i] < sma_20_1w_aligned[i]
+        # Pivot levels
+        pp = pivot_aligned[i]
+        r1_level = r1_aligned[i]
+        s1_level = s1_aligned[i]
+        r2_level = r2_aligned[i]
+        s2_level = s2_aligned[i]
         
-        # Entry conditions
-        long_entry = above_ema and rsi_not_overbought and above_weekly_sma
-        short_entry = below_ema and rsi_not_oversold and below_weekly_sma
+        # Entry conditions: price near pivot levels with trend and volume
+        # Long: price near support (S1 or S2) in uptrend
+        near_s1 = abs(close[i] - s1_level) / s1_level < 0.005  # within 0.5%
+        near_s2 = abs(close[i] - s2_level) / s2_level < 0.005  # within 0.5%
+        long_entry = vol_filter and above_ema and (near_s1 or near_s2)
         
-        # Exit conditions: opposite signal or RSI extreme
-        exit_long = position == 1 and (below_ema or rsi_14_aligned[i] > 85)
-        exit_short = position == -1 and (above_ema or rsi_14_aligned[i] < 15)
+        # Short: price near resistance (R1 or R2) in downtrend
+        near_r1 = abs(close[i] - r1_level) / r1_level < 0.005  # within 0.5%
+        near_r2 = abs(close[i] - r2_level) / r2_level < 0.005  # within 0.5%
+        short_entry = vol_filter and below_ema and (near_r1 or near_r2)
+        
+        # Exit conditions: opposite signal
+        exit_long = position == 1 and below_ema
+        exit_short = position == -1 and above_ema
         
         # Execute signals
         if long_entry and position != 1:
@@ -103,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ema20_rsi14_weekly_sma20_filter"
-timeframe = "6h"
+name = "4h_1d_pivot_ema_volume_filter"
+timeframe = "4h"
 leverage = 1.0
