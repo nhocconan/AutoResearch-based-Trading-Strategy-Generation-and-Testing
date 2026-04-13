@@ -8,7 +8,7 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian channel breakout with 12h EMA trend filter and volume confirmation.
+    # Hypothesis: 4h Donchian breakout with 12h EMA trend filter and volume confirmation.
     # Works in bull markets (breakouts up) and bear markets (breakouts down) by following the 12h trend.
     # Uses discrete position size 0.25 to minimize fee churn. Target: 75-200 total trades over 4 years.
     
