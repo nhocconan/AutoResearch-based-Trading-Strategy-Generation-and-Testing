@@ -46,7 +46,7 @@ def generate_signals(prices):
     # Weekly EMA for trend filter
     ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean()
     
-    # Align all data to 4h timeframe
+    # Align all data to 1d timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
@@ -65,7 +65,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.25  # 25% position size
+    position_size = 0.20  # Reduced to 20% to lower drawdown
     
     for i in range(50, n):
         # Skip if any required data is not ready
@@ -76,11 +76,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current 4h volume > 1.5x 20-period average
-        # Approximate 4h volume from daily volume (assuming 6x 4h periods per day)
-        volume_4h_approx = volume[i]  # Current 4h bar volume
-        volume_ma_20_4h = volume_ma_20_1d_aligned[i] / 6  # Approximate 20-period average for 4h
-        volume_condition = volume_4h_approx > (volume_ma_20_4h * 1.5)
+        # Volume condition: current day volume > 1.5x 20-period average
+        volume_condition = volume[i] > (volume_ma_20_1d_aligned[i] * 1.5)
         
         # Trend filter: only long when price > weekly EMA50, short when price < weekly EMA50
         long_trend = close[i] > ema_50_1w_aligned[i]
@@ -118,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d1w_Camarilla_Pivot_Breakout_With_Volume_Confirmation_v1"
-timeframe = "4h"
+name = "1d_camarilla_pivot_breakout_volume_trend_v1"
+timeframe = "1d"
 leverage = 1.0
