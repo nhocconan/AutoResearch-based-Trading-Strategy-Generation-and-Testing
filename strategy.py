@@ -5,98 +5,83 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian(15) breakout with 1d ATR-based volatility filter and 1w EMA trend filter.
-    # Donchian breakouts capture momentum. ATR filter ensures breakouts occur during sufficient volatility.
-    # 1w EMA (50) provides multi-week trend bias: only long when price > weekly EMA, short when price < weekly EMA.
-    # This avoids counter-trend breakouts in strong trends. Target: 50-150 total trades over 4 years.
-    # Works in bull markets (long breakouts with bullish weekly trend) and bear markets (short breakouts with bearish weekly trend).
+    # Hypothesis: 4h Donchian(20) breakout with 12h HMA(21) trend filter and volume confirmation.
+    # Uses Donchian breakouts for entry timing, 12h HMA for structural trend bias,
+    # and volume spike for breakout validity. Designed to work in both bull and bear markets
+    # by only taking breakouts in the direction of the higher timeframe trend.
+    # Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR (call ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data for HMA trend filter (call ONCE before loop)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ATR(14)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 12h HMA(21) - Hull Moving Average
+    # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+    def wma(values, window):
+        weights = np.arange(1, window + 1)
+        return np.convolve(values, weights, mode='valid') / weights.sum()
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # first period
-    tr2[0] = np.abs(high_1d[0] - close_1d[0])
-    tr3[0] = np.abs(low_1d[0] - close_1d[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    close_12h = df_12h['close'].values
+    half_len = 21 // 2
+    sqrt_len = int(np.sqrt(21))
     
-    # ATR(14) - Wilder's smoothing
-    atr_1d = np.zeros_like(tr)
-    atr_1d[13] = np.mean(tr[1:15])  # first ATR
-    for i in range(14, len(tr)):
-        atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
+    wma_half = wma(close_12h, half_len)
+    wma_full = wma(close_12h, 21)
+    wma_2x_sub = 2 * wma_half - wma_full
     
-    # Align 1d ATR to 12h timeframe
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Pad the beginning with NaN to align lengths
+    wma_2x_sub_padded = np.full(len(close_12h), np.nan)
+    wma_2x_sub_padded[half_len-1:half_len-1+len(wma_2x_sub)] = wma_2x_sub
     
-    # Get 1w data for EMA trend filter (call ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    hma_12h = wma(wma_2x_sub_padded, sqrt_len)
+    hma_12h_padded = np.full(len(close_12h), np.nan)
+    hma_12h_padded[sqrt_len-1:sqrt_len-1+len(hma_12h)] = hma_12h
     
-    # Calculate 1w EMA(50)
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align 12h HMA to 4h timeframe
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_padded)
     
-    # Align 1w EMA to 12h timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 4h Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 12h Donchian channels (15-period)
-    donchian_high = pd.Series(high).rolling(window=15, min_periods=15).max().values
-    donchian_low = pd.Series(low).rolling(window=15, min_periods=15).min().values
-    
-    # Calculate 12h volume MA(20) for confirmation
+    # Calculate 4h volume MA(20) for confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(hma_12h_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 20-period MA
-        volume_filter = volume[i] > volume_ma[i]
-        
-        # ATR filter: current ATR > 0.5 * 20-period MA ATR (ensures sufficient volatility)
-        atr_ma = pd.Series(atr_1d_aligned).rolling(window=20, min_periods=20).mean().values
-        atr_filter = atr_1d_aligned[i] > 0.5 * atr_ma[i]
-        
-        # Weekly trend filter: price above/below weekly EMA
-        bullish_trend = close[i] > ema_50_1w_aligned[i]
-        bearish_trend = close[i] < ema_50_1w_aligned[i]
+        # Volume filter: current volume > 1.5x 20-period MA (volume spike)
+        volume_filter = volume[i] > 1.5 * volume_ma[i]
         
         # Breakout conditions
         long_breakout = close[i] > donchian_high[i-1]  # Break above prior period's high
         short_breakout = close[i] < donchian_low[i-1]  # Break below prior period's low
         
-        # Entry conditions: breakout in direction of weekly trend with volume and ATR confirmation
-        long_entry = long_breakout and bullish_trend and volume_filter and atr_filter
-        short_entry = short_breakout and bearish_trend and volume_filter and atr_filter
+        # Trend filter: price above/below 12h HMA
+        bullish_trend = close[i] > hma_12h_aligned[i]
+        bearish_trend = close[i] < hma_12h_aligned[i]
         
-        # Exit conditions: opposite breakout or loss of trend
+        # Entry conditions: breakout in direction of 12h HMA trend
+        long_entry = long_breakout and bullish_trend and volume_filter
+        short_entry = short_breakout and bearish_trend and volume_filter
+        
+        # Exit conditions: opposite breakout or trend reversal
         long_exit = short_breakout or not bullish_trend
         short_exit = long_breakout or not bearish_trend
         
@@ -123,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_1w_donchian_atr_ema_v1"
-timeframe = "12h"
+name = "4h_12h_donchian_hma_volume_v1"
+timeframe = "4h"
 leverage = 1.0
