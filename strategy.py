@@ -8,112 +8,64 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1h strategy using 4h Donchian breakout for direction,
-    # 1d ADX for trend strength filter, and volume spike for entry timing.
-    # Long: price > 4h Donchian upper (20) AND 1d ADX > 25 AND volume > 1.5x 20-bar avg
-    # Short: price < 4h Donchian lower (20) AND 1d ADX > 25 AND volume > 1.5x 20-bar avg
-    # Exit: price crosses 4h Donchian midpoint OR ADX < 20 (trend weak)
-    # Session filter: 08-20 UTC to avoid low-liquidity hours.
-    # Discrete sizing: 0.20 to limit drawdown and reduce fee churn.
+    # Hypothesis: 12h Donchian(20) breakout with 1d ATR filter and volume spike confirmation
+    # Long: price > Donchian high(20) AND ATR(14) > 1.2x 50-period ATR MA AND volume > 1.5x 20-period volume MA
+    # Short: price < Donchian low(20) AND ATR(14) > 1.2x 50-period ATR MA AND volume > 1.5x 20-period volume MA
+    # Exit: opposite Donchian breakout or volatility contraction (ATR < 0.8x 50-period ATR MA)
+    # Using 12h primary timeframe for low trade frequency, Donchian for structure,
+    # ATR filter to avoid low-volatility false breakouts, volume for confirmation.
+    # Discrete position sizing (0.25) to minimize fee churn.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Session filter: 08-20 UTC (pre-compute for efficiency)
-    hours = prices.index.hour  # prices.index is DatetimeIndex
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Get 4h data for Donchian channels (20-period)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    
-    # Calculate 4h Donchian channels (20-period high/low)
-    def rolling_max(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i < window - 1:
-                res[i] = np.nan
-            else:
-                res[i] = np.max(arr[i-window+1:i+1])
-        return res
-    
-    def rolling_min(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i < window - 1:
-                res[i] = np.nan
-            else:
-                res[i] = np.min(arr[i-window+1:i+1])
-        return res
-    
-    donchian_high_4h = rolling_max(high_4h, 20)
-    donchian_low_4h = rolling_min(low_4h, 20)
-    donchian_mid_4h = (donchian_high_4h + donchian_low_4h) / 2.0
-    
-    # Align 4h Donchian levels to 1h
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_4h)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_4h)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_4h, donchian_mid_4h)
-    
-    # Get 1d data for ADX trend filter
+    # Get daily data for ATR filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
+    # Calculate daily ATR(14)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d ADX(14)
-    # True Range (TR)
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with index
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
+    # ATR using Wilder's smoothing
+    atr_1d = np.full(len(tr), np.nan)
+    if len(tr) >= 14:
+        atr_1d[13] = np.nanmean(tr[1:15])  # First ATR = average of first 14 TR
+        for i in range(14, len(tr)):
+            if not np.isnan(atr_1d[i-1]) and not np.isnan(tr[i]):
+                atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # Smoothed TR, +DM, -DM (Wilder's smoothing = EMA with alpha=1/period)
-    def wilders_smoothing(data, period):
-        res = np.full_like(data, np.nan)
-        if len(data) < period:
-            return res
-        # First value: simple average
-        res[period-1] = np.nanmean(data[1:period])
-        # Subsequent: smoothed = (prev * (period-1) + current) / period
-        for i in range(period, len(data)):
-            if not np.isnan(res[i-1]) and not np.isnan(data[i]):
-                res[i] = (res[i-1] * (period-1) + data[i]) / period
-        return res
+    # Align daily ATR to 12h
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    atr_1d = wilders_smoothing(tr, 14)
-    plus_dm_1d = wilders_smoothing(plus_dm, 14)
-    minus_dm_1d = wilders_smoothing(minus_dm, 14)
+    # Calculate 50-period ATR MA for volatility regime filter
+    atr_ma_50 = np.full(n, np.nan)
+    for i in range(50, n):
+        atr_ma_50[i] = np.nanmean(atr_1d_aligned[i-50:i])
     
-    # Avoid division by zero
-    plus_di_1d = 100 * np.where(atr_1d != 0, plus_dm_1d / atr_1d, 0)
-    minus_di_1d = 100 * np.where(atr_1d != 0, minus_dm_1d / atr_1d, 0)
-    dx_1d = 100 * np.where((plus_di_1d + minus_di_1d) != 0, 
-                           np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d), 0)
-    adx_1d = wilders_smoothing(dx_1d, 14)
+    # Volatility filter: ATR > 1.2x 50-period ATR MA (avoid low-vol breakouts)
+    vol_filter = atr_1d_aligned > (1.2 * atr_ma_50)
     
-    # Align 1d ADX to 1h
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Get 12h data for Donchian channels and volume
+    # Calculate Donchian(20) on 12h data
+    donch_high = np.full(n, np.nan)
+    donch_low = np.full(n, np.nan)
     
-    # Volume confirmation: >1.5x 20-bar average
+    for i in range(20, n):
+        donch_high[i] = np.max(high[i-20:i])
+        donch_low[i] = np.min(low[i-20:i])
+    
+    # Volume confirmation: >1.5x 20-period volume MA
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -122,38 +74,31 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
-        # Skip if not in session or data not ready
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-            
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(adx_1d_aligned[i]) or np.isnan(volume_spike[i])):
+    for i in range(50, n):
+        # Skip if data not ready
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(vol_filter[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Trend and breakout conditions
-        bullish_breakout = close[i] > donchian_high_aligned[i]
-        bearish_breakout = close[i] < donchian_low_aligned[i]
-        strong_trend = adx_1d_aligned[i] > 25
-        weak_trend = adx_1d_aligned[i] < 20
-        vol_confirm = volume_spike[i]
+        # Entry conditions
+        long_breakout = close[i] > donch_high[i]
+        short_breakout = close[i] < donch_low[i]
         
-        # Entry logic
-        long_entry = bullish_breakout and strong_trend and vol_confirm
-        short_entry = bearish_breakout and strong_trend and vol_confirm
+        long_entry = long_breakout and vol_filter[i] and volume_spike[i]
+        short_entry = short_breakout and vol_filter[i] and volume_spike[i]
         
-        # Exit logic: breakout failure OR trend weakening
-        long_exit = (close[i] < donchian_mid_aligned[i]) or weak_trend
-        short_exit = (close[i] > donchian_mid_aligned[i]) or weak_trend
+        # Exit conditions: opposite breakout or volatility contraction
+        vol_contraction = atr_1d_aligned[i] < (0.8 * atr_ma_50[i]) if not np.isnan(atr_ma_50[i]) else False
+        long_exit = short_breakout or vol_contraction
+        short_exit = long_breakout or vol_contraction
         
         if long_entry and position != 1:
             position = 1
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif short_entry and position != -1:
             position = -1
-            signals[i] = -0.20
+            signals[i] = -0.25
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -163,14 +108,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1h_4h_1d_donchian_adx_volume_v1"
-timeframe = "1h"
+name = "12h_1d_donchian_atr_volume_v1"
+timeframe = "12h"
 leverage = 1.0
