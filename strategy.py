@@ -13,13 +13,13 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h Donchian channels (20-period) - use previous bar's high/low
+    # 12h Donchian channels (20-period) - use previous bar's high/low
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
     lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    # 4h average volume (20-period) - previous bar
+    # 12h average volume (20-period) - previous bar
     vol_series = pd.Series(volume)
     avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
@@ -73,6 +73,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Donchian_Volume_EMATrend"
-timeframe = "4h"
+name = "12h_1d_Donchian_Volume_EMATrend"
+timeframe = "12h"
 leverage = 1.0
