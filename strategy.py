@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_1d_Pivot_Breakout_With_Volume_Confirmation
-Hypothesis: Daily pivot points (classic) provide strong support/resistance levels.
-Breakouts above R1 or below S1 with volume confirmation indicate institutional participation.
-The 4h EMA50 filter ensures trades align with the medium-term trend, reducing whipsaws.
-This structure works in both bull (breakouts continue) and bear (fades at resistance) markets
-by using price action confirmation rather than pure breakout logic. Targets 30-60 trades/year.
+6h_1d_Ichimoku_Trend_Follow
+Hypothesis: Ichimoku system provides robust trend identification with leading/lagging spans.
+Using daily Ichimoku for trend direction and 6h for entry timing filters out noise.
+Tenkan-Kijun cross + price above/below cloud confirms trend strength.
+Works in bull markets (trend continuation) and bear markets (defensive positioning via cloud).
+Targets 15-30 trades/year on 6h timeframe.
 """
 
 import numpy as np
@@ -20,43 +20,43 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get daily data for pivot calculation
+    # Get daily data for Ichimoku calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 52:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate classic pivot points for each daily bar
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = 2 * pivot_1d - low_1d
-    s1_1d = 2 * pivot_1d - high_1d
-    r2_1d = pivot_1d + (high_1d - low_1d)
-    s2_1d = pivot_1d - (high_1d - low_1d)
+    # Calculate Ichimoku components on daily data
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2.0
     
-    # Align daily pivot levels to 4h
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2.0
     
-    # Get 4h data for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2.0
     
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2
+    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = (period52_high + period52_low) / 2.0
     
-    # Volume confirmation: current volume > 2.0x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 2.0)
+    # Chikou Span (Lagging Span): current close plotted 26 periods back
+    # For signal generation, we need current close vs Senkou spans
+    
+    # Align daily Ichimoku components to 6h
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -64,29 +64,25 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is not ready
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(r2_1d_aligned[i]) or
-            np.isnan(s2_1d_aligned[i]) or np.isnan(ema_50_aligned[i]) or
-            np.isnan(volume_expansion[i])):
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions:
-        # 1. Breakout above R1 with volume expansion
-        # 2. Must be above 4h EMA50 for trend alignment
-        breakout_long = (close[i] > r1_1d_aligned[i]) and volume_expansion[i]
-        long_condition = breakout_long and (close[i] > ema_50_aligned[i])
+        # Determine cloud boundaries (Senkou Span A/B)
+        upper_cloud = np.maximum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        lower_cloud = np.minimum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
         
-        # Short conditions:
-        # 1. Breakdown below S1 with volume expansion
-        # 2. Must be below 4h EMA50 for trend alignment
-        breakdown_short = (close[i] < s1_1d_aligned[i]) and volume_expansion[i]
-        short_condition = breakdown_short and (close[i] < ema_50_aligned[i])
+        # Ichimoku signals:
+        # Bullish: Tenkan > Kijun AND price above cloud
+        # Bearish: Tenkan < Kijun AND price below cloud
+        bullish = (tenkan_sen_aligned[i] > kijun_sen_aligned[i]) and (close[i] > upper_cloud)
+        bearish = (tenkan_sen_aligned[i] < kijun_sen_aligned[i]) and (close[i] < lower_cloud)
         
-        if long_condition and position != 1:
+        if bullish and position != 1:
             position = 1
             signals[i] = position_size
-        elif short_condition and position != -1:
+        elif bearish and position != -1:
             position = -1
             signals[i] = -position_size
         else:
@@ -95,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Pivot_Breakout_With_Volume_Confirmation"
-timeframe = "4h"
+name = "6h_1d_Ichimoku_Trend_Follow"
+timeframe = "6h"
 leverage = 1.0
