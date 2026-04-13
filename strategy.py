@@ -8,11 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Donchian(20) breakout with 1d EMA50 trend filter + volume confirmation
-    # Long: price > Donchian(20) high + price > 1d EMA50 + volume > 2.0x 20-period average
-    # Short: price < Donchian(20) low + price < 1d EMA50 + volume > 2.0x 20-period average
-    # Exit: opposite Donchian breakout OR price crosses 1d EMA50
-    # Using 6h timeframe to reduce trade frequency, 1d EMA50 for strong trend filter,
+    # Hypothesis: 12h Camarilla pivot (H3/L3) breakout with 1w EMA200 trend filter + volume confirmation
+    # Long: price > H3 + price > 1w EMA200 + volume > 2.0x 20-period average
+    # Short: price < L3 + price < 1w EMA200 + volume > 2.0x 20-period average
+    # Exit: opposite pivot level breakout OR price crosses 1w EMA200
+    # Using 12h timeframe to reduce trade frequency, 1w EMA200 for strong trend filter,
     # and volume spike confirmation to avoid false breakouts in choppy markets.
     # Discrete position sizing (0.25) to minimize fee churn.
     
@@ -21,63 +21,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w data for EMA200 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
         return np.zeros(n)
     
+    close_1w = df_1w['close'].values
+    
+    # Calculate 1w EMA200 with min_periods
+    ema_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 200:
+        ema_1w[199] = np.mean(close_1w[:200])  # SMA200 as seed
+        multiplier = 2 / (200 + 1)
+        for i in range(200, len(close_1w)):
+            ema_1w[i] = (close_1w[i] * multiplier) + (ema_1w[i-1] * (1 - multiplier))
+    
+    # Get 1d data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA50 with min_periods
-    ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema_1d[49] = np.mean(close_1d[:50])  # SMA50 as seed
-        multiplier = 2 / (50 + 1)
-        for i in range(50, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * multiplier) + (ema_1d[i-1] * (1 - multiplier))
+    # Calculate Camarilla levels (H3, L3) for each 1d bar
+    camarilla_H3 = np.full(len(close_1d), np.nan)
+    camarilla_L3 = np.full(len(close_1d), np.nan)
     
-    # Get 6h Donchian(20) for breakout with min_periods
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
+    for i in range(len(close_1d)):
+        if i >= 1:  # Need previous day's data
+            H = high_1d[i-1]
+            L = low_1d[i-1]
+            C = close_1d[i-1]
+            range_val = H - L
+            camarilla_H3[i] = C + range_val * 1.1 / 4
+            camarilla_L3[i] = C - range_val * 1.1 / 4
     
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
+    # Align 1w EMA200 to 12h
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Get 6h volume for confirmation (>2.0x 20-period average)
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (2.0 * vol_ma)
-    
-    # Align 1d EMA50 to 6h
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Align 1d Camarilla levels to 12h
+    camarilla_H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3)
+    camarilla_L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(camarilla_H3_aligned[i]) or 
+            np.isnan(camarilla_L3_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Breakout conditions
-        long_breakout = close[i] > donchian_high[i]
-        short_breakout = close[i] < donchian_low[i]
+        long_breakout = close[i] > camarilla_H3_aligned[i]
+        short_breakout = close[i] < camarilla_L3_aligned[i]
         
-        # Trend filter from 1d EMA50
-        bullish_trend = close[i] > ema_1d_aligned[i]
-        bearish_trend = close[i] < ema_1d_aligned[i]
+        # Trend filter from 1w EMA200
+        bullish_trend = close[i] > ema_1w_aligned[i]
+        bearish_trend = close[i] < ema_1w_aligned[i]
+        
+        # Volume confirmation (>2.0x 20-period average)
+        if i >= 20:
+            vol_ma = np.mean(volume[i-20:i])
+            volume_spike = volume[i] > (2.0 * vol_ma)
+        else:
+            volume_spike = False
         
         # Entry logic: Breakout + trend alignment + volume confirmation
-        long_entry = long_breakout and bullish_trend and volume_spike[i]
-        short_entry = short_breakout and bearish_trend and volume_spike[i]
+        long_entry = long_breakout and bullish_trend and volume_spike
+        short_entry = short_breakout and bearish_trend and volume_spike
         
         # Exit logic: opposite breakout or trend reversal
-        long_exit = short_breakout or (close[i] < ema_1d_aligned[i])
-        short_exit = long_breakout or (close[i] > ema_1d_aligned[i])
+        long_exit = short_breakout or (close[i] < ema_1w_aligned[i])
+        short_exit = long_breakout or (close[i] > ema_1w_aligned[i])
         
         if long_entry and position != 1:
             position = 1
@@ -102,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_donchian_breakout_ema50_volume_v1"
-timeframe = "6h"
+name = "12h_1w_camarilla_breakout_ema200_volume_v1"
+timeframe = "12h"
 leverage = 1.0
