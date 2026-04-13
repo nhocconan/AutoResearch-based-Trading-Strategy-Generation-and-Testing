@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_1D_Camarilla_Breakout_Volume_Confirmation
-Hypothesis: Buy when price breaks above daily Camarilla H4 level with volume > 2.0x 50-period average, sell when price breaks below daily L4 level with volume confirmation. Uses 4h primary timeframe with 1d trend filter (price > EMA50 for longs, < EMA50 for shorts). Designed to work in both bull and bear markets by capturing genuine breakouts with strong volume, avoiding false breakouts in ranging markets. Target: 20-40 trades/year per symbol.
+4h_1D_Camarilla_Breakout_Volume_Confirmation_v2
+Hypothesis: Buy when price breaks above daily Camarilla H4 level with volume > 2.0x 50-period average and price > daily EMA50, sell when price breaks below daily L4 level with volume confirmation and price < daily EMA50. Uses 4h primary timeframe with 1d trend filter. Added minimum holding period of 8 bars (32 hours) to reduce overtrading and filter false breakouts. Designed to work in both bull and bear markets by capturing genuine breakouts with strong volume and trend alignment.
 """
 
 import numpy as np
@@ -46,13 +46,17 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
+    bars_since_entry = 0  # Track holding period
     
     for i in range(60, n):  # warmup period
         # Skip if any required data is not ready
         if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
             np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_expansion[i])):
             signals[i] = 0.0
+            bars_since_entry = 0
             continue
+        
+        bars_since_entry += 1
         
         # Long signal: break above daily Camarilla H4 with volume expansion and price above daily EMA50
         long_signal = (close[i] > camarilla_h4_aligned[i] and 
@@ -64,18 +68,32 @@ def generate_signals(prices):
                        volume_expansion[i] and 
                        close[i] < ema50_1d_aligned[i])
         
-        if long_signal and position != 1:
-            position = 1
-            signals[i] = position_size
-        elif short_signal and position != -1:
+        # Exit conditions: minimum holding period reached and opposite signal
+        if position == 1 and bars_since_entry >= 8 and short_signal:
             position = -1
             signals[i] = -position_size
+            bars_since_entry = 0
+        elif position == -1 and bars_since_entry >= 8 and long_signal:
+            position = 1
+            signals[i] = position_size
+            bars_since_entry = 0
+        elif position == 0:
+            if long_signal:
+                position = 1
+                signals[i] = position_size
+                bars_since_entry = 0
+            elif short_signal:
+                position = -1
+                signals[i] = -position_size
+                bars_since_entry = 0
+            else:
+                signals[i] = 0.0
         else:
             # Hold current position
             signals[i] = position_size if position == 1 else (-position_size if position == -1 else 0.0)
     
     return signals
 
-name = "4h_1D_Camarilla_Breakout_Volume_Confirmation"
+name = "4h_1D_Camarilla_Breakout_Volume_Confirmation_v2"
 timeframe = "4h"
 leverage = 1.0
