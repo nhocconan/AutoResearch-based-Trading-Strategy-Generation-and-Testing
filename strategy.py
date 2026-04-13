@@ -8,11 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Camarilla pivot breakout from 1d + volume spike + ADX regime filter
+    # Hypothesis: 12h Camarilla pivot breakout from 1d + volume spike + ADX regime filter
     # Long when: price breaks above Camarilla H3 (1d) AND ADX > 25 AND volume > 2.0x 20-bar avg volume
     # Short when: price breaks below Camarilla L3 (1d) AND ADX > 25 AND volume > 2.0x 20-bar avg volume
     # Exit when: price crosses Camarilla pivot point (PP) OR ADX < 20 (regime change to ranging)
-    # Uses discrete sizing (0.25) targeting 75-200 total trades over 4 years.
+    # Uses discrete sizing (0.25) targeting 50-150 total trades over 4 years on 12h timeframe.
     # Camarilla levels provide precise support/resistance; ADX filters ranging markets;
     # Volume spike confirms breakout validity. Works in bull (trend continuation) and bear (strong moves only).
     
@@ -38,7 +38,7 @@ def generate_signals(prices):
     H3_1d = PP_1d + (high_1d - low_1d) * 1.1 / 4.0
     L3_1d = PP_1d - (high_1d - low_1d) * 1.1 / 4.0
     
-    # Calculate ADX(14) on 4h timeframe for regime filter
+    # Calculate ADX(14) on 12h timeframe for regime filter
     # ADX requires +DI, -DI, and TR
     plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
     minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
@@ -74,7 +74,7 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = wilders_smoothing(dx, period_adx)
     
-    # Align HTF indicators to 4h timeframe (wait for completed 1d bar)
+    # Align HTF indicators to 12h timeframe (wait for completed 1d bar)
     PP_1d_aligned = align_htf_to_ltf(prices, df_1d, PP_1d)
     H3_1d_aligned = align_htf_to_ltf(prices, df_1d, H3_1d)
     L3_1d_aligned = align_htf_to_ltf(prices, df_1d, L3_1d)
@@ -134,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_camarilla_breakout_adx_volume_v1"
-timeframe = "4h"
+name = "12h_1d_camarilla_breakout_adx_volume_v1"
+timeframe = "12h"
 leverage = 1.0
