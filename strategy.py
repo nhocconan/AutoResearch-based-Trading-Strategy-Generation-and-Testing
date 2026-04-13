@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_1D_Camarilla_Pivot_Breakout_With_Volume_Filter_v13
-Hypothesis: 4h price breaks above/below daily Camarilla R4/S4 levels with daily volume > 1.8x 20-period average.
+4h_1D_Camarilla_Pivot_Breakout_With_Volume_Filter_v14
+Hypothesis: 4h price breaks above/below daily Camarilla R4/S4 levels with daily volume > 2.0x 20-period average.
 Long when price breaks above R4 + volume condition.
 Short when price breaks below S4 + volume condition.
 Exit when price crosses daily pivot point (PP).
-Focus on tight entry conditions to reduce trade frequency and avoid fee drag. Designed for 4h timeframe to target 25-35 trades/year with strong trend capture in both bull and bear markets.
+Reduced volume multiplier from 1.8x to 2.0x to decrease trade frequency and improve edge.
+Target: 20-30 trades/year per symbol for better generalization in bull and bear markets.
 """
 
 import numpy as np
@@ -71,9 +72,9 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current 1d volume > 1.8x 20-period average
+        # Volume condition: current 1d volume > 2.0x 20-period average
         vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
-        vol_condition = vol_1d_aligned[i] > (vol_ma_20_aligned[i] * 1.8)
+        vol_condition = vol_1d_aligned[i] > (vol_ma_20_aligned[i] * 2.0)
         
         # Breakout conditions
         long_breakout = close[i] > camarilla_r4_aligned[i]
@@ -107,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1D_Camarilla_Pivot_Breakout_With_Volume_Filter_v13"
+name = "4h_1D_Camarilla_Pivot_Breakout_With_Volume_Filter_v14"
 timeframe = "4h"
 leverage = 1.0
