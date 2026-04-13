@@ -13,49 +13,47 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data once
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d Donchian channels (20-period) - use previous bar's high/low
+    # 1d Close prices for calculations
+    close_1d = df_1d['close'].values
+    
+    # 1d 20-period EMA (trend filter)
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    
+    # 1d 14-period ATR (for volatility filter and stop-loss)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    high_series = pd.Series(high_1d)
-    low_series = pd.Series(low_1d)
+    close_1d_arr = df_1d['close'].values
+    
+    high_low = high_1d - low_1d
+    high_close = np.abs(high_1d - np.roll(close_1d_arr, 1))
+    low_close = np.abs(low_1d - np.roll(close_1d_arr, 1))
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    tr[0] = high_low[0]
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    
+    # 4h 20-period Donchian channels (breakout levels)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
     upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
     lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    # 1d average volume (20-period) - previous bar
-    vol_1d = df_1d['volume'].values
-    vol_series = pd.Series(vol_1d)
+    # 4h 20-period average volume (volume confirmation)
+    vol_series = pd.Series(volume)
     avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
-    
-    # 1d EMA200 trend filter
-    close_1d = df_1d['close'].values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, min_periods=200, adjust=False).mean().values
-    
-    # 1d ATR (14-period) for stop-loss
-    high_low = high_1d - low_1d
-    high_close = np.abs(high_1d - np.roll(close_1d, 1))
-    low_close = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    tr[0] = high_low[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().shift(1).values
-    
-    # Align HTF indicators to LTF
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
-    avg_vol_aligned = align_htf_to_ltf(prices, df_1d, avg_vol)
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25
+    position_size = 0.25  # 25% position size
     
-    start = max(20, 200, 14)
+    start = max(20, 20)
     for i in range(start, n):
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(avg_vol_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or np.isnan(atr_aligned[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(avg_vol[i]) or np.isnan(ema_20_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -63,28 +61,28 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long: breakout above upper band + volume confirmation + price above EMA200
-            if (price > upper_aligned[i] and vol > 2.0 * avg_vol_aligned[i] and price > ema_200_1d_aligned[i]):
+            # Long: breakout above upper band + volume confirmation + price above 1d EMA20
+            if (price > upper[i] and vol > 1.5 * avg_vol[i] and price > ema_20_1d_aligned[i]):
                 position = 1
                 signals[i] = position_size
-            # Short: breakout below lower band + volume confirmation + price below EMA200
-            elif (price < lower_aligned[i] and vol > 2.0 * avg_vol_aligned[i] and price < ema_200_1d_aligned[i]):
+            # Short: breakout below lower band + volume confirmation + price below 1d EMA20
+            elif (price < lower[i] and vol > 1.5 * avg_vol[i] and price < ema_20_1d_aligned[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below lower band OR below EMA200 OR stop-loss hit
-            if (price < lower_aligned[i] or price < ema_200_1d_aligned[i] or 
-                price < entry_price_long - 2.0 * atr_aligned[i]):
+            # Exit long: price closes below lower band OR ATR-based stop-loss
+            if (price < lower[i] or 
+                price < entry_price_long - 1.5 * atr_14_1d_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes above upper band OR above EMA200 OR stop-loss hit
-            if (price > upper_aligned[i] or price > ema_200_1d_aligned[i] or 
-                price > entry_price_short + 2.0 * atr_aligned[i]):
+            # Exit short: price closes above upper band OR ATR-based stop-loss
+            if (price > upper[i] or 
+                price > entry_price_short + 1.5 * atr_14_1d_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -99,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Donchian_Volume_EMA200Trend_ATR"
+name = "4h_1d_Donchian_Volume_EMA20_ATR"
 timeframe = "4h"
 leverage = 1.0
