@@ -5,79 +5,95 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for daily high/low (for Donchian channel)
+    # Get 1d data for weekly context
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Daily high and low
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # 20-day Donchian channel (highest high and lowest low)
-    donchian_high = pd.Series(daily_high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(daily_low).rolling(window=20, min_periods=20).min().values
+    # Calculate weekly EMA(21) for trend
+    close_1w = df_1w['close'].values
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
-    # Align to 12h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Calculate daily Donchian(20) breakout levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Get 1d volume for volume confirmation
-    volume_1d = df_1d['volume'].values
-    volume_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_ratio = volume_1d / volume_ma
-    volume_ratio_aligned = align_htf_to_ltf(prices, df_1d, volume_ratio)
+    # Donchian upper (20-day high)
+    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    # Donchian lower (20-day low)
+    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 12h ATR for stop loss
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], 
-                        np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Align Donchian levels to 1d timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    
+    # Calculate daily ATR(14) for stop loss
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1]) if len(close_1d) > 1 else np.array([])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1]) if len(close_1d) > 1 else np.array([])
+    close_1d = df_1d['close'].values
+    tr_first = np.array([np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])])
+    if len(tr2) > 0 and len(tr3) > 0:
+        tr = np.concatenate([tr_first, np.maximum(tr1, np.maximum(tr2, tr3))])
+    else:
+        tr = tr_first
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% of capital
-    atr_multiplier = 2.5
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(volume_ratio_aligned[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(donch_high_aligned[i]) or 
+            np.isnan(donch_low_aligned[i]) or 
+            np.isnan(ema_21_1w_aligned[i]) or 
+            np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: Donchian breakout + volume confirmation
-        breakout_long = close[i] > donchian_high_aligned[i]
-        breakout_short = close[i] < donchian_low_aligned[i]
-        vol_confirm = volume_ratio_aligned[i] > 1.5  # Volume 1.5x average
+        # Trend filter: price above weekly EMA21 = uptrend, below = downtrend
+        uptrend = close[i] > ema_21_1w_aligned[i]
+        downtrend = close[i] < ema_21_1w_aligned[i]
         
-        long_entry = breakout_long and vol_confirm
-        short_entry = breakout_short and vol_confirm
+        # Entry conditions: Donchian breakout with trend filter
+        long_entry = uptrend and close[i] > donch_high_aligned[i]
+        short_entry = downtrend and close[i] < donch_low_aligned[i]
         
-        # Exit conditions: ATR-based stop loss or opposite breakout
+        # Exit conditions: opposite Donchian breakout or ATR stop
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Long position: stop if price drops below entry - ATR*multiplier
-            # or if price breaks below Donchian low
-            exit_long = (close[i] < donchian_low_aligned[i])  # Exit on opposite breakout
+            # Exit long: price breaks below Donchian low or hits ATR stop
+            if close[i] < donch_low_aligned[i]:
+                exit_long = True
+            elif i > 0:  # ATR stop
+                entry_price_approx = close[i-1]  # approximate entry from previous bar
+                if close[i] < entry_price_approx - 2.0 * atr_aligned[i]:
+                    exit_long = True
         elif position == -1:
-            # Short position: stop if price rises above entry + ATR*multiplier
-            # or if price breaks above Donchian high
-            exit_short = (close[i] > donchian_high_aligned[i])  # Exit on opposite breakout
+            # Exit short: price breaks above Donchian high or hits ATR stop
+            if close[i] > donch_high_aligned[i]:
+                exit_short = True
+            elif i > 0:  # ATR stop
+                entry_price_approx = close[i-1]  # approximate entry from previous bar
+                if close[i] > entry_price_approx + 2.0 * atr_aligned[i]:
+                    exit_short = True
         
         # Execute signals
         if long_entry and position != 1:
@@ -100,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_donchian_breakout_volume"
-timeframe = "12h"
+name = "1d_20_donchian_weekly_ema_trend"
+timeframe = "1d"
 leverage = 1.0
