@@ -8,142 +8,111 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian breakout + 12h HMA trend + volume confirmation
-    # Long: price > Donchian(20) high AND 12h HMA(21) rising AND volume > 1.5x avg
-    # Short: price < Donchian(20) low AND 12h HMA(21) falling AND volume > 1.5x avg
-    # Exit: price crosses Donchian midpoint OR volume drops below avg
-    # Uses 4h for price action/volume, 12h for trend filter
-    # Discrete position sizing (0.25) to minimize fee churn
-    # Target: 100-200 total trades over 4 years (~25-50/year) to stay within limits
+    # Hypothesis: 1h RSI(2) mean reversion + 4h trend filter + session filter
+    # Long: RSI(2) < 10 AND price > 4h EMA50 (uptrend) AND 08-20 UTC
+    # Short: RSI(2) > 90 AND price < 4h EMA50 (downtrend) AND 08-20 UTC
+    # Exit: RSI(2) crosses 50
+    # Uses 4h EMA50 for trend filter (direction), 1h RSI(2) for timing
+    # Session filter reduces noise outside active hours
+    # Discrete position sizing (0.20) to minimize fee churn
+    # Target: 60-150 total trades over 4 years (~15-37/year) to stay within limits
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Get 4h data for Donchian and volume (call ONCE before loop)
+    # Get 4h data for EMA50 (call ONCE before loop)
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Get 12h data for HMA (call ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
-    
-    # Calculate 4h Donchian Channel (20-period)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Calculate 4h EMA50
     close_4h = df_4h['close'].values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Donchian high and low
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # Align 4h EMA50 to 1h (wait for completed 4h bar)
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # Align 4h Donchian to 4h timeframe (no additional delay for price-based indicators)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_4h, donchian_mid)
+    # Calculate 1h RSI(2)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate 4h volume average (20-period)
-    volume_4h = df_4h['volume'].values
-    volume_ma = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    volume_ma_aligned = align_htf_to_ltf(prices, df_4h, volume_ma)
-    
-    # Calculate 12h HMA (Hull Moving Average) for trend
-    close_12h = df_12h['close'].values
-    
-    # HMA formula: WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
-    def wma(data, period):
-        if len(data) < period:
-            return np.full_like(data, np.nan)
-        weights = np.arange(1, period + 1)
-        return np.convolve(data, weights/weights.sum(), mode='valid')
-    
-    def hma(data, period):
-        half_period = period // 2
-        sqrt_period = int(np.sqrt(period))
-        
-        if len(data) < period:
-            return np.full_like(data, np.nan)
-        
-        wma_half = wma(data, half_period)
-        wma_full = wma(data, period)
-        
-        # 2*WMA(n/2) - WMA(n)
-        raw_hma = 2 * wma_half - wma_full
-        
-        # WMA(sqrt(n)) of the above
-        hma_val = wma(raw_hma, sqrt_period)
-        
-        # Pad to original length
+    # Wilder's smoothing for RSI
+    def wilders_smoothing(data, period):
+        alpha = 1.0 / period
         result = np.full_like(data, np.nan)
-        result[period-1:period-1+len(hma_val)] = hma_val
+        if len(data) >= period:
+            result[period-1] = np.nanmean(data[:period])
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
         return result
     
-    hma_12h = hma(close_12h, 21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
+    avg_gain = wilders_smoothing(gain, 2)
+    avg_loss = wilders_smoothing(loss, 2)
     
-    # HMA slope (rising/falling)
-    hma_slope = np.diff(hma_12h_aligned, prepend=hma_12h_aligned[0])
-    hma_rising = hma_slope > 0
-    hma_falling = hma_slope < 0
+    rs = np.full_like(avg_gain, np.nan)
+    mask = ~np.isnan(avg_loss) & (avg_loss > 0)
+    rs[mask] = avg_gain[mask] / avg_loss[mask]
+    
+    rsi = np.full_like(avg_gain, 100.0)
+    rsi[mask] = 100 - (100 / (1 + rs[mask]))
+    rsi[np.isnan(avg_loss) & (avg_loss == 0)] = 100.0  # all gains
+    rsi[np.isnan(avg_gain) & (avg_gain == 0)] = 0.0   # all losses
+    
+    # Precompute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        # Skip if data not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(donchian_mid_aligned[i]) or np.isnan(volume_ma_aligned[i]) or
-            np.isnan(hma_12h_aligned[i])):
+        # Skip if data not ready or outside session
+        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(rsi[i]) or 
+            not in_session[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x average
-        volume_confirm = volume[i] > 1.5 * volume_ma_aligned[i]
+        # RSI(2) signals
+        rsi_oversold = rsi[i] < 10
+        rsi_overbought = rsi[i] > 90
+        rsi_exit = (rsi[i] >= 50 and position == 1) or (rsi[i] <= 50 and position == -1)
         
-        # Breakout conditions
-        long_breakout = close[i] > donchian_high_aligned[i]
-        short_breakout = close[i] < donchian_low_aligned[i]
+        # Trend filter: price vs 4h EMA50
+        price_above_ema = close[i] > ema50_4h_aligned[i]
+        price_below_ema = close[i] < ema50_4h_aligned[i]
         
-        # Exit conditions
-        long_exit = close[i] < donchian_mid_aligned[i]
-        short_exit = close[i] > donchian_mid_aligned[i]
-        volume_exit = volume[i] < volume_ma_aligned[i]  # volume drops below average
+        # Entry logic: RSI extreme + trend alignment + session
+        long_entry = rsi_oversold and price_above_ema
+        short_entry = rsi_overbought and price_below_ema
         
-        # Entry logic: breakout + trend + volume confirmation
-        long_entry = long_breakout and hma_rising[i] and volume_confirm
-        short_entry = short_breakout and hma_falling[i] and volume_confirm
-        
-        # Exit logic: midpoint cross OR volume drops
-        long_exit_condition = long_exit or volume_exit
-        short_exit_condition = short_exit or volume_exit
-        
+        # Exit logic: RSI crosses 50
         if long_entry and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif short_entry and position != -1:
             position = -1
-            signals[i] = -0.25
-        elif position == 1 and long_exit_condition:
+            signals[i] = -0.20
+        elif position == 1 and rsi_exit:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and short_exit_condition:
+        elif position == -1 and rsi_exit:
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_12h_donchian_hma_volume_v1"
-timeframe = "4h"
+name = "1h_4h_rsi2_mean_reversion_trend_filter_session_v1"
+timeframe = "1h"
 leverage = 1.0
