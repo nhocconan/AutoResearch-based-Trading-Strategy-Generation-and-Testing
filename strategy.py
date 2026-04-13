@@ -8,63 +8,100 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Camarilla pivot breakout with daily trend filter + volume confirmation
-    # Long: price breaks above R4 AND daily close > daily open AND volume > 1.5x avg
-    # Short: price breaks below S4 AND daily close < daily open AND volume > 1.5x avg
-    # Exit: price retests the pivot point (PP) or opposite Camarilla level (S1/R1)
-    # Using 6h timeframe for optimal trade frequency (target 12-37/year), Camarilla pivots from 1d for institutional levels,
-    # daily trend filter to align with higher timeframe bias, and volume confirmation to avoid false breakouts.
+    # Hypothesis: 12h Camarilla H3/L3 breakout with 1d ADX regime filter and volume confirmation
+    # Long: price breaks above H3 AND ADX(14) > 25 (trending) AND volume > 1.5x avg
+    # Short: price breaks below L3 AND ADX(14) > 25 (trending) AND volume > 1.5x avg
+    # Exit: price touches H4 (for longs) or L4 (for shorts) OR opposite Camarilla level touch
+    # Using 12h timeframe for optimal trade frequency (target 12-37/year), Camarilla levels for intraday structure,
+    # ADX to filter ranging markets, and volume confirmation to avoid false breakouts.
     # Discrete position sizing (0.25) to minimize fee churn.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_price = prices['open'].values
     
-    # Get daily data for Camarilla pivots and trend filter
+    # Get daily data for ADX regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels
+    # Calculate daily ADX(14) for trend strength filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla calculations: PP = (H+L+C)/3, Range = H-L
-    pp_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Camarilla levels
-    r4_1d = pp_1d + range_1d * 1.1 / 2
-    r3_1d = pp_1d + range_1d * 1.1 / 4
-    r2_1d = pp_1d + range_1d * 1.1 / 6
-    r1_1d = pp_1d + range_1d * 1.1 / 12
-    s1_1d = pp_1d - range_1d * 1.1 / 12
-    s2_1d = pp_1d - range_1d * 1.1 / 6
-    s3_1d = pp_1d - range_1d * 1.1 / 4
-    s4_1d = pp_1d - range_1d * 1.1 / 2
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
     
-    # Align daily Camarilla levels to 6h
-    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    # Smoothed values (Wilder's smoothing)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(data[1:period])
+        # Subsequent values: smoothed = (prev * (period-1) + current) / period
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    # Daily trend filter: bullish if close > open, bearish if close < open
-    daily_bullish = close_1d > open_price  # Note: open_price here is from prices DF, need daily open
-    # Fix: get daily open from df_1d
-    open_1d = df_1d['open'].values
-    daily_bullish = close_1d > open_1d
-    daily_bearish = close_1d < open_1d
+    tr14 = wilders_smoothing(tr, 14)
+    plus_dm14 = wilders_smoothing(plus_dm, 14)
+    minus_dm14 = wilders_smoothing(minus_dm, 14)
     
-    # Align daily trend to 6h
-    daily_bullish_aligned = align_htf_to_ltf(prices, df_1d, daily_bullish.astype(float))
-    daily_bearish_aligned = align_htf_to_ltf(prices, df_1d, daily_bearish.astype(float))
+    # DI+ and DI-
+    plus_di14 = np.where(tr14 != 0, (plus_dm14 / tr14) * 100, 0)
+    minus_di14 = np.where(tr14 != 0, (minus_dm14 / tr14) * 100, 0)
     
-    # Get 6h volume for confirmation (>1.5x 20-period average)
+    # DX and ADX
+    dx = np.where((plus_di14 + minus_di14) != 0, 
+                  np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14) * 100, 0)
+    adx = wilders_smoothing(dx, 14)
+    
+    # Align daily ADX to 12h
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate 12h Camarilla levels (based on previous day's OHLC)
+    # We need to get daily OHLC and align it to 12h bars
+    df_1d_ohlc = get_htf_data(prices, '1d')
+    if len(df_1d_ohlc) < 2:
+        return np.zeros(n)
+    
+    # Previous day's OHLC for Camarilla calculation
+    prev_close = df_1d_ohlc['close'].shift(1).values
+    prev_high = df_1d_ohlc['high'].shift(1).values
+    prev_low = df_1d_ohlc['low'].shift(1).values
+    
+    # Camarilla levels: H4, H3, H2, H1, L1, L2, L3, L4
+    # H4 = close + 1.5 * (high - low)
+    # H3 = close + 1.25 * (high - low)
+    # L3 = close - 1.25 * (high - low)
+    # L4 = close - 1.5 * (high - low)
+    camarilla_h3 = prev_close + 1.25 * (prev_high - prev_low)
+    camarilla_l3 = prev_close - 1.25 * (prev_high - prev_low)
+    camarilla_h4 = prev_close + 1.5 * (prev_high - prev_low)
+    camarilla_l4 = prev_close - 1.5 * (prev_high - prev_low)
+    
+    # Align Camarilla levels to 12h
+    h3_aligned = align_htf_to_ltf(prices, df_1d_ohlc, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d_ohlc, camarilla_l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d_ohlc, camarilla_h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d_ohlc, camarilla_l4)
+    
+    # Get 12h volume for confirmation (>1.5x 20-period average)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -75,29 +112,31 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(pp_1d_aligned[i]) or np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
-            np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
-            np.isnan(daily_bullish_aligned[i]) or np.isnan(daily_bearish_aligned[i]) or
-            np.isnan(volume_spike[i])):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
+        # Regime filter: ADX > 25 indicates trending market
+        trending_market = adx_1d_aligned[i] > 25
+        
         # Camarilla breakout conditions
-        breakout_r4 = close[i] > r4_1d_aligned[i]
-        breakout_s4 = close[i] < s4_1d_aligned[i]
+        breakout_h3 = close[i] > h3_aligned[i]
+        breakout_l3 = close[i] < l3_aligned[i]
         
-        # Retest conditions: price returns to PP or S1/R1
-        retest_pp = abs(close[i] - pp_1d_aligned[i]) < (0.001 * pp_1d_aligned[i])  # 0.1% tolerance
-        retest_r1 = abs(close[i] - r1_1d_aligned[i]) < (0.001 * r1_1d_aligned[i])
-        retest_s1 = abs(close[i] - s1_1d_aligned[i]) < (0.001 * s1_1d_aligned[i])
+        # Exit conditions: touch H4/L4 or opposite level
+        touch_h4 = close[i] >= h4_aligned[i]
+        touch_l4 = close[i] <= l4_aligned[i]
+        touch_opposite_h3 = close[i] < h3_aligned[i] and position == 1  # Long exit on H3 retest
+        touch_opposite_l3 = close[i] > l3_aligned[i] and position == -1  # Short exit on L3 retest
         
-        # Entry logic: Camarilla breakout + daily trend alignment + volume confirmation
-        long_entry = breakout_r4 and daily_bullish_aligned[i] and volume_spike[i]
-        short_entry = breakout_s4 and daily_bearish_aligned[i] and volume_spike[i]
+        # Entry logic: Camarilla breakout + trending market + volume confirmation
+        long_entry = breakout_h3 and trending_market and volume_spike[i]
+        short_entry = breakout_l3 and trending_market and volume_spike[i]
         
-        # Exit logic: retest of PP or opposite Camarilla level
-        long_exit = retest_pp or retest_s1 or (close[i] < pp_1d_aligned[i])
-        short_exit = retest_pp or retest_r1 or (close[i] > pp_1d_aligned[i])
+        # Exit logic: H4/L4 touch or opposite level retest
+        long_exit = touch_h4 or touch_opposite_l3
+        short_exit = touch_l4 or touch_opposite_h3
         
         if long_entry and position != 1:
             position = 1
@@ -122,6 +161,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_camarilla_breakout_trend_volume_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_h3l3_breakout_adx_volume_v1"
+timeframe = "12h"
 leverage = 1.0
