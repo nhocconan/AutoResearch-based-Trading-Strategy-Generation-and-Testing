@@ -8,12 +8,12 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with 1d ADX regime filter and volume confirmation
-    # Long: price breaks above Donchian upper band AND ADX(14) > 20 (trending) AND volume > 1.5x avg
-    # Short: price breaks below Donchian lower band AND ADX(14) > 20 AND volume > 1.5x avg
-    # Exit: price touches Donchian middle band (mean of upper/lower) OR opposite breakout
-    # Using 4h timeframe for optimal trade frequency (target 20-50/year), Donchian for structure,
-    # ADX to filter ranging markets, and volume confirmation to avoid false breakouts.
+    # Hypothesis: 4h Donchian(20) breakout with 1d volume spike and ADX regime filter
+    # Long: price breaks above upper Donchian AND ADX(14) > 20 AND volume > 2x 20-period avg
+    # Short: price breaks below lower Donchian AND ADX(14) > 20 AND volume > 2x 20-period avg
+    # Exit: price returns to middle of Donchian channel OR opposite breakout
+    # Using 4h timeframe for optimal trade frequency (target 19-50/year), Donchian for structure,
+    # ADX to filter weak trends, volume spike to confirm institutional interest.
     # Discrete position sizing (0.25) to minimize fee churn.
     
     close = prices['close'].values
@@ -21,7 +21,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ADX regime filter
+    # Get daily data for ADX and volume regime filters
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -45,7 +45,7 @@ def generate_signals(prices):
     plus_dm = np.concatenate([[np.nan], plus_dm])
     minus_dm = np.concatenate([[np.nan], minus_dm])
     
-    # Smoothed values (Wilder's smoothing)
+    # Wilder's smoothing function
     def wilders_smoothing(data, period):
         result = np.full_like(data, np.nan)
         if len(data) < period:
@@ -75,50 +75,60 @@ def generate_signals(prices):
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Calculate 4h Donchian channels (20-period)
-    period = 20
-    upper_band = np.full(n, np.nan)
-    lower_band = np.full(n, np.nan)
-    middle_band = np.full(n, np.nan)
+    upper_donchian = np.full(n, np.nan)
+    lower_donchian = np.full(n, np.nan)
+    middle_donchian = np.full(n, np.nan)
     
-    for i in range(period-1, n):
-        upper_band[i] = np.max(high[i-period+1:i+1])
-        lower_band[i] = np.min(low[i-period+1:i+1])
-        middle_band[i] = (upper_band[i] + lower_band[i]) / 2
-    
-    # Get 4h volume for confirmation (>1.5x 20-period average)
-    vol_ma = np.full(n, np.nan)
     for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (1.5 * vol_ma)
+        upper_donchian[i] = np.max(high[i-20:i])
+        lower_donchian[i] = np.min(low[i-20:i])
+        middle_donchian[i] = (upper_donchian[i] + lower_donchian[i]) / 2
+    
+    # Calculate daily volume spike filter (>2x 20-period average)
+    vol_ma_1d = np.full(len(df_1d), np.nan)
+    for i in range(20, len(df_1d)):
+        vol_ma_1d[i] = np.mean(df_1d['volume'].values[i-20:i])
+    
+    volume_spike_1d = np.full(len(df_1d), False)
+    for i in range(20, len(df_1d)):
+        if not np.isnan(vol_ma_1d[i]):
+            volume_spike_1d[i] = df_1d['volume'].values[i] > (2.0 * vol_ma_1d[i])
+    
+    # Align daily volume spike to 4h
+    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
-            np.isnan(middle_band[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(upper_donchian[i]) or 
+            np.isnan(lower_donchian[i]) or np.isnan(middle_donchian[i]) or
+            np.isnan(volume_spike_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: ADX > 20 indicates trending market
+        # Regime filters
         trending_market = adx_1d_aligned[i] > 20
+        vol_spike = bool(volume_spike_1d_aligned[i])
         
         # Donchian breakout conditions
-        breakout_upper = close[i] > upper_band[i]
-        breakout_lower = close[i] < lower_band[i]
+        breakout_upper = close[i] > upper_donchian[i]
+        breakout_lower = close[i] < lower_donchian[i]
         
-        # Exit conditions: touch middle band or opposite breakout
-        touch_middle = (close[i] >= middle_band[i] and position == 1) or (close[i] <= middle_band[i] and position == -1)
-        opposite_breakout = (breakout_lower and position == 1) or (breakout_upper and position == -1)
+        # Exit conditions: return to middle or opposite breakout
+        return_to_middle = (position == 1 and close[i] < middle_donchian[i]) or \
+                          (position == -1 and close[i] > middle_donchian[i])
+        opposite_breakout = (position == 1 and breakout_lower) or \
+                           (position == -1 and breakout_upper)
         
         # Entry logic: Donchian breakout + trending market + volume confirmation
-        long_entry = breakout_upper and trending_market and volume_spike[i]
-        short_entry = breakout_lower and trending_market and volume_spike[i]
+        long_entry = breakout_upper and trending_market and vol_spike
+        short_entry = breakout_lower and trending_market and vol_spike
         
-        # Exit logic: middle band touch or opposite breakout
-        long_exit = touch_middle or opposite_breakout
-        short_exit = touch_middle or opposite_breakout
+        # Exit logic: return to middle or opposite breakout
+        long_exit = return_to_middle or opposite_breakout
+        short_exit = return_to_middle or opposite_breakout
         
         if long_entry and position != 1:
             position = 1
@@ -143,6 +153,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_breakout_adx_volume_v1"
+name = "4h_1d_donchian_breakout_adx_volume_v2"
 timeframe = "4h"
 leverage = 1.0
