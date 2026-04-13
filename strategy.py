@@ -8,20 +8,26 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with 1d volume spike and 1d ADX trend filter
-    # Long: price breaks above Donchian upper + 1d volume > 1.5x 20-period average + 1d ADX > 25
-    # Short: price breaks below Donchian lower + 1d volume > 1.5x 20-period average + 1d ADX > 25
-    # Uses discrete sizing (0.25) to minimize fee drag and ATR-based stoploss
-    # Target: 15-40 trades/year to stay within 4h optimal range
+    # Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and 1w trend filter
+    # Long: price breaks above Donchian(20) high + volume > 1.5x 20-period 1d average + 1w close > 1w EMA20
+    # Short: price breaks below Donchian(20) low + volume > 1.5x 20-period 1d average + 1w close < 1w EMA20
+    # Uses discrete sizing (0.30) to balance return and drawdown with ATR-based stoploss
+    # Target: 20-50 trades/year to stay within 4h optimal range
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time']
     
-    # Get 1d data for volume confirmation and ADX trend filter
+    # Get 1d data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -29,53 +35,23 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Donchian channels (20-period) for breakout levels
-    donchian_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # Calculate 1d volume average (20-period) for confirmation
     vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1d ADX (14-period) for trend filter
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    # Calculate 1w EMA20 for trend filter
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smoothed values using Wilder's smoothing (alpha = 1/period)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        alpha = 1.0 / period
-        # First value is simple average
-        if len(data) >= period:
-            result[period-1] = np.nanmean(data[:period])
-        for i in range(period, len(data)):
-            result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
-        return result
-    
-    atr_1d = wilders_smoothing(tr, 14)
-    plus_di_1d = 100 * wilders_smoothing(plus_dm, 14) / atr_1d
-    minus_di_1d = 100 * wilders_smoothing(minus_dm, 14) / atr_1d
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    adx_1d = wilders_smoothing(dx_1d, 14)
-    
-    # Align all indicators to 4h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
+    # Align 1d volume average and 1w EMA to 4h timeframe
     vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.25  # 25% position size
+    position_size = 0.30  # 30% position size
     
     # Track entry price for stoploss
     entry_price = np.full(n, np.nan)
@@ -95,22 +71,32 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or
-            np.isnan(vol_avg_20_1d_aligned[i]) or
-            np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(vol_avg_20_1d_aligned[i]) or 
+            np.isnan(ema_20_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x 20-period average
-        volume_confirmed = volume_1d[-1] > 1.5 * vol_avg_20_1d_aligned[i] if len(volume_1d) > 0 else False
+        # Volume confirmation: current 4h volume > 1.5x 20-period 1d average
+        vol_avg_20_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        if np.isnan(vol_avg_20_4h[i]):
+            signals[i] = 0.0
+            continue
+        volume_confirmed = volume[i] > 1.5 * vol_avg_20_4h[i]
         
-        # Trend filter: 1d ADX > 25 indicates strong trend
-        strong_trend = adx_1d_aligned[i] > 25
+        # Trend filter: 4h close above/below 1w EMA20
+        uptrend = close[i] > ema_20_1w_aligned[i]
+        downtrend = close[i] < ema_20_1w_aligned[i]
         
-        # Breakout conditions: price breaks Donchian levels with volume and trend
-        breakout_long = (close[i] > donchian_high_aligned[i]) and volume_confirmed and strong_trend
-        breakout_short = (close[i] < donchian_low_aligned[i]) and volume_confirmed and strong_trend
+        # Donchian(20) breakout conditions
+        donchian_high = np.max(high[i-20:i]) if i >= 20 else np.nan
+        donchian_low = np.min(low[i-20:i]) if i >= 20 else np.nan
+        
+        if np.isnan(donchian_high) or np.isnan(donchian_low):
+            signals[i] = 0.0
+            continue
+            
+        breakout_long = (close[i] > donchian_high) and volume_confirmed and uptrend
+        breakout_short = (close[i] < donchian_low) and volume_confirmed and downtrend
         
         # Stoploss: 2x ATR below/above entry
         exit_long = position == 1 and not np.isnan(entry_price[i-1]) and close[i] < entry_price[i-1] - 2.0 * atr_4h[i]
@@ -147,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_volume_adx_v1"
+name = "4h_1d_1w_donchian_volume_trend_v1"
 timeframe = "4h"
 leverage = 1.0
