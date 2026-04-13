@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -36,15 +36,19 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
+    # 1d EMA200 for trend filter (HTF)
+    ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25
     
-    start = max(20, 50, 14)
+    start = max(20, 200, 14)
     for i in range(start, n):
         if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
             np.isnan(avg_vol[i]) or np.isnan(atr[i]) or
-            np.isnan(ema_50_1d_aligned[i])):
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_200_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -52,29 +56,29 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long: breakout above upper band + volume confirmation + price above EMA50_1d (bullish)
+            # Long: breakout above upper band + volume confirmation + EMA50_1d > EMA200_1d (bullish)
             if (price > upper[i] and vol > 2.0 * avg_vol[i] and 
-                price > ema_50_1d_aligned[i]):
+                ema_50_1d_aligned[i] > ema_200_1d_aligned[i]):
                 position = 1
                 signals[i] = position_size
-            # Short: breakout below lower band + volume confirmation + price below EMA50_1d (bearish)
+            # Short: breakout below lower band + volume confirmation + EMA50_1d < EMA200_1d (bearish)
             elif (price < lower[i] and vol > 2.0 * avg_vol[i] and 
-                  price < ema_50_1d_aligned[i]):
+                  ema_50_1d_aligned[i] < ema_200_1d_aligned[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below lower band OR below EMA50_1d OR stop-loss hit
-            if (price < lower[i] or price < ema_50_1d_aligned[i] or 
+            # Exit long: price closes below lower band OR stop-loss hit
+            if (price < lower[i] or 
                 price < entry_price_long - 2.0 * atr[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes above upper band OR above EMA50_1d OR stop-loss hit
-            if (price > upper[i] or price > ema_50_1d_aligned[i] or 
+            # Exit short: price closes above upper band OR stop-loss hit
+            if (price > upper[i] or 
                 price > entry_price_short + 2.0 * atr[i]):
                 position = 0
                 signals[i] = 0.0
@@ -90,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Donchian_Volume_EMA50Trend"
+name = "4h_1d_Donchian_Volume_EMA50EMA200Filter"
 timeframe = "4h"
 leverage = 1.0
