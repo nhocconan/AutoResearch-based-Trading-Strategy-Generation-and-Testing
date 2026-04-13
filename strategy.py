@@ -8,91 +8,82 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h ADX trend strength + 1d Camarilla pivot mean reversion.
-    # Long when ADX < 20 (range) and price touches 1d S3 pivot with rejection.
-    # Short when ADX < 20 and price touches 1d R3 pivot with rejection.
-    # Uses 6h candle close for entry timing, avoids whipsaw in strong trends (ADX > 25).
-    # Target: 60-120 total trades over 4 years (15-30/year) to minimize fee drag.
+    # Hypothesis: 6h Donchian(20) breakout with 1d weekly pivot filter.
+    # Long when price breaks above 6h Donchian(20) high AND 1d weekly pivot shows bullish bias (close > weekly pivot).
+    # Short when price breaks below 6h Donchian(20) low AND 1d weekly pivot shows bearish bias (close < weekly pivot).
+    # Uses volume confirmation: current 6h volume > 1.5 * 20-period average volume.
+    # Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+    # Works in both bull and bear: breakouts capture trends, weekly pivot filter avoids counter-trend trades.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot (call ONCE before loop)
+    # Get 1d data for weekly pivot (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels for 1d
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r3_1d = pivot_1d + range_1d * 1.1
-    s3_1d = pivot_1d - range_1d * 1.1
+    # Calculate weekly pivot (using prior week's daily OHLC)
+    # For simplicity, use prior 5 trading days (1 week) to calculate weekly pivot
+    if len(high_1d) >= 5:
+        # Rolling window of 5 days for weekly high/low/close
+        weekly_high = pd.Series(high_1d).rolling(window=5, min_periods=5).max().values
+        weekly_low = pd.Series(low_1d).rolling(window=5, min_periods=5).min().values
+        weekly_close = pd.Series(close_1d).rolling(window=5, min_periods=5).last().values
+        weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
+    else:
+        weekly_pivot = np.full_like(close_1d, np.nan)
     
-    # Align HTF pivot levels to 6h timeframe
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    # Align HTF weekly pivot to 6h timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
     
-    # Calculate ADX(14) on primary timeframe (6h)
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    # Directional Movement
-    up_move = high[1:] - high[:-1]
-    down_move = low[:-1] - low[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
-    # Smoothed TR, +DM, -DM (Wilder's smoothing = EMA with alpha=1/period)
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Calculate Donchian(20) on 6h timeframe
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume confirmation: current volume > 1.5 * 20-period average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(adx[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade in ranging markets (ADX < 20)
-        ranging = adx[i] < 20
+        # Breakout conditions with volume confirmation
+        long_breakout = (close[i] > donchian_high[i]) and volume_confirm[i]
+        short_breakout = (close[i] < donchian_low[i]) and volume_confirm[i]
         
-        # Pivot rejection conditions (price touches level and closes back inside)
-        long_setup = (low[i] <= s3_1d_aligned[i]) and (close[i] > s3_1d_aligned[i]) and ranging
-        short_setup = (high[i] >= r3_1d_aligned[i]) and (close[i] < r3_1d_aligned[i]) and ranging
+        # Weekly pivot filter: only trade in direction of weekly bias
+        long_filter = close[i] > weekly_pivot_aligned[i]  # bullish bias
+        short_filter = close[i] < weekly_pivot_aligned[i]  # bearish bias
         
-        # Exit conditions: price returns to 1d pivot
-        long_exit = close[i] >= pivot_1d_aligned[i] if 'pivot_1d_aligned' in locals() else close[i] >= ((pivot_1d[i] if not np.isnan(pivot_1d[i]) else 0))
-        short_exit = close[i] <= pivot_1d_aligned[i] if 'pivot_1d_aligned' in locals() else close[i] <= ((pivot_1d[i] if not np.isnan(pivot_1d[i]) else 0))
+        long_entry = long_breakout and long_filter
+        short_entry = short_breakout and short_filter
         
-        # Calculate aligned pivot for exit
-        pivot_1d = (high_1d + low_1d + close_1d) / 3
-        pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-        
-        long_exit = close[i] >= pivot_1d_aligned[i]
-        short_exit = close[i] <= pivot_1d_aligned[i]
+        # Exit conditions: opposite Donchian breakout
+        long_exit = close[i] < donchian_low[i]
+        short_exit = close[i] > donchian_high[i]
         
         # Fixed position size (discrete levels to minimize fee churn)
         position_size = 0.25
         
         # Entry conditions
-        if long_setup and position != 1:
+        if long_entry and position != 1:
             position = 1
             signals[i] = position_size
-        elif short_setup and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -position_size
         # Exit conditions
@@ -113,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_adx_ranging_camarilla_pivot_rejection_v1"
+name = "6h_1d_donchian_breakout_weekly_pivot_filter_v1"
 timeframe = "6h"
 leverage = 1.0
