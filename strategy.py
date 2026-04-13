@@ -13,46 +13,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for pivot points and volume
+    # Daily data for 12-hour analysis
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
+    # Calculate 20-day Donchian channel on daily
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
     # Calculate weekly EMA20 for trend filter
-    weekly_close = df_1w['close'].values
-    ema_20_1w = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Calculate daily pivot points (standard floor trader pivots)
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
-    
-    pivot = (daily_high + daily_low + daily_close) / 3
-    r1 = 2 * pivot - daily_low
-    s1 = 2 * pivot - daily_high
-    r2 = pivot + (daily_high - daily_low)
-    s2 = pivot - (daily_high - daily_low)
-    r3 = daily_high + 2 * (pivot - daily_low)
-    s3 = daily_low - 2 * (daily_high - pivot)
-    r4 = daily_high + 3 * (pivot - daily_low)
-    s4 = daily_low - 3 * (daily_high - pivot)
-    
-    # Align pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     # Calculate daily volume and its 20-period average
     volume_1d = df_1d['volume'].values
     volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all data to 12-hour timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
     signals = np.zeros(n)
@@ -61,51 +49,47 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(ema_20_1w_aligned[i]) or
-            np.isnan(volume_ma_20_1d_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current 6h volume > 1.3x daily volume MA (adjusted for 6h)
-        # 4 6h periods per day, so daily MA/4 = approximate 6h period MA
-        volume_6h_approx_ma = volume_ma_20_1d_aligned[i] / 4
-        volume_condition = volume[i] > (volume_6h_approx_ma * 1.3)
+        # Volume condition: current 12h volume > 1.5x daily volume MA (adjusted for 12h)
+        # 2 12h periods per day, so daily MA/2 = approximate 12h period MA
+        volume_12h_approx_ma = volume_ma_20_1d_aligned[i] / 2
+        volume_condition = volume[i] > (volume_12h_approx_ma * 1.5)
         
         # Trend filter: weekly EMA20 direction
+        # Long when price > weekly EMA20
+        # Short when price < weekly EMA20
         long_trend = close[i] > ema_20_1w_aligned[i]
         short_trend = close[i] < ema_20_1w_aligned[i]
         
-        # Price levels
-        price = close[i]
+        # Entry conditions: Donchian breakout with volume and trend confirmation
+        # Long when price breaks above Donchian high with volume and uptrend
+        # Short when price breaks below Donchian low with volume and downtrend
+        breakout_long = close[i] > donchian_high_aligned[i]
+        breakout_short = close[i] < donchian_low_aligned[i]
         
         if position == 0:
-            # Fade at R3/S3 with volume and counter-trend
-            if price >= r3_aligned[i] and volume_condition and short_trend:
-                position = -1
-                signals[i] = -position_size
-            elif price <= s3_aligned[i] and volume_condition and long_trend:
+            if breakout_long and volume_condition and long_trend:
                 position = 1
                 signals[i] = position_size
-            # Breakout continuation at R4/S4 with volume and trend
-            elif price > r4_aligned[i] and volume_condition and long_trend:
-                position = 1
-                signals[i] = position_size
-            elif price < s4_aligned[i] and volume_condition and short_trend:
+            elif breakout_short and volume_condition and short_trend:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit when price returns to pivot or breaks S4
-            if price <= pivot_aligned[i] or price < s4_aligned[i]:
+            # Exit when price breaks below Donchian low or shows reversal
+            if close[i] < donchian_low_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit when price returns to pivot or breaks R4
-            if price >= pivot_aligned[i] or price > r4_aligned[i]:
+            # Exit when price breaks above Donchian high or shows reversal
+            if close[i] > donchian_high_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -113,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d1w_Camarilla_Pivot_Fade_Breakout_v1"
-timeframe = "6h"
+name = "12h_1d1w_Donchian_Breakout_Volume_Trend_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
