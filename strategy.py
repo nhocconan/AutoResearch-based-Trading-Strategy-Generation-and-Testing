@@ -1,7 +1,11 @@
-# 1d_1w_CamarillaBreakout_TrendFilter
-# Breakout of daily Camarilla H3/L3 levels with volume spike, filtered by weekly trend (price above/below weekly 200 EMA).
-# Targets 8-20 trades/year (30-80 total over 4 years) on 1d timeframe.
-# Uses weekly trend filter to avoid counter-trend trades in strong trends, improving win rate in both bull and bear markets.
+#!/usr/bin/env python3
+"""
+12h_1w_CamarillaBreakout_TrendFilter
+Hypothesis: In BTC/ETH, weekly trend direction (above/below 200 EMA) provides strong directional bias.
+Breakouts of daily Camarilla H3/L3 levels with volume spike, taken only in direction of weekly trend,
+capture momentum moves while avoiding counter-trend trades. Weekly trend filter reduces whipsaw in
+ranging markets and improves win rate in both bull and bear markets. Target: 15-35 trades/year.
+"""
 
 import numpy as np
 import pandas as pd
@@ -44,7 +48,7 @@ def generate_signals(prices):
     breakout_up = high_1d > h3
     breakout_down = low_1d < l3
     
-    # Align breakout signals to 1d timeframe
+    # Align breakout signals to 12h timeframe
     breakout_up_aligned = align_htf_to_ltf(prices, df_1d, breakout_up.astype(float))
     breakout_down_aligned = align_htf_to_ltf(prices, df_1d, breakout_down.astype(float))
     
@@ -65,7 +69,7 @@ def generate_signals(prices):
     uptrend_1w = close_1w > ema_200_1w
     downtrend_1w = close_1w < ema_200_1w
     
-    # Align weekly trend to 1d timeframe
+    # Align weekly trend to 12h timeframe
     uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w.astype(float))
     downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w.astype(float))
     
@@ -118,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_CamarillaBreakout_TrendFilter"
-timeframe = "1d"
+name = "12h_1w_CamarillaBreakout_TrendFilter"
+timeframe = "12h"
 leverage = 1.0
