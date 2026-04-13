@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_1d1w_Camarilla_Pivot_Breakout_Volume_Trend_Hybrid
-Hypothesis: 4h close breaks above/below daily Camarilla R4/S4 with volume surge and weekly trend alignment.
-Long when price > R4, volume > 2x 20-day average, weekly close > weekly SMA50.
-Short when price < S4, volume > 2x 20-day average, weekly close < weekly SMA50.
-Exit when price crosses daily pivot point (PP) or weekly trend reverses.
-Designed for 4h timeframe to target 20-40 trades/year with strong trend capture in both bull/bear markets.
-Uses volume confirmation and weekly trend filter to reduce false breakouts and improve win rate.
+1d_1w_Camarilla_Pivot_Breakout_With_Volume_Confirmation
+Hypothesis: Daily close above/below weekly Camarilla levels with volume confirmation.
+Long when daily close > weekly R4 + daily volume > 2x 20-day avg volume + weekly close > weekly SMA50.
+Short when daily close < weekly S4 + daily volume > 2x 20-day avg volume + weekly close < weekly SMA50.
+Exit when daily close crosses weekly pivot point (PP) or weekly trend reverses.
+Designed for daily timeframe to target 5-15 trades/year with strong trend capture in both bull/bear markets.
 """
 
 import numpy as np
@@ -21,46 +20,41 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Daily data for Camarilla levels and volume
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    vol_1d = df_1d['volume'].values
-    
-    # Previous day's values for today's Camarilla calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
-    
-    # Calculate daily Camarilla levels
-    range_1d = prev_high - prev_low
-    camarilla_pp = (prev_high + prev_low + prev_close) / 3
-    camarilla_r4 = camarilla_pp + (range_1d * 1.1 / 2)
-    camarilla_s4 = camarilla_pp - (range_1d * 1.1 / 2)
-    
-    # Align daily Camarilla levels to 4h
-    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    
-    # Daily volume and 20-period average
-    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean()
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20.values)
-    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
-    
-    # Weekly trend filter
+    # Weekly Camarilla pivot levels (based on previous week)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
     
+    # Calculate weekly Camarilla levels
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Previous week's values for current week calculation
+    prev_high = np.roll(high_1w, 1)
+    prev_low = np.roll(low_1w, 1)
+    prev_close = np.roll(close_1w, 1)
+    prev_high[0] = high_1w[0]
+    prev_low[0] = low_1w[0]
+    prev_close[0] = close_1w[0]
+    
+    # Camarilla calculation
+    range_1w = prev_high - prev_low
+    camarilla_pp = (prev_high + prev_low + prev_close) / 3
+    camarilla_r4 = camarilla_pp + (range_1w * 1.1 / 2)
+    camarilla_s4 = camarilla_pp - (range_1w * 1.1 / 2)
+    
+    # Align weekly Camarilla levels to daily
+    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1w, camarilla_pp)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
+    
+    # Daily volume confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    
+    # Weekly trend filter
     close_1w = df_1w['close'].values
     sma_50 = pd.Series(close_1w).rolling(window=50, min_periods=50).mean()
     sma_50_aligned = align_htf_to_ltf(prices, df_1w, sma_50.values)
@@ -72,19 +66,19 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if any required data is not ready
         if (np.isnan(camarilla_pp_aligned[i]) or np.isnan(camarilla_r4_aligned[i]) or
-            np.isnan(camarilla_s4_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or
-            np.isnan(sma_50_aligned[i]) or np.isnan(vol_1d_aligned[i])):
+            np.isnan(camarilla_s4_aligned[i]) or np.isnan(vol_ma_20[i]) or
+            np.isnan(sma_50_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current daily volume > 2x 20-period average
-        vol_condition = vol_1d_aligned[i] > (vol_ma_20_aligned[i] * 2.0)
+        # Volume condition: daily volume > 2x 20-day average
+        vol_condition = volume[i] > (vol_ma_20[i] * 2.0)
         
         # Weekly trend condition
         uptrend = close[i] > sma_50_aligned[i]
         downtrend = close[i] < sma_50_aligned[i]
         
-        # Breakout conditions
+        # Breakout conditions (using daily close)
         long_breakout = close[i] > camarilla_r4_aligned[i]
         short_breakout = close[i] < camarilla_s4_aligned[i]
         
@@ -118,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d1w_Camarilla_Pivot_Breakout_Volume_Trend_Hybrid"
-timeframe = "4h"
+name = "1d_1w_Camarilla_Pivot_Breakout_With_Volume_Confirmation"
+timeframe = "1d"
 leverage = 1.0
