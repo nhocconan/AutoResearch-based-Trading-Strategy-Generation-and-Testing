@@ -5,123 +5,132 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h strategy using 1w Williams %R for extreme overbought/oversold,
-    # confirmed by 1d volume spike and choppiness regime filter.
-    # Williams %R identifies reversals in ranging markets; volume confirms momentum;
-    # chop filter ensures we avoid strong trends where mean reversion fails.
-    # Designed for low trade frequency (12-37/year) to minimize fee drag on 12h timeframe.
-    # Works in both bull and bear: %R captures reversals, volume confirms, chop filter adapts to regime.
+    # Hypothesis: 4h Donchian breakout with 12h trend filter and volume confirmation
+    # Works in both bull and bear: Donchian captures breakouts, 12h trend filters false signals,
+    # volume confirms momentum, ATR stoploss controls risk
+    # Target: 20-50 trades/year to minimize fee drag
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values if 'volume' in prices.columns else np.ones(len(prices))
     
-    # Get 1w data for Williams %R (overbought/oversold)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 4h data for Donchian channels (primary entry/exit)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate 1w Williams %R (period=14)
-    highest_high_1w = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    lowest_low_1w = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
-    williams_r_1w = -100 * (highest_high_1w - close_1w) / (highest_high_1w - lowest_low_1w + 1e-10)
+    # Calculate 4h Donchian channels (20-period)
+    donchian_high_20_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low_20_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Get 1d data for volume confirmation and choppiness
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    
+    # Calculate 12h EMA(50) for trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Get 1d data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values if 'volume' in df_1d.columns else np.ones(len(df_1d))
     
     # Calculate 1d volume average (20-period)
     vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1d choppiness index (period=14)
-    tr_1d = np.maximum(np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1])), np.abs(low_1d[1:] - close_1d[:-1]))
-    tr_1d = np.concatenate([[np.nan], tr_1d])
-    atr_sum_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
-    max_high_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop_denom = np.log10((max_high_1d - min_low_1d) / (atr_sum_1d + 1e-10)) * np.log10(14)
-    chop_1d = 100 * (np.log10(atr_sum_1d + 1e-10) / np.log10(14)) / (chop_denom + 1e-10)
-    
-    # Align all HTF indicators to 12h primary timeframe
-    williams_r_1w_aligned = align_htf_to_ltf(prices, df_1w, williams_r_1w)
+    # Align all HTF indicators to 4h primary timeframe
+    donchian_high_20_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_20_4h)
+    donchian_low_20_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_20_4h)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
+    atr_multiplier = 2.5  # ATR stoploss multiplier
+    
+    # Calculate 4h ATR for stoploss
+    tr = np.maximum(np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1])), np.abs(low[1:] - close[:-1]))
+    tr = np.concatenate([[np.nan], tr])
+    atr_4h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Track entry price for stoploss
+    entry_price = np.full(n, np.nan)
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(williams_r_1w_aligned[i]) or 
+        if (np.isnan(donchian_high_20_4h_aligned[i]) or 
+            np.isnan(donchian_low_20_4h_aligned[i]) or
+            np.isnan(ema_50_12h_aligned[i]) or
             np.isnan(vol_avg_20_1d_aligned[i]) or
-            np.isnan(chop_1d_aligned[i])):
+            np.isnan(atr_4h[i])):
             signals[i] = 0.0
             continue
         
-        # Get 1d bar index for current 12h bar (each 1d bar = 2 12h bars)
-        idx_1d = i // 2
+        # Volume confirmation: current 1d volume > 1.5x 20-period average
+        # Get the 1d bar index for current 4h bar (each 1d bar = 6 4h bars)
+        idx_1d = i // 6
         if idx_1d >= len(volume_1d):
             signals[i] = 0.0
             continue
+        volume_confirmed = volume_1d[idx_1d] > 1.5 * vol_avg_20_1d_aligned[i]
         
-        # Volume confirmation: current 1d volume > 2.0x 20-period average
-        volume_confirmed = volume_1d[idx_1d] > 2.0 * vol_avg_20_1d_aligned[i]
+        # Trend direction from 12h EMA(50)
+        trend_up = close[i] > ema_50_12h_aligned[i]
+        trend_down = close[i] < ema_50_12h_aligned[i]
         
-        # Chop regime filter: only trade when choppy (CHOP > 61.8 = ranging market)
-        chop_regime = chop_1d_aligned[i] > 61.8
+        # Entry conditions: Donchian breakout + trend + volume
+        enter_long = (close[i] > donchian_high_20_4h_aligned[i]) and trend_up and volume_confirmed
+        enter_short = (close[i] < donchian_low_20_4h_aligned[i]) and trend_down and volume_confirmed
         
-        # Williams %R extreme levels: oversold < -80, overbought > -20
-        williams_r = williams_r_1w_aligned[i]
-        oversold = williams_r < -80
-        overbought = williams_r > -20
-        
-        # Entry conditions: mean reversion in ranging markets with volume confirmation
-        enter_long = oversold and volume_confirmed and chop_regime
-        enter_short = overbought and volume_confirmed and chop_regime
-        
-        # Exit conditions: reverse signal or chop regime ends
-        exit_long = position == 1 and (overbought or not chop_regime)
-        exit_short = position == -1 and (oversold or not chop_regime)
+        # Stoploss conditions
+        exit_long = position == 1 and not np.isnan(entry_price[i-1]) and close[i] < entry_price[i-1] - atr_multiplier * atr_4h[i]
+        exit_short = position == -1 and not np.isnan(entry_price[i-1]) and close[i] > entry_price[i-1] + atr_multiplier * atr_4h[i]
         
         # Execute signals
         if enter_long and position != 1:
             position = 1
             signals[i] = position_size
+            entry_price[i] = close[i]  # record entry price at close (filled next bar open)
         elif enter_short and position != -1:
             position = -1
             signals[i] = -position_size
+            entry_price[i] = close[i]  # record entry price at close (filled next bar open)
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
+            entry_price[i] = np.nan
         elif position == -1 and exit_short:
             position = 0
             signals[i] = 0.0
+            entry_price[i] = np.nan
         # Hold current position
         else:
             if position == 1:
                 signals[i] = position_size
+                entry_price[i] = entry_price[i-1] if i > 0 else np.nan
             elif position == -1:
                 signals[i] = -position_size
+                entry_price[i] = entry_price[i-1] if i > 0 else np.nan
             else:
                 signals[i] = 0.0
+                entry_price[i] = np.nan
     
     return signals
 
-name = "12h_1w_1d_williamsr_volume_chop_v1"
-timeframe = "12h"
+name = "4h_12h_1d_donchian_trend_volume_atrstop_v1"
+timeframe = "4h"
 leverage = 1.0
