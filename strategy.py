@@ -8,45 +8,39 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout + 1d Camarilla H3/L3 filter + volume confirmation
-    # Long when: price breaks above Donchian(20) high AND price > Camarilla H3 (1d) AND volume > 1.5x avg volume
-    # Short when: price breaks below Donchian(20) low AND price < Camarilla L3 (1d) AND volume > 1.5x avg volume
-    # Exit when: price crosses Donchian midpoint
-    # Uses discrete sizing (0.25) targeting 75-200 trades over 4 years.
-    # Camarilla pivots provide dynamic support/resistance that adapts to volatility, working in bull/bear.
+    # Hypothesis: 6h Williams %R mean reversion + 1d trend filter + volume spike
+    # Long when: Williams %R(14) < -80 (oversold) AND price > 1d EMA50 (uptrend) AND volume > 2x avg volume
+    # Short when: Williams %R(14) > -20 (overbought) AND price < 1d EMA50 (downtrend) AND volume > 2x avg volume
+    # Exit when: Williams %R crosses -50 (mean reversion midpoint) OR volume drops below average
+    # Uses discrete sizing (0.25) targeting 50-150 trades over 4 years.
+    # Works in bull/bear via 1d EMA50 trend filter preventing counter-trend trades.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    # Calculate 1d EMA50
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 1d Camarilla pivots (using previous day's range)
-    range_1d = high_1d - low_1d
-    h3_1d = close_1d + 1.125 * range_1d
-    l3_1d = close_1d - 1.125 * range_1d
+    # Calculate Williams %R(14) on 6h
+    lookback = 14
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero (when highest_high == lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Align 1d Camarilla levels to 4h timeframe
-    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
-    
-    # Calculate Donchian(20) channels on 4h
-    lookback = 20
-    donchian_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    donchian_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
-    
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_threshold = vol_ma * 1.5
+    vol_threshold = vol_ma * 2.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -54,8 +48,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(williams_r[i]) or np.isnan(ema_50_1d_aligned[i]) or
             np.isnan(vol_threshold[i])):
             signals[i] = 0.0
             continue
@@ -63,21 +57,22 @@ def generate_signals(prices):
         # Volume confirmation
         vol_ok = volume[i] > vol_threshold[i]
         
-        # Breakout conditions
-        long_breakout = close[i] > donchian_high[i]
-        short_breakout = close[i] < donchian_low[i]
+        # Williams %R conditions
+        wr_oversold = williams_r[i] < -80
+        wr_overbought = williams_r[i] > -20
+        wr_exit = williams_r[i] > -50  # Exit when crosses above -50 (for long) or below -50 (for short)
         
-        # Camarilla filters
-        long_filter = close[i] > h3_1d_aligned[i]
-        short_filter = close[i] < l3_1d_aligned[i]
+        # Trend filter from 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
         # Entry conditions
-        long_entry = long_breakout and long_filter and vol_ok and position != 1
-        short_entry = short_breakout and short_filter and vol_ok and position != -1
+        long_entry = wr_oversold and uptrend and vol_ok and position != 1
+        short_entry = wr_overbought and downtrend and vol_ok and position != -1
         
-        # Exit conditions: price crosses Donchian midpoint
-        exit_long = close[i] < donchian_mid[i]
-        exit_short = close[i] > donchian_mid[i]
+        # Exit conditions: Williams %R crosses -50 OR volume drops below average
+        exit_long = wr_exit or volume[i] < vol_ma[i]
+        exit_short = wr_exit or volume[i] < vol_ma[i]
         
         # Execute signals
         if long_entry:
@@ -103,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_camarilla_volume_v1"
-timeframe = "4h"
+name = "6h_1d_williams_r_mean_reversion_trend_v1"
+timeframe = "6h"
 leverage = 1.0
