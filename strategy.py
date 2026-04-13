@@ -8,9 +8,10 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Camarilla pivot breakout with 1d trend filter (ADX > 25) and volume confirmation.
-    # Long when price breaks above R3 pivot with ADX > 25 and volume > 1.5x average.
-    # Short when price breaks below S3 pivot with ADX > 25 and volume > 1.5x average.
+    # Hypothesis: 4h Camarilla pivot breakout with 1d ADX trend filter and volume confirmation.
+    # Long when price breaks above R3 with ADX > 25 and volume > 1.5x average.
+    # Short when price breaks below S3 with ADX > 25 and volume > 1.5x average.
+    # Exit when price returns to pivot level.
     # Uses breakouts in trending markets to capture momentum, avoids false breakouts in ranging markets.
     # Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
     
