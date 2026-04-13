@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe with 1d Camarilla pivot levels and volume confirmation.
-# Long: Price crosses above Camarilla R3 level + volume > 1.5x average volume (20-period).
-# Short: Price crosses below Camarilla S3 level + volume > 1.5x average volume.
-# Uses 1d Camarilla levels for support/resistance structure, 12h for execution with volume confirmation.
-# Time filter: 00-23 UTC (all hours) to maximize opportunities while maintaining discipline.
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+# Hypothesis: 4h timeframe with 1d Williams %R and RSI extremes + volume confirmation.
+# Long: Williams %R < -80 (oversold) AND RSI < 30 (oversold) AND volume > 1.5x average volume.
+# Short: Williams %R > -20 (overbought) AND RSI > 70 (overbought) AND volume > 1.5x average volume.
+# Exit: Opposite condition (Williams %R crosses above -50 for long exit, below -50 for short exit).
+# Uses 1d Williams %R for overbought/oversold extremes, RSI for confirmation, volume for conviction.
+# Time filter: None (all hours) to capture opportunities in both bull and bear markets.
+# Target: 20-50 total trades over 4 years (5-12.5/year) for 4h timeframe to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,37 +21,52 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla pivot levels
+    # 1d data for Williams %R and RSI
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels (using previous day's data)
-    camarilla_r3 = np.full(len(close_1d), np.nan)
-    camarilla_s3 = np.full(len(close_1d), np.nan)
-    for i in range(1, len(close_1d)):
-        # Previous day's OHLC
-        ph = high_1d[i-1]
-        pl = low_1d[i-1]
-        pc = close_1d[i-1]
-        rang = ph - pl
-        
-        # Camarilla levels
-        camarilla_r3[i] = pc + (rang * 1.1 / 4)
-        camarilla_s3[i] = pc - (rang * 1.1 / 4)
+    # Calculate Williams %R (14-period)
+    williams_r = np.full(len(close_1d), np.nan)
+    for i in range(14, len(close_1d)):
+        highest_high = np.max(high_1d[i-14:i])
+        lowest_low = np.min(low_1d[i-14:i])
+        if highest_high != lowest_low:
+            williams_r[i] = -100 * (highest_high - close_1d[i-1]) / (highest_high - lowest_low)
+        else:
+            williams_r[i] = -50  # neutral if no range
+    
+    # Calculate RSI (14-period)
+    rsi = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 15:
+        delta = np.diff(close_1d)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.full(len(close_1d), np.nan)
+        avg_loss = np.full(len(close_1d), np.nan)
+        avg_gain[14] = np.mean(gain[1:15])
+        avg_loss[14] = np.mean(loss[1:15])
+        for i in range(15, len(close_1d)):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
+            if avg_loss[i] != 0:
+                rs = avg_gain[i] / avg_loss[i]
+                rsi[i] = 100 - (100 / (1 + rs))
+            else:
+                rsi[i] = 100
     
     # Average volume (20-period) for volume confirmation
     avg_volume = np.full(n, np.nan)
     for i in range(20, n):
         avg_volume[i] = np.mean(volume[i-20:i])
     
-    # Align 1d Camarilla levels to 12h
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align 1d Williams %R and RSI to 4h
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -58,7 +74,7 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(rsi_aligned[i]) or 
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
@@ -66,33 +82,33 @@ def generate_signals(prices):
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        r3 = camarilla_r3_aligned[i]
-        s3 = camarilla_s3_aligned[i]
+        wr = williams_r_aligned[i]
+        rsi_val = rsi_aligned[i]
         
         # Volume confirmation: current volume > 1.5x average volume
         volume_confirm = vol > 1.5 * avg_vol
         
         if position == 0:
-            # Long: price crosses above R3 + volume confirmation
-            if (price > r3 and volume_confirm):
+            # Long: Williams %R < -80 AND RSI < 30 AND volume confirmation
+            if (wr < -80 and rsi_val < 30 and volume_confirm):
                 position = 1
                 signals[i] = position_size
-            # Short: price crosses below S3 + volume confirmation
-            elif (price < s3 and volume_confirm):
+            # Short: Williams %R > -20 AND RSI > 70 AND volume confirmation
+            elif (wr > -20 and rsi_val > 70 and volume_confirm):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below S3 (opposite level)
-            if price < s3:
+            # Exit long: Williams %R crosses above -50 (momentum shifting)
+            if wr > -50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes above R3 (opposite level)
-            if price > r3:
+            # Exit short: Williams %R crosses below -50 (momentum shifting)
+            if wr < -50:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -100,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_R3S3_Volume"
-timeframe = "12h"
+name = "4h_1d_Williams_RSI_Volume"
+timeframe = "4h"
 leverage = 1.0
