@@ -8,11 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Donchian(20) breakout + 1d/1w Camarilla pivot direction + volume confirmation (>2.0x 20-period MA).
-    # Uses higher timeframe pivot structure to filter breakout direction: long only when price > 1d pivot, short only when price < 1d pivot.
-    # Weekly pivot confirms longer-term bias: requires alignment between 1d and 1w pivot zones.
+    # Hypothesis: 12h Donchian(20) breakout + 1d/1w Camarilla pivot alignment + volume confirmation (>1.8x 20-period MA).
+    # Uses higher timeframe pivot structure to filter breakout direction: long when price > 1d pivot and > 1w pivot,
+    # short when price < 1d pivot and < 1w pivot. Weekly pivot confirms longer-term bias.
     # Volume filter ensures institutional participation. Discrete sizing (0.0, ±0.25) minimizes fee churn.
-    # Target: 75-150 total trades over 4 years (19-38/year) to stay within fee drag limits.
+    # Target: 50-150 total trades over 4 years (12-37/year) to stay within fee drag limits.
     
     close = prices['close'].values
     high = prices['high'].values
@@ -48,7 +48,7 @@ def generate_signals(prices):
     r4_1w = pivot_1w + range_1w * 1.5
     s4_1w = pivot_1w - range_1w * 1.5
     
-    # Align HTF pivot levels to 6h timeframe
+    # Align HTF pivot levels to 12h timeframe
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
@@ -62,7 +62,7 @@ def generate_signals(prices):
     # Calculate 20-period volume MA for confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate Donchian(20) channels on primary timeframe (6h)
+    # Calculate Donchian(20) channels on primary timeframe (12h)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -78,8 +78,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 2.0 * 20-period MA (stricter to reduce trades)
-        volume_filter = volume[i] > 2.0 * volume_ma[i]
+        # Volume filter: current volume > 1.8 * 20-period MA (balanced to avoid overtrading)
+        volume_filter = volume[i] > 1.8 * volume_ma[i]
         
         # Pivot direction filters: price relative to 1d S3/R3 and 1w pivot
         # Long bias: price > 1d S3 and price > 1w pivot
@@ -124,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_1w_camarilla_pivot_donchian_breakout_volume_v1"
-timeframe = "6h"
+name = "12h_1d_1w_camarilla_pivot_donchian_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
