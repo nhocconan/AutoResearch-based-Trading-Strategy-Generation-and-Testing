@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with Volume Spike and ADX Trend Filter.
-Trades breakouts above/below Donchian channels (20-period) confirmed by volume spikes,
+4h Camarilla Pivot Breakout with Volume Spike and ADX Trend Filter.
+Trades breakouts above/below Camarilla levels (1-day) confirmed by volume spikes,
 only in trending markets (1-day ADX > 25) to avoid false breakouts in ranging conditions.
 Designed for 4h timeframe to target 75-200 total trades over 4 years (19-50/year).
 Works in both bull and bear markets by following the trend direction.
@@ -21,36 +21,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # Donchian Channel (20-period)
-    upper_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    
-    # Breakout conditions
-    breakout_up = high_4h > upper_20
-    breakout_down = low_4h < lower_20
-    
-    # Align signals to 4h timeframe
-    breakout_up_aligned = align_htf_to_ltf(prices, df_4h, breakout_up.astype(float))
-    breakout_down_aligned = align_htf_to_ltf(prices, df_4h, breakout_down.astype(float))
-    
-    # Get 1d data for volume and ADX
+    # Get 1d data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    volume_1d = df_1d['volume'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    # Camarilla Pivot Levels (based on previous day)
+    range_1d = high_1d - low_1d
+    close_prev = np.roll(close_1d, 1)
+    close_prev[0] = close_1d[0]  # first day
+    
+    # Calculate Camarilla levels
+    H4 = close_prev + 1.1 * range_1d / 2
+    H3 = close_prev + 1.1 * range_1d / 4
+    H2 = close_prev + 1.1 * range_1d / 6
+    H1 = close_prev + 1.1 * range_1d / 12
+    L1 = close_prev - 1.1 * range_1d / 12
+    L2 = close_prev - 1.1 * range_1d / 6
+    L3 = close_prev - 1.1 * range_1d / 4
+    L4 = close_prev - 1.1 * range_1d / 2
+    
+    # Align to 4h timeframe (use previous day's levels)
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    H2_aligned = align_htf_to_ltf(prices, df_1d, H2)
+    H1_aligned = align_htf_to_ltf(prices, df_1d, H1)
+    L1_aligned = align_htf_to_ltf(prices, df_1d, L1)
+    L2_aligned = align_htf_to_ltf(prices, df_1d, L2)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
     
     # Volume spike: volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
@@ -98,27 +101,22 @@ def generate_signals(prices):
     
     for i in range(60, n):
         # Skip if data not ready
-        if (np.isnan(breakout_up_aligned[i]) or 
-            np.isnan(breakout_down_aligned[i]) or 
-            np.isnan(vol_spike_aligned[i]) or 
-            np.isnan(trending_aligned[i])):
+        if (np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or 
+            np.isnan(vol_spike_aligned[i]) or np.isnan(trending_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: Donchian breakout + volume spike + trending market
-        long_entry = (breakout_up_aligned[i] > 0.5 and 
+        # Entry conditions: Camarilla breakout + volume spike + trending market
+        long_entry = (close[i] > H4_aligned[i] and 
                       vol_spike_aligned[i] > 0.5 and 
                       trending_aligned[i] > 0.5)
-        short_entry = (breakout_down_aligned[i] > 0.5 and 
+        short_entry = (close[i] < L4_aligned[i] and 
                        vol_spike_aligned[i] > 0.5 and 
                        trending_aligned[i] > 0.5)
         
-        # Exit when price returns to middle of Donchian channel
-        middle = (upper_20 + lower_20) / 2
-        middle_aligned = align_htf_to_ltf(prices, df_4h, np.full_like(close_4h, middle))
-        
-        exit_long = position == 1 and close[i] <= middle_aligned[i]
-        exit_short = position == -1 and close[i] >= middle_aligned[i]
+        # Exit when price returns to H3/L3 levels (strong support/resistance)
+        exit_long = position == 1 and close[i] <= H3_aligned[i]
+        exit_short = position == -1 and close[i] >= L3_aligned[i]
         
         # Execute signals
         if long_entry and position != 1:
@@ -141,6 +139,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_donchian_breakout_volume_trend"
+name = "4h_camarilla_breakout_volume_trend"
 timeframe = "4h"
 leverage = 1.0
