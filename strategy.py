@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -13,80 +13,88 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for pivot levels and volume
+    # 4h data for trend and structure
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
+    
+    # 1d data for volume context
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels (using previous day's data)
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Calculate 4h Donchian channels (20-period)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Pivot and range
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
+    # Donchian upper and lower bands
+    donchian_upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Key resistance and support levels
-    r1 = pivot + (range_hl * 1.1 / 12)
-    r2 = pivot + (range_hl * 1.1 / 6)
-    s1 = pivot - (range_hl * 1.1 / 12)
-    s2 = pivot - (range_hl * 1.1 / 6)
+    # 4h ATR for volatility filter
+    tr1 = high_4h[1:] - low_4h[1:]
+    tr2 = np.abs(high_4h[1:] - np.concatenate([[high_4h[0]], high_4h[:-1]]))
+    tr3 = np.abs(low_4h[1:] - np.concatenate([[low_4h[0]], low_4h[:-1]]))
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Daily volume and its 20-period average
+    # 1d volume average for context
     volume_1d = df_1d['volume'].values
-    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean()
+    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align data to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d.values)
+    # Align all to 1h timeframe
+    donchian_upper_1h = align_htf_to_ltf(prices, df_4h, donchian_upper)
+    donchian_lower_1h = align_htf_to_ltf(prices, df_4h, donchian_lower)
+    atr_4h_1h = align_htf_to_ltf(prices, df_4h, atr_4h)
+    volume_ma_20_1d_1h = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.25  # 25% position size
+    position_size = 0.20  # 20% position size
     
-    for i in range(50, n):
+    for i in range(100, n):
+        # Skip if not in session
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
+            
         # Skip if any required data is not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(volume_ma_20_1d_aligned[i])):
+        if (np.isnan(donchian_upper_1h[i]) or np.isnan(donchian_lower_1h[i]) or
+            np.isnan(atr_4h_1h[i]) or np.isnan(volume_ma_20_1d_1h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current 12h volume > 1.5x 20-period average
-        # Approximate 12h volume from daily volume (assuming 2x 12h periods per day)
-        volume_12h_approx = volume[i]  # Current 12h bar volume
-        volume_ma_20_12h = volume_ma_20_1d_aligned[i] / 2  # Approximate 20-period average for 12h
-        volume_condition = volume_12h_approx > (volume_ma_20_12h * 1.5)
+        # Volume condition: current volume > 1.3x 1d average (adjusted for timeframe)
+        volume_condition = volume[i] > (volume_ma_20_1d_1h[i] * 1.3)
         
-        # Entry conditions: price near Camarilla levels with volume confirmation
-        near_support = (close[i] <= s1_aligned[i] * 1.002) or (close[i] <= s2_aligned[i] * 1.002)
-        near_resistance = (close[i] >= r1_aligned[i] * 0.998) or (close[i] >= r2_aligned[i] * 0.998)
+        # ATR filter: avoid extremely low volatility
+        atr_condition = atr_4h_1h[i] > 0
         
         if position == 0:
-            if near_support and volume_condition:
+            # Long: break above Donchian upper with volume and volatility
+            if close[i] > donchian_upper_1h[i] and volume_condition and atr_condition:
                 position = 1
                 signals[i] = position_size
-            elif near_resistance and volume_condition:
+            # Short: break below Donchian lower with volume and volatility
+            elif close[i] < donchian_lower_1h[i] and volume_condition and atr_condition:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit when price reaches midpoint between S1 and S2 or shows reversal
-            midpoint_s = (s1_aligned[i] + s2_aligned[i]) / 2
-            if close[i] >= midpoint_s:
+            # Exit long: price touches or crosses below Donchian lower
+            if close[i] < donchian_lower_1h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit when price reaches midpoint between R1 and R2 or shows reversal
-            midpoint_r = (r1_aligned[i] + r2_aligned[i]) / 2
-            if close[i] <= midpoint_r:
+            # Exit short: price touches or crosses above Donchian upper
+            if close[i] > donchian_upper_1h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -94,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_Pivot_Breakout_With_Volume_Confirmation_v1"
-timeframe = "12h"
+name = "1h_4h_Donchian_Breakout_Volume_Filter"
+timeframe = "1h"
 leverage = 1.0
