@@ -8,12 +8,12 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Camarilla pivot breakout with 1d volume spike and 1w ADX regime filter
-    # Long: price breaks above Camarilla H3 (1d) AND volume > 1.5x 20-period avg AND 1w ADX > 25
-    # Short: price breaks below Camarilla L3 (1d) AND volume > 1.5x 20-period avg AND 1w ADX > 25
-    # Exit: price returns to Camarilla Pivot level (1d) OR ADX drops below 20 (regime change)
-    # Using 12h timeframe for low trade frequency, Camarilla for structure,
-    # volume for confirmation, 1w ADX for trend strength filter.
+    # Hypothesis: 4h Donchian breakout with 1d ATR regime filter and volume confirmation
+    # Long: price breaks above Donchian(20) high AND ATR(14) < median ATR(50) (low volatility regime) AND volume > 1.5x avg
+    # Short: price breaks below Donchian(20) low AND ATR(14) < median ATR(50) AND volume > 1.5x avg
+    # Exit: price reverts to Donchian midpoint OR ATR spike (high volatility) OR volume dry-up
+    # Using 4h timeframe for optimal trade frequency, Donchian for structure breakout,
+    # ATR regime filter to avoid whipsaws in high volatility, volume for confirmation.
     # Discrete position sizing (0.25) to minimize fee churn.
     
     close = prices['close'].values
@@ -21,89 +21,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots
+    # Get daily data for ATR regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for 1d
+    # Calculate daily ATR(14) and its 50-period median for regime filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla formula: Range = high - low
-    # H4 = close + Range * 1.1/2
-    # H3 = close + Range * 1.1/4
-    # H2 = close + Range * 1.1/6
-    # H1 = close + Range * 1.1/12
-    # L1 = close - Range * 1.1/12
-    # L2 = close - Range * 1.1/6
-    # L3 = close - Range * 1.1/4
-    # L4 = close - Range * 1.1/2
-    rng = high_1d - low_1d
-    camarilla_h3 = close_1d + rng * 1.1 / 4
-    camarilla_l3 = close_1d - rng * 1.1 / 4
-    camarilla_pivot = (high_1d + low_1d + close_1d) / 3
+    # True Range calculation
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # Align with close_1d indices
     
-    # Align Camarilla levels to 12h
-    h3_12h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_12h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    pivot_12h = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    # ATR(14) using Wilder's smoothing
+    atr_1d = np.full_like(close_1d, np.nan)
+    if len(tr) >= 15:  # Need at least 15 values for ATR(14)
+        atr_1d[14] = np.nanmean(tr[1:15])  # First ATR is simple average of first 14 TR
+        for i in range(15, len(tr)):
+            if not np.isnan(atr_1d[i-1]) and not np.isnan(tr[i]):
+                atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # Get weekly data for ADX regime filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
+    # Median ATR over 50 periods for regime filter
+    median_atr_1d = np.full_like(close_1d, np.nan)
+    for i in range(49, len(close_1d)):
+        window = atr_1d[i-49:i+1]
+        if not np.all(np.isnan(window)):
+            median_atr_1d[i] = np.nanmedian(window)
     
-    # Calculate weekly ADX(14)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Align daily ATR and median ATR to 4h
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    median_atr_1d_aligned = align_htf_to_ltf(prices, df_1d, median_atr_1d)
     
-    # True Range
-    tr1 = np.abs(high_1w[1:] - low_1w[:-1])
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])  # prepend NaN for first element
+    # Calculate 4h Donchian channels (20-period)
+    lookback = 20
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    donchian_mid = np.full(n, np.nan)
     
-    # Directional Movement
-    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
-                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
-                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    for i in range(lookback-1, n):
+        donchian_high[i] = np.max(high[i-lookback+1:i+1])
+        donchian_low[i] = np.min(low[i-lookback+1:i+1])
+        donchian_mid[i] = (donchian_high[i] + donchian_low[i]) / 2
     
-    # Smooth TR, DM+ and DM- using Wilder's smoothing (EMA with alpha=1/period)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(data[1:period])
-        # Subsequent values
-        for i in range(period, len(data)):
-            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    atr_1w = wilders_smoothing(tr, 14)
-    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
-    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.where(atr_1w != 0, 100 * dm_plus_smooth / atr_1w, 0)
-    di_minus = np.where(atr_1w != 0, 100 * dm_minus_smooth / atr_1w, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx_1w = wilders_smoothing(dx, 14)
-    
-    # Align weekly ADX to 12h
-    adx_1w_12h = align_htf_to_ltf(prices, df_1w, adx_1w)
-    
-    # Get 12h volume for confirmation (>1.5x 20-period average)
+    # Get 4h volume for confirmation (>1.5x 20-period average)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -114,25 +79,25 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(h3_12h[i]) or np.isnan(l3_12h[i]) or np.isnan(pivot_12h[i]) or 
-            np.isnan(adx_1w_12h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(atr_1d_aligned[i]) or np.isnan(median_atr_1d_aligned[i]) or
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: ADX > 25 = trending market (good for breakouts)
-        strong_trend = adx_1w_12h[i] > 25
-        weak_trend = adx_1w_12h[i] < 20  # exit condition
+        # Regime filter: ATR < median ATR = low volatility regime (favor breakouts)
+        low_vol_regime = atr_1d_aligned[i] < median_atr_1d_aligned[i]
         
         # Volume confirmation
         vol_confirm = volume_spike[i]
         
-        # Entry logic: Camarilla breakout + volume confirmation + strong trend
-        long_entry = (close[i] > h3_12h[i]) and vol_confirm and strong_trend
-        short_entry = (close[i] < l3_12h[i]) and vol_confirm and strong_trend
+        # Entry logic: Donchian breakout + low volatility regime + volume confirmation
+        long_entry = (close[i] > donchian_high[i-1]) and low_vol_regime and vol_confirm
+        short_entry = (close[i] < donchian_low[i-1]) and low_vol_regime and vol_confirm
         
-        # Exit logic: return to pivot OR trend weakens
-        long_exit = (close[i] < pivot_12h[i]) or weak_trend
-        short_exit = (close[i] > pivot_12h[i]) or weak_trend
+        # Exit logic: price reverts to midpoint OR volatility spike OR volume dry-up
+        long_exit = (close[i] < donchian_mid[i]) or (atr_1d_aligned[i] > median_atr_1d_aligned[i]) or not vol_confirm
+        short_exit = (close[i] > donchian_mid[i]) or (atr_1d_aligned[i] > median_atr_1d_aligned[i]) or not vol_confirm
         
         if long_entry and position != 1:
             position = 1
@@ -157,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_1w_camarilla_breakout_volume_adx_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_atr_volume_v1"
+timeframe = "4h"
 leverage = 1.0
