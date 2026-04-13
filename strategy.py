@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Breakout_Target_V1
-Hypothesis: Combines daily Camarilla pivot levels with 12h breakouts and volume confirmation.
-In trending markets, price breaks above/below key Camarilla levels (H4/L4) with volume expansion.
-During ranging markets (Choppiness Index > 61.8), avoids false breakouts.
-Target: 15-35 trades/year on 12h (60-140 total over 4 years).
-Works in both bull and bear markets by filtering trades with regime and volume.
+4h_1d_1w_Triple_Timeframe_Confluence
+Hypothesis: Combines 1w trend filter, 1d momentum, and 4h entry timing to capture medium-term moves in both bull and bear markets.
+Goes long when 1w EMA21 > EMA50 (bullish trend), 1d RSI > 50 (bullish momentum), and 4h close > 4h EMA21 with volume > 1.5x average.
+Goes short when 1w EMA21 < EMA50 (bearish trend), 1d RSI < 50 (bearish momentum), and 4h close < 4h EMA21 with volume > 1.5x average.
+Uses discrete position sizing (0.25) to minimize fee churn and includes ATR-based stoploss.
+Target: 20-50 trades per year on 4h (80-200 total over 4 years).
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,94 +22,160 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
-    # Formula: H4 = C + 1.5*(H-L), L4 = C - 1.5*(H-L)
-    # where C = (H+L+C)/3 (typical price)
-    # Using previous day's data to avoid lookahead
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly EMA21 and EMA50 for trend filter
+    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Get daily data for momentum
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
     close_1d = df_1d['close'].values
     
-    # Calculate pivot using previous day's OHLC
-    typical_price = (high_1d + low_1d + close_1d) / 3.0
-    cam_h4 = typical_price + 1.5 * (high_1d - low_1d)
-    cam_l4 = typical_price - 1.5 * (high_1d - low_1d)
+    # Calculate daily RSI(14)
+    delta = pd.Series(close_1d).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d = rsi_1d.values
     
-    # Align Camarilla levels to 12h timeframe (using previous day's values)
-    cam_h4_aligned = align_htf_to_ltf(prices, df_1d, cam_h4)
-    cam_l4_aligned = align_htf_to_ltf(prices, df_1d, cam_l4)
+    # Get 4h data for entry timing
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
+        return np.zeros(n)
     
-    # Calculate 12h Choppiness Index for regime filtering
-    # Chop = 100 * log10(sum(ATR) / (max(high) - min(low))) / log10(n)
-    period = 14
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[0], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=period, min_periods=period).mean()
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    volume_4h = df_4h['volume'].values
     
-    max_high = pd.Series(high).rolling(window=period, min_periods=period).max()
-    min_low = pd.Series(low).rolling(window=period, min_periods=period).min()
+    # Calculate 4h EMA21 for entry
+    ema21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    chop = 100 * np.log10(atr.rolling(window=period, min_periods=period).sum() / (max_high - min_low)) / np.log10(period)
-    chop = chop.fillna(50).values  # neutral when undefined
+    # Calculate volume average for confirmation
+    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
     
-    # Chop > 61.8 = ranging market (avoid breakouts)
-    chop_filter = chop < 61.8  # only trade when NOT ranging
+    # Calculate ATR for stoploss
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    atr_4h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 1.5)
-    
-    # Session filter: 08:00-20:00 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_mask = (hours >= 8) & (hours <= 20)
+    # Align all signals to 4h timeframe
+    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
+    vol_ma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20_4h)
+    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% of capital
+    atr_multiplier = 2.5  # ATR multiplier for stoploss
+    
+    # Track entry price for stoploss
+    entry_price = np.zeros(n)
+    position_side = np.zeros(n)  # 1 for long, -1 for short, 0 for flat
     
     for i in range(50, n):
-        # Skip if not in session or data not ready
-        if not session_mask[i] or \
-           np.isnan(cam_h4_aligned[i]) or \
-           np.isnan(cam_l4_aligned[i]) or \
-           np.isnan(chop_filter[i]) or \
-           np.isnan(volume_expansion[i]):
+        # Skip if data not ready
+        if (np.isnan(ema21_1w_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or
+            np.isnan(rsi_1d_aligned[i]) or np.isnan(ema21_4h_aligned[i]) or
+            np.isnan(vol_ma_20_4h_aligned[i]) or np.isnan(atr_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions
-        long_entry = (close[i] > cam_h4_aligned[i]) and volume_expansion[i] and chop_filter[i]
-        short_entry = (close[i] < cam_l4_aligned[i]) and volume_expansion[i] and chop_filter[i]
+        # Determine trend and momentum
+        bullish_trend = ema21_1w_aligned[i] > ema50_1w_aligned[i]
+        bearish_trend = ema21_1w_aligned[i] < ema50_1w_aligned[i]
+        bullish_momentum = rsi_1d_aligned[i] > 50
+        bearish_momentum = rsi_1d_aligned[i] < 50
         
-        # Exit conditions: reverse signal or loss of momentum
-        long_exit = (position == 1) and (close[i] < cam_l4_aligned[i])
-        short_exit = (position == -1) and (close[i] > cam_h4_aligned[i])
+        # Volume confirmation
+        volume_confirmation = volume[i] > (vol_ma_20_4h_aligned[i] * 1.5)
         
-        if long_entry and position != 1:
-            position = 1
-            signals[i] = position_size
-        elif short_entry and position != -1:
-            position = -1
-            signals[i] = -position_size
-        elif long_exit or short_exit:
-            position = 0
-            signals[i] = 0.0
-        elif position == 1:
-            signals[i] = position_size
-        elif position == -1:
-            signals[i] = -position_size
+        # Update entry price and position side when position changes
+        if position == 1 and position_side[i-1] != 1:
+            entry_price[i] = close[i]
+            position_side[i] = 1
+        elif position == -1 and position_side[i-1] != -1:
+            entry_price[i] = close[i]
+            position_side[i] = -1
         else:
+            # Carry forward
+            entry_price[i] = entry_price[i-1] if i > 0 else 0
+            position_side[i] = position_side[i-1] if i > 0 else 0
+        
+        # Check stoploss
+        stoploss_triggered = False
+        if position == 1 and i > 0:
+            if close[i] < entry_price[i] - (atr_multiplier * atr_4h_aligned[i]):
+                stoploss_triggered = True
+        elif position == -1 and i > 0:
+            if close[i] > entry_price[i] + (atr_multiplier * atr_4h_aligned[i]):
+                stoploss_triggered = True
+        
+        if stoploss_triggered:
+            position = 0
+            position_side[i] = 0
             signals[i] = 0.0
+            continue
+        
+        # Entry logic
+        if bullish_trend and bullish_momentum and volume_confirmation:
+            # Long conditions
+            if close[i] > ema21_4h_aligned[i]:
+                if position != 1:
+                    position = 1
+                    signals[i] = position_size
+                else:
+                    signals[i] = position_size
+            else:
+                # Hold or exit
+                if position == 1:
+                    signals[i] = position_size
+                else:
+                    signals[i] = 0.0
+                    position = 0
+        elif bearish_trend and bearish_momentum and volume_confirmation:
+            # Short conditions
+            if close[i] < ema21_4h_aligned[i]:
+                if position != -1:
+                    position = -1
+                    signals[i] = -position_size
+                else:
+                    signals[i] = -position_size
+            else:
+                # Hold or exit
+                if position == -1:
+                    signals[i] = -position_size
+                else:
+                    signals[i] = 0.0
+                    position = 0
+        else:
+            # No clear signal - exit
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
     
     return signals
 
-name = "12h_1d_Camarilla_Breakout_Target_V1"
-timeframe = "12h"
+name = "4h_1d_1w_Triple_Timeframe_Confluence"
+timeframe = "4h"
 leverage = 1.0
