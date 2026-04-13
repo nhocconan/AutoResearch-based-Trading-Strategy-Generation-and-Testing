@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -28,38 +28,51 @@ def generate_signals(prices):
         high_20[i] = np.max(high_1d[i-20:i])
         low_20[i] = np.min(low_1d[i-20:i])
     
-    # Calculate 50-period EMA on 1d (trend filter)
+    # Calculate 30-period EMA on 1d (trend filter)
     close_1d_series = pd.Series(close_1d)
-    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_30_1d = close_1d_series.ewm(span=30, adjust=False, min_periods=30).mean().values
     
-    # Align indicators to 12h timeframe
+    # Calculate 14-period ATR on 1d for volatility filter
+    high_low = high_1d - low_1d
+    high_close = np.abs(high_1d - np.append(close_1d[0], close_1d[:-1]))
+    low_close = np.abs(low_1d - np.append(close_1d[0], close_1d[:-1]))
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    tr = pd.Series(tr)
+    atr_14_1d = tr.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Align indicators to 4h timeframe
     high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
     low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_30_aligned = align_htf_to_ltf(prices, df_1d, ema_30_1d)
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% of capital
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if data not ready
         if (np.isnan(high_20_aligned[i]) or 
             np.isnan(low_20_aligned[i]) or 
-            np.isnan(ema_50_aligned[i])):
+            np.isnan(ema_30_aligned[i]) or
+            np.isnan(atr_14_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below EMA50
-        above_ema = close[i] > ema_50_aligned[i]
-        below_ema = close[i] < ema_50_aligned[i]
+        # Trend filter: price above/below EMA30
+        above_ema = close[i] > ema_30_aligned[i]
+        below_ema = close[i] < ema_30_aligned[i]
         
         # Donchian breakout conditions
         long_breakout = close[i] > high_20_aligned[i]
         short_breakout = close[i] < low_20_aligned[i]
         
-        # Entry conditions: breakout in direction of trend
-        long_entry = long_breakout and above_ema
-        short_entry = short_breakout and below_ema
+        # Volatility filter: only trade when volatility is elevated
+        vol_filter = atr_14_aligned[i] > np.nanmedian(atr_14_aligned[max(0, i-50):i+1])
+        
+        # Entry conditions: breakout in direction of trend with volume confirmation
+        long_entry = long_breakout and above_ema and vol_filter
+        short_entry = short_breakout and below_ema and vol_filter
         
         # Exit conditions: opposite breakout or trend reversal
         exit_long = position == 1 and (short_breakout or below_ema)
@@ -86,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_donchian_ema50_breakout"
-timeframe = "12h"
+name = "4h_1d_donchian_ema30_vol_filter"
+timeframe = "4h"
 leverage = 1.0
