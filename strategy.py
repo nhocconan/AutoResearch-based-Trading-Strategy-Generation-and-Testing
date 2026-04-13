@@ -8,145 +8,112 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian channel breakout with 12h volume confirmation and ADX trend filter
-    # Long: price breaks above Donchian(20) high + volume > 1.5x 20-period average + ADX > 25
-    # Short: price breaks below Donchian(20) low + volume > 1.5x 20-period average + ADX > 25
-    # Uses discrete sizing (0.25) to minimize fee drag and ATR-based stoploss
-    # Target: 20-50 trades/year to stay within 4h optimal range
+    # Hypothesis: 1h strategy using 4h Camarilla pivot breakouts with 1d volume confirmation
+    # Uses 4h for signal direction (structure), 1d for volume filter (institutional participation)
+    # 1h only for precise entry timing on breakouts
+    # Session filter (08-20 UTC) to avoid low-liquidity periods
+    # Target: 15-37 trades/year to stay within 1h optimal range
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time']
     
-    # Get 12h data for volume confirmation and ADX trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Get 4h data for Camarilla pivots (primary signal direction)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate 12h volume average (20-period) for confirmation
-    vol_avg_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    # Calculate 4h Camarilla levels (based on previous 4h bar)
+    # Pivot = (H+L+C)/3
+    # H3 = Pivot + 1.1*(H-L)
+    # L3 = Pivot - 1.1*(H-L)
+    pivot_4h = (high_4h + low_4h + close_4h) / 3.0
+    hl_range_4h = high_4h - low_4h
+    h3_4h = pivot_4h + 1.1 * hl_range_4h
+    l3_4h = pivot_4h - 1.1 * hl_range_4h
     
-    # Calculate 12h ADX for trend filter (ADX > 25 indicates strong trend)
-    # True Range
-    tr1 = np.abs(high_12h[1:] - low_12h[1:])
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr_12h = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Get 1d data for volume confirmation (institutional participation filter)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # +DM and -DM
-    up_move = np.diff(high_12h)
-    down_move = -np.diff(low_12h)
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[0.0], plus_dm])
-    minus_dm = np.concatenate([[0.0], minus_dm])
+    volume_1d = df_1d['volume'].values
     
-    # Smoothed TR, +DM, -DM (Wilder's smoothing)
-    atr_12h = np.zeros_like(tr_12h)
-    plus_dm_smooth = np.zeros_like(plus_dm)
-    minus_dm_smooth = np.zeros_like(minus_dm)
+    # Calculate 1d volume average (20-period) for confirmation
+    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    for i in range(len(tr_12h)):
-        if i < 14:
-            if i == 0:
-                atr_12h[i] = tr_12h[i] if not np.isnan(tr_12h[i]) else 0.0
-                plus_dm_smooth[i] = plus_dm[i]
-                minus_dm_smooth[i] = minus_dm[i]
-            else:
-                prev_atr = atr_12h[i-1] if not np.isnan(atr_12h[i-1]) else 0.0
-                prev_plus = plus_dm_smooth[i-1]
-                prev_minus = minus_dm_smooth[i-1]
-                atr_12h[i] = prev_atr + (tr_12h[i] - prev_atr) / 14 if not np.isnan(tr_12h[i]) else prev_atr
-                plus_dm_smooth[i] = prev_plus + (plus_dm[i] - prev_plus) / 14
-                minus_dm_smooth[i] = prev_minus + (minus_dm[i] - prev_minus) / 14
-        else:
-            prev_atr = atr_12h[i-1]
-            prev_plus = plus_dm_smooth[i-1]
-            prev_minus = minus_dm_smooth[i-1]
-            atr_12h[i] = (prev_atr * 13 + tr_12h[i]) / 14
-            plus_dm_smooth[i] = (prev_plus * 13 + plus_dm[i]) / 14
-            minus_dm_smooth[i] = (prev_minus * 13 + minus_dm[i]) / 14
+    # Align all indicators to 1h timeframe
+    h3_4h_aligned = align_htf_to_ltf(prices, df_4h, h3_4h)
+    l3_4h_aligned = align_htf_to_ltf(prices, df_4h, l3_4h)
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
-    # DI+ and DI-
-    plus_di_12h = np.where(atr_12h != 0, (plus_dm_smooth / atr_12h) * 100, 0)
-    minus_di_12h = np.where(atr_12h != 0, (minus_dm_smooth / atr_12h) * 100, 0)
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    position_size = 0.20  # 20% position size (discrete level to reduce churn)
     
-    # DX and ADX
-    dx_12h = np.where((plus_di_12h + minus_di_12h) != 0, 
-                      np.abs(plus_di_12h - minus_di_12h) / (plus_di_12h + minus_di_12h) * 100, 0)
+    # Track entry price for stoploss
+    entry_price = np.full(n, np.nan)
     
-    adx_12h = np.zeros_like(dx_12h)
-    for i in range(len(dx_12h)):
-        if i < 14:
-            adx_12h[i] = np.mean(dx_12h[:i+1]) if i > 0 and not np.isnan(dx_12h[i]) else 0.0
-        else:
-            adx_12h[i] = (adx_12h[i-1] * 13 + dx_12h[i]) / 14
-    
-    # Align 12h indicators to 4h timeframe
-    vol_avg_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_avg_20_12h)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
-    
-    # Calculate 4h Donchian channels (20-period)
-    donchian_high = np.zeros(n)
-    donchian_low = np.zeros(n)
-    for i in range(n):
-        if i < 20:
-            donchian_high[i] = np.max(high[:i+1]) if i >= 0 else np.nan
-            donchian_low[i] = np.min(low[:i+1]) if i >= 0 else np.nan
-        else:
-            donchian_high[i] = np.max(high[i-19:i+1])
-            donchian_low[i] = np.min(low[i-19:i+1])
-    
-    # Calculate 4h ATR for stoploss
-    atr_4h = np.zeros(n)
-    tr_4h = np.zeros(n)
+    # Calculate ATR for 1h timeframe
+    atr_1h = np.zeros(n)
     for i in range(1, n):
         tr = max(
             high[i] - low[i],
             abs(high[i] - close[i-1]),
             abs(low[i] - close[i-1])
         )
-        tr_4h[i] = tr
         if i < 14:
-            atr_4h[i] = np.mean(tr_4h[1:i+1]) if i > 0 else tr
+            atr_1h[i] = tr  # Simple average for warmup
         else:
-            atr_4h[i] = (atr_4h[i-1] * 13 + tr_4h[i]) / 14
+            atr_1h[i] = 0.93 * atr_1h[i-1] + 0.07 * tr  # Wilder's smoothing
     
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.25  # 25% position size
-    
-    # Track entry price for stoploss
-    entry_price = np.full(n, np.nan)
-    
-    for i in range(50, n):
+    for i in range(30, n):
+        # Skip if not in trading session
+        if not in_session[i]:
+            if position == 1:
+                signals[i] = position_size
+                entry_price[i] = entry_price[i-1] if i > 0 else np.nan
+            elif position == -1:
+                signals[i] = -position_size
+                entry_price[i] = entry_price[i-1] if i > 0 else np.nan
+            else:
+                signals[i] = 0.0
+                entry_price[i] = np.nan
+            continue
+        
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or
-            np.isnan(vol_avg_20_12h_aligned[i]) or
-            np.isnan(adx_12h_aligned[i])):
+        if (np.isnan(h3_4h_aligned[i]) or 
+            np.isnan(l3_4h_aligned[i]) or
+            np.isnan(vol_avg_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x 20-period average from 12h
-        volume_confirmed = volume[i] > 1.5 * vol_avg_20_12h_aligned[i]
+        # Volume confirmation: current 1d volume > 1.3x 20-period average
+        volume_confirmed = False
+        # Find the most recent completed 1d bar
+        # We use the aligned value which represents the last completed 1d bar
+        if not np.isnan(vol_avg_20_1d_aligned[i]):
+            # For volume confirmation, we compare current 1h volume to the 1d average
+            # This is a proxy for institutional participation
+            volume_confirmed = volume[i] > 1.3 * vol_avg_20_1d_aligned[i]
         
-        # Trend filter: 12h ADX > 25 indicates strong trend
-        strong_trend = adx_12h_aligned[i] > 25
+        # Breakout conditions: price breaks Camarilla levels with volume confirmation
+        breakout_long = (close[i] > h3_4h_aligned[i]) and volume_confirmed
+        breakout_short = (close[i] < l3_4h_aligned[i]) and volume_confirmed
         
-        # Breakout conditions: price breaks Donchian levels with volume and trend
-        breakout_long = (close[i] > donchian_high[i]) and volume_confirmed and strong_trend
-        breakout_short = (close[i] < donchian_low[i]) and volume_confirmed and strong_trend
-        
-        # Stoploss: 2.5x ATR below/above entry
-        exit_long = position == 1 and not np.isnan(entry_price[i-1]) and close[i] < entry_price[i-1] - 2.5 * atr_4h[i]
-        exit_short = position == -1 and not np.isnan(entry_price[i-1]) and close[i] > entry_price[i-1] + 2.5 * atr_4h[i]
+        # Stoploss: 2x ATR below/above entry
+        exit_long = position == 1 and not np.isnan(entry_price[i-1]) and close[i] < entry_price[i-1] - 2.0 * atr_1h[i]
+        exit_short = position == -1 and not np.isnan(entry_price[i-1]) and close[i] > entry_price[i-1] + 2.0 * atr_1h[i]
         
         # Execute signals
         if breakout_long and position != 1:
@@ -179,6 +146,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_donchian_volume_adx_v3"
-timeframe = "4h"
+name = "1h_4h_1d_camarilla_breakout_volume_v1"
+timeframe = "1h"
 leverage = 1.0
