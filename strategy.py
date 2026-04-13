@@ -8,7 +8,7 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume expansion
+    # Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
     # Long when price > upper Donchian + price > 1d EMA50 + volume > 2x 20-period average
     # Short when price < lower Donchian + price < 1d EMA50 + volume > 2x 20-period average
     # Exit when price crosses middle Donchian
