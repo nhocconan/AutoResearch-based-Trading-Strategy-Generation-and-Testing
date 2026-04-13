@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 300:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian calculation (main signal)
+    # Get 12h data for Donchian calculation
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) < 30:
         return np.zeros(n)
@@ -34,40 +34,56 @@ def generate_signals(prices):
     for i in range(20, len(vol_12h)):
         avg_volume_12h[i] = np.mean(vol_12h[i-20:i])
     
-    # Get 1d data for ATR-based volatility filter
+    # Get 1d data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 14-period ATR on 1d
-    tr1 = np.maximum(high_1d[1:], close_1d[:-1]) - np.minimum(low_1d[1:], close_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1d = np.full(len(high_1d), np.nan)
-    for i in range(14, len(tr)):
-        atr_1d[i] = np.mean(tr[i-13:i+1])
+    # Calculate weekly pivot points (using prior week data)
+    week_high = np.full(len(high_1d), np.nan)
+    week_low = np.full(len(low_1d), np.nan)
+    week_close = np.full(len(close_1d), np.nan)
+    
+    for i in range(7, len(high_1d)):
+        week_high[i] = np.max(high_1d[i-7:i])
+        week_low[i] = np.min(low_1d[i-7:i])
+        week_close[i] = close_1d[i-1]  # Previous day's close as weekly close
+    
+    # Calculate pivot points and support/resistance levels
+    pivot = np.full(len(high_1d), np.nan)
+    r3 = np.full(len(high_1d), np.nan)
+    s3 = np.full(len(high_1d), np.nan)
+    
+    for i in range(7, len(high_1d)):
+        if not (np.isnan(week_high[i]) or np.isnan(week_low[i]) or np.isnan(week_close[i])):
+            pivot[i] = (week_high[i] + week_low[i] + week_close[i]) / 3.0
+            r3[i] = week_high[i] + 2 * (pivot[i] - week_low[i])
+            s3[i] = week_low[i] - 2 * (week_high[i] - pivot[i])
     
     # Align all indicators to 12h timeframe
     donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
     avg_volume_12h_aligned = align_htf_to_ltf(prices, df_12h, avg_volume_12h)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.25
+    position_size = 0.30
     
-    for i in range(200, n):
+    for i in range(300, n):
         # Skip if data not ready
         if (np.isnan(donchian_high_aligned[i]) or 
             np.isnan(donchian_low_aligned[i]) or
             np.isnan(avg_volume_12h_aligned[i]) or
-            np.isnan(atr_1d_aligned[i])):
+            np.isnan(pivot_aligned[i]) or
+            np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -78,16 +94,17 @@ def generate_signals(prices):
         donchian_breakout_long = close[i] > donchian_high_aligned[i]
         donchian_breakout_short = close[i] < donchian_low_aligned[i]
         
-        # Volatility filter: only trade when volatility is above average
-        vol_filter = atr_1d_aligned[i] > np.nanmedian(atr_1d_aligned[:i]) if i > 200 else True
+        # Pivot conditions
+        pivot_support = close[i] > s3_aligned[i]
+        pivot_resistance = close[i] < r3_aligned[i]
         
         # Entry conditions with confluence
-        long_entry = donchian_breakout_long and vol_confirm and vol_filter
-        short_entry = donchian_breakout_short and vol_confirm and vol_filter
+        long_entry = donchian_breakout_long and vol_confirm and pivot_support
+        short_entry = donchian_breakout_short and vol_confirm and pivot_resistance
         
-        # Exit conditions: opposite Donchian breakout
-        exit_long = position == 1 and donchian_breakout_short
-        exit_short = position == -1 and donchian_breakout_long
+        # Exit conditions: opposite Donchian breakout or pivot reversal
+        exit_long = position == 1 and (donchian_breakout_short or close[i] < pivot_aligned[i])
+        exit_short = position == -1 and (donchian_breakout_long or close[i] > pivot_aligned[i])
         
         # Execute signals
         if long_entry and position != 1:
@@ -110,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_donchian_volume_volatility_filter"
+name = "12h_1d_1w_donchian_pivot_volume_confluence"
 timeframe = "12h"
 leverage = 1.0
