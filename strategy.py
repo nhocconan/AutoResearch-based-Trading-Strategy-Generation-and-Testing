@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,118 +13,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend bias
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly high/low for trend bias (using weekly high/low of previous week)
-    # We use the weekly range to determine bias: if price > weekly high -> bullish bias, < weekly low -> bearish bias
-    weekly_high = np.maximum.accumulate(high_1w)
-    weekly_low = np.minimum.accumulate(low_1w)
-    
-    # Get daily data for entry signals (Camarilla pivots)
+    # Get daily data for indicator calculations
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for each day (based on previous day's range)
-    # Camarilla: 
-    # H5 = close + 1.1*(high-low)/2
-    # H4 = close + 1.1*(high-low)
-    # H3 = close + 1.1*(high-low)/1.5
-    # L3 = close - 1.1*(high-low)/1.5
-    # L4 = close - 1.1*(high-low)
-    # L5 = close - 1.1*(high-low)/2
+    # Calculate daily ATR for volatility filter
+    tr_1d = np.maximum(
+        high_1d - low_1d,
+        np.maximum(
+            np.abs(high_1d - np.roll(close_1d, 1)),
+            np.abs(low_1d - np.roll(close_1d, 1))
+        )
+    )
+    tr_1d[0] = high_1d[0] - low_1d[0]
+    atr_1d = np.zeros_like(tr_1d)
+    for i in range(len(tr_1d)):
+        if i < 14:
+            atr_1d[i] = np.mean(tr_1d[:i+1]) if i > 0 else tr_1d[i]
+        else:
+            atr_1d[i] = 0.93 * atr_1d[i-1] + 0.07 * tr_1d[i]
     
-    # Calculate daily ranges
-    daily_range = high_1d - low_1d
-    # Shift by 1 to use previous day's data for today's levels
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_range = np.roll(daily_range, 1)
+    # Calculate daily EMA200 for trend filter
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Handle first day
-    prev_close[0] = close_1d[0]
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_range[0] = high_1d[0] - low_1d[0]
+    # Calculate daily RSI for momentum filter
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    for i in range(len(gain)):
+        if i < 14:
+            avg_gain[i] = np.mean(gain[:i+1]) if i > 0 else gain[i]
+            avg_loss[i] = np.mean(loss[:i+1]) if i > 0 else loss[i]
+        else:
+            avg_gain[i] = 0.92 * avg_gain[i-1] + 0.08 * gain[i]
+            avg_loss[i] = 0.92 * avg_loss[i-1] + 0.08 * loss[i]
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi_1d = 100 - (100 / (1 + rs))
     
-    # Calculate Camarilla levels (using previous day's data)
-    H3 = prev_close + 1.1 * prev_range / 1.5
-    L3 = prev_close - 1.1 * prev_range / 1.5
-    H4 = prev_close + 1.1 * prev_range
-    L4 = prev_close - 1.1 * prev_range
+    # Align indicators to daily timeframe (no additional shift needed)
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Align weekly trend bias to 6h timeframe
-    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
-    
-    # Align daily Camarilla levels to 6h timeframe
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    # Calculate 20-day ATR multiple for volatility filter
+    atr_mult = 2.0
+    volatility_threshold = atr_1d_aligned * atr_mult
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25
     
-    for i in range(50, n):
+    for i in range(200, n):
         # Skip if data not ready
-        if (np.isnan(weekly_high_aligned[i]) or 
-            np.isnan(weekly_low_aligned[i]) or
-            np.isnan(H3_aligned[i]) or
-            np.isnan(L3_aligned[i]) or
-            np.isnan(H4_aligned[i]) or
-            np.isnan(L4_aligned[i])):
+        if (np.isnan(ema_200_1d_aligned[i]) or 
+            np.isnan(rsi_1d_aligned[i]) or
+            np.isnan(volatility_threshold[i])):
             signals[i] = 0.0
             continue
         
-        # Determine weekly trend bias
-        # Bullish bias: price above weekly high (new weekly high made)
-        # Bearish bias: price below weekly low (new weekly low made)
-        weekly_bullish = close[i] > weekly_high_aligned[i]
-        weekly_bearish = close[i] < weekly_low_aligned[i]
+        # Price volatility filter: avoid choppy markets
+        price_change = np.abs(close[i] - close[i-1])
+        low_volatility = price_change < volatility_threshold[i]
         
-        # Entry logic based on Camarilla levels and weekly bias
-        # In bullish weekly bias: look for longs at L3/L4 (support), shorts only on H4 break
-        # In bearish weekly bias: look for shorts at H3/H4 (resistance), longs only on L4 break
+        # Trend and momentum filters
+        uptrend = close[i] > ema_200_1d_aligned[i]
+        strong_momentum = rsi_1d_aligned[i] > 50
         
-        long_entry = False
-        short_entry = False
+        downtrend = close[i] < ema_200_1d_aligned[i]
+        weak_momentum = rsi_1d_aligned[i] < 50
         
-        if weekly_bullish:
-            # In bullish week: buy at support (L3/L4), sell at resistance (H3/H4)
-            if close[i] <= L3_aligned[i] or close[i] <= L4_aligned[i]:
-                long_entry = True
-            if close[i] >= H4_aligned[i]:
-                short_entry = True  # Only short on strong break above H4 in bullish week
-        elif weekly_bearish:
-            # In bearish week: sell at resistance (H3/H4), buy at support (L3/L4)
-            if close[i] >= H3_aligned[i] or close[i] >= H4_aligned[i]:
-                short_entry = True
-            if close[i] <= L4_aligned[i]:
-                long_entry = True  # Only long on strong break below L4 in bearish week
-        else:
-            # No clear weekly bias: use mean reversion at extreme levels
-            if close[i] <= L3_aligned[i]:
-                long_entry = True
-            if close[i] >= H3_aligned[i]:
-                short_entry = True
+        # Entry conditions
+        long_entry = uptrend and strong_momentum and low_volatility
+        short_entry = downtrend and weak_momentum and low_volatility
         
-        # Exit logic: reverse position when opposite signal occurs
-        exit_long = position == 1 and short_entry
-        exit_short = position == -1 and long_entry
+        # Exit conditions: trend reversal
+        exit_long = position == 1 and (not uptrend or not strong_momentum)
+        exit_short = position == -1 and (not downtrend or not weak_momentum)
         
         # Execute signals
         if long_entry and position != 1:
@@ -147,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_1d_camarilla_weekly_bias_v1"
-timeframe = "6h"
+name = "12h_1d_ema200_rsi_momentum_filter_v1"
+timeframe = "12h"
 leverage = 1.0
