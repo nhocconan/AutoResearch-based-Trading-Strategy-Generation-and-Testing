@@ -8,9 +8,9 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and ATR regime filter.
-    # Camarilla levels from 1d provide institutional support/resistance.
-    # Breakouts with volume + ATR expansion capture strong moves in both bull/bear markets.
+    # Hypothesis: 12h Donchian(20) breakout with 1d volume spike and ATR regime filter.
+    # Donchian channels capture momentum breakouts in both bull/bear markets.
+    # Volume spike confirms institutional interest. ATR filter ensures volatility expansion.
     # Target: 50-150 total trades over 4 years = 12-37/year.
     
     close = prices['close'].values
@@ -18,39 +18,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and ATR (call ONCE before loop)
+    # Get 1d data for volume and ATR (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla levels (based on previous day)
+    # Calculate 12h Donchian channels (20-period)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    
+    # Donchian upper/lower bands (20-period high/low)
+    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian bands to 12h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    
+    # Calculate 1d ATR(14) for volatility regime filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's values for Camarilla calculation
-    phigh = np.roll(high_1d, 1)
-    plow = np.roll(low_1d, 1)
-    pclose = np.roll(close_1d, 1)
-    phigh[0] = high_1d[0]  # First bar uses current values
-    plow[0] = low_1d[0]
-    pclose[0] = close_1d[0]
-    
-    # Camarilla levels
-    range_ = phigh - plow
-    camarilla_h4 = pclose + range_ * 1.1 / 2
-    camarilla_l4 = pclose - range_ * 1.1 / 2
-    camarilla_h3 = pclose + range_ * 1.1 / 4
-    camarilla_l3 = pclose - range_ * 1.1 / 4
-    camarilla_h2 = pclose + range_ * 1.1 / 6
-    camarilla_l2 = pclose - range_ * 1.1 / 6
-    camarilla_h1 = pclose + range_ * 1.1 / 12
-    camarilla_l1 = pclose - range_ * 1.1 / 12
-    
-    # Calculate 1d ATR(14) for volatility regime filter
-    tr1 = phigh - plow
-    tr2 = np.abs(phigh - pclose)
-    tr3 = np.abs(plow - pclose)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - close_1d)
+    tr3 = np.abs(low_1d - close_1d)
     tr1[0] = 0
     tr2[0] = 0
     tr3[0] = 0
@@ -62,31 +58,15 @@ def generate_signals(prices):
     volume_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
     # Align HTF indicators to 12h timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    h2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h2)
-    l2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l2)
-    h1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h1)
-    l1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l1)
     atr_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
-    
-    # Calculate 12h price position for entry triggers
-    high_12h = get_htf_data(prices, '12h')['high'].values
-    low_12h = get_htf_data(prices, '12h')['low'].values
-    high_ma_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    low_ma_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    high_ma_aligned = align_htf_to_ltf(prices, get_htf_data(prices, '12h'), high_ma_20)
-    low_ma_aligned = align_htf_to_ltf(prices, get_htf_data(prices, '12h'), low_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
             np.isnan(atr_aligned[i]) or np.isnan(volume_ma_aligned[i])):
             signals[i] = 0.0
             continue
@@ -99,17 +79,17 @@ def generate_signals(prices):
         # Volume filter: current volume > 20-period MA
         volume_filter = volume[i] > volume_ma_aligned[i]
         
-        # Camarilla breakout conditions (using H4/L4 as primary levels)
-        breakout_long = close[i] > h4_aligned[i]  # Break above H4
-        breakout_short = close[i] < l4_aligned[i]  # Break below L4
+        # Donchian breakout conditions
+        breakout_long = close[i] > donchian_high_aligned[i]  # Break above upper band
+        breakout_short = close[i] < donchian_low_aligned[i]  # Break below lower band
         
         # Entry conditions: breakout with volatility AND volume filters
         long_entry = breakout_long and volatility_filter and volume_filter
         short_entry = breakout_short and volatility_filter and volume_filter
         
-        # Exit conditions: price returns to opposite Camarilla level
-        long_exit = close[i] < l4_aligned[i]
-        short_exit = close[i] > h4_aligned[i]
+        # Exit conditions: price returns to opposite Donchian band
+        long_exit = close[i] < donchian_low_aligned[i]
+        short_exit = close[i] > donchian_high_aligned[i]
         
         if long_entry and position != 1:
             position = 1
@@ -134,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_camarilla_atr_volume_v1"
+name = "12h_1d_donchian_atr_volume_v1"
 timeframe = "12h"
 leverage = 1.0
