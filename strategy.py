@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 250:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,11 +23,11 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     vol_1d = df_1d['volume'].values
     
-    # Calculate 20-period EMA on 1d (trend filter)
-    close_1d_series = pd.Series(close_1d)
-    ema_20_1d = close_1d_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate 1d Donchian channels (20-period)
+    high_20_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Calculate RSI(14) on 1d
+    # Calculate 1d RSI(14) for overbought/oversold
     delta = np.diff(close_1d, prepend=close_1d[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -36,65 +36,47 @@ def generate_signals(prices):
     rs = avg_gain / (avg_loss + 1e-10)
     rsi_14 = 100 - (100 / (1 + rs))
     
-    # Calculate Bollinger Bands (20, 2) on 1d
-    sma_20 = close_1d_series.rolling(window=20, min_periods=20).mean().values
-    std_20 = close_1d_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = sma_20 + 2 * std_20
-    bb_lower = sma_20 - 2 * std_20
+    # Calculate 1d volume ratio (current vs 20-period average)
+    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = vol_1d / (vol_ma_20 + 1e-10)
     
-    # Get 1w data for trend confirmation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    # Calculate 20-period SMA on 1w
-    sma_20_1w = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
-    
-    # Align indicators to daily timeframe
-    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    # Align indicators to 12h timeframe
+    high_20_1d_aligned = align_htf_to_ltf(prices, df_1d, high_20_1d)
+    low_20_1d_aligned = align_htf_to_ltf(prices, df_1d, low_20_1d)
     rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
-    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
-    sma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_20_1w)
+    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25
     
-    for i in range(250, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema_20_aligned[i]) or 
+        if (np.isnan(high_20_1d_aligned[i]) or 
+            np.isnan(low_20_1d_aligned[i]) or
             np.isnan(rsi_14_aligned[i]) or
-            np.isnan(bb_upper_aligned[i]) or
-            np.isnan(bb_lower_aligned[i]) or
-            np.isnan(sma_20_1w_aligned[i])):
+            np.isnan(vol_ratio_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below EMA20
-        above_ema = close[i] > ema_20_aligned[i]
-        below_ema = close[i] < ema_20_aligned[i]
+        # Price breaking above/below 1d Donchian channels
+        breakout_up = close[i] > high_20_1d_aligned[i]
+        breakout_down = close[i] < low_20_1d_aligned[i]
         
-        # RSI conditions: not overbought/oversold
+        # Volume confirmation (volume > 1.5x average)
+        vol_confirm = vol_ratio_aligned[i] > 1.5
+        
+        # RSI filter to avoid extremes
         rsi_not_overbought = rsi_14_aligned[i] < 70
         rsi_not_oversold = rsi_14_aligned[i] > 30
         
-        # Bollinger Band conditions: price near bands
-        near_upper_band = close[i] > bb_upper_aligned[i] * 0.98
-        near_lower_band = close[i] < bb_lower_aligned[i] * 1.02
-        
-        # Weekly trend filter: price above/below weekly SMA20
-        above_weekly_sma = close[i] > sma_20_1w_aligned[i]
-        below_weekly_sma = close[i] < sma_20_1w_aligned[i]
-        
         # Entry conditions
-        long_entry = above_ema and rsi_not_overbought and near_lower_band and above_weekly_sma
-        short_entry = below_ema and rsi_not_oversold and near_upper_band and below_weekly_sma
+        long_entry = breakout_up and vol_confirm and rsi_not_overbought
+        short_entry = breakout_down and vol_confirm and rsi_not_oversold
         
-        # Exit conditions: opposite signal or RSI extreme
-        exit_long = position == 1 and (below_ema or rsi_14_aligned[i] > 75)
-        exit_short = position == -1 and (above_ema or rsi_14_aligned[i] < 25)
+        # Exit conditions: opposite breakout
+        exit_long = position == 1 and breakout_down
+        exit_short = position == -1 and breakout_up
         
         # Execute signals
         if long_entry and position != 1:
@@ -117,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_ema_rsi_bb_weekly_filter"
-timeframe = "1d"
+name = "12h_1d_donchian_breakout_volume"
+timeframe = "12h"
 leverage = 1.0
