@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Pullback_Trend
+4h_1d_Camarilla_Pullback_Trend_v2
 Hypothesis: Buy pullbacks to S3 in uptrend, sell rallies to R3 in downtrend using 1d
 trend filter (price above/below 200-period EMA). Works in bull markets via pullbacks to
 support and bear markets via rallies to resistance. Volume confirmation ensures
-institutional participation. Target: 20-40 trades/year.
+institutional participation. Uses tighter conditions to reduce trade frequency.
 """
 
 import numpy as np
@@ -61,9 +61,9 @@ def generate_signals(prices):
     uptrend_aligned = align_htf_to_ltf(prices, df_1d, uptrend.astype(float))
     downtrend_aligned = align_htf_to_ltf(prices, df_1d, downtrend.astype(float))
     
-    # Volume confirmation: current volume > 1.3x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average (stricter)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 1.3)
+    volume_expansion = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -106,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_Pullback_Trend"
+name = "4h_1d_Camarilla_Pullback_Trend_v2"
 timeframe = "4h"
 leverage = 1.0
