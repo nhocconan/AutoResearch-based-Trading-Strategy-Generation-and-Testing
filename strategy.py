@@ -8,90 +8,120 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Ichimoku Cloud breakout with 1w trend filter and volume confirmation
-    # Long: Tenkan > Kijun AND price above cloud (Senkou Span A/B) AND 1w close > 1w EMA50 AND volume > 1.5x avg
-    # Short: Tenkan < Kijun AND price below cloud AND 1w close < 1w EMA50 AND volume > 1.5x avg
-    # Exit: Opposite TK cross OR price re-enters cloud
-    # Using 6h timeframe for optimal trade frequency (target 12-37/year), Ichimoku for trend/momentum,
-    # Weekly EMA50 for primary trend filter, volume to avoid false breakouts.
-    # Discrete position sizing (0.25) to minimize fee churn.
+    # Hypothesis: 12h Camarilla H3/L3 breakout with 1d ATR volatility filter and volume confirmation
+    # Long: price breaks above H3 AND ATR(14) > 1.2x 50-period median ATR (high volatility) AND volume > 1.5x avg
+    # Short: price breaks below L3 AND ATR(14) > 1.2x 50-period median ATR AND volume > 1.5x avg
+    # Exit: price touches H4 (for longs) or L4 (for shorts) OR price retests the breakout level (H3/L3)
+    # Using 12h timeframe for optimal trade frequency (target 12-37/year), ATR filter to avoid low-volatility false breakouts,
+    # and volume confirmation to ensure participation. Discrete position sizing (0.25) to minimize fee churn.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data for ATR volatility filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Calculate weekly EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate daily ATR(14) for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Ichimoku components on 6h data
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period_tenkan = 9
-    max_high_tenkan = pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
-    min_low_tenkan = pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
-    tenkan = (max_high_tenkan + min_low_tenkan) / 2
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period_kijun = 26
-    max_high_kijun = pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max().values
-    min_low_kijun = pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min().values
-    kijun = (max_high_kijun + min_low_kijun) / 2
+    # Wilder's smoothing for ATR
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(data[1:period])
+        # Subsequent values: smoothed = (prev * (period-1) + current) / period
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2, shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
-    # We don't shift ahead as we'll use current values for cloud (price vs current cloud)
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2, shifted 26 periods ahead
-    period_senkou_b = 52
-    max_high_senkou_b = pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
-    min_low_senkou_b = pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
-    senkou_b = ((max_high_senkou_b + min_low_senkou_b) / 2)
+    atr14 = wilders_smoothing(tr, 14)
+    
+    # Calculate 50-period median ATR for volatility regime filter
+    atr_median = np.full_like(atr14, np.nan)
+    for i in range(50, len(atr14)):
+        atr_median[i] = np.nanmedian(atr14[i-50:i])
+    
+    # Volatility filter: current ATR > 1.2x median ATR (high volatility regime)
+    volatility_filter = atr14 > (1.2 * atr_median)
+    
+    # Align daily ATR and volatility filter to 12h
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr14)
+    volatility_filter_aligned = align_htf_to_ltf(prices, df_1d, volatility_filter)
+    
+    # Get previous day's OHLC for Camarilla calculation
+    df_1d_ohlc = get_htf_data(prices, '1d')
+    if len(df_1d_ohlc) < 2:
+        return np.zeros(n)
+    
+    # Previous day's OHLC for Camarilla calculation (shifted by 1 to avoid look-ahead)
+    prev_close = df_1d_ohlc['close'].shift(1).values
+    prev_high = df_1d_ohlc['high'].shift(1).values
+    prev_low = df_1d_ohlc['low'].shift(1).values
+    
+    # Camarilla levels: H3, L3, H4, L4
+    camarilla_h3 = prev_close + 1.25 * (prev_high - prev_low)
+    camarilla_l3 = prev_close - 1.25 * (prev_high - prev_low)
+    camarilla_h4 = prev_close + 1.5 * (prev_high - prev_low)
+    camarilla_l4 = prev_close - 1.5 * (prev_high - prev_low)
+    
+    # Align Camarilla levels to 12h
+    h3_aligned = align_htf_to_ltf(prices, df_1d_ohlc, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d_ohlc, camarilla_l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d_ohlc, camarilla_h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d_ohlc, camarilla_l4)
+    
+    # Get 12h volume for confirmation (>1.5x 20-period average)
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(52, n):  # Start after Senkou B period
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(tenkan[i]) or np.isnan(kijun[i]) or
-            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i])):
+        if (np.isnan(atr_14_aligned[i]) or np.isnan(volatility_filter_aligned[i]) or 
+            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Weekly trend filter
-        weekly_uptrend = close[i] > ema_50_1w_aligned[i]
-        weekly_downtrend = close[i] < ema_50_1w_aligned[i]
+        # Volatility filter: only trade in high volatility regimes
+        high_volatility = volatility_filter_aligned[i]
         
-        # Ichimoku signals
-        tk_bullish = tenkan[i] > kijun[i]
-        tk_bearish = tenkan[i] < kijun[i]
+        # Camarilla breakout conditions
+        breakout_h3 = close[i] > h3_aligned[i]
+        breakout_l3 = close[i] < l3_aligned[i]
         
-        # Cloud topology
-        upper_cloud = np.maximum(senkou_a[i], senkou_b[i])
-        lower_cloud = np.minimum(senkou_a[i], senkou_b[i])
-        price_above_cloud = close[i] > upper_cloud
-        price_below_cloud = close[i] < lower_cloud
-        price_in_cloud = (close[i] >= lower_cloud) & (close[i] <= upper_cloud)
+        # Exit conditions: touch H4/L4 or price retests the breakout level (H3/L3)
+        touch_h4 = close[i] >= h4_aligned[i]
+        touch_l4 = close[i] <= l4_aligned[i]
+        retest_h3 = close[i] < h3_aligned[i] and position == 1  # Long exit on H3 retest
+        retest_l3 = close[i] > l3_aligned[i] and position == -1  # Short exit on L3 retest
         
-        # Volume confirmation (>1.5x 20-period average)
-        if i >= 20:
-            vol_ma = np.mean(volume[i-20:i])
-            volume_spike = volume[i] > (1.5 * vol_ma)
-        else:
-            volume_spike = False
+        # Entry logic: Camarilla breakout + high volatility + volume confirmation
+        long_entry = breakout_h3 and high_volatility and volume_spike[i]
+        short_entry = breakout_l3 and high_volatility and volume_spike[i]
         
-        # Entry logic
-        long_entry = tk_bullish and price_above_cloud and weekly_uptrend and volume_spike
-        short_entry = tk_bearish and price_below_cloud and weekly_downtrend and volume_spike
-        
-        # Exit logic: opposite TK cross OR price re-enters cloud
-        long_exit = tk_bearish or price_in_cloud
-        short_exit = tk_bullish or price_in_cloud
+        # Exit logic: H4/L4 touch or retest of breakout level
+        long_exit = touch_h4 or retest_l3
+        short_exit = touch_l4 or retest_h3
         
         if long_entry and position != 1:
             position = 1
@@ -116,6 +146,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_ichimoku_cloud_breakout_weekly_trend_volume_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_h3l3_breakout_atr_volume_v1"
+timeframe = "12h"
 leverage = 1.0
