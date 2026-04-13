@@ -8,92 +8,90 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Hypothesis: 6h ADX(14) + volume spike + 1d trend filter
-    # Long: ADX > 25 (trending) + +DI > -DI (bullish momentum) + volume > 2x 20-period avg + 1d close > 1d EMA50
-    # Short: ADX > 25 + -DI > +DI (bearish momentum) + volume > 2x 20-period avg + 1d close < 1d EMA50
-    # Uses discrete sizing (0.25) to minimize fee drag and volatility-based exit
-    # Target: 12-37 trades/year to stay within 6h optimal range (50-150 total over 4 years)
+    # Hypothesis: 12h Williams Alligator trend with 1d volume confirmation
+    # Long: Jaw > Teeth > Lips (bullish alignment) + volume > 1.5x 20-period 12h average
+    # Short: Jaw < Teeth < Lips (bearish alignment) + volume > 1.5x 20-period 12h average
+    # Uses discrete sizing (0.25) to minimize fee drag
+    # Target: 12-37 trades/year to stay within 12h optimal range (50-150 total over 4 years)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for Williams Alligator calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    median_1d = (df_1d['high'].values + df_1d['low'].values) / 2.0
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Calculate ADX and DI using Wilder's smoothing
-    # True Range
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]  # First bar
-    
-    # Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    up_move[0] = 0
-    down_move[0] = 0
-    up_move = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    down_move = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Wilder's smoothing (alpha = 1/period)
-    def wilder_smooth(data, period):
-        result = np.zeros_like(data)
-        alpha = 1.0 / period
-        result[period-1] = np.mean(data[:period])  # Seed
+    # Williams Alligator lines (Smoothed Moving Average - SMMA)
+    # Jaw: 13-period SMMA, 8 bars ahead
+    # Teeth: 8-period SMMA, 5 bars ahead  
+    # Lips: 5-period SMMA, 3 bars ahead
+    def smma(data, period):
+        result = np.full_like(data, np.nan, dtype=float)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: SMMA = (PREV * (N-1) + CURRENT) / N
         for i in range(period, len(data)):
-            result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
         return result
     
-    atr_6h = wilder_smooth(tr, 14)
-    plus_di_6h = 100 * wilder_smooth(up_move, 14) / (atr_6h + 1e-10)
-    minus_di_6h = 100 * wilder_smooth(down_move, 14) / (atr_6h + 1e-10)
-    dx_6h = 100 * np.abs(plus_di_6h - minus_di_6h) / (plus_di_6h + minus_di_6h + 1e-10)
-    adx_6h = wilder_smooth(dx_6h, 14)
+    jaw = smma(median_1d, 13)
+    teeth = smma(median_1d, 8)
+    lips = smma(median_1d, 5)
     
-    # Calculate volume average for confirmation (using 6h data)
-    vol_avg_20_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Shift Alligator lines forward (Jaw +8, Teeth +5, Lips +3)
+    jaw_shifted = np.full_like(jaw, np.nan)
+    teeth_shifted = np.full_like(teeth, np.nan)
+    lips_shifted = np.full_like(lips, np.nan)
+    
+    if len(jaw) > 8:
+        jaw_shifted[8:] = jaw[:-8]
+    if len(teeth) > 5:
+        teeth_shifted[5:] = teeth[:-5]
+    if len(lips) > 3:
+        lips_shifted[3:] = lips[:-3]
+    
+    # Align Alligator lines to 12h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_shifted)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_shifted)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_shifted)
+    
+    # Volume confirmation: current 12h volume > 1.5x 20-period average
+    vol_avg_20 = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_avg_20[i] = np.mean(volume[i-20:i])
+    volume_confirmed = volume > 1.5 * vol_avg_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(adx_6h[i]) or 
-            np.isnan(plus_di_6h[i]) or
-            np.isnan(minus_di_6h[i]) or
-            np.isnan(vol_avg_20_6h[i]) or
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(jaw_aligned[i]) or 
+            np.isnan(teeth_aligned[i]) or
+            np.isnan(lips_aligned[i]) or
+            np.isnan(volume_confirmed[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 6h volume > 2x 20-period average
-        volume_confirmed = volume[i] > 2.0 * vol_avg_20_6h[i]
+        # Alligator alignment conditions
+        bullish_alignment = (jaw_aligned[i] > teeth_aligned[i]) and (teeth_aligned[i] > lips_aligned[i])
+        bearish_alignment = (jaw_aligned[i] < teeth_aligned[i]) and (teeth_aligned[i] < lips_aligned[i])
         
-        # Trend filter: 6h close above/below EMA50 (from 1d)
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Entry conditions: Alligator alignment + volume confirmation
+        enter_long = bullish_alignment and volume_confirmed[i]
+        enter_short = bearish_alignment and volume_confirmed[i]
         
-        # ADX conditions: strong trend with directional bias
-        strong_trend = adx_6h[i] > 25
-        bullish_momentum = plus_di_6h[i] > minus_di_6h[i]
-        bearish_momentum = minus_di_6h[i] > plus_di_6h[i]
-        
-        # Entry conditions
-        enter_long = strong_trend and bullish_momentum and volume_confirmed and uptrend
-        enter_short = strong_trend and bearish_momentum and volume_confirmed and downtrend
-        
-        # Exit conditions: trend weakening or reversal
-        exit_long = position == 1 and (adx_6h[i] < 20 or minus_di_6h[i] > plus_di_6h[i])
-        exit_short = position == -1 and (adx_6h[i] < 20 or plus_di_6h[i] > minus_di_6h[i])
+        # Exit conditions: loss of alignment
+        exit_long = position == 1 and not bullish_alignment
+        exit_short = position == -1 and not bearish_alignment
         
         # Execute signals
         if enter_long and position != 1:
@@ -102,10 +100,10 @@ def generate_signals(prices):
         elif enter_short and position != -1:
             position = -1
             signals[i] = -position_size
-        elif position == 1 and exit_long:
+        elif exit_long:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and exit_short:
+        elif exit_short:
             position = 0
             signals[i] = 0.0
         # Hold current position
@@ -119,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_adx_volume_trend_v1"
-timeframe = "6h"
+name = "12h_1d_williams_alligator_volume_v1"
+timeframe = "12h"
 leverage = 1.0
