@@ -5,106 +5,93 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h primary timeframe with 1d HTF Camarilla pivot breakout + volume confirmation + chop regime filter
-    # Designed to capture institutional breakouts from key pivot levels with volume and regime alignment
-    # Target: 50-150 total trades over 4 years (12-37/year) for low fee drag and good generalization
+    # Hypothesis: 4h primary with 12h HTF - 12h Donchian breakout with volume confirmation
+    # and ATR volatility filter to avoid choppy markets. Designed for strong multi-day
+    # trends with institutional participation, targeting 75-200 trades over 4 years.
+    # Uses discrete position sizing (0.25) to minimize fee churn.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    volume = prices['volume'].values if 'volume' in prices.columns else np.ones(len(prices))
     
-    # Get 1d data for HTF Camarilla pivot levels and chop regime
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data for HTF Donchian channels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate 1d Camarilla pivot levels (based on previous day)
-    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), etc.
-    # We'll use R3 and S3 as breakout levels
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
+    # Calculate 12h Donchian channels (20-period)
+    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Avoid division by zero and handle first bar
-    prev_high_1d[0] = high_1d[0]
-    prev_low_1d[0] = low_1d[0]
-    prev_close_1d[0] = close_1d[0]
+    # Get 4h data for volume confirmation and ATR
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
+        return np.zeros(n)
     
-    rang = prev_high_1d - prev_low_1d
-    camarilla_r3 = prev_close_1d + (rang * 1.1 / 4)
-    camarilla_s3 = prev_close_1d - (rang * 1.1 / 4)
-    camarilla_r4 = prev_close_1d + (rang * 1.1 / 2)
-    camarilla_s4 = prev_close_1d - (rang * 1.1 / 2)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values if 'volume' in df_4h.columns else np.ones(len(df_4h))
     
-    # Calculate 1d Choppiness Index regime filter (CHOP > 61.8 = range, CHOP < 38.2 = trend)
-    def calculate_chop(high, low, close, window=14):
-        # True Range
+    # Calculate 4h ATR (14-period) for volatility filter
+    def calculate_atr(high, low, close, window=14):
         tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - np.roll(close, 1)[1:]))
         tr1 = np.maximum(tr1, np.abs(low[1:] - np.roll(close, 1)[1:]))
         tr = np.concatenate([[np.nan], tr1])
-        atr = pd.Series(tr).rolling(window=window, min_periods=window).sum()
-        
-        # Highest high and lowest low over window
-        hh = pd.Series(high).rolling(window=window, min_periods=window).max()
-        ll = pd.Series(low).rolling(window=window, min_periods=window).min()
-        
-        # Choppiness Index
-        chop = 100 * np.log10(atr / (hh - ll)) / np.log10(window)
-        return chop.values
+        return pd.Series(tr).rolling(window=window, min_periods=window).mean().values
     
-    chop_1d = calculate_chop(high_1d, low_1d, close_1d, window=14)
-    chop_filter = chop_1d > 61.8  # Only trade in ranging markets (choppy)
+    atr_4h = calculate_atr(high_4h, low_4h, close_4h, window=14)
+    atr_ma_10 = pd.Series(atr_4h).rolling(window=10, min_periods=10).mean().values
     
-    # Calculate 1d volume average (20-period) for confirmation
-    vol_avg_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate 4h volume average (20-period)
+    vol_avg_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
     
-    # Align all HTF indicators to 12h primary timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    chop_filter_aligned = align_htf_to_ltf(prices, df_1d, chop_filter.astype(float))
-    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
+    # Align all HTF/LTF indicators to 4h primary timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_12h, donchian_mid)
+    vol_avg_20_aligned = align_htf_to_ltf(prices, df_4h, vol_avg_20)
+    atr_ma_10_aligned = align_htf_to_ltf(prices, df_4h, atr_ma_10)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(chop_filter_aligned[i]) or
-            np.isnan(vol_avg_20_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(donchian_mid_aligned[i]) or 
+            np.isnan(vol_avg_20_aligned[i]) or
+            np.isnan(atr_ma_10_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        volume_confirmed = volume[i] > 1.3 * vol_avg_20_aligned[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume_4h[i] > 1.5 * vol_avg_20_aligned[i]
         
-        # Regime filter: only trade in choppy/ranging markets (CHOP > 61.8)
-        regime_filter = chop_filter_aligned[i] > 0.5  # Boolean as float
+        # Volatility filter: avoid extremely low volatility (choppy markets)
+        vol_filter = atr_4h[i] > 0.3 * atr_ma_10_aligned[i]
         
-        # Breakout conditions: price breaks Camarilla R3/S3 with volume and regime
-        breakout_up = close[i] > camarilla_r3_aligned[i]
-        breakout_down = close[i] < camarilla_s3_aligned[i]
+        # Breakout conditions
+        breakout_up = close_4h[i] > donchian_high_aligned[i]
+        breakout_down = close_4h[i] < donchian_low_aligned[i]
         
         # Entry conditions
-        enter_long = breakout_up and volume_confirmed and regime_filter
-        enter_short = breakout_down and volume_confirmed and regime_filter
+        enter_long = breakout_up and volume_confirmed and vol_filter
+        enter_short = breakout_down and volume_confirmed and vol_filter
         
-        # Exit conditions: price returns to opposite Camarilla level (mean reversion)
-        exit_long = position == 1 and close[i] < camarilla_s3_aligned[i]
-        exit_short = position == -1 and close[i] > camarilla_r3_aligned[i]
+        # Exit conditions: price returns to 12h Donchian middle
+        exit_long = position == 1 and close_4h[i] <= donchian_mid_aligned[i]
+        exit_short = position == -1 and close_4h[i] >= donchian_mid_aligned[i]
         
         # Execute signals
         if enter_long and position != 1:
@@ -130,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_camarilla_breakout_volume_chop_v2"
-timeframe = "12h"
+name = "4h_12h_donchian_breakout_volume_atr_v1"
+timeframe = "4h"
 leverage = 1.0
