@@ -8,10 +8,10 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h strategy using 1d Donchian channel breakout with 1d ADX trend filter and volume confirmation
-    # Donchian breakout captures strong momentum moves, ADX > 25 filters choppy/range markets,
-    # volume confirmation ensures institutional participation. Works in both bull and bear markets.
-    # Discrete position sizing (0.25) minimizes fee drag. Target: 12-30 trades/year.
+    # Hypothesis: 4h strategy using 1d Donchian channel breakout with 1d ADX trend filter
+    # Works in both bull and bear: Donchian captures breakouts, 1d ADX > 25 filters chop,
+    # volume confirmation ensures momentum. Discrete sizing (0.25) minimizes fee drag.
+    # Target: 20-50 trades/year to stay within 4h optimal range.
     
     close = prices['close'].values
     high = prices['high'].values
@@ -80,7 +80,7 @@ def generate_signals(prices):
     # Get 1d volume for confirmation (20-period average)
     vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all HTF indicators to 12h primary timeframe
+    # Align all HTF indicators to 4h primary timeframe
     donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
@@ -103,7 +103,11 @@ def generate_signals(prices):
             continue
         
         # Volume confirmation: current 1d volume > 1.3x 20-period average
-        volume_confirmed = volume_1d[i] > 1.3 * vol_avg_20_1d_aligned[i]
+        idx_1d = i // 6  # 1d bars in 4h timeframe (6 bars per day)
+        if idx_1d >= len(volume_1d):
+            signals[i] = 0.0
+            continue
+        volume_confirmed = volume_1d[idx_1d] > 1.3 * vol_avg_20_1d_aligned[i]
         
         # Trend filter: 1d ADX > 25 indicates trending market
         trending = adx_1d_aligned[i] > 25
@@ -112,7 +116,7 @@ def generate_signals(prices):
         enter_long = (close[i] > donchian_high_aligned[i]) and trending and volume_confirmed
         enter_short = (close[i] < donchian_low_aligned[i]) and trending and volume_confirmed
         
-        # Stoploss: 2x ATR based on 1d true range (simplified using Donchian width)
+        # Stoploss: 2x ATR based on 4h true range (simplified using Donchian width)
         donchian_width = donchian_high_aligned[i] - donchian_low_aligned[i]
         stop_distance = donchian_width * 0.2  # 20% of channel width
         
@@ -150,6 +154,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_donchian_breakout_adx_volume_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_breakout_adx_volume_v2"
+timeframe = "4h"
 leverage = 1.0
