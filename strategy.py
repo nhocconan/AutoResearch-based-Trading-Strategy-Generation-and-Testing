@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h 1-day Camarilla pivot with 1-hour volume confirmation and 4-hour trend filter.
-Uses 1-day Camarilla levels for mean reversion at extremes, 1-hour volume spike to confirm 
-momentum at pivot touches, and 4-hour EMA trend filter to avoid counter-trend trades. 
-Long when price touches Camarilla L4 with volume spike and above 4h EMA50. 
-Short when price touches Camarilla H4 with volume spike and below 4h EMA50.
-Target: 80-150 total trades over 4 years (20-38/year) to avoid fee drag.
+Hypothesis: 4h/1d Camarilla pivot reversal with volume confirmation.
+Uses daily Camarilla pivot levels (support/resistance) for mean reversion entries.
+Long when price touches S3 level with volume confirmation, short when touches R3 level.
+Avoids overtrading by requiring both price level touch AND volume spike (>1.5x 20-day avg).
+Target: 20-50 trades/year to minimize fee drag while capturing mean reversion in ranging markets.
+Works in both bull/bear as it fades extremes at statistical reversal points.
 """
 
 import numpy as np
@@ -22,54 +22,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot levels
+    # Get 1d data for Camarilla pivots and volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate daily Camarilla pivot levels
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # S1 = C - (Range * 1.1/2)
+    # S2 = C - (Range * 1.1)
+    # S3 = C - (Range * 1.1 * 2)
+    # R1 = C + (Range * 1.1/2)
+    # R2 = C + (Range * 1.1)
+    # R3 = C + (Range * 1.1 * 2)
     
-    # Calculate Camarilla pivot levels (based on previous day)
-    # Typical price = (H + L + C) / 3
-    typical_price = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    daily_range = df_1d['high'] - df_1d['low']
     
-    # Camarilla levels
-    camarilla_h4 = typical_price + (range_1d * 1.1 / 2)
-    camarilla_l4 = typical_price - (range_1d * 1.1 / 2)
-    camarilla_h3 = typical_price + (range_1d * 1.1 / 4)
-    camarilla_l3 = typical_price - (range_1d * 1.1 / 4)
+    pivot = typical_price.values
+    s1 = typical_price - (daily_range * 1.1 / 2)
+    s2 = typical_price - (daily_range * 1.1)
+    s3 = typical_price - (daily_range * 1.1 * 2)
+    r1 = typical_price + (daily_range * 1.1 / 2)
+    r2 = typical_price + (daily_range * 1.1)
+    r3 = typical_price + (daily_range * 1.1 * 2)
     
     # Align Camarilla levels to 4h timeframe
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3.values)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3.values)
     
-    # Get 1h data for volume confirmation
-    df_1h = get_htf_data(prices, '1h')
-    if len(df_1h) < 30:
-        return np.zeros(n)
-    
-    volume_1h = df_1h['volume'].values
-    
-    # Calculate 1h volume spike (volume > 2x 24-period average)
-    vol_ma_24 = pd.Series(volume_1h).rolling(window=24, min_periods=24).mean().values
-    vol_spike = volume_1h > (vol_ma_24 * 2.0)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1h, vol_spike.astype(float))
-    
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    
-    # Calculate 4h EMA50 for trend filter
-    ema_50 = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50)
+    # Calculate volume spike (volume > 1.5x 20-day average)
+    vol_ma_20 = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_spike = df_1d['volume'].values > (vol_ma_20 * 1.5)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -77,26 +63,32 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h4_aligned[i]) or 
-            np.isnan(camarilla_l4_aligned[i]) or 
-            np.isnan(vol_spike_aligned[i]) or 
-            np.isnan(ema_50_aligned[i])):
+        if (np.isnan(s3_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or 
+            np.isnan(vol_spike_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: Camarilla touch + volume spike + trend filter
-        touch_l4 = low[i] <= camarilla_l4_aligned[i]  # Touch or penetrate L4
-        touch_h4 = high[i] >= camarilla_h4_aligned[i]  # Touch or penetrate H4
+        # Entry conditions: price touches Camarilla S3/R3 with volume confirmation
+        # Using 0.1% buffer to avoid whipsaws from exact equality
+        buffer = 0.001
+        touch_s3 = low[i] <= s3_aligned[i] * (1 + buffer)
+        touch_r3 = high[i] >= r3_aligned[i] * (1 - buffer)
         vol_confirm = vol_spike_aligned[i] > 0.5  # True if volume spike
-        uptrend = close[i] > ema_50_aligned[i]    # Above EMA50 = uptrend
-        downtrend = close[i] < ema_50_aligned[i]  # Below EMA50 = downtrend
         
-        long_entry = touch_l4 and vol_confirm and uptrend
-        short_entry = touch_h4 and vol_confirm and downtrend
+        long_entry = touch_s3 and vol_confirm
+        short_entry = touch_r3 and vol_confirm
         
-        # Exit when price returns to opposite Camarilla H3/L3 level
-        exit_long = position == 1 and high[i] >= camarilla_h3_aligned[i]
-        exit_short = position == -1 and low[i] <= camarilla_l3_aligned[i]
+        # Exit when price moves back toward midpoint (mean reversion target)
+        # Exit long when price reaches S2, exit short when price reaches R2
+        # Calculate S2 and R2 for exit
+        typical_price_i = (high[i] + low[i] + close[i]) / 3
+        daily_range_i = high[i] - low[i]
+        s2_exit = typical_price_i - (daily_range_i * 1.1)
+        r2_exit = typical_price_i + (daily_range_i * 1.1)
+        
+        exit_long = position == 1 and close[i] >= s2_exit
+        exit_short = position == -1 and close[i] <= r2_exit
         
         # Execute signals
         if long_entry and position != 1:
@@ -119,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_camarilla_volume_trend"
+name = "4h_1d_camarilla_pivot_reversal_v1"
 timeframe = "4h"
 leverage = 1.0
