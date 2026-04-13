@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h timeframe with 1d Elder Ray (bull/bear power) and 1w trend filter.
-# Bull Power = High - EMA13(Close), Bear Power = EMA13(Close) - Low
-# Long: Bull Power > 0 and Bear Power < 0 (bullish imbalance) + price > weekly EMA34
-# Short: Bear Power > 0 and Bull Power < 0 (bearish imbalance) + price < weekly EMA34
-# Uses 1d for Elder Ray calculation (captures intra-day strength/weakness),
-# 1w EMA34 for trend filter to avoid counter-trend trades.
-# Works in bull markets (trend-following with strength confirmation)
-# and bear markets (avoids longs in downtrend, shorts in uptrend).
+# Hypothesis: 1h strategy using 4h/1d for trend direction and 1h for entry timing.
+# Trend direction: 4h close above/below 4h EMA200 (bull/bear).
+# Entry: In bull trend, buy when 1h price crosses above 1h VWAP; in bear trend, sell when 1h price crosses below 1h VWAP.
+# Volume filter: Require volume > 1.2x 20-period average to confirm breakouts.
+# Session filter: Trade only between 08:00-20:00 UTC to avoid low-volume Asian session.
+# Position size: 0.20 (20%) to manage drawdown in volatile markets.
+# This approach uses higher timeframes for trend filtering (reducing whipsaw) and lower timeframe for precise entries,
+# while volume and session filters reduce false signals. Designed to work in both bull and bear markets by
+# following the trend defined on 4h and using mean-reversion to VWAP on 1h for entries.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,75 +21,86 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # 1d data for Elder Ray calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 4h data for trend filter (EMA200)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 200:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_4h = df_4h['close'].values
+    # Calculate EMA200 on 4h close
+    ema_200_4h = np.full(len(close_4h), np.nan)
+    if len(close_4h) >= 200:
+        ema_200_4h[199] = np.mean(close_4h[:200])  # Simple average for first value
+        for i in range(200, len(close_4h)):
+            ema_200_4h[i] = (close_4h[i] * 2 / (200 + 1)) + (ema_200_4h[i-1] * (199 / (200 + 1)))
     
-    # Calculate EMA13 on daily close for Elder Ray
-    close_1d_series = pd.Series(close_1d)
-    ema13_1d = close_1d_series.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Align 4h EMA200 to 1h timeframe
+    ema_200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_200_4h)
     
-    # Elder Ray components
-    bull_power = high_1d - ema13_1d  # High - EMA13
-    bear_power = ema13_1d - low_1d   # EMA13 - Low
+    # Calculate 1h VWAP (typical price * volume cumulative)
+    typical_price = (high + low + close) / 3.0
+    vwap_num = np.cumsum(typical_price * volume)
+    vwap_den = np.cumsum(volume)
+    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(vwap_num, np.nan), where=vwap_den!=0)
     
-    # 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 40:
-        return np.zeros(n)
+    # Average volume (20-period) for volume confirmation
+    avg_volume = np.full(n, np.nan)
+    for i in range(20, n):
+        avg_volume[i] = np.mean(volume[i-20:i])
     
-    close_1w = df_1w['close'].values
-    close_1w_series = pd.Series(close_1w)
-    ema34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align indicators to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Precompute session hours (08:00-20:00 UTC)
+    hours = pd.to_datetime(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.25  # 25% position size
+    position_size = 0.20  # 20% position size
     
-    for i in range(20, n):
+    for i in range(200, n):  # Start after EMA200 warmup
         # Skip if any required data is not ready
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(ema34_1w_aligned[i])):
+        if (np.isnan(ema_200_4h_aligned[i]) or np.isnan(vwap[i]) or 
+            np.isnan(avg_volume[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Session filter: only trade 08:00-20:00 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
             signals[i] = 0.0
             continue
         
         price = close[i]
-        bull = bull_power_aligned[i]
-        bear = bear_power_aligned[i]
-        weekly_ema = ema34_1w_aligned[i]
+        vol = volume[i]
+        avg_vol = avg_volume[i]
+        ema_200 = ema_200_4h_aligned[i]
+        vwap_val = vwap[i]
+        
+        # Volume confirmation: current volume > 1.2x average volume
+        volume_confirm = vol > 1.2 * avg_vol
         
         if position == 0:
-            # Long: bullish imbalance (bull>0, bear<0) + price above weekly EMA
-            if (bull > 0 and bear < 0 and price > weekly_ema):
-                position = 1
-                signals[i] = position_size
-            # Short: bearish imbalance (bear>0, bull<0) + price below weekly EMA
-            elif (bear > 0 and bull < 0 and price < weekly_ema):
-                position = -1
-                signals[i] = -position_size
-            else:
-                signals[i] = 0.0
+            # Determine trend from 4h EMA200
+            if price > ema_200:  # Bull trend
+                # Long: price crosses above VWAP + volume confirmation
+                if price > vwap_val and volume_confirm:
+                    position = 1
+                    signals[i] = position_size
+            else:  # Bear trend (price <= ema_200)
+                # Short: price crosses below VWAP + volume confirmation
+                if price < vwap_val and volume_confirm:
+                    position = -1
+                    signals[i] = -position_size
         elif position == 1:
-            # Exit long: bullish imbalance breaks or price crosses below weekly EMA
-            if (bull <= 0 or bear >= 0 or price < weekly_ema):
+            # Exit long: price crosses below VWAP (mean reversion)
+            if price < vwap_val:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: bearish imbalance breaks or price crosses above weekly EMA
-            if (bear <= 0 or bull >= 0 or price > weekly_ema):
+            # Exit short: price crosses above VWAP (mean reversion)
+            if price > vwap_val:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -96,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_1w_Elder_Ray_Weekly_Trend"
-timeframe = "6h"
+name = "1h_4h_VWAP_Trend_Filter"
+timeframe = "1h"
 leverage = 1.0
