@@ -5,57 +5,65 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get 1d data for HTF calculations
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Calculate 20-period Donchian channels on 1d
-    high_20 = np.full(len(close_1d), np.nan)
-    low_20 = np.full(len(close_1d), np.nan)
-    for i in range(20, len(close_1d)):
-        high_20[i] = np.max(high_1d[i-20:i])
-        low_20[i] = np.min(low_1d[i-20:i])
+    # Calculate 20-period Donchian channels on weekly
+    high_20w = np.full(len(close_1w), np.nan)
+    low_20w = np.full(len(close_1w), np.nan)
+    for i in range(20, len(close_1w)):
+        high_20w[i] = np.max(high_1w[i-20:i])
+        low_20w[i] = np.min(low_1w[i-20:i])
     
-    # Calculate 50-period EMA on 1d (trend filter)
-    close_1d_series = pd.Series(close_1d)
-    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 50-period EMA on weekly
+    close_1w_series = pd.Series(close_1w)
+    ema_50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align indicators to 12h timeframe
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align weekly indicators to daily
+    high_20w_aligned = align_htf_to_ltf(prices, df_1w, high_20w)
+    low_20w_aligned = align_htf_to_ltf(prices, df_1w, low_20w)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Calculate daily ATR(14) for volatility filter and stop
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% of capital
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(high_20_aligned[i]) or 
-            np.isnan(low_20_aligned[i]) or 
-            np.isnan(ema_50_aligned[i])):
+        if (np.isnan(high_20w_aligned[i]) or 
+            np.isnan(low_20w_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below EMA50
-        above_ema = close[i] > ema_50_aligned[i]
-        below_ema = close[i] < ema_50_aligned[i]
+        # Trend filter: price above/below weekly EMA50
+        above_ema = close[i] > ema_50_1w_aligned[i]
+        below_ema = close[i] < ema_50_1w_aligned[i]
         
-        # Donchian breakout conditions
-        long_breakout = close[i] > high_20_aligned[i]
-        short_breakout = close[i] < low_20_aligned[i]
+        # Weekly Donchian breakout conditions
+        long_breakout = close[i] > high_20w_aligned[i]
+        short_breakout = close[i] < low_20w_aligned[i]
         
         # Entry conditions: breakout in direction of trend
         long_entry = long_breakout and above_ema
@@ -86,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_donchian_ema50_breakout"
-timeframe = "12h"
+name = "1d_1w_donchian_ema50_breakout"
+timeframe = "1d"
 leverage = 1.0
