@@ -1,15 +1,14 @@
-#1d_1w_kama_rsi_chop
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d timeframe with KAMA trend filter, RSI momentum, and weekly Chop index regime filter.
-# KAMA adapts to market efficiency - follows trends in trending markets, stays flat in ranging markets.
-# RSI(14) > 55 for long, < 45 for short provides momentum confirmation.
-# Weekly Chop index > 61.8 indicates ranging market (avoid trend following), < 38.2 indicates trending (follow trend).
-# This combination should work in both bull (trend following) and bear (avoiding false signals in ranges) markets.
-# Target: 20-80 total trades over 4 years (5-20/year) to minimize fee drag while capturing significant moves.
+# Hypothesis: 12h timeframe with 1-day Donchian breakout + volume confirmation + chop filter
+# Long when price breaks above 1d Donchian Upper (20) and volume > 1.5x avg volume
+# Short when price breaks below 1d Donchian Lower (20) and volume > 1.5x avg volume
+# Chop filter: only trade when CHOP(14) > 61.8 (ranging market) to avoid false breakouts in trends
+# Uses daily timeframe for structure to avoid whipsaws, 12h for execution timing
+# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,75 +16,47 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for KAMA and RSI
+    # Get 1d data for Donchian channels and chop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate KAMA (10-period)
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.abs(np.diff(close_1d))
-    er = np.where(volatility != 0, change / volatility, 0)
+    # Calculate 1d Donchian channels (20-period)
+    donch_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    
-    # KAMA calculation
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    
-    # Calculate RSI (14-period)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Get weekly data for Chop index
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate Chop index (14-period)
+    # Calculate 1d Choppy Index (14-period)
     # True Range
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.concatenate([[np.max([high_1w[0] - low_1w[0], np.abs(high_1w[0] - close_1w[0]), np.abs(low_1w[0] - close_1w[0])])], 
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], 
                         np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # ATR
+    # Calculate ATR (14-period)
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Max/min close over period
-    max_close = pd.Series(close_1w).rolling(window=14, min_periods=14).max().values
-    min_close = pd.Series(close_1w).rolling(window=14, min_periods=14).min().values
+    # Calculate Chop = 100 * log10(sum(TR14) / (max(HH14) - min(LL14))) / log10(14)
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    hh14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(tr_sum / (hh14 - ll14)) / np.log10(14)
     
-    # Chop index
-    chop = np.where((max_close - min_close) != 0, 
-                    100 * np.log10(atr.sum() / (max_close - min_close)) / np.log10(14), 
-                    50)
-    # Handle initial values
-    chop = np.concatenate([np.full(13, 50), chop])
+    # Align 1d indicators to 12h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high_20)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low_20)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Align indicators to daily timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
+    # Calculate 12h volume average (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -93,27 +64,26 @@ def generate_signals(prices):
     
     for i in range(30, n):
         # Skip if data not ready
-        if (np.isnan(kama_aligned[i]) or 
-            np.isnan(rsi_aligned[i]) or 
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(donch_high_aligned[i]) or 
+            np.isnan(donch_low_aligned[i]) or 
+            np.isnan(chop_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade when market is trending (Chop < 38.2)
-        trending_market = chop_aligned[i] < 38.2
+        # Entry conditions: Donchian breakout + volume + chop filter
+        volume_spike = volume[i] > 1.5 * vol_ma[i]
+        ranging_market = chop_aligned[i] > 61.8  # Chop > 61.8 = ranging
         
-        # Entry conditions
-        price_above_kama = close[i] > kama_aligned[i]
-        price_below_kama = close[i] < kama_aligned[i]
-        rsi_long = rsi_aligned[i] > 55
-        rsi_short = rsi_aligned[i] < 45
+        long_breakout = close[i] > donch_high_aligned[i]
+        short_breakout = close[i] < donch_low_aligned[i]
         
-        long_entry = price_above_kama and rsi_long and trending_market
-        short_entry = price_below_kama and rsi_short and trending_market
+        long_entry = long_breakout and volume_spike and ranging_market
+        short_entry = short_breakout and volume_spike and ranging_market
         
-        # Exit conditions: opposite signal or chop indicates ranging market
-        exit_long = position == 1 and (price_below_kama or not trending_market)
-        exit_short = position == -1 and (price_above_kama or not trending_market)
+        # Exit conditions: opposite Donchian breakout
+        exit_long = position == 1 and close[i] < donch_low_aligned[i]
+        exit_short = position == -1 and close[i] > donch_high_aligned[i]
         
         # Execute signals
         if long_entry and position != 1:
@@ -136,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_kama_rsi_chop"
-timeframe = "1d"
+name = "12h_1d_donchian_volume_chop"
+timeframe = "12h"
 leverage = 1.0
