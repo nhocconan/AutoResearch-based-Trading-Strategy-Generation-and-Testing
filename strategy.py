@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_1w_Camarilla_Breakout_With_Trend_Filter
-Hypothesis: Daily Camarilla pivot breakouts combined with weekly trend filter and volume expansion capture high-probability swing moves in both bull and bear markets.
-The Camarilla levels act as intraday support/resistance; breakouts with volume expansion signal institutional interest.
-Weekly trend filter ensures trades align with higher timeframe momentum, reducing false signals in ranging markets.
-Targets 15-25 trades/year per symbol to minimize fee drag.
+4h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation_v5
+Hypothesis: Camarilla pivot levels from daily timeframe act as strong support/resistance.
+Breakout above H3 or below L3 with volume expansion (>1.5x 20-period average) and 
+ADX trend filter (>25) captures high-probability trend continuation moves.
+Works in bull markets via breakouts above H3 and in bear markets via breakdowns below L3.
+Uses 4h timeframe with 1d HTF for pivot calculation. Target: 20-35 trades/year per symbol.
 """
 
 import numpy as np
@@ -21,42 +22,49 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate ATR for risk management
+    # Calculate ATR for ADX
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[0], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean()
     
-    # Calculate previous day's close for Camarilla levels
-    prev_close = np.roll(close, 1)
-    prev_close[0] = np.nan
+    # Calculate ADX (14-period)
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
     
-    # Calculate Camarilla levels for each day
-    # Resistance levels
-    R1 = close + (high - low) * 1.1 / 12
-    R2 = close + (high - low) * 1.1 / 6
-    R3 = close + (high - low) * 1.1 / 4
-    R4 = close + (high - low) * 1.1 / 2
+    tr_ma = pd.Series(tr).rolling(window=14, min_periods=14).mean()
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean() / tr_ma
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean() / tr_ma
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Support levels
-    S1 = close - (high - low) * 1.1 / 12
-    S2 = close - (high - low) * 1.1 / 6
-    S3 = close - (high - low) * 1.1 / 4
-    S4 = close - (high - low) * 1.1 / 2
-    
-    # Volume confirmation: current volume > 1.3x 20-day average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 1.3)
+    volume_expansion = volume > (vol_ma_20 * 1.5)
     
-    # Weekly EMA trend filter (using 1w data)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
-        ema21_1w = np.full(len(prices), np.nan)
+    # Get daily data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        # Not enough daily data
+        H3 = np.full(n, np.nan)
+        L3 = np.full(n, np.nan)
     else:
-        close_1w = df_1w['close'].values
-        ema21_1w_raw = pd.Series(close_1w).ewm(span=21, min_periods=21, adjust=False).mean().values
-        ema21_1w = align_htf_to_ltf(prices, df_1w, ema21_1w_raw)
+        # Calculate Camarilla levels from previous day's OHLC
+        prev_close = df_1d['close'].shift(1).values
+        prev_high = df_1d['high'].shift(1).values
+        prev_low = df_1d['low'].shift(1).values
+        prev_range = prev_high - prev_low
+        
+        # Camarilla levels: H3 = close + range * 1.1/4, L3 = close - range * 1.1/4
+        H3_raw = prev_close + prev_range * 1.1 / 4
+        L3_raw = prev_close - prev_range * 1.1 / 4
+        
+        # Align to 4h timeframe
+        H3 = align_htf_to_ltf(prices, df_1d, H3_raw)
+        L3 = align_htf_to_ltf(prices, df_1d, L3_raw)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -64,20 +72,23 @@ def generate_signals(prices):
     
     for i in range(50, n):  # warmup period
         # Skip if any required data is not ready
-        if (np.isnan(prev_close[i]) or np.isnan(R4[i]) or np.isnan(S4[i]) or 
-            np.isnan(ema21_1w[i]) or np.isnan(volume_expansion[i])):
+        if (np.isnan(H3[i]) or np.isnan(L3[i]) or 
+            np.isnan(adx[i]) or np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Long signal: break above R4 with volume expansion and weekly uptrend
-        long_signal = (close[i] > R4[i] and 
-                      volume_expansion[i] and 
-                      close[i] > ema21_1w[i])
+        # Trend filter: only trade when ADX > 25 (trending market)
+        is_trending = adx[i] > 25
         
-        # Short signal: break below S4 with volume expansion and weekly downtrend
-        short_signal = (close[i] < S4[i] and 
+        # Long signal: break above H3 with volume expansion and trending market
+        long_signal = (close[i] > H3[i] and 
+                      volume_expansion[i] and 
+                      is_trending)
+        
+        # Short signal: break below L3 with volume expansion and trending market
+        short_signal = (close[i] < L3[i] and 
                        volume_expansion[i] and 
-                       close[i] < ema21_1w[i])
+                       is_trending)
         
         if long_signal and position != 1:
             position = 1
@@ -91,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_Camarilla_Breakout_With_Trend_Filter"
-timeframe = "1d"
+name = "4h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation_v5"
+timeframe = "4h"
 leverage = 1.0
