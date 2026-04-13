@@ -5,55 +5,69 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with 1d ATR regime filter + volume confirmation
-    # Long: price > Donchian(20) high AND ATR(14) > ATR(50) AND volume > 1.5x 20-period average
-    # Short: price < Donchian(20) low AND ATR(14) > ATR(50) AND volume > 1.5x 20-period average
-    # Exit: opposite Donchian breakout
-    # Using 4h timeframe for optimal trade frequency (target 20-50/year), ATR regime to avoid low-vol whipsaws,
-    # and volume spike confirmation to avoid false breakouts. Discrete position sizing (0.25) to minimize fee churn.
+    # Hypothesis: 6h Bollinger Band squeeze breakout with daily trend filter + volume confirmation
+    # Long: BB squeeze (BW < 20th percentile) AND price > upper BB AND daily EMA50 > EMA200 AND volume > 1.5x avg
+    # Short: BB squeeze (BW < 20th percentile) AND price < lower BB AND daily EMA50 < EMA200 AND volume > 1.5x avg
+    # Exit: price crosses middle BB (20-period SMA) OR opposite BB touch
+    # Using 6h timeframe for optimal trade frequency (target 12-37/year), Bollinger squeeze to identify low volatility
+    # periods before expansion, daily EMA crossover for trend filter, and volume confirmation to avoid false breakouts.
+    # Discrete position sizing (0.25) to minimize fee churn.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate ATR(14) and ATR(50) for regime filter
-    tr1 = np.zeros(n)
-    tr1[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr1[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    # Get daily data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    atr14 = np.full(n, np.nan)
-    atr50 = np.full(n, np.nan)
+    # Calculate daily EMA50 and EMA200 for trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # ATR(14)
-    for i in range(14, n):
-        if i == 14:
-            atr14[i] = np.mean(tr1[1:15])
-        else:
-            atr14[i] = (atr14[i-1] * 13 + tr1[i]) / 14
+    # Align daily EMAs to 6h
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # ATR(50)
-    for i in range(50, n):
-        if i == 50:
-            atr50[i] = np.mean(tr1[1:51])
-        else:
-            atr50[i] = (atr50[i-1] * 49 + tr1[i]) / 50
+    # Calculate 6h Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = np.full(n, np.nan)
+    bb_ma = np.full(n, np.nan)
     
-    atr_regime = atr14 > atr50  # High volatility regime
+    for i in range(bb_period, n):
+        bb_ma[i] = np.mean(close[i-bb_period:i])
+        bb_std[i] = np.std(close[i-bb_period:i])
     
-    # Get 4h Donchian(20) for breakout with min_periods
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
+    bb_upper = bb_ma + (2 * bb_std)
+    bb_lower = bb_ma - (2 * bb_std)
+    bb_middle = bb_ma
     
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
+    # Calculate Bollinger Band Width for squeeze detection
+    bb_width = (bb_upper - bb_lower) / bb_middle
     
-    # Get 4h volume for confirmation (>1.5x 20-period average)
+    # Calculate percentile rank of BB width (20-period lookback)
+    bb_width_percentile = np.full(n, np.nan)
+    lookback = 20
+    
+    for i in range(lookback, n):
+        window = bb_width[i-lookback:i]
+        current = bb_width[i]
+        if not np.isnan(current) and not np.all(np.isnan(window)):
+            # Calculate percentile: percentage of values in window <= current
+            valid_window = window[~np.isnan(window)]
+            if len(valid_window) > 0:
+                bb_width_percentile[i] = (np.sum(valid_window <= current) / len(valid_window)) * 100
+    
+    # Bollinger squeeze condition: width < 20th percentile
+    bb_squeeze = bb_width_percentile < 20
+    
+    # Get 6h volume for confirmation (>1.5x 20-period average)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -62,24 +76,31 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_spike[i]) or np.isnan(atr_regime[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or
+            np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(bb_middle[i]) or
+            np.isnan(bb_squeeze[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Breakout conditions
-        long_breakout = close[i] > donchian_high[i]
-        short_breakout = close[i] < donchian_low[i]
+        # Trend filter conditions
+        bullish_trend = ema50_1d_aligned[i] > ema200_1d_aligned[i]
+        bearish_trend = ema50_1d_aligned[i] < ema200_1d_aligned[i]
         
-        # Entry logic: Breakout + ATR regime + volume confirmation
-        long_entry = long_breakout and atr_regime[i] and volume_spike[i]
-        short_entry = short_breakout and atr_regime[i] and volume_spike[i]
+        # Bollinger Band conditions
+        bb_breakout_up = close[i] > bb_upper[i]
+        bb_breakout_down = close[i] < bb_lower[i]
+        bb_middle_cross_up = (close[i] > bb_middle[i]) and (prices['close'].iloc[i-1] <= bb_middle[i-1]) if i > 0 else False
+        bb_middle_cross_down = (close[i] < bb_middle[i]) and (prices['close'].iloc[i-1] >= bb_middle[i-1]) if i > 0 else False
         
-        # Exit logic: opposite breakout
-        long_exit = short_breakout
-        short_exit = long_breakout
+        # Entry logic: Squeeze breakout + trend alignment + volume confirmation
+        long_entry = bb_squeeze[i] and bb_breakout_up and bullish_trend and volume_spike[i]
+        short_entry = bb_squeeze[i] and bb_breakout_down and bearish_trend and volume_spike[i]
+        
+        # Exit logic: middle BB cross or opposite BB touch
+        long_exit = bb_middle_cross_down or bb_breakout_down
+        short_exit = bb_middle_cross_up or bb_breakout_up
         
         if long_entry and position != 1:
             position = 1
@@ -104,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_donchian_breakout_atr_regime_volume_v1"
-timeframe = "4h"
+name = "6h_1d_bb_squeeze_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
