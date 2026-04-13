@@ -8,12 +8,12 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian(20) breakout + 1d EMA50 trend filter + volume confirmation
-    # Long when: price breaks above 12h Donchian upper (20) AND price > 1d EMA50 AND volume > 2x 20-bar avg
-    # Short when: price breaks below 12h Donchian lower (20) AND price < 1d EMA50 AND volume > 2x 20-bar avg
-    # Exit when: price crosses 12h Donchian midpoint
-    # Uses discrete sizing (0.25) targeting 50-150 total trades over 4 years.
-    # Donchian provides structure; 1d EMA50 filters counter-trend breaks; volume confirms validity.
+    # Hypothesis: 1d Donchian(20) breakout + 1w EMA34 trend filter + volume confirmation
+    # Long when: price breaks above 1d Donchian upper (20) AND price > 1w EMA34 AND volume > 1.5x 20-bar avg
+    # Short when: price breaks below 1d Donchian lower (20) AND price < 1w EMA34 AND volume > 1.5x 20-bar avg
+    # Exit when: price crosses 1d Donchian midpoint
+    # Uses discrete sizing (0.25) targeting 30-100 total trades over 4 years.
+    # Donchian provides structure; 1w EMA34 filters counter-trend breaks; volume confirms validity.
     # Works in bull (breakouts with trend) and bear (strong trend-aligned breaks only).
     
     close = prices['close'].values
@@ -21,26 +21,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w data for EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d EMA50
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1w EMA34
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate 12h Donchian channels (20-period)
+    # Calculate 1d Donchian channels (20-period)
     donchian_window = 20
     donchian_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
     donchian_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     donchian_mid = (donchian_high + donchian_low) / 2.0
     
-    # Calculate volume confirmation: volume > 2x 20-bar average volume
+    # Calculate volume confirmation: volume > 1.5x 20-bar average volume
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (2.0 * avg_volume)
+    volume_confirmed = volume > (1.5 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -49,7 +49,7 @@ def generate_signals(prices):
     for i in range(donchian_window, n):
         # Skip if data not ready
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(donchian_mid[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(avg_volume[i])):
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
@@ -58,8 +58,8 @@ def generate_signals(prices):
         breakout_down = close[i] < donchian_low[i-1]  # break below previous Donchian low
         
         # Entry conditions with trend filter and volume confirmation
-        long_entry = breakout_up and (close[i] > ema_50_1d_aligned[i]) and volume_confirmed[i] and position != 1
-        short_entry = breakout_down and (close[i] < ema_50_1d_aligned[i]) and volume_confirmed[i] and position != -1
+        long_entry = breakout_up and (close[i] > ema_34_1w_aligned[i]) and volume_confirmed[i] and position != 1
+        short_entry = breakout_down and (close[i] < ema_34_1w_aligned[i]) and volume_confirmed[i] and position != -1
         
         # Exit conditions
         exit_long = (position == 1 and close[i] < donchian_mid[i])
@@ -89,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_donchian_ema50_volume_v1"
-timeframe = "12h"
+name = "1d_1w_donchian_ema34_volume_v1"
+timeframe = "1d"
 leverage = 1.0
