@@ -1,40 +1,40 @@
 #!/usr/bin/env python3
 """
-4h_1d_1w_Camarilla_Volume_Trend
-Hypothesis: Uses Camarilla pivot levels from daily timeframe for breakout trading. 
-Trades breakouts above R3 or below S3 with volume confirmation and weekly trend filter.
-In trending markets, breaks through S3/R3 indicate strong momentum. 
-Weekly trend filter ensures we only trade in direction of weekly momentum.
-Volume expansion confirms institutional interest. 
-Designed for 4h timeframe with target of 25-50 trades/year (100-200 total over 4 years).
-Works in both bull and bear markets by following institutional breakouts with trend alignment.
+12h_1d_1w_KAMA_Trend_Filter
+Hypothesis: Uses Kaufman Adaptive Moving Average (KAMA) on 12h for trend direction,
+with 1d volume confirmation and 1w trend filter to avoid counter-trend trades.
+KAMA adapts to market noise, reducing whipsaws in ranging markets while capturing trends.
+Works in both bull and bear markets by only trading in direction of higher timeframe trend.
+Target: 15-30 trades/year on 12h (60-120 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given high, low, close arrays."""
-    range_val = high - low
-    # Handle zero range to avoid division by zero
-    range_val = np.where(range_val == 0, 1e-10, range_val)
+def calculate_kama(close, er_length=10, fast_sc=2, slow_sc=30):
+    """Calculate Kaufman Adaptive Moving Average."""
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close, prepend=close[0]))
     
-    C = close
-    H = high
-    L = low
+    # Efficiency Ratio
+    er = np.zeros_like(close)
+    for i in range(er_length, len(close)):
+        if volatility[i-er_length:i+1].sum() > 0:
+            er[i] = np.abs(close[i] - close[i-er_length]) / volatility[i-er_length:i+1].sum()
+        else:
+            er[i] = 0
     
-    # Camarilla levels
-    R1 = C + ((H - L) * 1.0833)
-    R2 = C + ((H - L) * 1.1666)
-    R3 = C + ((H - L) * 1.2500)
-    R4 = C + ((H - L) * 1.5000)
-    S1 = C - ((H - L) * 1.0833)
-    S2 = C - ((H - L) * 1.1666)
-    S3 = C - ((H - L) * 1.2500)
-    S4 = C - ((H - L) * 1.5000)
+    # Smoothing Constant
+    sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
     
-    return R1, R2, R3, R4, S1, S2, S3, S4
+    # KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    return kama
 
 def generate_signals(prices):
     n = len(prices)
@@ -46,81 +46,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
+    # Get daily data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels on daily
-    R1_1d, R2_1d, R3_1d, R4_1d, S1_1d, S2_1d, S3_1d, S4_1d = calculate_camarilla(high_1d, low_1d, close_1d)
+    volume_1d = df_1d['volume'].values
     
     # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Weekly trend: bullish if weekly close > weekly open, bearish if weekly close < weekly open
-    weekly_open = df_1w['open'].values
     weekly_close = df_1w['close'].values
-    weekly_bullish = weekly_close > weekly_open
+    weekly_open = df_1w['open'].values
     
-    # Align all data to 4h timeframe
-    R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
-    R2_1d_aligned = align_htf_to_ltf(prices, df_1d, R2_1d)
-    R3_1d_aligned = align_htf_to_ltf(prices, df_1d, R3_1d)
-    R4_1d_aligned = align_htf_to_ltf(prices, df_1d, R4_1d)
-    S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
-    S2_1d_aligned = align_htf_to_ltf(prices, df_1d, S2_1d)
-    S3_1d_aligned = align_htf_to_ltf(prices, df_1d, S3_1d)
-    S4_1d_aligned = align_htf_to_ltf(prices, df_1d, S4_1d)
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
+    # Calculate KAMA on 12h close
+    kama = calculate_kama(close, er_length=10, fast_sc=2, slow_sc=30)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 1.5)
+    # Calculate 1d volume average
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean()
+    
+    # Align all data to 12h timeframe
+    kama_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), kama)
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20.values)
+    weekly_bullish = (weekly_close > weekly_open).astype(float)
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% of capital
     
-    for i in range(20, n):
+    for i in range(30, n):  # Wait for KAMA to stabilize
         # Skip if any required data is not ready
-        if (np.isnan(R3_1d_aligned[i]) or np.isnan(S3_1d_aligned[i]) or 
-            np.isnan(weekly_bullish_aligned[i]) or np.isnan(volume_expansion[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(vol_ma_aligned[i]) or 
+            np.isnan(weekly_bullish_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Breakout conditions with volume expansion and weekly trend filter
+        # Volume confirmation: current 1d volume > 1.5x 20-day average
+        # Find corresponding 1d index for current 12h bar
+        # Since we aligned the data, we can use the aligned volume MA
+        vol_expanded = volume[i] > (vol_ma_aligned[i] * 1.5) if not np.isnan(vol_ma_aligned[i]) else False
         
-        # Long setup: price breaks above R3 with volume expansion, weekly bullish
-        long_condition = (high[i] > R3_1d_aligned[i]) and volume_expansion[i] and weekly_bullish_aligned[i] > 0.5
+        # Trend filters
+        price_above_kama = close[i] > kama_aligned[i]
+        price_below_kama = close[i] < kama_aligned[i]
+        weekly_bull = weekly_bullish_aligned[i] > 0.5
         
-        # Short setup: price breaks below S3 with volume expansion, weekly bearish
-        short_condition = (low[i] < S3_1d_aligned[i]) and volume_expansion[i] and weekly_bullish_aligned[i] < 0.5
-        
-        if long_condition and position != 1:
-            position = 1
-            signals[i] = position_size
-        elif long_condition and position == 1:
-            signals[i] = position_size
-        elif short_condition and position != -1:
-            position = -1
-            signals[i] = -position_size
-        elif short_condition and position == -1:
-            signals[i] = -position_size
-        elif position == 1:
-            signals[i] = position_size
-        elif position == -1:
-            signals[i] = -position_size
+        # Long conditions: price above KAMA, volume expansion, weekly bullish
+        if price_above_kama and vol_expanded and weekly_bull:
+            if position != 1:
+                position = 1
+                signals[i] = position_size
+            else:
+                signals[i] = position_size
+        # Short conditions: price below KAMA, volume expansion, weekly bearish
+        elif price_below_kama and vol_expanded and not weekly_bull:
+            if position != -1:
+                position = -1
+                signals[i] = -position_size
+            else:
+                signals[i] = -position_size
+        # Exit conditions: trend change or loss of volume confirmation
         else:
-            signals[i] = 0.0
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
     
     return signals
 
-name = "4h_1d_1w_Camarilla_Volume_Trend"
-timeframe = "4h"
+name = "12h_1d_1w_KAMA_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
