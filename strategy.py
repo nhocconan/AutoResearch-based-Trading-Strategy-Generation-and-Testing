@@ -8,11 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with 1d trend filter (EMA50) and volume confirmation
+    # Hypothesis: 12h Donchian(20) breakout with 1d trend filter (EMA50) and volume confirmation
     # Uses 1d EMA50 for trend direction (HTF) to avoid counter-trend trades
-    # Donchian breakout on 4h for entry timing
+    # Donchian breakout on 12h for entry timing
     # Volume > 1.3x 20-period average confirms breakout strength
-    # Target: 19-50 trades/year (75-200 total over 4 years) for low fee drag
+    # Target: 12-30 trades/year (50-120 total over 4 years) for low fee drag
     # Works in bull via long bias, in bear via short bias from 1d EMA50 filter
     
     close = prices['close'].values
@@ -35,7 +35,7 @@ def generate_signals(prices):
         for i in range(50, len(close_1d)):
             ema_1d[i] = (close_1d[i] * multiplier) + (ema_1d[i-1] * (1 - multiplier))
     
-    # Get 4h Donchian(20) for breakout
+    # Get 12h Donchian(20) for breakout
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     
@@ -43,13 +43,13 @@ def generate_signals(prices):
         donchian_high[i] = np.max(high[i-20:i])
         donchian_low[i] = np.min(low[i-20:i])
     
-    # Get 4h volume for confirmation (>1.3x 20-period average)
+    # Get 12h volume for confirmation (>1.3x 20-period average)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     volume_spike = volume > (1.3 * vol_ma)
     
-    # Align 1d EMA50 to 4h
+    # Align 1d EMA50 to 12h
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     signals = np.zeros(n)
@@ -101,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_breakout_ema50_volume_v1"
-timeframe = "4h"
+name = "12h_1d_donchian_breakout_ema50_volume_v1"
+timeframe = "12h"
 leverage = 1.0
