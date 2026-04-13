@@ -8,36 +8,38 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Elder Ray + 12h ADX regime filter
-    # Long: Bull Power > 0 AND Bear Power < 0 AND 12h ADX > 25 (strong trend)
-    # Short: Bear Power < 0 AND Bull Power > 0 AND 12h ADX > 25 (strong trend)
-    # Exit: Elder Power divergence or ADX < 20 (trend weakening)
-    # Uses 6h for optimal trade frequency (target 12-37/year), Elder Ray for trend strength,
-    # 12h ADX to filter weak trends, and discrete position sizing (0.25) to minimize fee churn.
+    # Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and 1w ADX regime filter
+    # Long: price breaks above upper band AND 1w ADX > 25 (strong trend) AND volume > 2.0x avg
+    # Short: price breaks below lower band AND 1w ADX > 25 (strong trend) AND volume > 2.0x avg
+    # Exit: price touches opposite band or retests midpoint of channel
+    # Using 4h timeframe for optimal trade frequency (target 20-50/year), Donchian for structure,
+    # 1w ADX to filter weak/choppy markets, and volume confirmation to avoid false breakouts.
+    # Discrete position sizing (0.30) to balance return and drawdown.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 12h data for ADX regime filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get weekly data for ADX regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 12h ADX(14) for trend strength filter
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate weekly ADX(14) for trend strength filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # True Range
-    tr1 = high_12h[1:] - low_12h[1:]
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
     # Directional Movement
-    up_move = high_12h[1:] - high_12h[:-1]
-    down_move = low_12h[:-1] - low_12h[1:]
+    up_move = high_1w[1:] - high_1w[:-1]
+    down_move = low_1w[:-1] - low_1w[1:]
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     plus_dm = np.concatenate([[np.nan], plus_dm])
@@ -67,50 +69,66 @@ def generate_signals(prices):
     # DX and ADX
     dx = np.where((plus_di14 + minus_di14) != 0, 
                   np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14) * 100, 0)
-    adx_12h = wilders_smoothing(dx, 14)
+    adx = wilders_smoothing(dx, 14)
     
-    # Align 12h ADX to 6h
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    # Align weekly ADX to 4h
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
-    # Calculate 6h Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13)
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Calculate 4h Donchian channels (20-period)
+    # Upper band = highest high over past 20 periods
+    # Lower band = lowest low over past 20 periods
+    upper_band = np.full(n, np.nan)
+    lower_band = np.full(n, np.nan)
+    midpoint = np.full(n, np.nan)
+    
+    for i in range(20, n):
+        upper_band[i] = np.max(high[i-20:i])
+        lower_band[i] = np.min(low[i-20:i])
+        midpoint[i] = (upper_band[i] + lower_band[i]) / 2.0
+    
+    # Get 4h volume for confirmation (>2.0x 20-period average)
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(adx_12h_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        if (np.isnan(adx_1w_aligned[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: ADX > 25 indicates strong trend
-        strong_trend = adx_12h_aligned[i] > 25
-        weak_trend = adx_12h_aligned[i] < 20
+        # Regime filter: ADX > 25 indicates strong trending market
+        strong_trend = adx_1w_aligned[i] > 25
         
-        # Elder Ray conditions
-        bull_strong = bull_power[i] > 0
-        bear_weak = bear_power[i] < 0
-        bear_strong = bear_power[i] > 0
-        bull_weak = bull_power[i] < 0
+        # Donchian breakout conditions
+        breakout_upper = close[i] > upper_band[i]
+        breakout_lower = close[i] < lower_band[i]
         
-        # Entry logic: Strong trend + Elder Ray alignment
-        long_entry = bull_strong and bear_weak and strong_trend
-        short_entry = bear_strong and bull_weak and strong_trend
+        # Exit conditions: touch opposite band or retest midpoint
+        touch_lower = close[i] < lower_band[i]  # Exit long on lower band touch
+        touch_upper = close[i] > upper_band[i]  # Exit short on upper band touch
+        retest_mid_long = close[i] < midpoint[i] and position == 1  # Long exit on midpoint retest
+        retest_mid_short = close[i] > midpoint[i] and position == -1  # Short exit on midpoint retest
         
-        # Exit logic: Weak trend or Elder Ray divergence
-        long_exit = weak_trend or (bull_power[i] < 0 and bear_power[i] > 0)
-        short_exit = weak_trend or (bear_power[i] < 0 and bull_power[i] > 0)
+        # Entry logic: Donchian breakout + strong trend + volume confirmation
+        long_entry = breakout_upper and strong_trend and volume_spike[i]
+        short_entry = breakout_lower and strong_trend and volume_spike[i]
+        
+        # Exit logic: opposite band touch or midpoint retest
+        long_exit = touch_lower or retest_mid_long
+        short_exit = touch_upper or retest_mid_short
         
         if long_entry and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.30
         elif short_entry and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.30
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -120,14 +138,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "6h_12h_elder_ray_adx_regime_v1"
-timeframe = "6h"
+name = "4h_1w_donchian_breakout_adx_volume_v1"
+timeframe = "4h"
 leverage = 1.0
