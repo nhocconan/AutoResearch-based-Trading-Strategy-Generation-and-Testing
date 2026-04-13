@@ -8,82 +8,107 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Camarilla pivot breakout with 1d volume confirmation
-    # Long: 6h close > H4 (Camarilla resistance) AND 1d volume > 1.5 * 20-period average volume
-    # Short: 6h close < L4 (Camarilla support) AND 1d volume > 1.5 * 20-period average volume
-    # Exit: Opposite Camarilla level touch (H3/L3) or volume drops below average
-    # Using Camarilla from 1d for structure, 6h for execution, 1d volume for confirmation
-    # Discrete position sizing (0.25) to balance return and drawdown
-    # Target: 12-37 trades/year (~50-150 over 4 years) to minimize fee drag
+    # Hypothesis: 12h Donchian(20) breakout + 1d ADX regime filter + volume confirmation
+    # Long: price > Donchian upper(20) AND 1d ADX > 25 AND volume > 1.5 * volume MA(20)
+    # Short: price < Donchian lower(20) AND 1d ADX > 25 AND volume > 1.5 * volume MA(20)
+    # Exit: price crosses Donchian middle (mean of upper/lower) OR ADX < 20
+    # Using 12h primary timeframe for structure, 1d for trend regime (ADX)
+    # Discrete position sizing (0.25) to minimize fee churn and control drawdown
+    # Target: 12-37 trades/year (~50-150 over 4 years) to stay within fee drag limits
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot and volume (call ONCE before loop)
+    # Get 1d data for ADX (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla levels from previous day
+    # Calculate 1d ADX (14-period) using Wilder's smoothing
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Camarilla levels: based on previous day's range
-    # H4 = close + 1.5 * (high - low)
-    # H3 = close + 1.1 * (high - low)
-    # L3 = close - 1.1 * (high - low)
-    # L4 = close - 1.5 * (high - low)
-    prev_close = np.concatenate([[np.nan], close_1d[:-1]])
-    prev_high = np.concatenate([[np.nan], high_1d[:-1]])
-    prev_low = np.concatenate([[np.nan], low_1d[:-1]])
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.nan], tr])  # align with index 0
     
-    r = prev_high - prev_low
-    h4 = prev_close + 1.5 * r
-    h3 = prev_close + 1.1 * r
-    l3 = prev_close - 1.1 * r
-    l4 = prev_close - 1.5 * r
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[0.0], plus_dm])
+    minus_dm = np.concatenate([[0.0], minus_dm])
     
-    # Calculate 1d volume average (20-period)
-    vol_1d = df_1d['volume'].values
-    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = vol_1d / vol_ma_20  # current volume relative to average
+    # Wilder's smoothing function
+    def wilders_smoothing(data, period):
+        """Wilder's smoothing (equivalent to EMA with alpha=1/period)"""
+        alpha = 1.0 / period
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            result[period-1] = np.nanmean(data[:period])
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    # Align 1d indicators to 6h (wait for completed 1d bar)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
+    atr_1d = wilders_smoothing(tr, 14)
+    plus_di_1d = 100 * wilders_smoothing(plus_dm, 14) / atr_1d
+    minus_di_1d = 100 * wilders_smoothing(minus_dm, 14) / atr_1d
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
+    adx_1d = wilders_smoothing(dx_1d, 14)
+    
+    # Align 1d ADX to 12h (wait for completed 1d bar)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Calculate 12h Donchian channels (20-period)
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    donchian_upper = highest_high
+    donchian_lower = lowest_low
+    donchian_middle = (donchian_upper + donchian_lower) / 2.0
+    
+    # Volume confirmation: volume > 1.5 * 20-period volume MA
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(lookback, n):
         # Skip if data not ready
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(vol_ratio_aligned[i])):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: significant volume spike
-        volume_confirmed = vol_ratio_aligned[i] > 1.5
+        # Regime filter: only trade when 1d ADX > 25 (strong trend)
+        strong_trend = adx_1d_aligned[i] > 25
+        weak_trend = adx_1d_aligned[i] < 20  # exit condition
         
-        # Camarilla breakout conditions
-        long_breakout = close[i] > h4_aligned[i] and volume_confirmed
-        short_breakout = close[i] < l4_aligned[i] and volume_confirmed
+        # Breakout conditions with volume confirmation
+        bull_breakout = (close[i] > donchian_upper[i]) and volume_confirm[i]
+        bear_breakout = (close[i] < donchian_lower[i]) and volume_confirm[i]
         
-        # Exit conditions: retracement to H3/L3 or volume normalization
-        long_exit = close[i] < h3_aligned[i] or vol_ratio_aligned[i] < 1.0
-        short_exit = close[i] > l3_aligned[i] or vol_ratio_aligned[i] < 1.0
+        # Exit conditions: middle line crossover OR trend weakening
+        long_exit = (close[i] < donchian_middle[i]) or weak_trend
+        short_exit = (close[i] > donchian_middle[i]) or weak_trend
         
-        if long_breakout and position != 1:
+        # Entry logic: Donchian breakout + strong trend + volume
+        long_entry = bull_breakout and strong_trend
+        short_entry = bear_breakout and strong_trend
+        
+        if long_entry and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_breakout and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
@@ -103,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_camarilla_breakout_volume_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_breakout_adx_volume_v1"
+timeframe = "12h"
 leverage = 1.0
