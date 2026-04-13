@@ -8,12 +8,12 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Donchian(20) breakout with 12h trend filter (EMA50) and volume confirmation
-    # Long: price > upper band AND price > EMA50_12h AND volume > 1.5x avg
-    # Short: price < lower band AND price < EMA50_12h AND volume > 1.5x avg
-    # Exit: opposite Donchian breakout or volume dry-up
-    # Using 6h timeframe for balanced trade frequency, Donchian for structure,
-    # 12h EMA for HTF trend filter, volume for confirmation.
+    # Hypothesis: 4h Camarilla pivot breakout with 1d volume spike and ADX regime filter
+    # Long: price breaks above H3 pivot AND volume > 1.5x 20-period avg AND ADX > 25 (trending)
+    # Short: price breaks below L3 pivot AND volume > 1.5x 20-period avg AND ADX > 25 (trending)
+    # Exit: price re-enters H3-L3 range OR volume dry-up OR ADX < 20 (range)
+    # Using 4h timeframe for optimal trade frequency, Camarilla for intraday structure,
+    # 1d volume for confirmation, ADX for trend regime (avoid whipsaws in ranging markets).
     # Discrete position sizing (0.25) to minimize fee churn.
     
     close = prices['close'].values
@@ -21,59 +21,128 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get daily data for Camarilla pivots and volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA(50)
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate daily Camarilla pivot levels (based on previous day)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 6h Donchian channels (20-period)
-    lookback = 20
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
+    # Pivot point (PP) = (H + L + C) / 3
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    # Range = H - L
+    range_1d = high_1d - low_1d
     
-    for i in range(lookback-1, n):
-        upper[i] = np.max(high[i-lookback+1:i+1])
-        lower[i] = np.min(low[i-lookback+1:i+1])
+    # Camarilla levels
+    h3 = pp + (range_1d * 1.1 / 4)
+    l3 = pp - (range_1d * 1.1 / 4)
+    h4 = pp + (range_1d * 1.1 / 2)
+    l4 = pp - (range_1d * 1.1 / 2)
     
-    # Get 6h volume for confirmation (>1.5x 20-period average)
-    vol_ma = np.full(n, np.nan)
+    # Align daily Camarilla levels to 4h (completed 1d bar only)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    
+    # Calculate daily volume for confirmation (>1.5x 20-period average)
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = np.full(len(vol_1d), np.nan)
+    for i in range(20, len(vol_1d)):
+        vol_ma_1d[i] = np.mean(vol_1d[i-20:i])
+    volume_spike_1d = vol_1d > (1.5 * vol_ma_1d)
+    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
+    
+    # Calculate 4h ADX(14) for regime filter
+    # ADX requires +DI, -DI, and TR
+    # +DM = max(high - prev_high, 0) if high - prev_high > prev_low - low else 0
+    # -DM = max(prev_low - low, 0) if prev_low - low > high - prev_high else 0
+    # TR = max(high - low, high - prev_close, prev_close - low)
+    # +DI = 100 * smoothed(+DM) / smoothed(TR)
+    # -DI = 100 * smoothed(-DM) / smoothed(TR)
+    # DX = 100 * |+DI - -DI| / (+DI + -DI)
+    # ADX = smoothed(DX)
+    
+    # Calculate +DM and -DM
+    high_diff = high[1:] - high[:-1]
+    low_diff = low[:-1] - low[1:]
+    
+    plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0)
+    minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0)
+    
+    # Pad with zeros for first element
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    
+    # Calculate True Range (TR)
+    prev_close = np.concatenate([[close[0]], close[:-1]])
+    tr1 = high - low
+    tr2 = np.abs(high - prev_close)
+    tr3 = np.abs(low - prev_close)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Wilder's smoothing function
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: smoothed = (prev * (period-1) + current) / period
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    period = 14
+    # Smoothed +DM, -DM, and TR
+    smoothed_plus_dm = wilders_smoothing(plus_dm, period)
+    smoothed_minus_dm = wilders_smoothing(minus_dm, period)
+    smoothed_tr = wilders_smoothing(tr, period)
+    
+    # Calculate +DI and -DI
+    plus_di = np.where(smoothed_tr != 0, 100 * smoothed_plus_dm / smoothed_tr, 0)
+    minus_di = np.where(smoothed_tr != 0, 100 * smoothed_minus_dm / smoothed_tr, 0)
+    
+    # Calculate DX
+    dx = np.where((plus_di + minus_di) != 0, 
+                  100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    
+    # Calculate ADX (smoothed DX)
+    adx = wilders_smoothing(dx, period)
+    
+    # Get 4h volume for additional confirmation
+    vol_ma_4h = np.full(n, np.nan)
     for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (1.5 * vol_ma)
+        vol_ma_4h[i] = np.mean(volume[i-20:i])
+    volume_spike_4h = volume > (1.5 * vol_ma_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(lookback, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema_12h_aligned[i]) or np.isnan(upper[i]) or 
-            np.isnan(lower[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
+            np.isnan(volume_spike_1d_aligned[i]) or np.isnan(adx[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to 12h EMA50
-        above_ema = close[i] > ema_12h_aligned[i]
-        below_ema = close[i] < ema_12h_aligned[i]
+        # Regime filter: ADX > 25 = trending market
+        trending = adx[i] > 25
+        ranging = adx[i] < 20  # Exit condition for ranging
         
-        # Volume confirmation
-        vol_confirm = volume_spike[i]
+        # Volume confirmation (either 1d or 4h spike)
+        vol_confirm = volume_spike_1d_aligned[i] or volume_spike_4h[i]
         
-        # Donchian breakout conditions
-        long_breakout = close[i] > upper[i]
-        short_breakout = close[i] < lower[i]
+        # Entry logic: Camarilla breakout + volume confirmation + trending regime
+        long_entry = (close[i] > h3_aligned[i]) and vol_confirm and trending
+        short_entry = (close[i] < l3_aligned[i]) and vol_confirm and trending
         
-        # Entry logic: Donchian breakout + trend filter + volume confirmation
-        long_entry = long_breakout and above_ema and vol_confirm
-        short_entry = short_breakout and below_ema and vol_confirm
-        
-        # Exit logic: opposite Donchian breakout or volume dry-up
-        long_exit = short_breakout or not vol_confirm
-        short_exit = long_breakout or not vol_confirm
+        # Exit logic: re-enter H3-L3 range OR volume dry-up OR ranging market
+        long_exit = (close[i] < l3_aligned[i]) or not vol_confirm or ranging
+        short_exit = (close[i] > h3_aligned[i]) or not vol_confirm or ranging
         
         if long_entry and position != 1:
             position = 1
@@ -98,6 +167,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_donchian_ema_volume_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_volume_adx_v1"
+timeframe = "4h"
 leverage = 1.0
