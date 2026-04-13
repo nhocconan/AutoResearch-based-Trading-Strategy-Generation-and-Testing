@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_1w_Camarilla_Pivot_Breakout_With_Volume_Confirmation
-Hypothesis: Daily close above/below weekly Camarilla levels with volume confirmation.
-Long when daily close > weekly R4 + daily volume > 2x 20-day avg volume + weekly close > weekly SMA50.
-Short when daily close < weekly S4 + daily volume > 2x 20-day avg volume + weekly close < weekly SMA50.
-Exit when daily close crosses weekly pivot point (PP) or weekly trend reverses.
-Designed for daily timeframe to target 5-15 trades/year with strong trend capture in both bull/bear markets.
+12h_1d1w_Vortex_Trend_Filter
+Hypothesis: 12h price action with 1d Vortex trend filter and 1w volatility regime.
+Long when price > 12h EMA21 + VI+ > VI- (bullish vortex) + 1w ATR% < 0.08 (low vol regime).
+Short when price < 12h EMA21 + VI- > VI+ (bearish vortex) + 1w ATR% < 0.08 (low vol regime).
+Exit when vortex reverses or price crosses EMA21.
+Designed for 12h to capture trends in low-volatility regimes, reducing whipsaw in choppy markets.
 """
 
 import numpy as np
@@ -20,44 +20,63 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Weekly Camarilla pivot levels (based on previous week)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 12h EMA21
+    close_s = pd.Series(close)
+    ema_21 = close_s.ewm(span=21, adjust=False, min_periods=21).values
+    
+    # 1d Vortex Indicator (VI+ and VI-)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate weekly Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align indices
+    
+    # Vortex movements
+    vm_plus = np.abs(high_1d[1:] - low_1d[:-1])
+    vm_minus = np.abs(low_1d[1:] - high_1d[:-1])
+    vm_plus = np.concatenate([[np.nan], vm_plus])
+    vm_minus = np.concatenate([[np.nan], vm_minus])
+    
+    # Sum over 14 periods
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    vm_plus14 = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
+    vm_minus14 = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    vi_plus = vm_plus14 / tr14
+    vi_minus = vm_minus14 / tr14
+    
+    vi_plus_aligned = align_htf_to_ltf(prices, df_1d, vi_plus)
+    vi_minus_aligned = align_htf_to_ltf(prices, df_1d, vi_minus)
+    
+    # 1w ATR% (volatility regime filter)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Previous week's values for current week calculation
-    prev_high = np.roll(high_1w, 1)
-    prev_low = np.roll(low_1w, 1)
-    prev_close = np.roll(close_1w, 1)
-    prev_high[0] = high_1w[0]
-    prev_low[0] = low_1w[0]
-    prev_close[0] = close_1w[0]
+    # True Range for 1w
+    tr1_w = np.abs(high_1w[1:] - low_1w[1:])
+    tr2_w = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3_w = np.abs(low_1w[1:] - close_1w[:-1])
+    tr_w = np.maximum(tr1_w, np.maximum(tr2_w, tr3_w))
+    tr_w = np.concatenate([[np.nan], tr_w])
     
-    # Camarilla calculation
-    range_1w = prev_high - prev_low
-    camarilla_pp = (prev_high + prev_low + prev_close) / 3
-    camarilla_r4 = camarilla_pp + (range_1w * 1.1 / 2)
-    camarilla_s4 = camarilla_pp - (range_1w * 1.1 / 2)
-    
-    # Align weekly Camarilla levels to daily
-    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1w, camarilla_pp)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
-    
-    # Daily volume confirmation
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    
-    # Weekly trend filter
-    close_1w = df_1w['close'].values
-    sma_50 = pd.Series(close_1w).rolling(window=50, min_periods=50).mean()
-    sma_50_aligned = align_htf_to_ltf(prices, df_1w, sma_50.values)
+    atr14_w = pd.Series(tr_w).rolling(window=14, min_periods=14).mean().values
+    atr_percent_w = atr14_w / close_1w
+    atr_percent_w_aligned = align_htf_to_ltf(prices, df_1w, atr_percent_w)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -65,46 +84,47 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(camarilla_pp_aligned[i]) or np.isnan(camarilla_r4_aligned[i]) or
-            np.isnan(camarilla_s4_aligned[i]) or np.isnan(vol_ma_20[i]) or
-            np.isnan(sma_50_aligned[i])):
+        if (np.isnan(ema_21[i]) or np.isnan(vi_plus_aligned[i]) or np.isnan(vi_minus_aligned[i]) or
+            np.isnan(atr_percent_w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume condition: daily volume > 2x 20-day average
-        vol_condition = volume[i] > (vol_ma_20[i] * 2.0)
+        # Low volatility regime (1w ATR% < 8%)
+        low_vol = atr_percent_w_aligned[i] < 0.08
         
-        # Weekly trend condition
-        uptrend = close[i] > sma_50_aligned[i]
-        downtrend = close[i] < sma_50_aligned[i]
+        # Vortex conditions
+        bullish_vortex = vi_plus_aligned[i] > vi_minus_aligned[i]
+        bearish_vortex = vi_minus_aligned[i] > vi_plus_aligned[i]
         
-        # Breakout conditions (using daily close)
-        long_breakout = close[i] > camarilla_r4_aligned[i]
-        short_breakout = close[i] < camarilla_s4_aligned[i]
+        # EMA21 conditions
+        price_above_ema = close[i] > ema_21[i]
+        price_below_ema = close[i] < ema_21[i]
+        
+        # Entry conditions
+        long_entry = price_above_ema and bullish_vortex and low_vol
+        short_entry = price_below_ema and bearish_vortex and low_vol
         
         # Exit conditions
-        long_exit = close[i] < camarilla_pp_aligned[i]
-        short_exit = close[i] > camarilla_pp_aligned[i]
-        trend_reverse_long = close[i] < sma_50_aligned[i]  # uptrend broken
-        trend_reverse_short = close[i] > sma_50_aligned[i]  # downtrend broken
+        long_exit = (price_below_ema or not bullish_vortex or not low_vol)
+        short_exit = (price_above_ema or not bearish_vortex or not low_vol)
         
         if position == 0:
-            if long_breakout and vol_condition and uptrend:
+            if long_entry:
                 position = 1
                 signals[i] = position_size
-            elif short_breakout and vol_condition and downtrend:
+            elif short_entry:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            if long_exit or trend_reverse_long:
+            if long_exit:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            if short_exit or trend_reverse_short:
+            if short_exit:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -112,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_Camarilla_Pivot_Breakout_With_Volume_Confirmation"
-timeframe = "1d"
+name = "12h_1d1w_Vortex_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
