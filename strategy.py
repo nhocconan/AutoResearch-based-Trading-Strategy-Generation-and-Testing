@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 300:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -64,7 +64,7 @@ def generate_signals(prices):
             r3[i] = week_high[i] + 2 * (pivot[i] - week_low[i])
             s3[i] = week_low[i] - 2 * (week_high[i] - pivot[i])
     
-    # Align all indicators to 6h timeframe
+    # Align all indicators to 12h timeframe
     donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
     avg_volume_12h_aligned = align_htf_to_ltf(prices, df_12h, avg_volume_12h)
@@ -76,7 +76,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25
     
-    for i in range(200, n):
+    for i in range(300, n):
         # Skip if data not ready
         if (np.isnan(donchian_high_aligned[i]) or 
             np.isnan(donchian_low_aligned[i]) or
@@ -127,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_1d_donchian_pivot_volume_confluence"
-timeframe = "6h"
+name = "12h_1d_1w_donchian_pivot_volume_confluence"
+timeframe = "12h"
 leverage = 1.0
