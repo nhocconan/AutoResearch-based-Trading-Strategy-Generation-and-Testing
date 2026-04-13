@@ -8,12 +8,12 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
-    # Long: price > upper Donchian(20) AND price > 1w EMA50 AND volume > 1.5x avg
-    # Short: price < lower Donchian(20) AND price < 1w EMA50 AND volume > 1.5x avg
-    # Exit: opposite Donchian breakout or volume dry-up
-    # Using 12h timeframe for low trade frequency, Donchian for structure,
-    # 1w EMA50 for regime filter (avoid counter-trend trades), volume for confirmation.
+    # Hypothesis: 4h Donchian breakout with 1d ATR regime filter and volume spike confirmation
+    # Long: price > Donchian(20) high AND ATR(14)/ATR(50) > 1.2 (high vol regime) AND volume > 1.5x avg
+    # Short: price < Donchian(20) low AND ATR(14)/ATR(50) > 1.2 AND volume > 1.5x avg
+    # Exit: opposite Donchian breakout or ATR ratio < 0.8 (low vol exit)
+    # Using 4h timeframe for optimal trade frequency, Donchian for structure,
+    # ATR ratio for volatility regime (avoid low vol whipsaws), volume for confirmation.
     # Discrete position sizing (0.25) to minimize fee churn.
     
     close = prices['close'].values
@@ -21,26 +21,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data for ATR regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA(50)
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate daily ATR(14) and ATR(50) for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align weekly EMA to 12h
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # True Range calculation
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]  # first bar
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Calculate 12h Donchian channels (20-period)
-    upper_donch = np.full(n, np.nan)
-    lower_donch = np.full(n, np.nan)
-    for i in range(20, n):
-        upper_donch[i] = np.max(high[i-20:i])
-        lower_donch[i] = np.min(low[i-20:i])
+    # ATR calculation with min_periods
+    def calculate_atr(data, period):
+        atr = np.full_like(data, np.nan)
+        if len(data) < period:
+            return atr
+        # First value: simple average
+        atr[period-1] = np.mean(data[:period])
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(data)):
+            atr[i] = (atr[i-1] * (period-1) + data[i]) / period
+        return atr
     
-    # Get 12h volume for confirmation (>1.5x 20-period average)
+    atr_14 = calculate_atr(tr, 14)
+    atr_50 = calculate_atr(tr, 50)
+    
+    # ATR ratio: short-term / long-term volatility
+    atr_ratio = np.where(atr_50 > 0, atr_14 / atr_50, 0)
+    
+    # Align daily ATR ratio to 4h
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    
+    # Calculate 4h Donchian channels (20-period)
+    lookback = 20
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    
+    for i in range(lookback-1, n):
+        highest_high[i] = np.max(high[i-lookback+1:i+1])
+        lowest_low[i] = np.min(low[i-lookback+1:i+1])
+    
+    # Donchian breakout signals
+    donchian_long = close > highest_high
+    donchian_short = close < lowest_low
+    
+    # Get 4h volume for confirmation (>1.5x 20-period average)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -51,25 +85,25 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(upper_donch[i]) or 
-            np.isnan(lower_donch[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(atr_ratio_aligned[i]) or np.isnan(donchian_long[i]) or 
+            np.isnan(donchian_short[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: price > weekly EMA50 = bullish bias, price < weekly EMA50 = bearish bias
-        bullish_bias = close[i] > ema_1w_aligned[i]
-        bearish_bias = close[i] < ema_1w_aligned[i]
+        # Regime filter: high volatility (ATR ratio > 1.2)
+        high_vol_regime = atr_ratio_aligned[i] > 1.2
+        low_vol_exit = atr_ratio_aligned[i] < 0.8
         
         # Volume confirmation
         vol_confirm = volume_spike[i]
         
-        # Entry logic: Donchian breakout + regime bias + volume confirmation
-        long_entry = (close[i] > upper_donch[i]) and bullish_bias and vol_confirm
-        short_entry = (close[i] < lower_donch[i]) and bearish_bias and vol_confirm
+        # Entry logic: Donchian breakout + high vol regime + volume confirmation
+        long_entry = donchian_long[i] and high_vol_regime and vol_confirm
+        short_entry = donchian_short[i] and high_vol_regime and vol_confirm
         
-        # Exit logic: opposite Donchian breakout or volume dry-up
-        long_exit = (close[i] < lower_donch[i]) or not vol_confirm
-        short_exit = (close[i] > upper_donch[i]) or not vol_confirm
+        # Exit logic: opposite Donchian breakout OR low vol regime OR volume dry-up
+        long_exit = donchian_short[i] or low_vol_exit or not vol_confirm
+        short_exit = donchian_long[i] or low_vol_exit or not vol_confirm
         
         if long_entry and position != 1:
             position = 1
@@ -94,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1w_donchian_ema_volume_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_atr_volume_v1"
+timeframe = "4h"
 leverage = 1.0
