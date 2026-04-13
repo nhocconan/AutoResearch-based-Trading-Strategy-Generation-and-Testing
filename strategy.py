@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation
+4h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation_v4
 Hypothesis: Daily Camarilla pivot levels (S3/R3) provide strong support/resistance.
-Breakouts above R3 or below S3 on 12h chart with volume expansion capture institutional moves.
-Works in both bull and bear markets by trading breakouts regardless of direction.
-Target: 15-25 trades/year per symbol.
+Breakouts above R3 or below S3 on 4h chart with volume expansion capture institutional moves.
+Adds volume confirmation to reduce false breakouts. Works in both bull and bear markets
+by trading breakouts regardless of direction. Target: 20-30 trades/year per symbol.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -43,7 +43,7 @@ def generate_signals(prices):
     # Support levels (S3 used)
     S3 = close_prev - (range_1d * 1.2500 / 4)
     
-    # Align levels to 12h timeframe
+    # Align levels to 4h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
@@ -55,7 +55,7 @@ def generate_signals(prices):
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25
     
-    for i in range(50, n):
+    for i in range(200, n):
         # Skip if any required data is not ready
         if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
             np.isnan(volume_expansion[i])):
@@ -80,6 +80,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation"
-timeframe = "12h"
+name = "4h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation_v4"
+timeframe = "4h"
 leverage = 1.0
