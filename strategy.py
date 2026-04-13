@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with volume confirmation and ATR filter.
-# Donchian channels capture breakouts in both bull and bear markets.
-# Volume confirmation ensures breakouts have conviction.
-# ATR filter avoids false breakouts in low volatility.
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+# Hypothesis: 1h strategy using 4h Donchian breakout for direction and 1h RSI for entry timing.
+# 4h Donchian captures major trend direction, 1h RSI provides pullback entries in trending markets.
+# This reduces whipsaw and avoids counter-trend trading.
+# Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
+# Session filter (08-20 UTC) reduces noise trades.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,97 +19,91 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for multi-timeframe analysis
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # 4h data for trend direction
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate Donchian channels (20-period) on 4h data
+    # 4h Donchian channels (20-period)
     period = 20
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    donchian_high_4h = np.full(len(df_4h), np.nan)
+    donchian_low_4h = np.full(len(df_4h), np.nan)
+    for i in range(period-1, len(df_4h)):
+        donchian_high_4h[i] = np.max(high_4h[i-period+1:i+1])
+        donchian_low_4h[i] = np.min(low_4h[i-period+1:i+1])
+    donchian_high_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_4h)
+    donchian_low_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_4h)
     
-    for i in range(period-1, n):
-        donchian_high[i] = np.max(high[i-period+1:i+1])
-        donchian_low[i] = np.min(low[i-period+1:i+1])
+    # 1h RSI (14-period) for entry timing
+    rsi_period = 14
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    for i in range(rsi_period, n):
+        if i == rsi_period:
+            avg_gain[i] = np.mean(gain[i-rsi_period:i])
+            avg_loss[i] = np.mean(loss[i-rsi_period:i])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
+            avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate ATR (14-period) for volatility filter
-    atr_period = 14
-    tr = np.zeros(n)
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = np.zeros(n)
-    for i in range(atr_period, n):
-        atr[i] = np.mean(tr[i-atr_period+1:i+1])
-    
-    # Calculate average volume (20-period) for volume confirmation
-    avg_volume = np.zeros(n)
-    for i in range(20, n):
-        avg_volume[i] = np.mean(volume[i-20:i])
-    
-    # Align daily trend filter
-    close_1d = df_1d['close'].values
-    sma_1d = np.zeros(len(close_1d))
-    for i in range(20, len(close_1d)):
-        sma_1d[i] = np.mean(close_1d[i-20:i])
-    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d)
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.25  # 25% position size
+    position_size = 0.20  # 20% position size
     
     for i in range(30, n):
         # Skip if any required data is not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(atr[i]) or np.isnan(avg_volume[i]) or 
-            np.isnan(sma_1d_aligned[i])):
+        if (np.isnan(donchian_high_4h_aligned[i]) or np.isnan(donchian_low_4h_aligned[i]) or 
+            np.isnan(rsi[i])):
+            signals[i] = 0.0
+            continue
+        
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
+        if not in_session:
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol = volume[i]
-        avg_vol = avg_volume[i]
-        donch_high = donchian_high[i]
-        donch_low = donchian_low[i]
-        atr_val = atr[i]
-        daily_sma = sma_1d_aligned[i]
-        
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirm = vol > 1.5 * avg_vol
-        
-        # ATR filter: ATR > 0 (always true, but keeps structure)
-        atr_filter = atr_val > 0
+        donch_high = donchian_high_4h_aligned[i]
+        donch_low = donchian_low_4h_aligned[i]
+        rsi_val = rsi[i]
         
         if position == 0:
-            # Long: price breaks above Donchian high + volume + price above daily SMA
-            if (price > donch_high and 
-                volume_confirm and 
-                atr_filter and
-                price > daily_sma):
+            # Long: 4h uptrend (price above 4h Donchian mid) + RSI pullback (< 40)
+            if (price > (donch_high + donch_low) / 2 and 
+                rsi_val < 40):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below Donchian low + volume + price below daily SMA
-            elif (price < donch_low and 
-                  volume_confirm and 
-                  atr_filter and
-                  price < daily_sma):
+            # Short: 4h downtrend (price below 4h Donchian mid) + RSI bounce (> 60)
+            elif (price < (donch_high + donch_low) / 2 and 
+                  rsi_val > 60):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below Donchian low OR volume drops
+            # Exit long: 4h trend reversal (price below 4h Donchian low) OR RSI overbought
             if (price < donch_low or 
-                vol < 0.5 * avg_vol):
+                rsi_val > 70):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above Donchian high OR volume drops
+            # Exit short: 4h trend reversal (price above 4h Donchian high) OR RSI oversold
             if (price > donch_high or 
-                vol < 0.5 * avg_vol):
+                rsi_val < 30):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -117,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Donchian_Breakout_Volume_Filter_v1"
-timeframe = "4h"
+name = "1h_4h_Donchian_RSI_Pullback_v1"
+timeframe = "1h"
 leverage = 1.0
