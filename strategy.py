@@ -8,37 +8,71 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout + volume confirmation + ATR filter
-    # Enter long when price breaks above 20-bar high with volume > 1.5x 20-bar avg volume
-    # Enter short when price breaks below 20-bar low with volume > 1.5x 20-bar avg volume
-    # Exit on opposite Donchian(10) break or ATR-based stoploss
-    # Works in bull (continuation breaks) and bear (reversal breaks at extremes)
-    # Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag
+    # Hypothesis: 1d Camarilla pivot breakout with volume confirmation and chop regime filter
+    # Enter long when price breaks above R4 with volume > 1.5x 20-bar avg AND chop < 61.8 (trending)
+    # Enter short when price breaks below S4 with volume > 1.5x 20-bar avg AND chop < 61.8
+    # Exit when price crosses the 1d close (midpoint)
+    # Uses 1w HTF for Camarilla levels (more stable than 1d) and 1d for entry timing
+    # Camarilla levels from 1w provide institutional support/resistance
+    # Volume confirmation ensures breakouts have participation
+    # Chop filter avoids false breakouts in ranging markets
+    # Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-bar for entry, 10-bar for exit)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
-    low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
+    # Get 1d data for primary timeframe
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # ATR(14) for volatility filter and stoploss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Get 1w data for Camarilla pivot calculation (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate 1w Camarilla levels (based on previous week's OHLC)
+    cam_high_low = high_1w - low_1w
+    camarilla_r4 = close_1w + (cam_high_low * 1.1 / 2)
+    camarilla_s4 = close_1w - (cam_high_low * 1.1 / 2)
+    camarilla_mid = close_1w  # midpoint is the 1w close
+    
+    # Align 1w Camarilla levels to 1d timeframe
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
+    camarilla_mid_aligned = align_htf_to_ltf(prices, df_1w, camarilla_mid)
     
     # Volume confirmation: volume > 1.5x 20-bar average volume
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirmed = volume > (1.5 * avg_volume)
+    
+    # Choppiness Index regime filter: chop < 61.8 = trending (favor breakouts)
+    # CHOP = 100 * log10(sum(ATR(14)) / log10(highest_high - lowest_low) / log10(14)
+    atr_period = 14
+    tr = np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1))), np.abs(low - np.roll(close, 1)))
+    tr[0] = high[0] - low[0]  # first TR
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    
+    highest_high = pd.Series(high).rolling(window=atr_period, min_periods=atr_period).max().values
+    lowest_low = pd.Series(low).rolling(window=atr_period, min_periods=atr_period).min().values
+    
+    # Avoid division by zero
+    range_hl = highest_high - lowest_low
+    range_hl = np.where(range_hl == 0, 1e-10, range_hl)
+    
+    chop = 100 * np.log10(atr * atr_period) / np.log10(range_hl)
+    chop = np.where(np.isnan(chop), 50.0, chop)  # default to neutral if undefined
+    chop_filter = chop < 61.8  # trending regime
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -46,29 +80,22 @@ def generate_signals(prices):
     
     for i in range(1, n):  # start from 1 to access previous bar
         # Skip if data not ready
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(high_10[i]) or np.isnan(low_10[i]) or
-            np.isnan(atr[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or np.isnan(camarilla_mid_aligned[i]) or
+            np.isnan(avg_volume[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > high_20[i-1]  # break above previous 20-bar high
-        breakout_down = close[i] < low_20[i-1]  # break below previous 20-bar low
+        # Camarilla breakout conditions (using current bar's close vs current bar's levels)
+        breakout_up = close[i] > camarilla_r4_aligned[i]  # break above R4
+        breakout_down = close[i] < camarilla_s4_aligned[i]  # break below S4
         
-        # Entry conditions with volume confirmation and ATR filter
-        long_entry = breakout_up and volume_confirmed[i] and atr[i] > 0 and position != 1
-        short_entry = breakout_down and volume_confirmed[i] and atr[i] > 0 and position != -1
+        # Entry conditions with volume confirmation and chop filter
+        long_entry = breakout_up and volume_confirmed[i] and chop_filter[i] and position != 1
+        short_entry = breakout_down and volume_confirmed[i] and chop_filter[i] and position != -1
         
-        # Exit conditions: opposite Donchian(10) break or ATR stoploss
-        exit_long = False
-        exit_short = False
-        
-        if position == 1:
-            # Exit long: price breaks below 10-bar low OR 2*ATR stoploss
-            exit_long = close[i] < low_10[i-1] or close[i] <= (prices['close'].values[i-1] - 2.0 * atr[i-1]) if i > 0 else False
-        elif position == -1:
-            # Exit short: price breaks above 10-bar high OR 2*ATR stoploss
-            exit_short = close[i] > high_10[i-1] or close[i] >= (prices['close'].values[i-1] + 2.0 * atr[i-1]) if i > 0 else False
+        # Exit conditions
+        exit_long = (position == 1 and close[i] < camarilla_mid_aligned[i])
+        exit_short = (position == -1 and close[i] > camarilla_mid_aligned[i])
         
         # Execute signals
         if long_entry:
@@ -94,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_donchian_breakout_volume_atr_v1"
-timeframe = "4h"
+name = "1d_1w_camarilla_breakout_volume_chop_v1"
+timeframe = "1d"
 leverage = 1.0
