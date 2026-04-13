@@ -8,12 +8,12 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ADX regime filter
-    # Long when price breaks above 20-period high + 1d volume > 1.2x 20-day average + 1d ADX > 25
-    # Short when price breaks below 20-period low + 1d volume > 1.2x 20-day average + 1d ADX > 25
+    # Hypothesis: 1d Donchian(20) breakout with 1w volume confirmation and ADX regime filter
+    # Long when price breaks above 20-period high + 1w volume > 1.2x 20-week average + 1w ADX > 25
+    # Short when price breaks below 20-period low + 1w volume > 1.2x 20-week average + 1w ADX > 25
     # Exit when price crosses 10-period moving average in opposite direction
     # Uses discrete position sizing (0.25) to minimize fee churn and manage drawdown
-    # Target: 75-200 total trades over 4 years (~19-50/year) to avoid fee drag
+    # Target: 30-100 total trades over 4 years (~7-25/year) to avoid fee drag
     # Volume filter ensures breakouts occur with institutional participation
     # ADX filter ensures we only trade in trending markets, avoiding chop
     
@@ -22,17 +22,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data (call ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 1w data (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 1d volume average (20-period) with min_periods
-    volume_1d = df_1d['volume'].values
-    volume_series = pd.Series(volume_1d)
+    # Calculate 1w volume average (20-period) with min_periods
+    volume_1w = df_1w['volume'].values
+    volume_series = pd.Series(volume_1w)
     vol_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1d ADX (14-period) with min_periods
+    # Calculate 1w ADX (14-period) with min_periods
     def calculate_adx(high, low, close, period=14):
         plus_dm = np.zeros_like(high)
         minus_dm = np.zeros_like(high)
@@ -71,16 +71,16 @@ def generate_signals(prices):
         
         return adx
     
-    adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
+    adx_1w = calculate_adx(df_1w['high'].values, df_1w['low'].values, df_1w['close'].values, 14)
     
-    # Align all 1d indicators to 4h
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Align all 1w indicators to 1d
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Pre-calculate Donchian channels for 4h timeframe
+    # Pre-calculate Donchian channels for 1d timeframe
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_high = high_series.rolling(window=20, min_periods=20).max().values
@@ -95,10 +95,10 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current 1d volume > 1.2 * 20-period average
-        vol_1d_current = df_1d['volume'].values
-        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d_current)
-        volume_confirmation = vol_1d_aligned[i] > 1.2 * vol_ma_aligned[i]
+        # Volume filter: current 1w volume > 1.2 * 20-period average
+        vol_1w_current = df_1w['volume'].values
+        vol_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_1w_current)
+        volume_confirmation = vol_1w_aligned[i] > 1.2 * vol_ma_aligned[i]
         
         # ADX filter: trending market (ADX > 25)
         trending_market = adx_aligned[i] > 25
@@ -138,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_breakout_volume_adx_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_breakout_volume_adx_v1"
+timeframe = "1d"
 leverage = 1.0
