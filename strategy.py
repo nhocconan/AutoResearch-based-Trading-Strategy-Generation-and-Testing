@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation_v4
-Hypothesis: Daily Camarilla pivot levels (S3/R3) provide strong support/resistance.
-Breakouts above R3 or below S3 on 4h chart with volume expansion capture institutional moves.
-Adds volume confirmation to reduce false breakouts. Works in both bull and bear markets
-by trading breakouts regardless of direction. Target: 15-25 trades/year per symbol.
+6h_1w_Donchian_Breakout_Weekly_Trend_Filter
+Hypothesis: Weekly trend filters 6h Donchian breakouts to avoid counter-trend trades.
+In bull markets (price above weekly SMA50), take long breakouts above 20-period high.
+In bear markets (price below weekly SMA50), take short breakdowns below 20-period low.
+Weekly trend reduces whipsaws during reversals. Volume confirmation ensures institutional participation.
+Works in both bull and bear by adapting direction to weekly trend. Target: 15-25 trades/year.
 """
 
 import numpy as np
@@ -13,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,65 +22,64 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each daily bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly SMA50 for trend filter
+    close_1w = df_1w['close'].values
+    sma50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
+    sma50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma50_1w)
     
-    # Camarilla formulas
-    close_prev = np.roll(close_1d, 1)
-    close_prev[0] = close_1d[0]  # first bar uses its own close
+    # 6h Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    range_1d = high_1d - low_1d
-    
-    # Resistance levels (R3 used)
-    R3 = close_prev + (range_1d * 1.2500 / 4)
-    
-    # Support levels (S3 used)
-    S3 = close_prev - (range_1d * 1.2500 / 4)
-    
-    # Align levels to 4h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    
-    # Volume confirmation: current volume > 2.0x 20-period average (more strict)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 2.0)
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_expansion = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25
     
-    for i in range(200, n):
+    for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(volume_expansion[i])):
+        if (np.isnan(sma50_1w_aligned[i]) or np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Long breakout: price breaks above R3 with volume expansion
-        long_breakout = close[i] > R3_aligned[i] and volume_expansion[i]
+        # Weekly trend: price above/below weekly SMA50
+        weekly_uptrend = close[i] > sma50_1w_aligned[i]
+        weekly_downtrend = close[i] < sma50_1w_aligned[i]
         
-        # Short breakdown: price breaks below S3 with volume expansion
-        short_breakout = close[i] < S3_aligned[i] and volume_expansion[i]
+        # Donchian breakout signals
+        long_breakout = close[i] > high_20[i] and volume_expansion[i]
+        short_breakout = close[i] < low_20[i] and volume_expansion[i]
         
-        if long_breakout and position != 1:
+        # Enter long only in weekly uptrend
+        if long_breakout and weekly_uptrend and position != 1:
             position = 1
             signals[i] = position_size
-        elif short_breakout and position != -1:
+        # Enter short only in weekly downtrend
+        elif short_breakout and weekly_downtrend and position != -1:
             position = -1
             signals[i] = -position_size
+        # Exit when trend changes or opposite signal
+        elif position == 1 and not weekly_uptrend:
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and not weekly_downtrend:
+            position = 0
+            signals[i] = 0.0
         else:
             # Hold current position
             signals[i] = position_size if position == 1 else (-position_size if position == -1 else 0.0)
     
     return signals
 
-name = "4h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation_v4"
-timeframe = "4h"
+name = "6h_1w_Donchian_Breakout_Weekly_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
