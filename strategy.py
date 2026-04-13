@@ -8,13 +8,13 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with 1d ADX regime filter and volume confirmation
+    # Hypothesis: 6h Donchian(20) breakout with 1d ADX regime filter and volume confirmation
     # Long: price breaks above upper band AND 1d ADX > 25 (strong trend) AND volume > 1.3x avg
     # Short: price breaks below lower band AND 1d ADX > 25 (strong trend) AND volume > 1.3x avg
     # Exit: price retests breakout level (middle of channel) or opposite band touch
-    # Using 4h timeframe for optimal trade frequency (target 19-50/year), Donchian for structure,
+    # Using 6h timeframe for optimal trade frequency (target 12-37/year), Donchian for structure,
     # 1d ADX to filter weak/choppy markets, and volume confirmation to avoid false breakouts.
-    # Discrete position sizing (0.25) to minimize fee churn. Works in bull/bear via trend filter.
+    # Discrete position sizing (0.25) to minimize fee churn.
     
     close = prices['close'].values
     high = prices['high'].values
@@ -71,22 +71,20 @@ def generate_signals(prices):
                   np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14) * 100, 0)
     adx = wilders_smoothing(dx, 14)
     
-    # Align daily ADX to 4h
+    # Align daily ADX to 6h
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Calculate 4h Donchian channels (20-period)
-    # Upper band = highest high over past 20 bars
-    # Lower band = lowest low over past 20 bars
+    # Calculate 6h Donchian channels (20-period)
+    # Upper band = highest high over past 20 periods
+    # Lower band = lowest low over past 20 periods
     upper_band = np.full(n, np.nan)
     lower_band = np.full(n, np.nan)
-    middle_band = np.full(n, np.nan)  # for exit retest
     
     for i in range(20, n):
         upper_band[i] = np.max(high[i-20:i])
         lower_band[i] = np.min(low[i-20:i])
-        middle_band[i] = (upper_band[i] + lower_band[i]) / 2.0
     
-    # Get 4h volume for confirmation (>1.3x 20-period average)
+    # Get 6h volume for confirmation (>1.3x 20-period average)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -109,19 +107,19 @@ def generate_signals(prices):
         breakout_upper = close[i] > upper_band[i]
         breakout_lower = close[i] < lower_band[i]
         
-        # Exit conditions: retest middle band or touch opposite band
-        retest_middle_long = position == 1 and close[i] < middle_band[i]
-        retest_middle_short = position == -1 and close[i] > middle_band[i]
-        touch_lower = close[i] < lower_band[i]  # Exit long on lower band touch
-        touch_upper = close[i] > upper_band[i]  # Exit short on upper band touch
+        # Exit conditions: retest middle of channel or touch opposite band
+        middle_channel = (upper_band[i] + lower_band[i]) / 2
+        retest_middle = np.abs(close[i] - middle_channel) < 0.001 * middle_channel  # within 0.1%
+        touch_upper = close[i] >= upper_band[i]  # Exit long on upper band touch/re-test
+        touch_lower = close[i] <= lower_band[i]  # Exit short on lower band touch/re-test
         
         # Entry logic: Donchian breakout + strong trend + volume confirmation
         long_entry = breakout_upper and strong_trend and volume_spike[i]
         short_entry = breakout_lower and strong_trend and volume_spike[i]
         
-        # Exit logic: middle band retest or opposite band touch
-        long_exit = retest_middle_long or touch_lower
-        short_exit = retest_middle_short or touch_upper
+        # Exit logic: retest middle or opposite band touch
+        long_exit = retest_middle or touch_lower
+        short_exit = retest_middle or touch_upper
         
         if long_entry and position != 1:
             position = 1
@@ -146,6 +144,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_breakout_adx_volume_v2"
-timeframe = "4h"
+name = "6h_1d_donchian_breakout_adx_volume_v1"
+timeframe = "6h"
 leverage = 1.0
