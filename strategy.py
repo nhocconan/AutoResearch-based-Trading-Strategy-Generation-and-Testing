@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_1d_1w_CamarillaBreakout_TrendFilter_v2
-Hypothesis: Price breaking above daily R4 or below daily S4 Camarilla pivot levels with weekly volume expansion and filtered by weekly ADX trend strength captures strong momentum moves in both bull and bear markets. Daily pivots act as strong support/resistance; breaks indicate institutional interest. Weekly volume and trend filters reduce false breakouts. Target: 20-40 trades/year by requiring confluence.
+4h_1d_1w_BollingerBandBreakout_VolumeTrend_v1
+Hypothesis: Price breaking above upper Bollinger Band (20,2) or below lower band with weekly volume expansion and filtered by weekly ADX trend captures strong momentum moves. Bollinger bands adapt to volatility, making them effective in both bull and bear markets. Volume and trend filters reduce false breakouts. Target: 20-40 trades/year.
 """
 
 import numpy as np
@@ -18,7 +18,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot points
+    # Get daily data for Bollinger Bands
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -27,11 +27,11 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily Camarilla pivot points
-    # Correct formula: R4 = Close + ((High-Low) * 1.1), S4 = Close - ((High-Low) * 1.1)
-    diff = high_1d - low_1d
-    camarilla_r4 = close_1d + (diff * 1.1)
-    camarilla_s4 = close_1d - (diff * 1.1)
+    # Calculate daily Bollinger Bands (20, 2)
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + (2 * std_20)
+    lower_bb = sma_20 - (2 * std_20)
     
     # Get weekly data for volume and ADX
     df_1w = get_htf_data(prices, '1w')
@@ -80,11 +80,11 @@ def generate_signals(prices):
     minus_di = 100 * minus_dm / atr
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = wilders_smooth(dx, period)
-    strong_trend = adx > 20  # Moderate trend filter to allow more trades
+    strong_trend = adx > 20  # Moderate trend filter
     
     # Align all signals to 4h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
     volume_expansion_aligned = align_htf_to_ltf(prices, df_1w, volume_expansion.astype(float))
     strong_trend_aligned = align_htf_to_ltf(prices, df_1w, strong_trend.astype(float))
     
@@ -94,25 +94,28 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(r4_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or 
+        if (np.isnan(upper_bb_aligned[i]) or 
+            np.isnan(lower_bb_aligned[i]) or 
             np.isnan(volume_expansion_aligned[i]) or 
             np.isnan(strong_trend_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: Break of daily R4/S4 with weekly volume and trend
-        long_break = close[i] > r4_aligned[i]
-        short_break = close[i] < s4_aligned[i]
+        # Entry conditions: Break of Bollinger Bands with weekly volume and trend
+        long_break = close[i] > upper_bb_aligned[i]
+        short_break = close[i] < lower_bb_aligned[i]
         
         long_entry = long_break and volume_expansion_aligned[i] > 0.5 and strong_trend_aligned[i] > 0.5
         short_entry = short_break and volume_expansion_aligned[i] > 0.5 and strong_trend_aligned[i] > 0.5
         
-        # Exit when price returns to daily pivot point (mean reversion)
-        pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-        exit_long = position == 1 and close[i] <= pivot_aligned[i]
-        exit_short = position == -1 and close[i] >= pivot_aligned[i]
+        # Exit when price returns to middle Bollinger Band (mean reversion)
+        exit_long = position == 1 and close[i] <= sma_20_aligned[i] if 'sma_20_aligned' in locals() else False
+        exit_short = position == -1 and close[i] >= sma_20_aligned[i] if 'sma_20_aligned' in locals() else False
+        
+        # Calculate aligned SMA for exit
+        sma_20_aligned = align_htf_to_ltf(prices, df_1d, sma_20)
+        exit_long = position == 1 and close[i] <= sma_20_aligned[i]
+        exit_short = position == -1 and close[i] >= sma_20_aligned[i]
         
         # Execute signals
         if long_entry and position != 1:
@@ -135,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_1w_CamarillaBreakout_TrendFilter_v2"
+name = "4h_1d_1w_BollingerBandBreakout_VolumeTrend_v1"
 timeframe = "4h"
 leverage = 1.0
