@@ -3,6 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 12h Donchian(20) breakout with daily volume confirmation and RSI filter.
+# Uses daily Donchian channels and RSI to avoid whipsaws in both bull and bear markets.
+# Timeframe 12h reduces trade frequency to minimize fee drag while capturing medium-term trends.
+# Volume confirmation ensures breakouts have conviction. RSI filter avoids overextended moves.
+# Target: 50-150 total trades over 4 years (12-37/year) to stay within profitable range.
+
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
@@ -39,7 +45,7 @@ def generate_signals(prices):
     volume_1d = df_1d['volume'].values
     volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all data to 4-hour timeframe
+    # Align all data to 12-hour timeframe
     donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_values)
@@ -56,10 +62,10 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current 4h volume > 1.5x daily volume MA (adjusted for 4h)
-        # 6 4h periods per day, so daily MA/6 = approximate 4h period MA
-        volume_4h_approx_ma = volume_ma_20_1d_aligned[i] / 6
-        volume_condition = volume[i] > (volume_4h_approx_ma * 1.5)
+        # Volume condition: current 12h volume > 1.5x daily volume MA (adjusted for 12h)
+        # 2 12h periods per day, so daily MA/2 = approximate 12h period MA
+        volume_12h_approx_ma = volume_ma_20_1d_aligned[i] / 2
+        volume_condition = volume[i] > (volume_12h_approx_ma * 1.5)
         
         # RSI conditions: avoid extreme overbought/oversold
         rsi_not_overbought = rsi_aligned[i] < 70
@@ -97,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Donchian_Breakout_Volume_RSI_Filter_v1"
-timeframe = "4h"
+name = "12h_1d_Donchian_Breakout_Volume_RSI_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
