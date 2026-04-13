@@ -3,10 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray with weekly trend filter and daily volume confirmation.
-# Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13) identifies institutional buying/selling pressure.
-# Weekly trend filter ensures we only take trades in the direction of the higher timeframe trend.
-# Daily volume confirmation ensures institutional participation.
+# Hypothesis: 12h Williams Alligator with daily volume confirmation.
+# Uses Williams Alligator (3 SMAs) to identify trends and avoid whipsaws.
+# Daily volume ensures breakouts have conviction. Works in both bull and bear markets.
 # Target: 50-150 total trades over 4 years (12-37/year) to stay within profitable range.
 
 def generate_signals(prices):
@@ -19,41 +18,37 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    # Daily data for volume confirmation and EMA calculation
+    # Daily data for multi-timeframe analysis
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA13 for trend filter
-    close_1w = df_1w['close'].values
-    ema13_1w = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Calculate daily EMA13 for Elder Ray
+    # Williams Alligator: Jaw (13-period, 8-shift), Teeth (8-period, 5-shift), Lips (5-period, 3-shift)
     close_1d = df_1d['close'].values
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate daily high and low for Elder Ray
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Jaw: SMA(13) shifted 8 bars forward
+    jaw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean()
+    jaw = jaw.shift(8)  # shift forward
+    jaw_values = jaw.values
     
-    # Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high_1d - ema13_1d
-    bear_power = low_1d - ema13_1d
+    # Teeth: SMA(8) shifted 5 bars forward
+    teeth = pd.Series(close_1d).rolling(window=8, min_periods=8).mean()
+    teeth = teeth.shift(5)  # shift forward
+    teeth_values = teeth.values
+    
+    # Lips: SMA(5) shifted 3 bars forward
+    lips = pd.Series(close_1d).rolling(window=5, min_periods=5).mean()
+    lips = lips.shift(3)  # shift forward
+    lips_values = lips.values
     
     # Calculate daily volume and its 20-period average
     volume_1d = df_1d['volume'].values
     volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all data to 6-hour timeframe
-    ema13_1w_aligned = align_htf_to_ltf(prices, df_1w, ema13_1w)
-    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    # Align all data to 12-hour timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_values)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_values)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_values)
     volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
     signals = np.zeros(n)
@@ -62,46 +57,44 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is not ready
-        if (np.isnan(ema13_1w_aligned[i]) or np.isnan(ema13_1d_aligned[i]) or
-            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
-            np.isnan(volume_ma_20_1d_aligned[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or
+            np.isnan(lips_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Weekly trend: price above/below weekly EMA13
-        weekly_uptrend = close[i] > ema13_1w_aligned[i]
-        weekly_downtrend = close[i] < ema13_1w_aligned[i]
+        # Volume condition: current 12h volume > 1.5x daily volume MA (adjusted for 12h)
+        # 2 12h periods per day, so daily MA/2 = approximate 12h period MA
+        volume_12h_approx_ma = volume_ma_20_1d_aligned[i] / 2
+        volume_condition = volume[i] > (volume_12h_approx_ma * 1.5)
         
-        # Daily Elder Ray signals
-        strong_bull_power = bull_power_aligned[i] > 0
-        strong_bear_power = bear_power_aligned[i] < 0
+        # Alligator conditions: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
+        lips_above_teeth = lips_aligned[i] > teeth_aligned[i]
+        teeth_above_jaw = teeth_aligned[i] > jaw_aligned[i]
+        lips_below_teeth = lips_aligned[i] < teeth_aligned[i]
+        teeth_below_jaw = teeth_aligned[i] < jaw_aligned[i]
         
-        # Volume condition: current 6h volume > 1.5x daily volume MA (adjusted for 6h)
-        # 4 6h periods per day, so daily MA/4 = approximate 6h period MA
-        volume_6h_approx_ma = volume_ma_20_1d_aligned[i] / 4
-        volume_condition = volume[i] > (volume_6h_approx_ma * 1.5)
-        
+        # Entry conditions: Alligator alignment with volume confirmation
+        # Long when Lips > Teeth > Jaw (bullish alignment) with volume
+        # Short when Lips < Teeth < Jaw (bearish alignment) with volume
         if position == 0:
-            # Long: weekly uptrend + strong bull power + volume confirmation
-            if weekly_uptrend and strong_bull_power and volume_condition:
+            if lips_above_teeth and teeth_above_jaw and volume_condition:
                 position = 1
                 signals[i] = position_size
-            # Short: weekly downtrend + strong bear power + volume confirmation
-            elif weekly_downtrend and strong_bear_power and volume_condition:
+            elif lips_below_teeth and teeth_below_jaw and volume_condition:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit when weekly trend turns down or bull power weakens
-            if not weekly_uptrend or bull_power_aligned[i] <= 0:
+            # Exit when Alligator alignment breaks (Lips < Teeth or Teeth < Jaw)
+            if not (lips_above_teeth and teeth_above_jaw):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit when weekly trend turns up or bear power weakens
-            if not weekly_downtrend or bear_power_aligned[i] >= 0:
+            # Exit when Alligator alignment breaks (Lips > Teeth or Teeth > Jaw)
+            if not (lips_below_teeth and teeth_below_jaw):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -109,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_1d_Elder_Ray_Weekly_Trend_Volume_Filter_v1"
-timeframe = "6h"
+name = "12h_1d_Williams_Alligator_Volume_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
