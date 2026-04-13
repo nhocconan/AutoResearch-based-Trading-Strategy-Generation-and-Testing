@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Pivot_Rebound_Volume_Confirmation_v1
-Hypothesis: Price often reverses from daily Camarilla S3/R3 levels rather than breaking through.
-We take counter-trend positions at these strong support/resistance zones with volume confirmation.
-Works in both bull (buy dips at S3) and bear (sell rallies at R3) markets by fading extremes.
-Target: 15-25 trades/year per symbol to minimize fee drag.
+6h_1d_Pivot_Momentum_Reversal_v1
+Hypothesis: Price reverses from daily pivot points (PP) with momentum confirmation.
+In ranging markets, price respects daily pivot as support/resistance. In trending markets,
+breakouts from pivot with momentum (RSI divergence) continue. Uses 60% position size
+to manage drawdown. Works in both bull and bear by adapting to regime via RSI(6).
+Target: 15-25 trades/year per symbol.
 """
 
 import numpy as np
@@ -21,39 +22,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots
+    # Get daily data for pivot points
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each daily bar
+    # Calculate daily pivot points: PP = (H+L+C)/3
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Use previous day's close for calculations
-    close_prev = np.roll(close_1d, 1)
-    close_prev[0] = close_1d[0]  # first bar uses its own close
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    # R1 = 2*PP - L, S1 = 2*PP - H
+    r1 = 2 * pp - low_1d
+    s1 = 2 * pp - high_1d
     
-    range_1d = high_1d - low_1d
+    # Align pivot levels to 6h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Resistance levels (R3)
-    R3 = close_prev + (range_1d * 1.2500 / 4)
-    
-    # Support levels (S3)
-    S3 = close_prev - (range_1d * 1.2500 / 4)
-    
-    # Align levels to 4h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    
-    # Volume filter: current volume > 1.3x 20-period average (less strict than breakout)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_confirmation = volume > (vol_ma_20 * 1.3)
-    
-    # Price proximity: within 0.5% of S3/R3 level
-    proximity_to_S3 = np.abs(close - S3_aligned) / S3_aligned < 0.005
-    proximity_to_R3 = np.abs(close - R3_aligned) / R3_aligned < 0.005
+    # RSI(6) for momentum confirmation
+    close_series = pd.Series(close)
+    delta = close_series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/6, adjust=False, min_periods=6).mean()
+    avg_loss = loss.ewm(alpha=1/6, adjust=False, min_periods=6).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values  # neutral when undefined
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -61,30 +59,39 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(volume_confirmation[i]) or
-            np.isnan(proximity_to_S3[i]) or np.isnan(proximity_to_R3[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
-        # Long setup: price near S3 with volume confirmation (buy the dip)
-        long_setup = proximity_to_S3[i] and volume_confirmation[i]
+        # Long conditions: price near S1 with bullish momentum OR break above R1 with momentum
+        near_support = close[i] <= s1_aligned[i] * 1.005  # within 0.5% of S1
+        bullish_momentum = rsi[i] > 50 and rsi[i] > rsi[i-1]  # RSI > 50 and rising
+        breakout_resistance = close[i] > r1_aligned[i] and rsi[i] > 60  # breakout with strong momentum
         
-        # Short setup: price near R3 with volume confirmation (sell the rally)
-        short_setup = proximity_to_R3[i] and volume_confirmation[i]
+        # Short conditions: price near R1 with bearish momentum OR break below S1 with momentum
+        near_resistance = close[i] >= r1_aligned[i] * 0.995  # within 0.5% of R1
+        bearish_momentum = rsi[i] < 50 and rsi[i] < rsi[i-1]  # RSI < 50 and falling
+        breakdown_support = close[i] < s1_aligned[i] and rsi[i] < 40  # breakdown with weak momentum
         
-        if long_setup and position != 1:
-            position = 1
-            signals[i] = position_size
-        elif short_setup and position != -1:
-            position = -1
-            signals[i] = -position_size
+        if (near_support and bullish_momentum) or breakout_resistance:
+            if position != 1:
+                position = 1
+                signals[i] = position_size
+            else:
+                signals[i] = position_size
+        elif (near_resistance and bearish_momentum) or breakdown_support:
+            if position != -1:
+                position = -1
+                signals[i] = -position_size
+            else:
+                signals[i] = -position_size
         else:
             # Hold current position
             signals[i] = position_size if position == 1 else (-position_size if position == -1 else 0.0)
     
     return signals
 
-name = "4h_1d_Camarilla_Pivot_Rebound_Volume_Confirmation_v1"
-timeframe = "4h"
+name = "6h_1d_Pivot_Momentum_Reversal_v1"
+timeframe = "6h"
 leverage = 1.0
