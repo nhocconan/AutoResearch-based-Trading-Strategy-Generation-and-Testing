@@ -11,81 +11,105 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get daily data for weekly pivot calculation
+    # Get 1w data for weekly trend (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate 34-period EMA on 1w (weekly trend)
+    close_1w_series = pd.Series(close_1w)
+    ema_34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align weekly EMA to daily timeframe
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Calculate 20-period Donchian on 1d (price channels)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot levels from daily data
-    # Weekly high/low/close from last completed week
-    weekly_high = np.full(len(close_1d), np.nan)
-    weekly_low = np.full(len(close_1d), np.nan)
-    weekly_close = np.full(len(close_1d), np.nan)
+    # Donchian channels (20-period)
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Simple approach: use rolling window of 5 days for weekly approximation
-    for i in range(len(close_1d)):
-        if i >= 4:
-            weekly_high[i] = np.max(high_1d[i-4:i+1])
-            weekly_low[i] = np.min(low_1d[i-4:i+1])
-            weekly_close[i] = close_1d[i]
+    # Align Donchian to daily timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     
-    # Calculate pivot points and support/resistance levels
-    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    r1 = 2 * pivot - weekly_low
-    s1 = 2 * pivot - weekly_high
-    r2 = pivot + (weekly_high - weekly_low)
-    s2 = pivot - (weekly_high - weekly_low)
-    r3 = weekly_high + 2 * (pivot - weekly_low)
-    s3 = weekly_low - 2 * (weekly_high - pivot)
-    r4 = r3 + (weekly_high - weekly_low)
-    s4 = s3 - (weekly_high - weekly_low)
+    # Calculate 14-period RSI on 1d
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_14 = 100 - (100 / (1 + rs))
+    rsi_14_aligned = rsi_14  # Already on daily
     
-    # Align weekly pivot levels to 6h timeframe
-    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
-    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
-    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Volume confirmation: volume above 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_surge = volume > (vol_ma * 1.5)
+    # Volume confirmation: current volume > 1.5x 20-day average
+    volume = df_1d['volume'].values
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ma20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20)
+    volume_ok = volume > (vol_ma20_aligned * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% of capital
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if data not ready
-        if (np.isnan(pivot_6h[i]) or np.isnan(r3_6h[i]) or 
-            np.isnan(s3_6h[i]) or np.isnan(r4_6h[i]) or 
-            np.isnan(s4_6h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(high_20_aligned[i]) or 
+            np.isnan(low_20_aligned[i]) or 
+            np.isnan(rsi_14_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Breakout conditions with volume confirmation
-        long_breakout = (close[i] > r4_6h[i]) and vol_surge[i]
-        short_breakout = (close[i] < s4_6h[i]) and vol_surge[i]
+        # Trend filter: price above/below weekly EMA34
+        above_weekly_ema = close[i] > ema_34_1w_aligned[i]
+        below_weekly_ema = close[i] < ema_34_1w_aligned[i]
         
-        # Fade conditions at extreme levels
-        long_fade = (close[i] < s3_6h[i]) and vol_surge[i]
-        short_fade = (close[i] > r3_6h[i]) and vol_surge[i]
+        # Donchian breakout conditions
+        donchian_breakout_up = close[i] > high_20_aligned[i-1]  # Break above upper band
+        donchian_breakout_down = close[i] < low_20_aligned[i-1]  # Break below lower band
         
-        # Exit conditions: return to pivot or opposite signal
-        exit_long = position == 1 and (close[i] < pivot_6h[i] or close[i] > r4_6h[i])
-        exit_short = position == -1 and (close[i] > pivot_6h[i] or close[i] < s4_6h[i])
+        # RSI conditions: avoid extreme levels
+        rsi_not_overbought = rsi_14_aligned[i] < 70
+        rsi_not_oversold = rsi_14_aligned[i] > 30
+        
+        # Volume confirmation
+        vol_ok = volume_ok[i] if i < len(volume_ok) else False
+        
+        # Entry conditions: Donchian breakout + weekly trend + RSI + volume
+        long_entry = (donchian_breakout_up and 
+                     above_weekly_ema and 
+                     rsi_not_overbought and 
+                     vol_ok)
+        
+        short_entry = (donchian_breakout_down and 
+                      below_weekly_ema and 
+                      rsi_not_oversold and 
+                      vol_ok)
+        
+        # Exit conditions: opposite Donchian breakout or RSI extreme
+        exit_long = (position == 1 and 
+                    (donchian_breakout_down or rsi_14_aligned[i] > 80))
+        exit_short = (position == -1 and 
+                     (donchian_breakout_up or rsi_14_aligned[i] < 20))
         
         # Execute signals
-        if (long_breakout or long_fade) and position != 1:
+        if long_entry and position != 1:
             position = 1
             signals[i] = position_size
-        elif (short_breakout or short_fade) and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -position_size
         elif exit_long or exit_short:
@@ -102,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_weekly_pivot_breakout_fade"
-timeframe = "6h"
+name = "1d_weekly_ema_donchian_volume_rsi_filter"
+timeframe = "1d"
 leverage = 1.0
