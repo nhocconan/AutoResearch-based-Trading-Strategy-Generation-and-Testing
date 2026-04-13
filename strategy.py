@@ -8,9 +8,9 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Donchian(20) breakout with 1d weekly pivot direction filter and volume confirmation.
-    # Weekly pivots from 1d data determine structural bias: price above weekly pivot = bullish bias (long breakouts only),
-    # price below weekly pivot = bearish bias (short breakouts only). Donchian breakouts provide entry timing.
+    # Hypothesis: 12h Camarilla pivot breakout with 1d weekly pivot bias and volume confirmation.
+    # Weekly pivot from 1d data determines structural bias: price above weekly pivot = bullish bias (long breakouts only),
+    # price below weekly pivot = bearish bias (short breakouts only). Camarilla levels (H3/L3) from 1d provide entry zones.
     # Volume confirmation ensures breakout validity. Target: 50-150 total trades over 4 years = 12-37/year.
     # Works in bull markets (long breakouts with bullish bias) and bear markets (short breakouts with bearish bias).
     
@@ -19,7 +19,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for weekly pivots (call ONCE before loop)
+    # Get 1d data for weekly pivot and Camarilla levels (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -39,14 +39,19 @@ def generate_signals(prices):
     # Weekly pivot point
     weekly_pivot = (week_high + week_low + week_close) / 3.0
     
-    # Align weekly pivot to 6h timeframe
+    # Align weekly pivot to 12h timeframe
     weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
     
-    # Calculate 6h Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d Camarilla levels (H3, L3)
+    # Camarilla: H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4
+    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 4.0
+    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 4.0
     
-    # Calculate 6h volume MA(20) for confirmation
+    # Align Camarilla levels to 12h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    
+    # Calculate 12h volume MA(20) for confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -54,17 +59,17 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
+            np.isnan(camarilla_l3_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volume filter: current volume > 20-period MA
         volume_filter = volume[i] > volume_ma[i]
         
-        # Breakout conditions
-        long_breakout = close[i] > donchian_high[i-1]  # Break above prior period's high
-        short_breakout = close[i] < donchian_low[i-1]  # Break below prior period's low
+        # Breakout conditions at Camarilla H3/L3 levels
+        long_breakout = close[i] > camarilla_h3_aligned[i]  # Break above H3
+        short_breakout = close[i] < camarilla_l3_aligned[i]  # Break below L3
         
         # Weekly pivot bias: price above pivot = bullish bias, below = bearish bias
         bullish_bias = close[i] > weekly_pivot_aligned[i]
@@ -101,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_donchian_weekly_pivot_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_weekly_pivot_v1"
+timeframe = "12h"
 leverage = 1.0
