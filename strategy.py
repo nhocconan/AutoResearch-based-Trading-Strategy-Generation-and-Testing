@@ -8,11 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with 1d ATR-based volume spike filter and 12h chop regime.
-    # Long when price breaks above Donchian(20) high + volume > 1.5x ATR-scaled average + CHOP_12h > 61.8 (range).
-    # Short when price breaks below Donchian(20) low + volume > 1.5x ATR-scaled average + CHOP_12h > 61.8 (range).
-    # Exit when price crosses Donchian(20) midpoint.
-    # Uses ATR-scaled volume filter to adapt to volatility and chop regime to avoid trend-following false breakouts.
+    # Hypothesis: 4h Camarilla pivot breakout with 1d volume spike filter and 12h chop regime.
+    # Long when price breaks above Camarilla H3 + volume > 2.0x 20-period volume average + CHOP_12h > 61.8 (range).
+    # Short when price breaks below Camarilla L3 + volume > 2.0x 20-period volume average + CHOP_12h > 61.8 (range).
+    # Exit when price crosses Camarilla pivot point (PP).
+    # Uses volume spike to confirm breakout strength and chop regime to avoid trend-following false breakouts.
     # Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
     
     close = prices['close'].values
@@ -20,12 +20,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period) on 4h
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
-    
-    # Get 1d data for ATR-scaled volume filter (call ONCE before loop)
+    # Calculate Camarilla pivot levels from previous day (need OHLC from 1d)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -33,24 +28,31 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate True Range (TR) on 1d
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    # Calculate previous day's Camarilla levels
+    # PP = (H + L + C) / 3
+    # R4 = C + ((H-L) * 1.1/2)
+    # R3 = C + ((H-L) * 1.1/4)
+    # R2 = C + ((H-L) * 1.1/6)
+    # R1 = C + ((H-L) * 1.1/12)
+    # S1 = C - ((H-L) * 1.1/12)
+    # S2 = C - ((H-L) * 1.1/6)
+    # S3 = C - ((H-L) * 1.1/4)
+    # S4 = C - ((H-L) * 1.1/2)
     
-    # Calculate ATR(14) on 1d
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    PP_1d = (high_1d + low_1d + close_1d) / 3
+    RANGE_1d = high_1d - low_1d
+    R3_1d = close_1d + (RANGE_1d * 1.1 / 4)
+    R4_1d = close_1d + (RANGE_1d * 1.1 / 2)
+    S3_1d = close_1d - (RANGE_1d * 1.1 / 4)
+    S4_1d = close_1d - (RANGE_1d * 1.1 / 2)
     
-    # Calculate ATR-scaled volume average (20-period) on 1d: volume / ATR
-    vol_atr_ratio_1d = volume_1d / np.maximum(atr_1d, 1e-10)
-    vol_atr_ma_1d = pd.Series(vol_atr_ratio_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align HTF ATR-scaled volume MA to 4h timeframe
-    vol_atr_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_atr_ma_1d)
+    # Align HTF Camarilla levels to 4h timeframe
+    PP_1d_aligned = align_htf_to_ltf(prices, df_1d, PP_1d)
+    R3_1d_aligned = align_htf_to_ltf(prices, df_1d, R3_1d)
+    R4_1d_aligned = align_htf_to_ltf(prices, df_1d, R4_1d)
+    S3_1d_aligned = align_htf_to_ltf(prices, df_1d, S3_1d)
+    S4_1d_aligned = align_htf_to_ltf(prices, df_1d, S4_1d)
     
     # Get 12h data for chop regime (call ONCE before loop)
     df_12h = get_htf_data(prices, '12h')
@@ -83,34 +85,38 @@ def generate_signals(prices):
     # Align HTF chop to 4h timeframe
     chop_12h_aligned = align_htf_to_ltf(prices, df_12h, chop_12h)
     
+    # Calculate 20-period volume average on 1d for volume spike filter
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(donchian_mid[i]) or
-            np.isnan(vol_atr_ma_1d_aligned[i]) or np.isnan(chop_12h_aligned[i])):
+        if (np.isnan(PP_1d_aligned[i]) or np.isnan(R3_1d_aligned[i]) or np.isnan(R4_1d_aligned[i]) or
+            np.isnan(S3_1d_aligned[i]) or np.isnan(S4_1d_aligned[i]) or np.isnan(chop_12h_aligned[i]) or
+            np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume/ATR ratio > 1.5x 20-period average
-        vol_atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_atr_ratio_1d)
-        volume_confirm = vol_atr_ratio_1d_aligned[i] > 1.5 * vol_atr_ma_1d_aligned[i]
+        # Volume confirmation: current 1d volume > 2.0x 20-period average
+        volume_confirm = volume_1d[i] > 2.0 * vol_ma_20_1d[i]
         
         # Regime filter: CHOP_12h > 61.8 indicates ranging market (good for breakout fade)
         regime_filter = chop_12h_aligned[i] > 61.8
         
         # Breakout conditions
-        long_breakout = close[i] > donchian_high[i]
-        short_breakout = close[i] < donchian_low[i]
+        long_breakout = close[i] > R3_1d_aligned[i]
+        short_breakout = close[i] < S3_1d_aligned[i]
         
         # Entry conditions: breakout + volume + regime
         long_signal = long_breakout and volume_confirm and regime_filter
         short_signal = short_breakout and volume_confirm and regime_filter
         
-        # Exit conditions: price crosses Donchian midpoint
-        long_exit = close[i] < donchian_mid[i]
-        short_exit = close[i] > donchian_mid[i]
+        # Exit conditions: price crosses pivot point (PP)
+        long_exit = close[i] < PP_1d_aligned[i]
+        short_exit = close[i] > PP_1d_aligned[i]
         
         # Fixed position size (discrete levels to minimize fee churn)
         position_size = 0.25
@@ -140,6 +146,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_12h_donchian_vol_atr_chop_v1"
+name = "4h_1d_12h_camarilla_vol_chop_breakout_v1"
 timeframe = "4h"
 leverage = 1.0
