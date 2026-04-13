@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h timeframe with 1d Camarilla pivot levels + volume confirmation + chop regime filter
-# Strategy: Long when price touches Camarilla L3 with volume > 1.5x avg and CHOP > 50 (range)
-# Short when price touches Camarilla H3 with volume > 1.5x avg and CHOP > 50 (range)
-# Uses 1d Camarilla levels for mean reversion in ranging markets, volume confirms rejection
-# Chop filter ensures we only trade in ranging conditions (avoid trending markets)
-# Target: 20-50 total trades over 4 years (5-12.5/year) to minimize fee drag
+# Hypothesis: 1h timeframe with 4h Bollinger Band mean reversion + 1d trend filter
+# Strategy: Long when price touches lower 4h Bollinger Band (20,2) and closes above open (bullish candle)
+#           Short when price touches upper 4h Bollinger Band (20,2) and closes below open (bearish candle)
+#           Only in direction of 1d EMA50 trend (price > EMA50 for longs, price < EMA50 for shorts)
+#           Uses Bollinger Bands for mean reversion in ranging markets and EMA for trend filter
+#           Target: 60-150 total trades over 4 years (15-37/year) to minimize fee drag
+#           Session filter: 08-20 UTC to avoid low-volume Asian session
 
 def generate_signals(prices):
     n = len(prices)
@@ -16,94 +17,77 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    open_prices = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 4h data for Bollinger Bands
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # Calculate 4h Bollinger Bands (20,2)
+    sma_20_4h = pd.Series(close_4h).rolling(window=20, min_periods=20).mean().values
+    std_20_4h = pd.Series(close_4h).rolling(window=20, min_periods=20).std().values
+    upper_bb_4h = sma_20_4h + 2 * std_20_4h
+    lower_bb_4h = sma_20_4h - 2 * std_20_4h
+    
+    # Get 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 1d Camarilla levels (using previous day's OHLC)
-    # Camarilla levels: H4, H3, H2, H1, L1, L2, L3, L4
-    # H3 = close + 1.1*(high-low)*1.1/2
-    # L3 = close - 1.1*(high-low)*1.1/2
-    # We'll use the previous day's values to avoid look-ahead
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = high_1d[0]  # first period uses current values
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
-    
-    camarilla_h3 = prev_close + 1.1 * (prev_high - prev_low) * 1.1 / 2
-    camarilla_l3 = prev_close - 1.1 * (prev_high - prev_low) * 1.1 / 2
-    
-    # Calculate Choppiness Index (14) on 1d for regime detection
-    # CHOP = 100 * log10(sum(TR)/ (ATR * n)) / log10(n)
-    # Simplified: CHOP = 100 * log10(sum of TR over n periods) / log10(n) - 100 * log10(ATR * n) / log10(n)
-    # We'll use the standard formula: 100 * log10(sumTR / (atr * n)) / log10(n)
-    
-    # True Range
-    tr1 = np.abs(np.diff(high_1d, prepend=high_1d[0]))
-    tr2 = np.abs(np.diff(low_1d, prepend=low_1d[0]))
-    tr3 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr3 = np.concatenate([[tr3[0]] if len(tr3) > 0 else [0], tr3])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    
-    # ATR (14)
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Sum of TR over 14 periods
-    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    
-    # Chop = 100 * log10(sum_tr_14 / (atr_14 * 14)) / log10(14)
-    chop = 100 * np.log10(sum_tr_14 / (atr_14 * 14 + 1e-10)) / np.log10(14)
-    
-    # Volume average (20-period)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Align 1d indicators to 4h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Align indicators to 1h timeframe
+    upper_bb_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_bb_4h)
+    lower_bb_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_bb_4h)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.25  # 25% of capital
+    position_size = 0.20  # 20% of capital
+    
+    # Pre-calculate session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     for i in range(50, n):
-        # Skip if data not ready
-        if (np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        # Session filter: 08-20 UTC
+        if not (8 <= hours[i] <= 20):
             signals[i] = 0.0
             continue
         
-        # Volume surge condition
-        volume_surge = volume[i] > 1.5 * vol_ma_20[i]
+        # Skip if data not ready
+        if (np.isnan(upper_bb_4h_aligned[i]) or 
+            np.isnan(lower_bb_4h_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i])):
+            signals[i] = 0.0
+            continue
         
-        # Price near Camarilla levels (within 0.1% tolerance)
-        tolerance = 0.001  # 0.1%
-        near_h3 = abs(close[i] - camarilla_h3_aligned[i]) / camarilla_h3_aligned[i] < tolerance
-        near_l3 = abs(close[i] - camarilla_l3_aligned[i]) / camarilla_l3_aligned[i] < tolerance
+        # Bollinger Band touch conditions
+        bb_touch_low = low[i] <= lower_bb_4h_aligned[i]
+        bb_touch_high = high[i] >= upper_bb_4h_aligned[i]
         
-        # Range condition (choppy market)
-        ranging = chop_aligned[i] > 50
+        # Candlestick confirmation
+        bullish_candle = close[i] > open_prices[i]
+        bearish_candle = close[i] < open_prices[i]
+        
+        # Trend filter from 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
         # Entry logic
-        long_entry = near_l3 and volume_surge and ranging
-        short_entry = near_h3 and volume_surge and ranging
+        long_entry = bb_touch_low and bullish_candle and uptrend
+        short_entry = bb_touch_high and bearish_candle and downtrend
         
-        # Exit conditions: opposite touch or trend develops
-        exit_long = position == 1 and (near_h3 or chop_aligned[i] < 40)
-        exit_short = position == -1 and (near_l3 or chop_aligned[i] < 40)
+        # Exit conditions: opposite BB touch or trend change
+        exit_long = position == 1 and (bb_touch_high or not uptrend)
+        exit_short = position == -1 and (bb_touch_low or not downtrend)
         
         # Execute signals
         if long_entry and position != 1:
@@ -126,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_camarilla_pivot_volume_chop_v1"
-timeframe = "4h"
+name = "1h_4h_1d_bollinger_mean_reversion_trend_filter_v1"
+timeframe = "1h"
 leverage = 1.0
