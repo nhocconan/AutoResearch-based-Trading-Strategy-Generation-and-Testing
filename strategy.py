@@ -3,45 +3,80 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h timeframe with 1d Donchian channel breakout and volume confirmation.
-# Long: Price breaks above 1d Donchian upper channel (20-period high) + volume > 1.5x average volume.
-# Short: Price breaks below 1d Donchian lower channel (20-period low) + volume > 1.5x average volume.
-# Uses 1d Donchian channels for trend structure, 4h for execution with volume confirmation.
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+# Hypothesis: 1d timeframe with 1w ATR-based volatility filter and 1d Donchian channel breakout.
+# Long: Close breaks above 20-day Donchian high + weekly ATR < 0.8 * 50-week ATR (low volatility regime).
+# Short: Close breaks below 20-day Donchian low + weekly ATR < 0.8 * 50-week ATR.
+# Uses volatility regime filter to avoid false breakouts in high volatility periods.
+# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # 1d data for Donchian channels
+    # 1d data for Donchian channel
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 21:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Donchian channels (20-period) using previous day's data
-    donchian_high = np.full(len(high_1d), np.nan)
-    donchian_low = np.full(len(low_1d), np.nan)
-    for i in range(20, len(high_1d)):
-        donchian_high[i] = np.max(high_1d[i-20:i])
-        donchian_low[i] = np.min(low_1d[i-20:i])
+    # 20-day Donchian channel (using previous day's data)
+    donch_high = np.full(len(close_1d), np.nan)
+    donch_low = np.full(len(close_1d), np.nan)
+    for i in range(20, len(close_1d)):
+        donch_high[i] = np.max(high_1d[i-20:i])
+        donch_low[i] = np.min(low_1d[i-20:i])
     
-    # Average volume (20-period) for volume confirmation
-    avg_volume = np.full(n, np.nan)
-    for i in range(20, n):
-        avg_volume[i] = np.mean(volume[i-20:i])
+    # 1w data for ATR-based volatility filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Align 1d Donchian channels to 4h
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # True Range for ATR
+    tr_1w = np.zeros(len(close_1w))
+    tr_1w[0] = high_1w[0] - low_1w[0]
+    for i in range(1, len(close_1w)):
+        tr_1w[i] = max(
+            high_1w[i] - low_1w[i],
+            abs(high_1w[i] - close_1w[i-1]),
+            abs(low_1w[i] - close_1w[i-1])
+        )
+    
+    # 50-week ATR (slow ATR for regime)
+    atr_50w = np.full(len(close_1w), np.nan)
+    for i in range(50, len(close_1w)):
+        atr_50w[i] = np.mean(tr_1w[i-50:i])
+    
+    # Current week ATR (fast ATR)
+    atr_current = np.full(len(close_1w), np.nan)
+    for i in range(14, len(close_1w)):  # 2-week ATR for current volatility
+        atr_current[i] = np.mean(tr_1w[i-14:i])
+    
+    # Volatility filter: current ATR < 0.8 * long ATR (low volatility regime)
+    vol_filter = np.full(len(close_1w), np.nan)
+    for i in range(50, len(close_1w)):
+        if not np.isnan(atr_50w[i]) and atr_50w[i] > 0:
+            vol_filter[i] = atr_current[i] < 0.8 * atr_50w[i]
+        else:
+            vol_filter[i] = False
+    
+    # Align 1d Donchian levels to 1d (no alignment needed for same timeframe)
+    donch_high_aligned = donch_high
+    donch_low_aligned = donch_low
+    
+    # Align 1w volatility filter to 1d
+    vol_filter_aligned = align_htf_to_ltf(prices, df_1w, vol_filter.astype(float))
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -49,40 +84,36 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(avg_volume[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(vol_filter_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol = volume[i]
-        avg_vol = avg_volume[i]
-        upper = donchian_high_aligned[i]
-        lower = donchian_low_aligned[i]
-        
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirm = vol > 1.5 * avg_vol
+        vol_filt = bool(vol_filter_aligned[i])
+        upper = donch_high_aligned[i]
+        lower = donch_low_aligned[i]
         
         if position == 0:
-            # Long: price breaks above upper channel + volume confirmation
-            if (price > upper and volume_confirm):
+            # Long: price closes above Donchian high + low volatility regime
+            if price > upper and vol_filt:
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below lower channel + volume confirmation
-            elif (price < lower and volume_confirm):
+            # Short: price closes below Donchian low + low volatility regime
+            elif price < lower and vol_filt:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below lower channel (opposite side)
+            # Exit long: price closes below Donchian low (opposite bound)
             if price < lower:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes above upper channel (opposite side)
+            # Exit short: price closes above Donchian high (opposite bound)
             if price > upper:
                 position = 0
                 signals[i] = 0.0
@@ -91,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Donchian_Channel_Breakout_Volume"
-timeframe = "4h"
+name = "1d_1w_Donchian_Volatility_Filter"
+timeframe = "1d"
 leverage = 1.0
