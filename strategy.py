@@ -8,13 +8,13 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Camarilla pivot breakout with 1w trend filter and volume confirmation
+    # Hypothesis: 1d Camarilla breakout with 1w trend filter and volume confirmation
     # Long: price breaks above H3 (resistance) AND volume > 1.5x 20-period average AND price > 1w EMA50
     # Short: price breaks below L3 (support) AND volume > 1.5x 20-period average AND price < 1w EMA50
-    # Exit: price returns to pivot point (mean reversion in 12h timeframe)
-    # Using 1w for trend filter (strong bias) and 1d for Camarilla pivots (structure), 12h only for entry timing
+    # Exit: price returns to pivot point (mean reversion in 1d timeframe)
+    # Using 1w for EMA50 (trend) and 1d for Camarilla pivots (structure)
     # Discrete position sizing (0.25) to balance return and drawdown
-    # Target: 12-37 trades/year (~50-150 over 4 years) to minimize fee drag
+    # Target: 7-25 trades/year (~30-100 over 4 years) to minimize fee drag
     
     close = prices['close'].values
     high = prices['high'].values
@@ -42,12 +42,12 @@ def generate_signals(prices):
     h3_1d = close_1d + range_1d * 1.1 / 4
     l3_1d = close_1d - range_1d * 1.1 / 4
     
-    # Align 1d Camarilla levels to 12h (wait for completed 1d bar)
+    # Align 1d Camarilla levels to 1d (wait for completed 1d bar)
     h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
     l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     
-    # Get 1w data for EMA50 trend filter (call ONCE before loop)
+    # Get 1w data for EMA50 (call ONCE before loop)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
@@ -111,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_1w_camarilla_breakout_volume_trend_v1"
-timeframe = "12h"
+name = "1d_1w_camarilla_breakout_volume_trend_v1"
+timeframe = "1d"
 leverage = 1.0
