@@ -19,6 +19,7 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     # Get 1d data (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
