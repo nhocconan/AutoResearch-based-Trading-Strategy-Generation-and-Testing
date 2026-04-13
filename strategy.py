@@ -5,94 +5,76 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get daily data for HTF calculations
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for HTF calculations
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 14-period RSI on daily
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate 20-period Donchian channels on weekly
+    high_20 = np.full(len(close_1w), np.nan)
+    low_20 = np.full(len(close_1w), np.nan)
+    for i in range(20, len(close_1w)):
+        high_20[i] = np.max(high_1w[i-20:i])
+        low_20[i] = np.min(low_1w[i-20:i])
     
-    avg_gain = np.zeros_like(close_1d)
-    avg_loss = np.zeros_like(close_1d)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    # Calculate 50-period EMA on weekly (trend filter)
+    close_1w_series = pd.Series(close_1w)
+    ema_50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    for i in range(14, len(close_1d)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Align indicators to 12h timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_1w, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1w, low_20)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi_14 = 100 - (100 / (1 + rs))
-    
-    # Calculate 20-period ATR on daily for volatility filter
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    atr_20 = np.full(len(tr), np.nan)
-    for i in range(20, len(tr)):
-        atr_20[i] = np.mean(tr[i-19:i+1])
-    
-    # Align indicators to 6h timeframe
-    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
-    atr_20_aligned = align_htf_to_ltf(prices, df_1d, atr_20)
-    
-    # Calculate 6-period RSI on 6h for entry timing
-    delta_6h = np.diff(close, prepend=close[0])
-    gain_6h = np.where(delta_6h > 0, delta_6h, 0)
-    loss_6h = np.where(delta_6h < 0, -delta_6h, 0)
-    
-    avg_gain_6h = np.zeros_like(close)
-    avg_loss_6h = np.zeros_like(close)
-    for i in range(6, len(close)):
-        if i == 5:
-            avg_gain_6h[i] = np.mean(gain_6h[1:6])
-            avg_loss_6h[i] = np.mean(loss_6h[1:6])
-        else:
-            avg_gain_6h[i] = (avg_gain_6h[i-1] * 5 + gain_6h[i]) / 6
-            avg_loss_6h[i] = (avg_loss_6h[i-1] * 5 + loss_6h[i]) / 6
-    
-    rs_6h = np.divide(avg_gain_6h, avg_loss_6h, out=np.full_like(avg_gain_6h, np.nan), where=avg_loss_6h!=0)
-    rsi_6h = 100 - (100 / (1 + rs_6h))
+    # Calculate volume ratio (current vs 20-period average)
+    vol_ma = np.full(len(volume), np.nan)
+    for i in range(20, len(volume)):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    vol_ratio = np.divide(volume, vol_ma, out=np.full_like(volume, np.nan), where=vol_ma!=0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% of capital
     
-    for i in range(20, n):
+    for i in range(60, n):
         # Skip if data not ready
-        if (np.isnan(rsi_14_aligned[i]) or 
-            np.isnan(atr_20_aligned[i]) or 
-            np.isnan(rsi_6h[i])):
+        if (np.isnan(high_20_aligned[i]) or 
+            np.isnan(low_20_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # HTF conditions: RSI extreme + low volatility
-        rsi_extreme = (rsi_14_aligned[i] < 30) or (rsi_14_aligned[i] > 70)
-        low_vol = atr_20_aligned[i] < np.nanmedian(atr_20_aligned[max(0, i-50):i+1]) if not np.isnan(np.nanmedian(atr_20_aligned[max(0, i-50):i+1])) else False
+        # Trend filter: price above/below weekly EMA50
+        above_ema = close[i] > ema_50_aligned[i]
+        below_ema = close[i] < ema_50_aligned[i]
         
-        # LTF entry: RSI mean reversion
-        long_entry = rsi_6h[i] < 35 and rsi_extreme and rsi_14_aligned[i] < 30 and low_vol
-        short_entry = rsi_6h[i] > 65 and rsi_extreme and rsi_14_aligned[i] > 70 and low_vol
+        # Donchian breakout conditions
+        long_breakout = close[i] > high_20_aligned[i]
+        short_breakout = close[i] < low_20_aligned[i]
         
-        # Exit: RSI returns to neutral
-        exit_long = position == 1 and rsi_6h[i] > 50
-        exit_short = position == -1 and rsi_6h[i] < 50
+        # Volume confirmation: above average volume
+        vol_confirm = vol_ratio[i] > 1.5
+        
+        # Entry conditions: breakout in direction of trend with volume
+        long_entry = long_breakout and above_ema and vol_confirm
+        short_entry = short_breakout and below_ema and vol_confirm
+        
+        # Exit conditions: opposite breakout or trend reversal
+        exit_long = position == 1 and (short_breakout or below_ema)
+        exit_short = position == -1 and (long_breakout or above_ema)
         
         # Execute signals
         if long_entry and position != 1:
@@ -115,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_rsi_extreme_mean_reversion"
-timeframe = "6h"
+name = "12h_1w_donchian_ema50_volume"
+timeframe = "12h"
 leverage = 1.0
