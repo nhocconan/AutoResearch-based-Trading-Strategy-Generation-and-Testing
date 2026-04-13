@@ -39,9 +39,9 @@ def generate_signals(prices):
     daily_close = df_1d['close'].values
     daily_volume = df_1d['volume'].values if 'volume' in df_1d.columns else np.ones(len(df_1d))
     
-    # Calculate Camarilla levels for each day (H3 and L3 levels for tighter entries)
-    camarilla_h3 = daily_close + (daily_high - daily_low) * 1.1 / 4
-    camarilla_l3 = daily_close - (daily_high - daily_low) * 1.1 / 4
+    # Calculate Camarilla levels for each day (H4 and L4 levels)
+    camarilla_h4 = daily_close + (daily_high - daily_low) * 1.1 / 2
+    camarilla_l4 = daily_close - (daily_high - daily_low) * 1.1 / 2
     
     # Get 1d data for trend filter (EMA 50)
     ema_50_1d = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
@@ -50,8 +50,8 @@ def generate_signals(prices):
     vol_avg_20_1d = pd.Series(daily_volume).rolling(window=20, min_periods=20).mean().values
     
     # Align all HTF indicators to 4h primary timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
@@ -70,8 +70,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i]) or
+        if (np.isnan(camarilla_h4_aligned[i]) or 
+            np.isnan(camarilla_l4_aligned[i]) or
             np.isnan(ema_50_1d_aligned[i]) or
             np.isnan(vol_avg_20_1d_aligned[i]) or
             np.isnan(atr_4h[i])):
@@ -90,8 +90,8 @@ def generate_signals(prices):
         trend_down = close[i] < ema_50_1d_aligned[i]
         
         # Entry conditions: Camarilla level break + trend + volume
-        enter_long = (close[i] > camarilla_h3_aligned[i]) and trend_up and volume_confirmed
-        enter_short = (close[i] < camarilla_l3_aligned[i]) and trend_down and volume_confirmed
+        enter_long = (close[i] > camarilla_h4_aligned[i]) and trend_up and volume_confirmed
+        enter_short = (close[i] < camarilla_l4_aligned[i]) and trend_down and volume_confirmed
         
         # Stoploss conditions
         exit_long = position == 1 and not np.isnan(entry_price[i-1]) and close[i] < entry_price[i-1] - atr_multiplier * atr_4h[i]
@@ -128,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_camarilla_pivot_breakout_trend_volume_v2"
+name = "4h_1d_camarilla_pivot_breakout_trend_volume_v1"
 timeframe = "4h"
 leverage = 1.0
