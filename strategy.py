@@ -8,45 +8,108 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h strategy using 1d Bollinger Band breakout with 1w volume regime filter
-    # Works in bull/bear: BB breakouts capture momentum, 1w volume average filter avoids low-activity chop,
-    # discrete sizing (0.25) minimizes fee drag. Target: 12-25 trades/year to stay within 6h optimal range.
+    # Hypothesis: 12h strategy using 1w Camarilla pivot levels with 1d volume spike and ADX trend filter
+    # Works in bull/bear: Camarilla levels provide structure, ADX>25 filters chop, volume spike confirms momentum
+    # Discrete sizing (0.25) minimizes fee drag. Target: 12-25 trades/year for 12h timeframe.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values if 'volume' in prices.columns else np.ones(len(prices))
     
-    # Get 1d data for Bollinger Bands
+    # Get 1w data for Camarilla pivot levels (HTF structure)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Get 1d data for volume and ADX filters
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values if 'volume' in df_1d.columns else np.ones(len(df_1d))
     
-    # Get 1w data for volume regime (average volume filter)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
+    # Calculate 1w Camarilla pivot levels (based on previous week)
+    camarilla_h4 = np.zeros_like(close_1w)  # Resistance 4 (strongest)
+    camarilla_l4 = np.zeros_like(close_1w)  # Support 4 (strongest)
+    camarilla_h3 = np.zeros_like(close_1w)  # Resistance 3
+    camarilla_l3 = np.zeros_like(close_1w)  # Support 3
     
-    volume_1w = df_1w['volume'].values if 'volume' in df_1w.columns else np.ones(len(df_1w))
+    for i in range(1, len(close_1w)):
+        # Previous week's OHLC
+        ph = high_1w[i-1]
+        pl = low_1w[i-1]
+        pc = close_1w[i-1]
+        pivot = (ph + pl + pc) / 3
+        range_ = ph - pl
+        
+        camarilla_h4[i] = pivot + range_ * 1.1 / 2
+        camarilla_l4[i] = pivot - range_ * 1.1 / 2
+        camarilla_h3[i] = pivot + range_ * 1.1 / 4
+        camarilla_l3[i] = pivot - range_ * 1.1 / 4
     
-    # Calculate 1d Bollinger Bands (20, 2)
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    bb_upper = sma_20 + 2 * std_20
-    bb_lower = sma_20 - 2 * std_20
+    # Calculate 1d ADX (14-period)
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(0, high[i] - high[i-1])
+            minus_dm[i] = max(0, low[i-1] - low[i])
+            if plus_dm[i] == minus_dm[i]:
+                plus_dm[i] = 0
+                minus_dm[i] = 0
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Wilder's smoothing
+        atr = np.zeros_like(high)
+        atr[period] = np.mean(tr[1:period+1])
+        for i in range(period+1, len(high)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        plus_di = np.zeros_like(high)
+        minus_di = np.zeros_like(high)
+        dx = np.zeros_like(high)
+        
+        plus_dm_smoothed = np.zeros_like(high)
+        minus_dm_smoothed = np.zeros_like(high)
+        plus_dm_smoothed[period] = np.mean(plus_dm[1:period+1])
+        minus_dm_smoothed[period] = np.mean(minus_dm[1:period+1])
+        
+        for i in range(period+1, len(high)):
+            plus_dm_smoothed[i] = (plus_dm_smoothed[i-1] * (period-1) + plus_dm[i]) / period
+            minus_dm_smoothed[i] = (minus_dm_smoothed[i-1] * (period-1) + minus_dm[i]) / period
+            plus_di[i] = 100 * plus_dm_smoothed[i] / atr[i]
+            minus_di[i] = 100 * minus_dm_smoothed[i] / atr[i]
+            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i]) if (plus_di[i] + minus_di[i]) != 0 else 0
+        
+        adx = np.zeros_like(high)
+        adx[2*period] = np.mean(dx[period+1:2*period+1])
+        for i in range(2*period+1, len(high)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    # Calculate 1w average volume (10-period)
-    vol_avg_10_1w = pd.Series(volume_1w).rolling(window=10, min_periods=10).mean().values
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    # Align all HTF indicators to 6h primary timeframe
-    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
-    vol_avg_10_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_avg_10_1w)
+    # Get 1d volume for confirmation (20-period average)
+    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all HTF indicators to 12h primary timeframe
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l4)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,26 +120,30 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(bb_upper_aligned[i]) or 
-            np.isnan(bb_lower_aligned[i]) or
-            np.isnan(vol_avg_10_1w_aligned[i])):
+        if (np.isnan(camarilla_h4_aligned[i]) or 
+            np.isnan(camarilla_l4_aligned[i]) or
+            np.isnan(adx_1d_aligned[i]) or
+            np.isnan(vol_avg_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume regime: current 1w volume > 1.2x 10-period average (avoid low-activity chop)
-        idx_1w = i // (24 * 7)  # 1w bars in 6h timeframe (28 bars per week)
-        if idx_1w >= len(volume_1w):
+        # Volume confirmation: current 1d volume > 1.5x 20-period average
+        idx_1d = i // (24 * 2)  # 1d bars in 12h timeframe (2 bars per day)
+        if idx_1d >= len(volume_1d):
             signals[i] = 0.0
             continue
-        volume_regime = volume_1w[idx_1w] > 1.2 * vol_avg_10_1w_aligned[i]
+        volume_confirmed = volume_1d[idx_1d] > 1.5 * vol_avg_20_1d_aligned[i]
         
-        # Entry conditions: BB breakout + volume regime
-        enter_long = (close[i] > bb_upper_aligned[i]) and volume_regime
-        enter_short = (close[i] < bb_lower_aligned[i]) and volume_regime
+        # Trend filter: 1d ADX > 25 indicates trending market
+        trending = adx_1d_aligned[i] > 25
         
-        # Stoploss: 1.5x ATR based on BB width (volatility-adjusted)
-        bb_width = bb_upper_aligned[i] - bb_lower_aligned[i]
-        stop_distance = bb_width * 0.15  # 15% of BB width
+        # Entry conditions: Camarilla level breakout + trend + volume
+        enter_long = (close[i] > camarilla_h4_aligned[i]) and trending and volume_confirmed
+        enter_short = (close[i] < camarilla_l4_aligned[i]) and trending and volume_confirmed
+        
+        # Stoploss: 2x ATR based on Camarilla width (H4-L4)
+        camarilla_width = camarilla_h4_aligned[i] - camarilla_l4_aligned[i]
+        stop_distance = camarilla_width * 0.15  # 15% of Camarilla width
         
         exit_long = position == 1 and not np.isnan(entry_price[i-1]) and close[i] < entry_price[i-1] - stop_distance
         exit_short = position == -1 and not np.isnan(entry_price[i-1]) and close[i] > entry_price[i-1] + stop_distance
@@ -112,6 +179,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_1w_bb_breakout_volume_regime_v1"
-timeframe = "6h"
+name = "12h_1w_1d_camarilla_breakout_adx_volume_v1"
+timeframe = "12h"
 leverage = 1.0
