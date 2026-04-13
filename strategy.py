@@ -8,108 +8,104 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Williams %R extreme + 1d trend filter + volume confirmation
-    # Works in both bull and bear: Williams %R identifies overextended moves,
-    # 1d trend filters counter-trend noise, volume confirms momentum.
-    # Target: 20-40 trades/year to minimize fee drag
+    # Hypothesis: 4h Camarilla pivot breakout with 1d volume spike filter
+    # Works in bull/bear: Camarilla captures key intraday levels, volume confirms institutional participation
+    # Target: 40-80 trades/year to balance edge and fee drag
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values if 'volume' in prices.columns else np.ones(len(prices))
     
-    # Get 4h data for Williams %R calculation (primary timeframe)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # Get 1d data for trend filter and volume confirmation
+    # Get 1d data for Camarilla calculation (requires daily OHLC)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 14-period Williams %R on 4h data
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high_14 = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high_14 - close_4h) / (highest_high_14 - lowest_low_14) * -100
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
+    # Get daily OHLC
+    daily_open = df_1d['open'].values
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
+    daily_volume = df_1d['volume'].values if 'volume' in df_1d.columns else np.ones(len(df_1d))
     
-    # Get 1d close for trend filter (EMA 34)
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate Camarilla levels for each day (based on previous day's range)
+    # Camarilla H4 = Close + (High - Low) * 1.1 / 2
+    # Camarilla L4 = Close - (High - Low) * 1.1 / 2
+    camarilla_h4 = daily_close + (daily_high - daily_low) * 1.1 / 2
+    camarilla_l4 = daily_close - (daily_high - daily_low) * 1.1 / 2
     
-    # Get 1d volume for confirmation
-    volume_1d = df_1d['volume'].values if 'volume' in df_1d.columns else np.ones(len(df_1d))
-    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1d volume average (20-period) for spike detection
+    vol_avg_20_1d = pd.Series(daily_volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align all HTF indicators to 4h primary timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_4h, williams_r)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align HTF indicators to 4h primary timeframe
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
     
+    # Track entry price for exit logic
+    entry_price = np.full(n, np.nan)
+    
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(williams_r_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or
+        if (np.isnan(camarilla_h4_aligned[i]) or 
+            np.isnan(camarilla_l4_aligned[i]) or
             np.isnan(vol_avg_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x 20-period average
-        idx_1d = i // 6
-        if idx_1d >= len(volume_1d):
+        # Get corresponding 1d index for volume check
+        idx_1d = i // 6  # 6 * 4h bars = 1 day
+        if idx_1d >= len(daily_volume):
             signals[i] = 0.0
             continue
-        volume_confirmed = volume_1d[idx_1d] > 1.5 * vol_avg_20_1d_aligned[i]
+            
+        # Volume confirmation: current 1d volume > 1.5x 20-period average
+        volume_confirmed = daily_volume[idx_1d] > 1.5 * vol_avg_20_1d_aligned[i]
         
-        # Trend direction from 1d EMA(34)
-        trend_up = close[i] > ema_34_1d_aligned[i]
-        trend_down = close[i] < ema_34_1d_aligned[i]
+        # Entry conditions: Camarilla level break + volume confirmation
+        enter_long = (close[i] > camarilla_h4_aligned[i]) and volume_confirmed
+        enter_short = (close[i] < camarilla_l4_aligned[i]) and volume_confirmed
         
-        # Entry conditions: Williams %R extreme + trend + volume
-        # Long when oversold (< -80) and uptrend
-        # Short when overbought (> -20) and downtrend
-        enter_long = (williams_r_aligned[i] < -80) and trend_up and volume_confirmed
-        enter_short = (williams_r_aligned[i] > -20) and trend_down and volume_confirmed
-        
-        # Exit conditions: Williams %R returns to neutral zone (-50)
-        exit_long = position == 1 and williams_r_aligned[i] > -50
-        exit_short = position == -1 and williams_r_aligned[i] < -50
+        # Exit conditions: reverse signal or volume deterioration
+        exit_long = position == 1 and (close[i] < camarilla_l4_aligned[i] or not volume_confirmed)
+        exit_short = position == -1 and (close[i] > camarilla_h4_aligned[i] or not volume_confirmed)
         
         # Execute signals
         if enter_long and position != 1:
             position = 1
             signals[i] = position_size
+            entry_price[i] = close[i]  # record entry price at close (filled next bar open)
         elif enter_short and position != -1:
             position = -1
             signals[i] = -position_size
+            entry_price[i] = close[i]  # record entry price at close (filled next bar open)
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
+            entry_price[i] = np.nan
         elif position == -1 and exit_short:
             position = 0
             signals[i] = 0.0
+            entry_price[i] = np.nan
         # Hold current position
         else:
             if position == 1:
                 signals[i] = position_size
+                entry_price[i] = entry_price[i-1] if i > 0 else np.nan
             elif position == -1:
                 signals[i] = -position_size
+                entry_price[i] = entry_price[i-1] if i > 0 else np.nan
             else:
                 signals[i] = 0.0
+                entry_price[i] = np.nan
     
     return signals
 
-name = "4h_1d_williamsr_extreme_trend_volume_v1"
+name = "4h_1d_camarilla_pivot_breakout_volume_v1"
 timeframe = "4h"
 leverage = 1.0
