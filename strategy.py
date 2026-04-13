@@ -8,20 +8,20 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Williams Alligator + Elder Ray + volume spike filter
-    # Long when: Alligator jaws < teeth < lips (bullish alignment) AND Elder Bull Power > 0 AND volume > 1.5x 20-bar avg
-    # Short when: Alligator jaws > teeth > lips (bearish alignment) AND Elder Bear Power < 0 AND volume > 1.5x 20-bar avg
-    # Exit when: Alligator alignment reverses OR volume drops below average
-    # Uses discrete sizing (0.25) targeting 50-150 total trades over 4 years.
-    # Alligator identifies trend direction and exhaustion; Elder Ray measures bull/bear power;
-    # Volume spike confirms institutional participation. Works in bull (trend continuation) and bear (strong moves only).
+    # Hypothesis: 4h Camarilla pivot breakout from 1d + volume spike + ADX regime filter
+    # Long when: price breaks above Camarilla H3 (1d) AND ADX > 25 AND volume > 2.0x 20-bar avg volume
+    # Short when: price breaks below Camarilla L3 (1d) AND ADX > 25 AND volume > 2.0x 20-bar avg volume
+    # Exit when: price crosses Camarilla pivot point (PP) OR ADX < 20 (regime change to ranging)
+    # Uses discrete sizing (0.25) targeting 75-200 total trades over 4 years.
+    # Camarilla levels provide precise support/resistance; ADX filters ranging markets;
+    # Volume spike confirms breakout validity. Works in bull (trend continuation) and bear (strong moves only).
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Elder Ray calculation (requires daily high/low/close)
+    # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -30,52 +30,58 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Williams Alligator (SMAs with specific periods)
-    # Jaw: 13-period SMA, shifted 8 bars forward
-    # Teeth: 8-period SMA, shifted 5 bars forward  
-    # Lips: 5-period SMA, shifted 3 bars forward
-    def sma(data, period):
+    # Calculate Camarilla pivot levels from previous 1d bar
+    # PP = (H + L + C) / 3
+    # H3 = PP + (H - L) * 1.1 / 4
+    # L3 = PP - (H - L) * 1.1 / 4
+    PP_1d = (high_1d + low_1d + close_1d) / 3.0
+    H3_1d = PP_1d + (high_1d - low_1d) * 1.1 / 4.0
+    L3_1d = PP_1d - (high_1d - low_1d) * 1.1 / 4.0
+    
+    # Calculate ADX(14) on 4h timeframe for regime filter
+    # ADX requires +DI, -DI, and TR
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    # Pad to match length
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    
+    tr1 = high - low
+    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Wilder's smoothing (alpha = 1/period)
+    def wilders_smoothing(data, period):
         result = np.full_like(data, np.nan, dtype=float)
         if len(data) >= period:
-            for i in range(period-1, len(data)):
-                result[i] = np.mean(data[i-period+1:i+1])
-        return result
-    
-    jaw = sma(close, 13)
-    teeth = sma(close, 8)
-    lips = sma(close, 5)
-    
-    # Shift Alligator lines (jaw: +8, teeth: +5, lips: +3)
-    jaw_shifted = np.concatenate([np.full(8, np.nan), jaw[:-8]]) if len(jaw) > 8 else np.full_like(jaw, np.nan)
-    teeth_shifted = np.concatenate([np.full(5, np.nan), teeth[:-5]]) if len(teeth) > 5 else np.full_like(teeth, np.nan)
-    lips_shifted = np.concatenate([np.full(3, np.nan), lips[:-3]]) if len(lips) > 3 else np.full_like(lips, np.nan)
-    
-    # Calculate Elder Ray (requires 1d data)
-    # Bull Power = High - EMA(13)
-    # Bear Power = Low - EMA(13)
-    def ema(data, period):
-        result = np.full_like(data, np.nan, dtype=float)
-        if len(data) >= period:
-            multiplier = 2 / (period + 1)
-            result[period-1] = np.mean(data[:period])
+            result[period-1] = np.nansum(data[:period])
             for i in range(period, len(data)):
-                result[i] = (data[i] - result[i-1]) * multiplier + result[i-1]
+                result[i] = result[i-1] - (result[i-1] / period) + data[i]
         return result
     
-    ema13 = ema(close_1d, 13)
-    bull_power = high_1d - ema13
-    bear_power = low_1d - ema13
+    period_adx = 14
+    tr_period = wilders_smoothing(tr, period_adx)
+    plus_di_period = wilders_smoothing(plus_dm, period_adx)
+    minus_di_period = wilders_smoothing(minus_dm, period_adx)
     
-    # Align HTF indicators to 12h timeframe (wait for completed 1d bar)
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_shifted)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_shifted)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_shifted)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    # Avoid division by zero
+    divisor = tr_period
+    divisor[divisor == 0] = 1e-10
     
-    # Calculate volume confirmation: volume > 1.5x 20-bar average volume
+    plus_di = 100 * (plus_di_period / divisor)
+    minus_di = 100 * (minus_di_period / divisor)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilders_smoothing(dx, period_adx)
+    
+    # Align HTF indicators to 4h timeframe (wait for completed 1d bar)
+    PP_1d_aligned = align_htf_to_ltf(prices, df_1d, PP_1d)
+    H3_1d_aligned = align_htf_to_ltf(prices, df_1d, H3_1d)
+    L3_1d_aligned = align_htf_to_ltf(prices, df_1d, L3_1d)
+    
+    # Calculate volume confirmation: volume > 2.0x 20-bar average volume
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (1.5 * avg_volume)
+    volume_confirmed = volume > (2.0 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -83,26 +89,26 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(PP_1d_aligned[i]) or np.isnan(H3_1d_aligned[i]) or np.isnan(L3_1d_aligned[i]) or
+            np.isnan(adx[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
-        # Alligator alignment conditions (using previous bar's values to avoid look-ahead)
-        bullish_alignment = (jaw_aligned[i-1] < teeth_aligned[i-1]) and (teeth_aligned[i-1] < lips_aligned[i-1])
-        bearish_alignment = (jaw_aligned[i-1] > teeth_aligned[i-1]) and (teeth_aligned[i-1] > lips_aligned[i-1])
+        # Camarilla breakout conditions (using previous bar's levels to avoid look-ahead)
+        breakout_up = close[i] > H3_1d_aligned[i-1]  # break above previous H3
+        breakout_down = close[i] < L3_1d_aligned[i-1]  # break below previous L3
         
-        # Elder Ray conditions
-        strong_bull = bull_power_aligned[i-1] > 0
-        strong_bear = bear_power_aligned[i-1] < 0
+        # ADX regime filter: only trade when trending (ADX > 25)
+        strong_trend = adx[i] > 25
+        ranging_market = adx[i] < 20  # exit condition
         
-        # Entry conditions with volume confirmation
-        long_entry = bullish_alignment and strong_bull and volume_confirmed[i-1] and position != 1
-        short_entry = bearish_alignment and strong_bear and volume_confirmed[i-1] and position != -1
+        # Entry conditions with volume confirmation and trend filter
+        long_entry = breakout_up and strong_trend and volume_confirmed[i] and position != 1
+        short_entry = breakout_down and strong_trend and volume_confirmed[i] and position != -1
         
         # Exit conditions
-        exit_long = position == 1 and (not bullish_alignment or not strong_bull or not volume_confirmed[i-1])
-        exit_short = position == -1 and (not bearish_alignment or not strong_bear or not volume_confirmed[i-1])
+        exit_long = (position == 1 and (close[i] < PP_1d_aligned[i] or ranging_market))
+        exit_short = (position == -1 and (close[i] > PP_1d_aligned[i] or ranging_market))
         
         # Execute signals
         if long_entry:
@@ -128,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_alligator_elder_volume_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_adx_volume_v1"
+timeframe = "4h"
 leverage = 1.0
