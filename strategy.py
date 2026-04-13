@@ -1,15 +1,14 @@
-# Forced 1h version of 4h_1d_camarilla_breakout_v25 - proven winner
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h timeframe with 1d Camarilla pivot levels + volume confirmation
-# Long when price breaks above H3 with volume > 1.5x MA(20)
-# Short when price breaks below L3 with volume > 1.5x MA(20)
-# Exit when price crosses opposite pivot level (H3->L3 or L3->H3)
-# Uses 1d for structure to avoid whipsaws, 1h only for entry timing
-# Target: 60-150 total trades over 4 years (15-37/year) to balance opportunity and cost
+# Hypothesis: 12h timeframe with 1-day Donchian channel breakout (20-period) + volume confirmation + ADX trend filter
+# Long when price breaks above upper Donchian channel and volume > 1.5x average and ADX > 25
+# Short when price breaks below lower Donchian channel and volume > 1.5x average and ADX > 25
+# Exit when price crosses opposite Donchian band or ADX < 20
+# Uses daily timeframe for trend structure to avoid whipsaws in ranging markets
+# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,69 +20,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation
+    # Get 1d data for Donchian and ADX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate previous day's Camarilla levels
-    # Using (H-L) from previous day
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = high_1d[0]  # First day uses current day
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
+    # Calculate Donchian channels (20-period)
+    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Camarilla calculations
-    range_hl = prev_high - prev_low
-    h3 = prev_close + 1.1 * range_hl / 2
-    l3 = prev_close - 1.1 * range_hl / 2
-    h4 = prev_close + 1.1 * range_hl
-    l4 = prev_close - 1.1 * range_hl
+    # Calculate ADX (14-period)
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr0 = np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])
+    tr = np.concatenate([[tr0], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Volume confirmation: volume > 1.5x 20-period MA
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_ma)
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Align 1d levels to 1h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    vol_filter_aligned = align_htf_to_ltf(prices, df_1d, vol_filter)
+    # Smoothed TR, DM+
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align 1d indicators to 12h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.20  # 20% of capital
+    position_size = 0.25  # 25% of capital
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if data not ready
-        if (np.isnan(h3_aligned[i]) or 
-            np.isnan(l3_aligned[i]) or 
-            np.isnan(h4_aligned[i]) or 
-            np.isnan(l4_aligned[i]) or 
-            np.isnan(vol_filter_aligned[i])):
+        if (np.isnan(upper_aligned[i]) or 
+            np.isnan(lower_aligned[i]) or 
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: break of H3/L3 with volume
-        long_break = close[i] > h3_aligned[i] and vol_filter_aligned[i]
-        short_break = close[i] < l3_aligned[i] and vol_filter_aligned[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_ma = np.mean(volume[max(0, i-19):i+1]) if i >= 19 else np.mean(volume[:i+1])
+        vol_confirmed = volume[i] > 1.5 * vol_ma
         
-        # Exit conditions: cross opposite pivot level
-        exit_long = position == 1 and close[i] < l3_aligned[i]
-        exit_short = position == -1 and close[i] > h3_aligned[i]
+        # Entry conditions: Donchian breakout + volume + ADX filter
+        long_breakout = close[i] > upper_aligned[i]
+        short_breakout = close[i] < lower_aligned[i]
+        strong_trend = adx_aligned[i] > 25
+        
+        long_entry = long_breakout and vol_confirmed and strong_trend
+        short_entry = short_breakout and vol_confirmed and strong_trend
+        
+        # Exit conditions: price crosses opposite band OR ADX weakens
+        exit_long = position == 1 and (close[i] < lower_aligned[i] or adx_aligned[i] < 20)
+        exit_short = position == -1 and (close[i] > upper_aligned[i] or adx_aligned[i] < 20)
         
         # Execute signals
-        if long_break and position != 1:
+        if long_entry and position != 1:
             position = 1
             signals[i] = position_size
-        elif short_break and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -position_size
         elif exit_long or exit_short:
@@ -100,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_1d_camarilla_breakout_v25"
-timeframe = "1h"
+name = "12h_1d_donchian_volume_adx"
+timeframe = "12h"
 leverage = 1.0
