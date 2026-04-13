@@ -8,16 +8,17 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h strategy using 1d Donchian channel breakout with 1d volume confirmation
-    # Works in both bull and bear: Donchian captures breakouts, volume ensures momentum.
-    # Discrete sizing (0.25) minimizes fee drag. Target: 12-30 trades/year for 12h timeframe.
+    # Hypothesis: 4h strategy using 1d Donchian channel breakout with 1w ADX trend filter and volume confirmation
+    # Works in both bull and bear: Donchian captures breakouts, 1w ADX > 20 filters chop/range,
+    # volume confirmation ensures momentum. Discrete sizing (0.25) minimizes fee drag.
+    # Target: 20-40 trades/year to stay within 4h optimal range.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values if 'volume' in prices.columns else np.ones(len(prices))
     
-    # Get 1d data for Donchian channel (HTF for breakout) and volume
+    # Get 1d data for Donchian channel (primary HTF for breakout)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -27,16 +28,72 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values if 'volume' in df_1d.columns else np.ones(len(df_1d))
     
+    # Get 1w data for ADX trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values if 'volume' in df_1w.columns else np.ones(len(df_1w))
+    
     # Calculate 1d Donchian channel (20-period)
     donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
+    # Calculate 1w ADX (14-period)
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(0, high[i] - high[i-1])
+            minus_dm[i] = max(0, low[i-1] - low[i])
+            if plus_dm[i] == minus_dm[i]:
+                plus_dm[i] = 0
+                minus_dm[i] = 0
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Wilder's smoothing
+        atr = np.zeros_like(high)
+        atr[period] = np.mean(tr[1:period+1])
+        for i in range(period+1, len(high)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        plus_di = np.zeros_like(high)
+        minus_di = np.zeros_like(high)
+        dx = np.zeros_like(high)
+        
+        plus_dm_smoothed = np.zeros_like(high)
+        minus_dm_smoothed = np.zeros_like(high)
+        plus_dm_smoothed[period] = np.mean(plus_dm[1:period+1])
+        minus_dm_smoothed[period] = np.mean(minus_dm[1:period+1])
+        
+        for i in range(period+1, len(high)):
+            plus_dm_smoothed[i] = (plus_dm_smoothed[i-1] * (period-1) + plus_dm[i]) / period
+            minus_dm_smoothed[i] = (minus_dm_smoothed[i-1] * (period-1) + minus_dm[i]) / period
+            plus_di[i] = 100 * plus_dm_smoothed[i] / atr[i]
+            minus_di[i] = 100 * minus_dm_smoothed[i] / atr[i]
+            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i]) if (plus_di[i] + minus_di[i]) != 0 else 0
+        
+        adx = np.zeros_like(high)
+        adx[2*period] = np.mean(dx[period+1:2*period+1])
+        for i in range(2*period+1, len(high)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
+    
+    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
+    
     # Get 1d volume for confirmation (20-period average)
     vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all HTF indicators to 12h primary timeframe
+    # Align all HTF indicators to 4h primary timeframe
     donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
     signals = np.zeros(n)
@@ -50,18 +107,26 @@ def generate_signals(prices):
         # Skip if data not ready
         if (np.isnan(donchian_high_aligned[i]) or 
             np.isnan(donchian_low_aligned[i]) or
+            np.isnan(adx_1w_aligned[i]) or
             np.isnan(vol_avg_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current 1d volume > 1.3x 20-period average
-        volume_confirmed = volume_1d[i] > 1.3 * vol_avg_20_1d_aligned[i]
+        idx_1d = i // 6  # 1d bars in 4h timeframe (6 bars per day)
+        if idx_1d >= len(volume_1d):
+            signals[i] = 0.0
+            continue
+        volume_confirmed = volume_1d[idx_1d] > 1.3 * vol_avg_20_1d_aligned[i]
         
-        # Entry conditions: Donchian breakout + volume
-        enter_long = (close[i] > donchian_high_aligned[i]) and volume_confirmed
-        enter_short = (close[i] < donchian_low_aligned[i]) and volume_confirmed
+        # Trend filter: 1w ADX > 20 indicates trending market (not choppy/range)
+        trending = adx_1w_aligned[i] > 20
         
-        # Stoploss: 2x ATR based on 12h true range (simplified using Donchian width)
+        # Entry conditions: Donchian breakout + trend + volume
+        enter_long = (close[i] > donchian_high_aligned[i]) and trending and volume_confirmed
+        enter_short = (close[i] < donchian_low_aligned[i]) and trending and volume_confirmed
+        
+        # Stoploss: 2x ATR based on 4h true range (simplified using Donchian width)
         donchian_width = donchian_high_aligned[i] - donchian_low_aligned[i]
         stop_distance = donchian_width * 0.2  # 20% of channel width
         
@@ -99,6 +164,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_donchian_breakout_volume_v1"
-timeframe = "12h"
+name = "4h_1d_1w_donchian_breakout_adx_volume_v1"
+timeframe = "4h"
 leverage = 1.0
