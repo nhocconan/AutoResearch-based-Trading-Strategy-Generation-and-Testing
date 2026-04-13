@@ -8,17 +8,17 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with 1d HMA trend filter and volume confirmation
-    # Long: price breaks above 4h Donchian upper channel + 1d HMA21 uptrend + volume > 1.5x 20-period average
-    # Short: price breaks below 4h Donchian lower channel + 1d HMA21 downtrend + volume > 1.5x 20-period average
-    # Exit: price crosses 4h Donchian midline (median of upper/lower)
-    # Uses discrete position sizing (0.25) to minimize fee churn
-    # Target: 100-180 total trades over 4 years (25-45/year) to balance opportunity and fees
+    # Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and chop regime filter
+    # Long: price breaks above Donchian(20) high + 1d volume > 1.5x 20-period average + chop < 61.8 (trending)
+    # Short: price breaks below Donchian(20) low + 1d volume > 1.5x 20-period average + chop < 61.8 (trending)
+    # Exit: price crosses Donchian(20) midline
+    # Uses 1d volume to confirm institutional interest and chop filter to avoid whipsaws in ranging markets
+    # Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend)
+    # Target: 100-200 total trades over 4 years (25-50/year) to balance opportunity and fees
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
     # Get 4h data for primary timeframe
     df_4h = get_htf_data(prices, '4h')
@@ -29,41 +29,40 @@ def generate_signals(prices):
     low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
     
-    # Get 1d data for HMA trend filter (HTF)
+    # Get 1d data for volume confirmation and chop regime (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 21:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
+    volume_1d = df_1d['taker_buy_volume'].values  # proxy for volume
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 4h Donchian channels (20-period)
-    highest_high_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lowest_low_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_upper_4h = highest_high_4h
-    donchian_lower_4h = lowest_low_4h
-    donchian_middle_4h = (donchian_upper_4h + donchian_lower_4h) / 2.0
+    # Calculate Donchian(20) channels on 4h
+    highest_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_high = highest_high
+    donchian_low = lowest_low
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Calculate 1d HMA21 for trend filter
-    # HMA = WMA(2 * WMA(n/2) - WMA(n)), sqrt(n)
-    half_len = int(21 / 2)
-    sqrt_len = int(np.sqrt(21))
+    # Calculate 1d volume ratio (current vs 20-period average)
+    vol_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.where(vol_ma > 0, volume_1d / vol_ma, 1.0)
     
-    def wma(values, window):
-        if len(values) < window:
-            return np.full_like(values, np.nan)
-        weights = np.arange(1, window + 1)
-        return np.convolve(values, weights/weights.sum(), mode='same')
+    # Calculate 1d Chopiness Index (14-period)
+    def calculate_chop(high, low, close, window=14):
+        atr = pd.Series(np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1))), np.abs(low - np.roll(close, 1)))).rolling(window=window, min_periods=1).sum()
+        highest_high = pd.Series(high).rolling(window=window, min_periods=1).max()
+        lowest_low = pd.Series(low).rolling(window=window, min_periods=1).min()
+        chop = 100 * np.log10(atr / (highest_high - lowest_low)) / np.log10(window)
+        return np.where((highest_high - lowest_low) == 0, 50, chop.values)
     
-    wma_half_1d = wma(close_1d, half_len)
-    wma_full_1d = wma(close_1d, 21)
-    raw_hma_1d = 2 * wma_half_1d - wma_full_1d
-    hma_21_1d = wma(raw_hma_1d, sqrt_len)
+    chop = calculate_chop(high_1d, low_1d, close_1d, 14)
     
-    # Align 1d HMA21 to 4h timeframe
-    hma_21_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_21_1d)
-    
-    # Calculate 4h volume average (20-period)
-    volume_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align 1d indicators to 4h timeframe
+    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -71,29 +70,26 @@ def generate_signals(prices):
     
     for i in range(20, n):  # start from 20 to have enough data for Donchian
         # Skip if data not ready
-        if (np.isnan(donchian_upper_4h[i]) or np.isnan(donchian_lower_4h[i]) or 
-            np.isnan(hma_21_1d_aligned[i]) or np.isnan(volume_ma_4h[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(vol_ratio_aligned[i]) or np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > donchian_upper_4h[i-1]  # break above previous upper
-        breakout_down = close[i] < donchian_lower_4h[i-1]  # break below previous lower
+        # Breakout conditions
+        breakout_up = close[i] > donchian_high[i]
+        breakout_down = close[i] < donchian_low[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * volume_ma_4h[i]
-        
-        # Trend filter from 1d HMA21
-        uptrend = close[i] > hma_21_1d_aligned[i]
-        downtrend = close[i] < hma_21_1d_aligned[i]
-        
-        # Exit conditions: price crosses Donchian midline
-        exit_long = position == 1 and close[i] < donchian_middle_4h[i]
-        exit_short = position == -1 and close[i] > donchian_middle_4h[i]
+        # Volume and regime filters
+        volume_confirmed = vol_ratio_aligned[i] > 1.5
+        trending_regime = chop_aligned[i] < 61.8  # chop < 61.8 indicates trending market
         
         # Entry conditions
-        long_entry = breakout_up and volume_confirmed and uptrend and position != 1
-        short_entry = breakout_down and volume_confirmed and downtrend and position != -1
+        long_entry = breakout_up and volume_confirmed and trending_regime and position != 1
+        short_entry = breakout_down and volume_confirmed and trending_regime and position != -1
+        
+        # Exit conditions (midline cross)
+        exit_long = position == 1 and close[i] < donchian_mid[i]
+        exit_short = position == -1 and close[i] > donchian_mid[i]
         
         # Execute signals
         if long_entry:
@@ -102,7 +98,10 @@ def generate_signals(prices):
         elif short_entry:
             position = -1
             signals[i] = -position_size
-        elif exit_long or exit_short:
+        elif position == 1 and exit_long:
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and exit_short:
             position = 0
             signals[i] = 0.0
         # Hold current position
@@ -116,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_hma_volume_filter_v1"
+name = "4h_1d_donchian_breakout_volume_chop_v1"
 timeframe = "4h"
 leverage = 1.0
