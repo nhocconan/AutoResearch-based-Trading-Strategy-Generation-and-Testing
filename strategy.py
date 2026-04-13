@@ -5,73 +5,73 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout + 1d ATR-based volatility filter + volume confirmation + session filter (08-20 UTC)
-    # Long when: price breaks above 4h Donchian upper (20) AND 1d ATR(14) < 1d ATR(50) AND volume > 1.5x 20-bar avg AND session 08-20 UTC
-    # Short when: price breaks below 4h Donchian lower (20) AND 1d ATR(14) < 1d ATR(50) AND volume > 1.5x 20-bar avg AND session 08-20 UTC
-    # Exit when: price crosses 4h Donchian midpoint
-    # Uses discrete sizing (0.20) targeting 60-150 total trades over 4 years (15-37/year).
-    # ATR filter ensures breakouts occur during low volatility (pre-breakout compression) to avoid false breakouts in high volatility.
-    # Session filter reduces noise trades during off-hours.
+    # Hypothesis: 6h Camarilla pivot breakout with 1w trend filter and volume confirmation
+    # Long when: price breaks above 6h Camarilla R4 AND 1w close > 1w EMA(34) AND volume > 1.5x 20-bar avg
+    # Short when: price breaks below 6h Camarilla S4 AND 1w close < 1w EMA(34) AND volume > 1.5x 20-bar avg
+    # Exit when: price crosses 6h Camarilla pivot point (PP)
+    # Uses discrete sizing (0.25) targeting 50-150 total trades over 4 years (12-37/year).
+    # Weekly EMA filter ensures we only take breakouts in the direction of the higher timeframe trend.
+    # Works in bull (breakouts with weekly uptrend) and bear (breakouts with weekly downtrend).
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(open_time).hour
-    session_filter = (hours >= 8) & (hours <= 20)
-    
-    # Get 4h data for Donchian channels (primary timeframe)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get 6h data for Camarilla pivots (primary timeframe)
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 5:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
     
-    # Calculate 4h Donchian channels (20-period)
-    donchian_window = 20
-    donchian_high_4h = pd.Series(high_4h).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    donchian_low_4h = pd.Series(low_4h).rolling(window=donchian_window, min_periods=donchian_window).min().values
-    donchian_mid_4h = (donchian_high_4h + donchian_low_4h) / 2.0
+    # Calculate previous 6h Camarilla levels
+    # Camarilla uses previous period's high, low, close
+    prev_high_6h = np.roll(high_6h, 1)
+    prev_low_6h = np.roll(low_6h, 1)
+    prev_close_6h = np.roll(close_6h, 1)
+    prev_high_6h[0] = np.nan
+    prev_low_6h[0] = np.nan
+    prev_close_6h[0] = np.nan
     
-    # Align 4h Donchian levels to 1h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_4h)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_4h)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_4h, donchian_mid_4h)
+    # Camarilla pivot point
+    pp_6h = (prev_high_6h + prev_low_6h + prev_close_6h) / 3.0
+    # Camarilla levels
+    r4_6h = pp_6h + ((prev_high_6h - prev_low_6h) * 1.1 / 2)
+    r3_6h = pp_6h + ((prev_high_6h - prev_low_6h) * 1.1 / 4)
+    s3_6h = pp_6h - ((prev_high_6h - prev_low_6h) * 1.1 / 4)
+    s4_6h = pp_6h - ((prev_high_6h - prev_low_6h) * 1.1 / 2)
     
-    # Get 1d data for ATR-based volatility filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Align 6h Camarilla levels to 6h timeframe (no shift needed as we use previous bar's levels)
+    pp_6h_aligned = align_htf_to_ltf(prices, df_6h, pp_6h)
+    r4_6h_aligned = align_htf_to_ltf(prices, df_6h, r4_6h)
+    r3_6h_aligned = align_htf_to_ltf(prices, df_6h, r3_6h)
+    s3_6h_aligned = align_htf_to_ltf(prices, df_6h, s3_6h)
+    s4_6h_aligned = align_htf_to_ltf(prices, df_6h, s4_6h)
+    
+    # Get 1w data for trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate True Range for 1d
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = np.nan  # first value has no previous close
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate 1w EMA(34)
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate ATR(14) and ATR(50) for 1d
-    atr_14_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_50_1d = pd.Series(tr).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align 1w EMA to 6h timeframe
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Align 1d ATR values to 1h timeframe
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    atr_50_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_50_1d)
-    
-    # Volatility filter: ATR(14) < ATR(50) (low volatility regime)
-    vol_filter = atr_14_1d_aligned < atr_50_1d_aligned
+    # Weekly trend filter: close > EMA(34) for long, close < EMA(34) for short
+    weekly_uptrend = close_1w > ema_34_1w
+    weekly_downtrend = close_1w < ema_34_1w
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend)
+    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend)
     
     # Calculate volume confirmation: volume > 1.5x 20-bar average volume
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -79,26 +79,26 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
-    for i in range(donchian_window, n):
+    for i in range(5, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(donchian_mid_aligned[i]) or
-            np.isnan(atr_14_1d_aligned[i]) or np.isnan(atr_50_1d_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(pp_6h_aligned[i]) or np.isnan(r4_6h_aligned[i]) or np.isnan(s4_6h_aligned[i]) or
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
-        # Donchian breakout conditions (using current bar's close vs previous bar's levels)
-        breakout_up = close[i] > donchian_high_aligned[i-1]  # break above previous Donchian high
-        breakout_down = close[i] < donchian_low_aligned[i-1]  # break below previous Donchian low
+        # Camarilla breakout conditions (using current bar's close vs current bar's levels)
+        breakout_up = close[i] > r4_6h_aligned[i]  # break above R4
+        breakout_down = close[i] < s4_6h_aligned[i]  # break below S4
         
-        # Entry conditions with volatility filter, volume confirmation, and session filter
-        long_entry = breakout_up and vol_filter[i] and volume_confirmed[i] and session_filter[i] and position != 1
-        short_entry = breakout_down and vol_filter[i] and volume_confirmed[i] and session_filter[i] and position != -1
+        # Entry conditions with weekly trend filter and volume confirmation
+        long_entry = breakout_up and weekly_uptrend_aligned[i] and volume_confirmed[i] and position != 1
+        short_entry = breakout_down and weekly_downtrend_aligned[i] and volume_confirmed[i] and position != -1
         
         # Exit conditions
-        exit_long = (position == 1 and close[i] < donchian_mid_aligned[i])
-        exit_short = (position == -1 and close[i] > donchian_mid_aligned[i])
+        exit_long = (position == 1 and close[i] < pp_6h_aligned[i])
+        exit_short = (position == -1 and close[i] > pp_6h_aligned[i])
         
         # Execute signals
         if long_entry:
@@ -124,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4h_1d_donchian_atr_vol_filter_volume_session_v1"
-timeframe = "1h"
+name = "6h_1w_camarilla_breakout_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
