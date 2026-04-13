@@ -8,11 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter + volume confirmation
-    # Long: price > Donchian(20) high + price > 1w EMA50 + volume > 2.0x 20-period average
-    # Short: price < Donchian(20) low + price < 1w EMA50 + volume > 2.0x 20-period average
-    # Exit: opposite Donchian breakout OR price crosses 1w EMA50
-    # Using 1d timeframe for lower trade frequency, 1w EMA50 for strong trend filter,
+    # Hypothesis: 6h Donchian(20) breakout with 1d EMA50 trend filter + volume confirmation
+    # Long: price > Donchian(20) high + price > 1d EMA50 + volume > 2.0x 20-period average
+    # Short: price < Donchian(20) low + price < 1d EMA50 + volume > 2.0x 20-period average
+    # Exit: opposite Donchian breakout OR price crosses 1d EMA50
+    # Using 6h timeframe for lower trade frequency (target 12-37/year), 1d EMA50 for strong trend filter,
     # and volume spike confirmation to avoid false breakouts in choppy markets.
     # Discrete position sizing (0.25) to minimize fee churn.
     
@@ -21,22 +21,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w EMA50 with min_periods
-    ema_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 50:
-        ema_1w[49] = np.mean(close_1w[:50])  # SMA50 as seed
+    # Calculate 1d EMA50 with min_periods
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema_1d[49] = np.mean(close_1d[:50])  # SMA50 as seed
         multiplier = 2 / (50 + 1)
-        for i in range(50, len(close_1w)):
-            ema_1w[i] = (close_1w[i] * multiplier) + (ema_1w[i-1] * (1 - multiplier))
+        for i in range(50, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * multiplier) + (ema_1d[i-1] * (1 - multiplier))
     
-    # Get 1d Donchian(20) for breakout with min_periods
+    # Get 6h Donchian(20) for breakout with min_periods
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     
@@ -44,21 +44,21 @@ def generate_signals(prices):
         donchian_high[i] = np.max(high[i-20:i])
         donchian_low[i] = np.min(low[i-20:i])
     
-    # Get 1d volume for confirmation (>2.0x 20-period average)
+    # Get 6h volume for confirmation (>2.0x 20-period average)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     volume_spike = volume > (2.0 * vol_ma)
     
-    # Align 1w EMA50 to 1d
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Align 1d EMA50 to 6h
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(donchian_high[i]) or 
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
             np.isnan(donchian_low[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
@@ -67,17 +67,17 @@ def generate_signals(prices):
         long_breakout = close[i] > donchian_high[i]
         short_breakout = close[i] < donchian_low[i]
         
-        # Trend filter from 1w EMA50
-        bullish_trend = close[i] > ema_1w_aligned[i]
-        bearish_trend = close[i] < ema_1w_aligned[i]
+        # Trend filter from 1d EMA50
+        bullish_trend = close[i] > ema_1d_aligned[i]
+        bearish_trend = close[i] < ema_1d_aligned[i]
         
         # Entry logic: Breakout + trend alignment + volume confirmation
         long_entry = long_breakout and bullish_trend and volume_spike[i]
         short_entry = short_breakout and bearish_trend and volume_spike[i]
         
         # Exit logic: opposite breakout or trend reversal
-        long_exit = short_breakout or (close[i] < ema_1w_aligned[i])
-        short_exit = long_breakout or (close[i] > ema_1w_aligned[i])
+        long_exit = short_breakout or (close[i] < ema_1d_aligned[i])
+        short_exit = long_breakout or (close[i] > ema_1d_aligned[i])
         
         if long_entry and position != 1:
             position = 1
@@ -102,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_donchian_breakout_ema50_volume_v1"
-timeframe = "1d"
+name = "6h_1d_donchian_breakout_ema50_volume_v1"
+timeframe = "6h"
 leverage = 1.0
