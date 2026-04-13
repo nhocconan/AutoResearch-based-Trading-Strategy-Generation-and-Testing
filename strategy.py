@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_12h_Medium_Term_Trend_With_Volume_And_Regime_Filter
-Hypothesis: Combines 12h EMA trend filter with 4h Donchian breakout and volume confirmation for medium-term trend following.
-Uses 12h EMA(50) for trend direction, 4h Donchian(20) breakout for entry timing, volume > 1.5x 20-period average for confirmation,
-and avoids choppy markets with 12h Choppiness Index > 61.8. Works in both bull and bear markets by following established trends
-with volatility-based exits. Target: 20-50 trades/year on 4h (80-200 total over 4 years).
+1h_4h_1d_Volume_Regime_Filter
+Hypothesis: Trade volatility regime shifts using 4h trend and 1d volume regime. 
+Long when 4h EMA21 rising + 1d volume > 1.5x 20-day avg + price > 4h VWAP. 
+Short when 4h EMA21 falling + 1d volume > 1.5x 20-day avg + price < 4h VWAP. 
+Enter on 1h break of 4h VWAP with volume confirmation. 
+Uses volume regime to filter false breaks. Target: 15-37 trades/year.
+Works in bull (trend up + volume) and bear (trend down + volume).
 """
 
 import numpy as np
@@ -13,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,36 +23,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter and regime
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 60:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    
-    # 12h EMA(50) for trend direction
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # 12h Choppiness Index for regime filter
-    atr_period = 14
-    tr_12h = np.maximum(high_12h - low_12h,
-                        np.maximum(np.abs(high_12h - np.roll(close_12h, 1)),
-                                   np.abs(low_12h - np.roll(close_12h, 1))))
-    tr_12h[0] = high_12h[0] - low_12h[0]
-    atr_12h = pd.Series(tr_12h).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
-    
-    highest_12h = pd.Series(high_12h).rolling(window=atr_period, min_periods=atr_period).max().values
-    lowest_12h = pd.Series(low_12h).rolling(window=atr_period, min_periods=atr_period).min().values
-    
-    sum_atr_12h = pd.Series(atr_12h).rolling(window=atr_period, min_periods=atr_period).sum().values
-    range_12h = highest_12h - lowest_12h
-    
-    chop_12h = 100 * np.log10(sum_atr_12h / np.maximum(range_12h, 1e-10)) / np.log10(atr_period)
-    chop_12h = np.where(range_12h == 0, 100, chop_12h)
-    
-    # Get 4h data for entry signals
+    # Get 4h data for trend and VWAP
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 30:
         return np.zeros(n)
@@ -60,76 +33,101 @@ def generate_signals(prices):
     low_4h = df_4h['low'].values
     volume_4h = df_4h['volume'].values
     
-    # 4h Donchian(20) channels
-    highest_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lowest_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # 4h EMA21 for trend
+    ema_21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_rising = ema_21_4h > np.roll(ema_21_4h, 1)
+    ema_falling = ema_21_4h < np.roll(ema_21_4h, 1)
+    ema_rising[0] = False
+    ema_falling[0] = False
     
-    # Volume confirmation: > 1.5x 20-period average
-    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    volume_expansion_4h = volume_4h > (vol_ma_20_4h * 1.5)
+    # 4h VWAP (session VWAP reset daily)
+    vwap_4h = np.zeros_like(close_4h)
+    typical_price_4h = (high_4h + low_4h + close_4h) / 3.0
+    cum_vol = 0.0
+    cum_pv = 0.0
+    for i in range(len(close_4h)):
+        if i > 0 and df_4h.index[i].date() != df_4h.index[i-1].date():
+            cum_vol = 0.0
+            cum_pv = 0.0
+        cum_vol += volume_4h[i]
+        cum_pv += typical_price_4h[i] * volume_4h[i]
+        vwap_4h[i] = cum_pv / cum_vol if cum_vol > 0 else typical_price_4h[i]
     
-    # Align all signals to 4h timeframe
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    chop_12h_aligned = align_htf_to_ltf(prices, df_12h, chop_12h)
-    highest_4h_aligned = align_htf_to_ltf(prices, df_4h, highest_4h)
-    lowest_4h_aligned = align_htf_to_ltf(prices, df_4h, lowest_4h)
-    volume_expansion_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_expansion_4h)
+    # Get 1d data for volume regime
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    volume_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_regime = volume_1d > (vol_ma_20_1d * 1.5)
+    
+    # Align all to 1h
+    ema_rising_aligned = align_htf_to_ltf(prices, df_4h, ema_rising)
+    ema_falling_aligned = align_htf_to_ltf(prices, df_4h, ema_falling)
+    vwap_4h_aligned = align_htf_to_ltf(prices, df_4h, vwap_4h)
+    volume_regime_aligned = align_htf_to_ltf(prices, df_1d, volume_regime)
+    
+    # Session filter: 08:00-20:00 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_mask = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
-    position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.25  # 25% of capital
+    position = 0
+    position_size = 0.20
     
-    for i in range(100, n):
-        # Skip if any data not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(chop_12h_aligned[i]) or
-            np.isnan(highest_4h_aligned[i]) or np.isnan(lowest_4h_aligned[i]) or
-            np.isnan(volume_expansion_4h_aligned[i])):
+    for i in range(50, n):
+        if not session_mask[i] or \
+           np.isnan(ema_rising_aligned[i]) or \
+           np.isnan(ema_falling_aligned[i]) or \
+           np.isnan(vwap_4h_aligned[i]) or \
+           np.isnan(volume_regime_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 12h EMA50
-        uptrend = close[i] > ema_50_12h_aligned[i]
-        downtrend = close[i] < ema_50_12h_aligned[i]
+        # Volume confirmation on 1h
+        vol_ma_20_1h = np.nan
+        if i >= 20:
+            vol_ma_20_1h = np.mean(volume[max(0, i-19):i+1])
+        volume_expansion_1h = volume[i] > (vol_ma_20_1h * 1.5) if not np.isnan(vol_ma_20_1h) else False
         
-        # Regime filter: avoid choppy markets (Choppiness Index > 61.8 = range)
-        not_choppy = chop_12h_aligned[i] <= 61.8
-        
-        # Entry conditions
-        long_entry = (uptrend and 
-                      close[i] > highest_4h_aligned[i] and 
-                      volume_expansion_4h_aligned[i] and
-                      not_choppy)
-        
-        short_entry = (downtrend and 
-                       close[i] < lowest_4h_aligned[i] and 
-                       volume_expansion_4h_aligned[i] and
-                       not_choppy)
-        
-        # Exit conditions: reverse signal or loss of trend/regime
-        long_exit = (not uptrend or not not_choppy)
-        short_exit = (not downtrend or not not_choppy)
-        
-        if long_entry and position != 1:
-            position = 1
-            signals[i] = position_size
-        elif short_entry and position != -1:
-            position = -1
-            signals[i] = -position_size
-        elif position == 1 and long_exit:
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and short_exit:
-            position = 0
-            signals[i] = 0.0
-        elif position == 1:
-            signals[i] = position_size
-        elif position == -1:
-            signals[i] = -position_size
+        # Long: 4h uptrend + volume regime + price > VWAP
+        if ema_rising_aligned[i] and volume_regime_aligned[i] and close[i] > vwap_4h_aligned[i]:
+            if volume_expansion_1h and close[i] > close[i-1]:
+                if position != 1:
+                    position = 1
+                    signals[i] = position_size
+                else:
+                    signals[i] = position_size
+            elif position == 1:
+                signals[i] = position_size
+            else:
+                signals[i] = 0.0
+        # Short: 4h downtrend + volume regime + price < VWAP
+        elif ema_falling_aligned[i] and volume_regime_aligned[i] and close[i] < vwap_4h_aligned[i]:
+            if volume_expansion_1h and close[i] < close[i-1]:
+                if position != -1:
+                    position = -1
+                    signals[i] = -position_size
+                else:
+                    signals[i] = -position_size
+            elif position == -1:
+                signals[i] = -position_size
+            else:
+                signals[i] = 0.0
         else:
-            signals[i] = 0.0
+            # Exit conditions
+            if position == 1 and (close[i] < vwap_4h_aligned[i] or not volume_regime_aligned[i]):
+                position = 0
+                signals[i] = 0.0
+            elif position == -1 and (close[i] > vwap_4h_aligned[i] or not volume_regime_aligned[i]):
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
     
     return signals
 
-name = "4h_12h_Medium_Term_Trend_With_Volume_And_Regime_Filter"
-timeframe = "4h"
+name = "1h_4h_1d_Volume_Regime_Filter"
+timeframe = "1h"
 leverage = 1.0
