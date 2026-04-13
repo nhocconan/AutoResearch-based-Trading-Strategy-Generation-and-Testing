@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_1w_KAMA_Trend_Follow_Strategy
-Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market noise, reducing false signals in chop.
-Combined with 1-week trend filter and volume confirmation, this captures strong trends while avoiding whipsaws.
-Works in both bull (adapts to strong uptrends) and bear (adapts to strong downtrends) markets.
-Target: 15-25 trades/year.
+6h_12h_Camarilla_Pivot_Breakout_Volume
+Hypothesis: Camarilla pivot levels derived from 12h candles provide strong intraday support/resistance.
+Breakouts above R4 or below S4 with volume confirmation indicate institutional participation and trend continuation.
+This strategy works in both bull and bear markets by capturing breakouts in the direction of the trend.
+Target: 15-25 trades/year per symbol.
 """
 
 import numpy as np
@@ -13,94 +13,77 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 12h data for Camarilla pivots
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # Weekly EMA20 for trend filter
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate Camarilla levels for each 12h bar
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # KAMA on daily prices
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close, n=10))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    # Handle the array shapes correctly
-    change_padded = np.concatenate([[np.nan]*10, change])
-    volatility_padded = np.concatenate([[np.nan]*1, volatility])
+    # Camarilla formulas
+    close_prev = np.roll(close_12h, 1)
+    close_prev[0] = close_12h[0]  # first bar uses its own close
     
-    # Calculate ER and volatility arrays properly
-    er = np.full_like(close, np.nan)
-    vol_sum = np.full_like(close, np.nan)
+    range_12h = high_12h - low_12h
     
-    for i in range(10, len(close)):
-        if i >= 10:
-            ch = np.abs(close[i] - close[i-10])
-            vol = np.sum(np.abs(np.diff(close[i-9:i+1])))
-            if vol != 0:
-                er[i] = ch / vol
-            else:
-                er[i] = 1.0
-            vol_sum[i] = vol
+    # Resistance levels
+    R1 = close_prev + (range_12h * 1.0833 / 12)
+    R2 = close_prev + (range_12h * 1.1666 / 6)
+    R3 = close_prev + (range_12h * 1.2500 / 4)
+    R4 = close_prev + (range_12h * 1.5000 / 2)
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Support levels
+    S1 = close_prev - (range_12h * 1.0833 / 12)
+    S2 = close_prev - (range_12h * 1.1666 / 6)
+    S3 = close_prev - (range_12h * 1.2500 / 4)
+    S4 = close_prev - (range_12h * 1.5000 / 2)
     
-    # Calculate KAMA
-    kama = np.full_like(close, np.nan)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        if np.isnan(sc[i]) or np.isnan(kama[i-1]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Align levels to 6h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_12h, R1)
+    R2_aligned = align_htf_to_ltf(prices, df_12h, R2)
+    R3_aligned = align_htf_to_ltf(prices, df_12h, R3)
+    R4_aligned = align_htf_to_ltf(prices, df_12h, R4)
+    S1_aligned = align_htf_to_ltf(prices, df_12h, S1)
+    S2_aligned = align_htf_to_ltf(prices, df_12h, S2)
+    S3_aligned = align_htf_to_ltf(prices, df_12h, S3)
+    S4_aligned = align_htf_to_ltf(prices, df_12h, S4)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 1.5)
+    volume_expansion = volume > (vol_ma_20 * 1.8)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if any required data is not ready
-        if (np.isnan(kama[i]) or 
-            np.isnan(ema_20_1w_aligned[i]) or 
+        if (np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or 
             np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions:
-        # 1. Price above KAMA (uptrend signal)
-        # 2. Price above weekly EMA20 (1w trend filter)
-        # 3. Volume expansion
-        price_above_kama = close[i] > kama[i]
-        price_above_weekly_ema = close[i] > ema_20_1w_aligned[i]
-        long_condition = price_above_kama and price_above_weekly_ema and volume_expansion[i]
+        # Long breakout: price breaks above R4 with volume expansion
+        long_breakout = close[i] > R4_aligned[i] and volume_expansion[i]
         
-        # Short conditions:
-        # 1. Price below KAMA (downtrend signal)
-        # 2. Price below weekly EMA20 (1w trend filter)
-        # 3. Volume expansion
-        price_below_kama = close[i] < kama[i]
-        price_below_weekly_ema = close[i] < ema_20_1w_aligned[i]
-        short_condition = price_below_kama and price_below_weekly_ema and volume_expansion[i]
+        # Short breakdown: price breaks below S4 with volume expansion
+        short_breakout = close[i] < S4_aligned[i] and volume_expansion[i]
         
-        if long_condition and position != 1:
+        if long_breakout and position != 1:
             position = 1
             signals[i] = position_size
-        elif short_condition and position != -1:
+        elif short_breakout and position != -1:
             position = -1
             signals[i] = -position_size
         else:
@@ -109,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_KAMA_Trend_Follow_Strategy"
-timeframe = "1d"
+name = "6h_12h_Camarilla_Pivot_Breakout_Volume"
+timeframe = "6h"
 leverage = 1.0
