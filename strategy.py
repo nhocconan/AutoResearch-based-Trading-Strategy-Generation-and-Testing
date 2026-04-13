@@ -8,91 +8,152 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1h strategy using 4h Williams %R extremes + 1d EMA trend filter + volume confirmation
-    # Williams %R captures short-term reversals, 1d EMA ensures trend alignment, volume confirms momentum
-    # Session filter (08-20 UTC) reduces noise. Discrete sizing (0.20) minimizes fee drag.
-    # Target: 15-37 trades/year to stay within 1h optimal range.
+    # Hypothesis: 6h strategy using weekly Camarilla pivot levels (S3/R3 for mean reversion, S4/R4 for breakout)
+    # with 1d ADX trend filter and volume confirmation. In ranging markets (ADX<25), fade extremes.
+    # In trending markets (ADX>25), breakout continuation. Weekly pivots provide strong structure.
+    # Discrete sizing (0.25) minimizes fee drag. Target: 12-37 trades/year for 6h optimal range.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values if 'volume' in prices.columns else np.ones(len(prices))
     
-    # Get 4h data for Williams %R (primary HTF for reversal signals)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 14:
+    # Get 1w data for Camarilla pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values if 'volume' in df_4h.columns else np.ones(len(df_4h))
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Get 1d data for EMA trend filter
+    # Get 1d data for ADX trend filter and volume
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values if 'volume' in df_1d.columns else np.ones(len(df_1d))
     
-    # Calculate 4h Williams %R (14-period)
-    highest_high = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_4h) / (highest_high - lowest_low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid division by zero
+    # Calculate weekly Camarilla levels (based on previous week)
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # S3 = C - (Range * 1.1000/2)
+    # S4 = C - (Range * 1.1000)
+    # R3 = C + (Range * 1.1000/2)
+    # R4 = C + (Range * 1.1000)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
+    s3_1w = close_1w - (range_1w * 1.1000 / 2.0)
+    s4_1w = close_1w - (range_1w * 1.1000)
+    r3_1w = close_1w + (range_1w * 1.1000 / 2.0)
+    r4_1w = close_1w + (range_1w * 1.1000)
     
-    # Calculate 1d EMA (50-period)
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d ADX (14-period)
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            high_diff = high[i] - high[i-1]
+            low_diff = low[i-1] - low[i]
+            plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
+            minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Wilder's smoothing
+        atr = np.zeros_like(tr)
+        atr[period] = np.mean(tr[1:period+1])
+        for i in range(period+1, len(tr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        plus_di = 100 * (np.zeros_like(high))
+        minus_di = 100 * (np.zeros_like(high))
+        dx = 100 * (np.zeros_like(high))
+        
+        plus_sm = np.zeros_like(high)
+        minus_sm = np.zeros_like(high)
+        plus_sm[period] = np.sum(plus_dm[1:period+1])
+        minus_sm[period] = np.sum(minus_dm[1:period+1])
+        
+        for i in range(period+1, len(high)):
+            plus_sm[i] = (plus_sm[i-1] * (period-1) + plus_dm[i]) / period
+            minus_sm[i] = (minus_sm[i-1] * (period-1) + minus_dm[i]) / period
+            plus_di[i] = 100 * plus_sm[i] / atr[i] if atr[i] != 0 else 0
+            minus_di[i] = 100 * minus_sm[i] / atr[i] if atr[i] != 0 else 0
+            dx[i] = (abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])) * 100 if (plus_di[i] + minus_di[i]) != 0 else 0
+        
+        adx = np.zeros_like(dx)
+        adx[2*period] = np.mean(dx[period+1:2*period+1])
+        for i in range(2*period+1, len(dx)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    # Get 4h volume for confirmation (20-period average)
-    vol_avg_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    # Align all HTF indicators to 1h primary timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_4h, williams_r)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    vol_avg_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_avg_20_4h)
+    # Get 1d volume average (20-period)
+    vol_avg_20_1d = np.zeros_like(volume_1d)
+    for i in range(20, len(volume_1d)):
+        vol_avg_20_1d[i] = np.mean(volume_1d[i-20:i])
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour  # prices.index is DatetimeIndex
-    in_session = (hours >= 8) & (hours <= 20)
+    # Align all HTF indicators to 6h primary timeframe
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    s4_1w_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    r4_1w_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
     # Track entry price for stoploss
     entry_price = np.full(n, np.nan)
     
     for i in range(50, n):
-        # Skip if data not ready or outside session
-        if (np.isnan(williams_r_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(vol_avg_20_4h_aligned[i]) or
-            not in_session[i]):
+        # Skip if data not ready
+        if (np.isnan(s3_1w_aligned[i]) or np.isnan(s4_1w_aligned[i]) or
+            np.isnan(r3_1w_aligned[i]) or np.isnan(r4_1w_aligned[i]) or
+            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_avg_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x 20-period average
-        idx_4h = i // 4  # 4h bars in 1h timeframe (4 bars per 4h)
-        if idx_4h >= len(volume_4h):
+        # Volume confirmation: current 6h volume > 1.5x 20-period average (using 1d volume as proxy)
+        # Since we don't have 6h volume in 1d data, use 1d volume of current day
+        idx_1d = i // 4  # 6h bars in 1d timeframe (4 bars per day)
+        if idx_1d >= len(volume_1d):
             signals[i] = 0.0
             continue
-        volume_confirmed = volume_4h[idx_4h] > 1.5 * vol_avg_20_4h_aligned[i]
+        volume_confirmed = volume_1d[idx_1d] > 1.5 * vol_avg_20_1d_aligned[i]
         
-        # Trend filter: price relative to 1d EMA
-        price_above_ema = close[i] > ema_50_1d_aligned[i]
-        price_below_ema = close[i] < ema_50_1d_aligned[i]
+        # Trend regime: ADX > 25 = trending, ADX < 25 = ranging
+        adx_value = adx_1d_aligned[i]
+        is_trending = adx_value > 25
+        is_ranging = adx_value <= 25
         
-        # Entry conditions: Williams %R extremes + trend alignment + volume
-        enter_long = (williams_r_aligned[i] < -80) and price_above_ema and volume_confirmed
-        enter_short = (williams_r_aligned[i] > -20) and price_below_ema and volume_confirmed
+        # Entry conditions based on regime
+        # In ranging market: fade at S3/R3 (mean reversion)
+        # In trending market: breakout at S4/R4 (continuation)
+        enter_long = False
+        enter_short = False
         
-        # Stoploss: 2x ATR based on 4h true range (simplified using 4h range)
-        if idx_4h < len(high_4h) and idx_4h < len(low_4h):
-            daily_range = high_4h[idx_4h] - low_4h[idx_4h]
-        else:
-            daily_range = 0
-        stop_distance = daily_range * 0.5  # 50% of 4h range
+        if is_ranging and volume_confirmed:
+            # Fade at extremes in ranging market
+            enter_long = close[i] <= s3_1w_aligned[i]
+            enter_short = close[i] >= r3_1w_aligned[i]
+        elif is_trending and volume_confirmed:
+            # Breakout continuation in trending market
+            enter_long = close[i] >= r4_1w_aligned[i]
+            enter_short = close[i] <= s4_1w_aligned[i]
+        
+        # Stoploss: 1.5x ATR based on 1d true range (simplified using daily range)
+        daily_range = high_1d[idx_1d] - low_1d[idx_1d] if idx_1d < len(high_1d) else 0
+        stop_distance = daily_range * 0.75  # 75% of daily range
         
         exit_long = position == 1 and not np.isnan(entry_price[i-1]) and close[i] < entry_price[i-1] - stop_distance
         exit_short = position == -1 and not np.isnan(entry_price[i-1]) and close[i] > entry_price[i-1] + stop_distance
@@ -128,6 +189,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4h_1d_williams_r_extreme_ema_volume_v1"
-timeframe = "1h"
+name = "6h_1w_1d_camarilla_pivot_adx_volume_v1"
+timeframe = "6h"
 leverage = 1.0
