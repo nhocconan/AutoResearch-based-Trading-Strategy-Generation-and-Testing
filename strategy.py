@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d VWAP trend and volume confirmation.
-# Long: price breaks above Donchian(20) high + price > 1d VWAP + volume > 1.5x avg volume
-# Short: price breaks below Donchian(20) low + price < 1d VWAP + volume > 1.5x avg volume
-# VWAP from 1d data acts as dynamic trend filter to avoid counter-trend breakouts
-# Volume confirmation reduces false breakouts
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
-# Works in both bull and bear markets by using 1d VWAP as trend filter
+# Hypothesis: 4h Camarilla pivot breakout with 12h volume confirmation and choppiness regime filter.
+# Long: price breaks above H3 + volume > 1.3x avg volume + chop > 61.8 (range)
+# Short: price breaks below L3 + volume > 1.3x avg volume + chop > 61.8 (range)
+# Camarilla levels calculated from 1d: H3 = close + 1.1*(high-low)/6, L3 = close - 1.1*(high-low)/6
+# Chop filter avoids trending markets where breakouts fail; works in ranging markets.
+# Position size: 0.25 to limit drawdown. Target: 50-150 total trades over 4 years.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,7 +20,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-day data for VWAP
+    # 1-day data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 5:
         return np.zeros(n)
@@ -29,33 +28,37 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate VWAP for each 1d bar (cumulative since start of day)
-    vwap_1d = np.full(len(close_1d), np.nan)
-    cum_vol = 0.0
-    cum_price_vol = 0.0
-    for i in range(len(close_1d)):
-        typical_price = (high_1d[i] + low_1d[i] + close_1d[i]) / 3.0
-        cum_price_vol += typical_price * volume_1d[i]
-        cum_vol += volume_1d[i]
-        if cum_vol > 0:
-            vwap_1d[i] = cum_price_vol / cum_vol
+    # Camarilla levels H3 and L3 (using prior day's data)
+    H3 = np.full(len(close_1d), np.nan)
+    L3 = np.full(len(close_1d), np.nan)
+    for i in range(1, len(close_1d)):
+        rng = high_1d[i-1] - low_1d[i-1]
+        H3[i] = close_1d[i-1] + 1.1 * rng / 6.0
+        L3[i] = close_1d[i-1] - 1.1 * rng / 6.0
     
-    # Align 1d VWAP to 12h timeframe
-    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    # Align 1d Camarilla levels to 4h timeframe
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
     
-    # Donchian(20) on 12h timeframe
-    donch_high = np.full(n, np.nan)
-    donch_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donch_high[i] = np.max(high[i-20:i])
-        donch_low[i] = np.min(low[i-20:i])
-    
-    # Average volume (20-period = 20*12h = 10 days) for volume confirmation
+    # Average volume (20-period = 20*4h = ~3.3 days) for volume confirmation
     avg_volume = np.full(n, np.nan)
     for i in range(20, n):
         avg_volume[i] = np.mean(volume[i-20:i])
+    
+    # Choppiness Index (14-period) for regime filter
+    chop = np.full(n, np.nan)
+    for i in range(14, n):
+        atr_sum = 0.0
+        for j in range(i-13, i+1):
+            tr = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
+            atr_sum += tr
+        highest_high = np.max(high[i-13:i+1])
+        lowest_low = np.min(low[i-13:i+1])
+        if highest_high != lowest_low:
+            chop[i] = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
+        else:
+            chop[i] = 50.0
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -63,46 +66,48 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is not ready
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(vwap_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or 
+            np.isnan(avg_volume[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        vwap = vwap_aligned[i]
+        chop_val = chop[i]
         
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirm = vol > 1.5 * avg_vol
+        # Volume confirmation: current volume > 1.3x average volume
+        volume_confirm = vol > 1.3 * avg_vol
+        # Chop filter: range-bound market (chop > 61.8)
+        range_filter = chop_val > 61.8
         
         if position == 0:
-            # Long: break above Donchian high + above VWAP + volume confirmation
-            if (price > donch_high[i] and 
-                price > vwap and
-                volume_confirm):
+            # Long: break above H3 + volume confirmation + range market
+            if (price > H3_aligned[i] and 
+                volume_confirm and
+                range_filter):
                 position = 1
                 signals[i] = position_size
-            # Short: break below Donchian low + below VWAP + volume confirmation
-            elif (price < donch_low[i] and 
-                  price < vwap and
-                  volume_confirm):
+            # Short: break below L3 + volume confirmation + range market
+            elif (price < L3_aligned[i] and 
+                  volume_confirm and
+                  range_filter):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below Donchian low or below VWAP
-            if (price < donch_low[i] or
-                price < vwap):
+            # Exit long: price breaks below L3 or chop < 38.2 (trending)
+            if (price < L3_aligned[i] or
+                chop_val < 38.2):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above Donchian high or above VWAP
-            if (price > donch_high[i] or
-                price > vwap):
+            # Exit short: price breaks above H3 or chop < 38.2 (trending)
+            if (price > H3_aligned[i] or
+                chop_val < 38.2):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -110,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Donchian_VWAP_Volume"
-timeframe = "12h"
+name = "4h_12h_Camarilla_Chop_Volume"
+timeframe = "4h"
 leverage = 1.0
