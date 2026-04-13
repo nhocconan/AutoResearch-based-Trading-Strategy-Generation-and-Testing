@@ -3,12 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d daily KAMA trend with weekly ADX trend filter and volume confirmation.
-# Uses KAMA (Kaufman Adaptive Moving Average) to capture trend direction while adapting to volatility.
-# Weekly ADX > 25 ensures we only trade in strong trends, avoiding choppy markets.
-# Volume confirmation ensures breakouts/instability have conviction.
-# Target: 30-100 total trades over 4 years (7-25/year) to stay within profitable range.
-# Works in both bull and bear markets by only trading when trend is strong (ADX filter).
+# Hypothesis: 4h 12/26 EMA crossover with daily volume confirmation and ADX trend filter.
+# Uses EMA crossover for trend direction, daily volume to confirm momentum, and ADX to avoid choppy markets.
+# Designed to work in both bull and bear markets by filtering for trending conditions only.
+# Target: 80-120 total trades over 4 years (20-30/year) to stay within profitable range.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,76 +18,58 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for multi-timeframe analysis
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Daily data for multi-timeframe analysis
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate KAMA on weekly close
-    close_1w = df_1w['close'].values
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close_1w, n=10))
-    volatility = np.sum(np.abs(np.diff(close_1w)), axis=1)
-    # Avoid division by zero
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # Initialize KAMA
-    kama = np.full_like(close_1w, np.nan, dtype=float)
-    kama[9] = close_1w[9]  # Start after first 10 periods
-    for i in range(10, len(close_1w)):
-        if np.isnan(sc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close_1w[i] - kama[i-1])
+    # Calculate 12-period and 26-period EMA on daily
+    close_1d = df_1d['close'].values
+    ema_12 = pd.Series(close_1d).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema_26 = pd.Series(close_1d).ewm(span=26, adjust=False, min_periods=26).mean().values
     
-    # Calculate ADX on weekly
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate daily ADX for trend strength
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # True Range
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    tr = np.concatenate([[np.nan], tr])
     
     # Directional Movement
-    up_move = high_1w[1:] - high_1w[:-1]
-    down_move = low_1w[:-1] - low_1w[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
     
     # Smoothed values
-    def wilders_smooth(data, period):
-        result = np.full_like(data, np.nan, dtype=float)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(data[:period]) / period
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    atr = wilders_smooth(tr, 14)
-    plus_di = 100 * wilders_smooth(plus_dm, 14) / atr
-    minus_di = 100 * wilders_smooth(minus_dm, 14) / atr
-    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
-    adx = wilders_smooth(dx, 14)
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
     
-    # Calculate weekly volume and its 20-period average
-    volume_1w = df_1w['volume'].values
-    volume_ma_20_1w = np.full_like(volume_1w, np.nan, dtype=float)
-    for i in range(19, len(volume_1w)):
-        volume_ma_20_1w[i] = np.mean(volume_1w[i-19:i+1])
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Align all data to daily timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1w, kama)
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    volume_ma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_ma_20_1w)
+    # Calculate daily volume and its 20-period average
+    volume_1d = df_1d['volume'].values
+    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all data to 4-hour timeframe
+    ema_12_aligned = align_htf_to_ltf(prices, df_1d, ema_12)
+    ema_26_aligned = align_htf_to_ltf(prices, df_1d, ema_26)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -97,41 +77,42 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(volume_ma_20_1w_aligned[i])):
+        if (np.isnan(ema_12_aligned[i]) or np.isnan(ema_26_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current daily volume > 1.5x weekly volume MA (adjusted for daily)
-        # Approximate: 5 trading days per week, so weekly MA/5 = approximate daily period MA
-        volume_daily_approx_ma = volume_ma_20_1w_aligned[i] / 5
-        volume_condition = volume[i] > (volume_daily_approx_ma * 1.5)
+        # Volume condition: current 4h volume > 1.5x daily volume MA (adjusted for 4h)
+        # 6 4h periods per day, so daily MA/6 = approximate 4h period MA
+        volume_4h_approx_ma = volume_ma_20_1d_aligned[i] / 6
+        volume_condition = volume[i] > (volume_4h_approx_ma * 1.5)
         
-        # ADX condition: strong trend
-        strong_trend = adx_aligned[i] > 25
+        # ADX condition: trending market (ADX > 25)
+        trend_condition = adx_aligned[i] > 25
         
-        # Entry conditions: KAMA trend with volume and ADX filter
-        # Long when price above KAMA with volume and strong trend
-        # Short when price below KAMA with volume and strong trend
+        # EMA crossover conditions
+        ema_fast_above = ema_12_aligned[i] > ema_26_aligned[i]
+        ema_fast_below = ema_12_aligned[i] < ema_26_aligned[i]
+        
         if position == 0:
-            if close[i] > kama_aligned[i] and volume_condition and strong_trend:
+            if ema_fast_above and volume_condition and trend_condition:
                 position = 1
                 signals[i] = position_size
-            elif close[i] < kama_aligned[i] and volume_condition and strong_trend:
+            elif ema_fast_below and volume_condition and trend_condition:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit when price crosses below KAMA or trend weakens
-            if close[i] < kama_aligned[i] or adx_aligned[i] < 20:
+            # Exit when EMA crossover turns bearish or ADX drops (trend weakening)
+            if ema_fast_below or adx_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit when price crosses above KAMA or trend weakens
-            if close[i] > kama_aligned[i] or adx_aligned[i] < 20:
+            # Exit when EMA crossover turns bullish or ADX drops (trend weakening)
+            if ema_fast_above or adx_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -139,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_KAMA_ADX_Volume_Filter_v1"
-timeframe = "1d"
+name = "4h_1d_EMA_Crossover_Volume_ADX_Filter"
+timeframe = "4h"
 leverage = 1.0
