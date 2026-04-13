@@ -13,14 +13,9 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for HTF analysis
+    # Daily data for multi-timeframe analysis
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     # Calculate 20-day Donchian channel on daily
@@ -30,17 +25,24 @@ def generate_signals(prices):
     donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Calculate weekly EMA20 for trend filter
-    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate daily RSI for overbought/oversold conditions
+    delta = pd.Series(df_1d['close']).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
     # Calculate daily volume and its 20-period average
     volume_1d = df_1d['volume'].values
     volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all data to 12-hour timeframe (2 periods per day)
+    # Align all data to 4-hour timeframe
     donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_values)
     volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
     signals = np.zeros(n)
@@ -50,42 +52,44 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any required data is not ready
         if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
+            np.isnan(rsi_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current 12h volume > 1.8x daily volume MA (adjusted for 12h)
-        # 2 12h periods per day, so daily MA/2 = approximate 12h period MA
-        volume_12h_approx_ma = volume_ma_20_1d_aligned[i] / 2
-        volume_condition = volume[i] > (volume_12h_approx_ma * 1.8)
+        # Volume condition: current 4h volume > 1.5x daily volume MA (adjusted for 4h)
+        # 6 4h periods per day, so daily MA/6 = approximate 4h period MA
+        volume_4h_approx_ma = volume_ma_20_1d_aligned[i] / 6
+        volume_condition = volume[i] > (volume_4h_approx_ma * 1.5)
         
-        # Trend filter: weekly EMA20 direction
-        long_trend = close[i] > ema_20_1w_aligned[i]
-        short_trend = close[i] < ema_20_1w_aligned[i]
+        # RSI conditions: avoid extreme overbought/oversold
+        rsi_not_overbought = rsi_aligned[i] < 70
+        rsi_not_oversold = rsi_aligned[i] > 30
         
-        # Entry conditions: Donchian breakout with volume and trend confirmation
+        # Entry conditions: Donchian breakout with volume and RSI filter
+        # Long when price breaks above Donchian high with volume and not overbought
+        # Short when price breaks below Donchian low with volume and not oversold
         breakout_long = close[i] > donchian_high_aligned[i]
         breakout_short = close[i] < donchian_low_aligned[i]
         
         if position == 0:
-            if breakout_long and volume_condition and long_trend:
+            if breakout_long and volume_condition and rsi_not_overbought:
                 position = 1
                 signals[i] = position_size
-            elif breakout_short and volume_condition and short_trend:
+            elif breakout_short and volume_condition and rsi_not_oversold:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit when price breaks below Donchian low or shows reversal
-            if close[i] < donchian_low_aligned[i]:
+            # Exit when price breaks below Donchian low or RSI becomes overbought
+            if close[i] < donchian_low_aligned[i] or rsi_aligned[i] >= 70:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit when price breaks above Donchian high or shows reversal
-            if close[i] > donchian_high_aligned[i]:
+            # Exit when price breaks above Donchian high or RSI becomes oversold
+            if close[i] > donchian_high_aligned[i] or rsi_aligned[i] <= 30:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -93,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d1w_Donchian_Breakout_Volume_Trend_Filter_v1"
-timeframe = "12h"
+name = "4h_1d_Donchian_Breakout_Volume_RSI_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
