@@ -8,12 +8,12 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Williams %R extreme with 1w EMA200 trend filter and volume confirmation
-    # Long: Williams %R(14) < -80 (oversold) AND price > weekly EMA200 (bullish trend) AND volume > 1.5x avg
-    # Short: Williams %R(14) > -20 (overbought) AND price < weekly EMA200 (bearish trend) AND volume > 1.5x avg
-    # Exit: Williams %R returns to -50 level (mean reversion) OR opposite extreme
-    # Using 6h timeframe for optimal trade frequency (target 12-37/year), Williams %R for momentum extremes,
-    # weekly EMA200 for major trend filter, and volume confirmation to avoid false signals.
+    # Hypothesis: 12h Camarilla H3/L3 breakout with 1d ADX regime filter and volume confirmation
+    # Long: price breaks above H3 AND ADX(14) > 25 (trending) AND volume > 1.5x avg
+    # Short: price breaks below L3 AND ADX(14) > 25 (trending) AND volume > 1.5x avg
+    # Exit: price touches H4 (for longs) or L4 (for shorts) OR opposite Camarilla level touch
+    # Using 12h timeframe for optimal trade frequency (target 12-37/year), Camarilla levels for intraday structure,
+    # ADX to filter ranging markets, and volume confirmation to avoid false breakouts.
     # Discrete position sizing (0.25) to minimize fee churn.
     
     close = prices['close'].values
@@ -21,33 +21,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for EMA200 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
+    # Get daily data for ADX regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA200
-    close_1w = df_1w['close'].values
-    ema_200 = np.full_like(close_1w, np.nan)
-    multiplier = 2.0 / (200 + 1)
-    ema_200[0] = close_1w[0]
-    for i in range(1, len(close_1w)):
-        ema_200[i] = (close_1w[i] * multiplier) + (ema_200[i-1] * (1 - multiplier))
+    # Calculate daily ADX(14) for trend strength filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align weekly EMA200 to 6h
-    ema_200_aligned = align_htf_to_ltf(prices, df_1w, ema_200)
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Calculate 6h Williams %R(14)
-    williams_r = np.full(n, np.nan)
-    for i in range(13, n):
-        highest_high = np.max(high[i-13:i+1])
-        lowest_low = np.min(low[i-13:i+1])
-        if highest_high != lowest_low:
-            williams_r[i] = ((highest_high - close[i]) / (highest_high - lowest_low)) * -100
-        else:
-            williams_r[i] = -50  # neutral when no range
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
     
-    # Get 6h volume for confirmation (>1.5x 20-period average)
+    # Smoothed values (Wilder's smoothing)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(data[1:period])
+        # Subsequent values: smoothed = (prev * (period-1) + current) / period
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    tr14 = wilders_smoothing(tr, 14)
+    plus_dm14 = wilders_smoothing(plus_dm, 14)
+    minus_dm14 = wilders_smoothing(minus_dm, 14)
+    
+    # DI+ and DI-
+    plus_di14 = np.where(tr14 != 0, (plus_dm14 / tr14) * 100, 0)
+    minus_di14 = np.where(tr14 != 0, (minus_dm14 / tr14) * 100, 0)
+    
+    # DX and ADX
+    dx = np.where((plus_di14 + minus_di14) != 0, 
+                  np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14) * 100, 0)
+    adx = wilders_smoothing(dx, 14)
+    
+    # Align daily ADX to 12h
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate 12h Camarilla levels (based on previous day's OHLC)
+    # We need to get daily OHLC and align it to 12h bars
+    df_1d_ohlc = get_htf_data(prices, '1d')
+    if len(df_1d_ohlc) < 2:
+        return np.zeros(n)
+    
+    # Previous day's OHLC for Camarilla calculation
+    prev_close = df_1d_ohlc['close'].shift(1).values
+    prev_high = df_1d_ohlc['high'].shift(1).values
+    prev_low = df_1d_ohlc['low'].shift(1).values
+    
+    # Camarilla levels: H4, H3, H2, H1, L1, L2, L3, L4
+    # H4 = close + 1.5 * (high - low)
+    # H3 = close + 1.25 * (high - low)
+    # L3 = close - 1.25 * (high - low)
+    # L4 = close - 1.5 * (high - low)
+    camarilla_h3 = prev_close + 1.25 * (prev_high - prev_low)
+    camarilla_l3 = prev_close - 1.25 * (prev_high - prev_low)
+    camarilla_h4 = prev_close + 1.5 * (prev_high - prev_low)
+    camarilla_l4 = prev_close - 1.5 * (prev_high - prev_low)
+    
+    # Align Camarilla levels to 12h
+    h3_aligned = align_htf_to_ltf(prices, df_1d_ohlc, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d_ohlc, camarilla_l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d_ohlc, camarilla_h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d_ohlc, camarilla_l4)
+    
+    # Get 12h volume for confirmation (>1.5x 20-period average)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -58,26 +112,31 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema_200_aligned[i]) or np.isnan(williams_r[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to weekly EMA200
-        bullish_trend = close[i] > ema_200_aligned[i]
-        bearish_trend = close[i] < ema_200_aligned[i]
+        # Regime filter: ADX > 25 indicates trending market
+        trending_market = adx_1d_aligned[i] > 25
         
-        # Williams %R extreme conditions
-        oversold = williams_r[i] < -80
-        overbought = williams_r[i] > -20
-        mean_reversion = abs(williams_r[i] + 50) < 10  # near -50 level
+        # Camarilla breakout conditions
+        breakout_h3 = close[i] > h3_aligned[i]
+        breakout_l3 = close[i] < l3_aligned[i]
         
-        # Entry logic: Williams %R extreme + trend filter + volume confirmation
-        long_entry = oversold and bullish_trend and volume_spike[i]
-        short_entry = overbought and bearish_trend and volume_spike[i]
+        # Exit conditions: touch H4/L4 or opposite level
+        touch_h4 = close[i] >= h4_aligned[i]
+        touch_l4 = close[i] <= l4_aligned[i]
+        touch_opposite_h3 = close[i] < h3_aligned[i] and position == 1  # Long exit on H3 retest
+        touch_opposite_l3 = close[i] > l3_aligned[i] and position == -1  # Short exit on L3 retest
         
-        # Exit logic: mean reversion or opposite extreme
-        long_exit = mean_reversion or overbought
-        short_exit = mean_reversion or oversold
+        # Entry logic: Camarilla breakout + trending market + volume confirmation
+        long_entry = breakout_h3 and trending_market and volume_spike[i]
+        short_entry = breakout_l3 and trending_market and volume_spike[i]
+        
+        # Exit logic: H4/L4 touch or opposite level retest
+        long_exit = touch_h4 or touch_opposite_l3
+        short_exit = touch_l4 or touch_opposite_h3
         
         if long_entry and position != 1:
             position = 1
@@ -102,6 +161,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_williamsr_extreme_ema200_volume_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_h3l3_breakout_adx_volume_v1"
+timeframe = "12h"
 leverage = 1.0
