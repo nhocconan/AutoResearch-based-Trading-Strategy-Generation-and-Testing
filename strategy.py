@@ -8,17 +8,17 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian(20) breakout with 1d weekly pivot direction filter and volume confirmation.
+    # Hypothesis: 4h Donchian(20) breakout with 12h volume confirmation and 1d weekly pivot bias.
     # Weekly pivot from 1d data provides institutional bias (bullish/bearish).
     # Donchian breakout captures momentum. Volume confirms participation.
-    # Target: 50-150 total trades over 4 years = 12-37/year.
+    # Target: 75-200 total trades over 4 years = 19-50/year.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for weekly pivot, Donchian, and volume (call ONCE before loop)
+    # Get 1d data for weekly pivot (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -39,20 +39,25 @@ def generate_signals(prices):
     # Weekly pivot bias: above pivot = bullish, below = bearish
     weekly_bias = 1 if weekly_close > weekly_pivot else -1
     
-    # Calculate 12h Donchian channels (20-period)
+    # Get 12h data for volume confirmation (call ONCE before loop)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    
+    # Calculate 12h volume MA(20) for confirmation
+    volume_12h = df_12h['volume'].values
+    volume_ma = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate 4h Donchian channels (20-period)
     donchian_window = 20
     donchian_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
     donchian_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     
-    # Calculate 1d volume MA(20) for confirmation
-    volume_1d = df_1d['volume'].values
-    volume_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align HTF indicators to 12h timeframe
+    # Align HTF indicators to 4h timeframe
     weekly_bias_aligned = align_htf_to_ltf(prices, df_1d, np.full_like(df_1d.index, weekly_bias, dtype=float))
     donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
+    volume_ma_aligned = align_htf_to_ltf(prices, df_12h, volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -64,7 +69,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 20-period MA
+        # Volume filter: current volume > 12h volume MA
         volume_filter = volume[i] > volume_ma_aligned[i]
         
         # Donchian breakout conditions
@@ -102,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_weekly_pivot_donchian_breakout_v1"
-timeframe = "12h"
+name = "4h_12h_1d_weekly_pivot_donchian_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
