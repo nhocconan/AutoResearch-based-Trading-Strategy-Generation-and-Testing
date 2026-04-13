@@ -8,49 +8,68 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian breakout with 1d ATR regime filter and volume confirmation.
-    # Donchian channels provide clear breakout levels in trending markets.
-    # 1d ATR ratio (short/long) identifies low volatility regimes for breakout trading.
-    # Volume spike confirms institutional participation.
+    # Hypothesis: 1d Camarilla pivot breakout with 1w trend filter and volume confirmation.
+    # Camarilla levels provide precise support/resistance in ranging markets.
+    # 1w EMA filter ensures we trade with the higher timeframe trend.
+    # Volume spike confirms breakout validity.
     # Discrete position sizing (0.0, ±0.25) minimizes fee churn.
-    # Target: 75-200 total trades over 4 years (19-50/year).
+    # Target: 30-100 total trades over 4 years (7-25/year).
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR regime filter (call ONCE before loop)
+    # Get 1d data for Camarilla pivot calculation (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d ATR(14) and ATR(50) for regime filter
+    # Calculate 1d Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range calculation
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Pivot point (PP)
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    # Range
+    rng = high_1d - low_1d
     
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    # Camarilla levels
+    # Resistance levels
+    r4 = pp + (rng * 1.1 / 2.0)
+    r3 = pp + (rng * 1.1 / 4.0)
+    r2 = pp + (rng * 1.1 / 6.0)
+    r1 = pp + (rng * 1.1 / 12.0)
+    # Support levels
+    s1 = pp - (rng * 1.1 / 12.0)
+    s2 = pp - (rng * 1.1 / 6.0)
+    s3 = pp - (rng * 1.1 / 4.0)
+    s4 = pp - (rng * 1.1 / 2.0)
     
-    # ATR ratio (short-term/long-term) - low values indicate low volatility regime
-    atr_ratio = atr_14 / atr_50
+    # Align Camarilla levels to 1d timeframe
+    r4_1d = align_htf_to_ltf(prices, df_1d, r4)
+    r3_1d = align_htf_to_ltf(prices, df_1d, r3)
+    r2_1d = align_htf_to_ltf(prices, df_1d, r2)
+    r1_1d = align_htf_to_ltf(prices, df_1d, r1)
+    s1_1d = align_htf_to_ltf(prices, df_1d, s1)
+    s2_1d = align_htf_to_ltf(prices, df_1d, s2)
+    s3_1d = align_htf_to_ltf(prices, df_1d, s3)
+    s4_1d = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Align ATR ratio to 4h timeframe
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # Get 1w data for EMA trend filter (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
     
-    # Calculate 4h Donchian channels (20-period)
-    donchian_period = 20
-    upper_channel = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    lower_channel = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    # Calculate 1w EMA(20) for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate 4h volume MA(20) for confirmation
+    # Align 1w EMA to 1d timeframe
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # Calculate 1d volume MA(20) for confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -58,25 +77,25 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(atr_ratio_aligned[i]) or np.isnan(upper_channel[i]) or 
-            np.isnan(lower_channel[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(r4_1d[i]) or np.isnan(s4_1d[i]) or 
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
-        
-        # Regime filter: ATR ratio < 0.8 (low volatility regime conducive to breakouts)
-        low_vol_regime = atr_ratio_aligned[i] < 0.8
         
         # Volume filter: current volume > 1.5 * 20-period MA
         volume_filter = volume[i] > 1.5 * volume_ma[i]
         
-        # Breakout conditions: price breaks Donchian channels with regime and volume confirmation
-        long_breakout = (close[i] > upper_channel[i-1]) and low_vol_regime and volume_filter
-        short_breakout = (close[i] < lower_channel[i-1]) and low_vol_regime and volume_filter
+        # Trend filter: price above/below 1w EMA(20)
+        uptrend = close[i] > ema_20_1w_aligned[i]
+        downtrend = close[i] < ema_20_1w_aligned[i]
         
-        # Exit conditions: price returns to midpoint of Donchian channel
-        midpoint = (upper_channel[i-1] + lower_channel[i-1]) / 2.0
-        long_exit = close[i] < midpoint
-        short_exit = close[i] > midpoint
+        # Breakout conditions: price breaks Camarilla levels with volume and trend confirmation
+        long_breakout = (close[i] > r4_1d[i-1]) and volume_filter and uptrend
+        short_breakout = (close[i] < s4_1d[i-1]) and volume_filter and downtrend
+        
+        # Exit conditions: price returns to opposite Camarilla level
+        long_exit = close[i] < s1_1d[i-1]
+        short_exit = close[i] > r1_1d[i-1]
         
         # Fixed position size (discrete levels to minimize fee churn)
         position_size = 0.25
@@ -106,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_breakout_atr_regime_volume_v1"
-timeframe = "4h"
+name = "1d_1w_camarilla_breakout_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
