@@ -8,13 +8,10 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Camarilla pivot breakout with volume confirmation and session filter
-    # Long: price breaks above H3 (resistance) AND volume > 1.5x 20-period average AND hour 8-20 UTC
-    # Short: price breaks below L3 (support) AND volume > 1.5x 20-period average AND hour 8-20 UTC
-    # Exit: price returns to PIVOT point or volume drops below average
-    # Using 4h/1d for signal direction (Camarilla pivots), 1h only for entry timing
-    # Session filter (08-20 UTC) to reduce noise trades
-    # Discrete position sizing (0.20) to minimize fee churn
+    # Hypothesis: 1h strategy using 4h Camarilla pivot breakouts with volume confirmation
+    # and 1d EMA50 trend filter. Trades only during 08-20 UTC session to avoid low-liquidity hours.
+    # Uses discrete position sizing (0.20) to minimize fee churn. Designed to work in both bull and bear
+    # markets by only taking trades in direction of higher timeframe trend (1d EMA50).
     
     close = prices['close'].values
     high = prices['high'].values
@@ -42,21 +39,19 @@ def generate_signals(prices):
     range_4h = high_4h - low_4h
     
     # Camarilla levels:
-    # H4 = C + RANGE * 1.1/2
     # H3 = C + RANGE * 1.1/4
     # L3 = C - RANGE * 1.1/4
-    # L4 = C - RANGE * 1.1/2
     h3_4h = close_4h + range_4h * 1.1 / 4
     l3_4h = close_4h - range_4h * 1.1 / 4
     
     # Align 4h Camarilla levels to 1h (wait for completed 4h bar)
     h3_4h_aligned = align_htf_to_ltf(prices, df_4h, h3_4h)
     l3_4h_aligned = align_htf_to_ltf(prices, df_4h, l3_4h)
+    pivot_4h_aligned = align_htf_to_ltf(prices, df_4h, pivot_4h)
     
-    # Get 1d data for trend filter (optional: only trade in direction of 1d EMA50)
+    # Get 1d data for trend filter (EMA50)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
-        # Fallback to just 4h if 1d not enough data
         ema_1d = np.full(len(close_4h), np.nan)
     else:
         close_1d = df_1d['close'].values
@@ -106,7 +101,6 @@ def generate_signals(prices):
         short_entry = (close[i] < l3_4h_aligned[i]) and vol_confirm and short_trend_ok
         
         # Exit logic: return to pivot or volume dry-up
-        pivot_4h_aligned = align_htf_to_ltf(prices, df_4h, pivot_4h)
         long_exit = (close[i] < pivot_4h_aligned[i]) or not vol_confirm
         short_exit = (close[i] > pivot_4h_aligned[i]) or not vol_confirm
         
