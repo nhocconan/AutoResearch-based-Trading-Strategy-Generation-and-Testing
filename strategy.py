@@ -5,116 +5,79 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1d KAMA direction + RSI(14) + 1w choppiness regime filter
-    # Designed for low trade frequency (7-25/year) to minimize fee drag
-    # Works in bull/bear markets: KAMA catches trend, RSI avoids extremes, chop filter avoids whipsaws
+    # Hypothesis: 6h Williams %R extreme reversals with 1d volume confirmation and 1d trend filter
+    # Designed for low trade frequency (12-37/year) to minimize fee drag
+    # Williams %R identifies overextended moves; volume confirms participation; 1d EMA50 filters trend direction
+    # Works in bull/bear markets by fading extremes at key daily levels with volume confirmation
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values if 'volume' in prices.columns else np.ones(len(prices))
     
-    # Get 1d data for KAMA and RSI
+    # Get 1d data for HTF Williams %R, volume, and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values if 'volume' in df_1d.columns else np.ones(len(df_1d))
     
-    # Calculate 1d KAMA (adaptive trend)
-    # Efficiency ratio
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.abs(np.diff(close_1d))
-    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # KAMA calculation
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Calculate 1d Williams %R (14-period)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14) * -100
+    # Avoid division by zero
+    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
     
-    # Calculate 1d RSI(14)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Get 1w data for choppiness regime
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Calculate 1d volume average (20-period)
+    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate 1w choppiness index
-    atr_1w = np.zeros_like(high_1w)
-    tr1 = np.abs(np.diff(high_1w, prepend=high_1w[0]))
-    tr2 = np.abs(np.diff(low_1w, prepend=low_1w[0]))
-    tr3 = np.abs(np.diff(close_1w, prepend=close_1w[0]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    max_high = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
-    
-    chop = np.divide(
-        atr_1w * np.sqrt(14),
-        np.maximum(max_high - min_low, 1e-10),
-        out=np.zeros_like(atr_1w),
-        where=(max_high - min_low)!=0
-    )
-    chop *= 100
-    
-    # Align all HTF indicators to 1d primary timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
+    # Align all HTF indicators to 6h primary timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(kama_aligned[i]) or 
-            np.isnan(rsi_aligned[i]) or
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or
+            np.isnan(vol_avg_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend direction: price relative to KAMA
-        above_kama = close[i] > kama_aligned[i]
-        below_kama = close[i] < kama_aligned[i]
+        # Volume confirmation: current 1d volume > 1.5x 20-period average
+        volume_confirmed = volume_1d[i] > 1.5 * vol_avg_20_1d_aligned[i]
         
-        # RSI conditions: avoid extremes, look for mean reversion
-        rsi_not_overbought = rsi_aligned[i] < 70
-        rsi_not_oversold = rsi_aligned[i] > 30
-        rsi_bullish = rsi_aligned[i] > 50
-        rsi_bearish = rsi_aligned[i] < 50
+        # Williams %R extreme conditions (oversold/overbought)
+        williams_oversold = williams_r_aligned[i] < -80  # Oversold -> potential long
+        williams_overbought = williams_r_aligned[i] > -20  # Overbought -> potential short
         
-        # Choppiness regime: CHOP > 61.8 = range (mean revert), CHOP < 38.2 = trending (trend follow)
-        chop_high = chop_aligned[i] > 61.8  # ranging market
-        chop_low = chop_aligned[i] < 38.2   # trending market
+        # Trend filter: only trade in direction of 1d EMA50
+        # For long: price above EMA50; for short: price below EMA50
+        trend_filter_long = close[i] > ema50_1d_aligned[i]
+        trend_filter_short = close[i] < ema50_1d_aligned[i]
         
         # Entry conditions
-        # Long: price above KAMA (uptrend) + RSI not overbought + in ranging market (mean reversion)
-        enter_long = above_kama and rsi_not_overbought and chop_high and rsi_bullish
-        # Short: price below KAMA (downtrend) + RSI not oversold + in ranging market (mean reversion)
-        enter_short = below_kama and rsi_not_oversold and chop_high and rsi_bearish
+        enter_long = williams_oversold and volume_confirmed and trend_filter_long
+        enter_short = williams_overbought and volume_confirmed and trend_filter_short
         
-        # Exit conditions: opposite signal or RSI extreme
-        exit_long = (below_kama or rsi_aligned[i] >= 70) and position == 1
-        exit_short = (above_kama or rsi_aligned[i] <= 30) and position == -1
+        # Exit conditions: Williams %R returns to neutral territory (-50 level)
+        exit_long = position == 1 and williams_r_aligned[i] >= -50
+        exit_short = position == -1 and williams_r_aligned[i] <= -50
         
         # Execute signals
         if enter_long and position != 1:
@@ -140,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_kama_rsi_chop_regime_v1"
-timeframe = "1d"
+name = "6h_1d_williamsr_extreme_volume_trend_v1"
+timeframe = "6h"
 leverage = 1.0
