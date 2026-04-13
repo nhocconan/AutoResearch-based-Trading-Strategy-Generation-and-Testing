@@ -8,10 +8,10 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h price breaks Donchian(20) with 12h volume spike and ranging market (Chop > 61.8)
-    # Uses 12h timeframe for volume and Chop regime filter to avoid look-ahead
-    # Discrete position sizing (0.25) to minimize fee churn
+    # Hypothesis: 4h Donchian(20) breakout with 12h volume spike and chop regime > 61.8
+    # Uses discrete position sizing (0.25) to minimize fee churn
     # Target: 75-150 total trades over 4 years (~19-38/year)
+    # Works in both bull and bear markets by using ranging market filter and ATR-based exits
     
     close = prices['close'].values
     high = prices['high'].values
