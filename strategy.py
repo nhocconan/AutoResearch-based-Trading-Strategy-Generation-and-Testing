@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Breakout_40726
-Hypothesis: Uses daily Camarilla levels (H4/L4) on 4h timeframe with volume confirmation and ADX regime filter.
-Enters long when 4h close > daily H4 and volume > 1.5x 20-period volume average and ADX > 20.
-Enters short when 4h close < daily L4 and volume > 1.5x 20-period volume average and ADX > 20.
-Exits when price returns to prior 4h close or ADX < 15 (trend weakening).
-Designed for 4h timeframe to target 20-50 trades/year (80-200 total over 4 years).
-Works in both bull and bear markets by requiring volume expansion on breakouts and trend presence via ADX.
+1d_1w_RSI_Pullback_with_Volume_Confirmation
+Hypothesis: On daily timeframe, enter long when RSI(14) crosses above 30 from below (bullish momentum in uptrend)
+with volume > 1.5x 20-day average, and price above 200-day EMA (trend filter). Enter short when RSI crosses below 70
+from above with volume expansion and price below 200-day EMA. Uses weekly trend filter: only take longs when
+weekly close > weekly 50 EMA, shorts when weekly close < weekly 50 EMA. Designed for 1d timeframe to target
+15-25 trades/year (60-100 total over 4 years). Works in bull markets via RSI pullback longs and in bear markets
+via RSI rejection shorts, both requiring volume confirmation and trend alignment.
 """
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,87 +23,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels and ADX
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Daily indicators
+    close_series = pd.Series(close)
+    rsi_period = 14
+    delta = close_series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/rsi_period, min_periods=rsi_period).mean()
+    avg_loss = loss.ewm(alpha=1/rsi_period, min_periods=rsi_period).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
+    
+    ema200 = close_series.ewm(span=200, min_periods=200).mean().values
+    
+    vol_ma_20 = close_series.rolling(window=20, min_periods=20).apply(lambda x: np.mean(x), raw=True).values
+    # Actually compute volume MA correctly
+    vol_series = pd.Series(volume)
+    vol_ma_20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    
+    # Weekly trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    weekly_close = df_1w['close'].values
+    weekly_ema50 = pd.Series(weekly_close).ewm(span=50, min_periods=50).mean().values
     
-    # Calculate Camarilla pivot levels for previous daily bar
-    hl_range = high_1d - low_1d
-    H4 = close_1d + 1.125 * hl_range
-    L4 = close_1d - 1.125 * hl_range
-    
-    # Calculate 20-period volume average on daily
-    vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate ADX(14) on daily
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(0, high[i] - high[i-1])
-            minus_dm[i] = max(0, low[i-1] - low[i])
-            if plus_dm[i] < minus_dm[i]:
-                plus_dm[i] = 0
-            if minus_dm[i] < plus_dm[i]:
-                minus_dm[i] = 0
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        atr = np.zeros_like(high)
-        atr[period-1] = np.mean(tr[1:period+1]) if period+1 <= len(tr) else np.mean(tr[1:])
-        for i in range(period, len(tr)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        
-        plus_di = 100 * pd.Series(plus_dm).rolling(window=period, min_periods=period).sum().values / (atr * period)
-        minus_di = 100 * pd.Series(minus_dm).rolling(window=period, min_periods=period).sum().values / (atr * period)
-        dx = np.zeros_like(high)
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-        adx = pd.Series(dx).rolling(window=period, min_periods=period).mean().values
-        return adx
-    
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    
-    # Align all signals to 4h timeframe
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Align weekly EMA50 to daily
+    weekly_ema50_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema50)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% of capital
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if data not ready
-        if (np.isnan(H4_aligned[i]) or 
-            np.isnan(L4_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i]) or 
-            np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(rsi_values[i]) or 
+            np.isnan(ema200[i]) or 
+            np.isnan(vol_ma_20[i]) or 
+            np.isnan(weekly_ema50_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x daily volume MA
-        volume_expansion = volume[i] > (vol_ma_20_1d_aligned[i] * 1.5)
+        # Volume confirmation: current daily volume > 1.5x 20-day average
+        volume_expansion = volume[i] > (vol_ma_20[i] * 1.5)
         
-        # Regime filter: ADX > 20 for trend presence
-        strong_trend = adx_1d_aligned[i] > 20
-        weak_trend = adx_1d_aligned[i] < 15
+        # RSI crossover conditions
+        rsi_now = rsi_values[i]
+        rsi_prev = rsi_values[i-1]
+        rsi_long_signal = (rsi_now > 30) and (rsi_prev <= 30)  # Cross above 30
+        rsi_short_signal = (rsi_now < 70) and (rsi_prev >= 70)  # Cross below 70
         
-        # Entry conditions: price CLOSES beyond H4/L4 with volume expansion and strong trend
-        long_entry = (close[i] > H4_aligned[i]) and volume_expansion and strong_trend
-        short_entry = (close[i] < L4_aligned[i]) and volume_expansion and strong_trend
+        # Trend filters
+        price_above_ema200 = close[i] > ema200[i]
+        price_below_ema200 = close[i] < ema200[i]
+        weekly_uptrend = weekly_ema50_aligned[i] > weekly_ema50_aligned[i-1]  # Weekly EMA50 rising
+        weekly_downtrend = weekly_ema50_aligned[i] < weekly_ema50_aligned[i-1]  # Weekly EMA50 falling
         
-        # Exit conditions: return to prior 4h close OR trend weakening
-        prev_close = np.roll(close, 1)
-        prev_close[0] = close[0]
-        exit_long = position == 1 and (close[i] <= prev_close[i] or weak_trend)
-        exit_short = position == -1 and (close[i] >= prev_close[i] or weak_trend)
+        # Entry conditions
+        long_entry = rsi_long_signal and volume_expansion and price_above_ema200 and weekly_uptrend
+        short_entry = rsi_short_signal and volume_expansion and price_below_ema200 and weekly_downtrend
+        
+        # Exit conditions: reverse signal or RSI midpoint crossover
+        exit_long = position == 1 and (rsi_now < 50 or rsi_short_signal)
+        exit_short = position == -1 and (rsi_now > 50 or rsi_long_signal)
         
         # Execute signals
         if long_entry and position != 1:
@@ -126,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_Breakout_40726"
-timeframe = "4h"
+name = "1d_1w_RSI_Pullback_with_Volume_Confirmation"
+timeframe = "1d"
 leverage = 1.0
