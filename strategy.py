@@ -1,9 +1,11 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-1d_1w_Ichimoku_Bullish_Trend_Following
-Hypothesis: Ichimoku Cloud on daily chart with weekly trend filter captures major trends.
-Price above/below Cloud + weekly Senkou Span filter gives high-probability trend trades.
-Works in bull (trend following) and bear (short when price below Cloud + weekly filter).
+12h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation
+Hypothesis: Daily Camarilla pivot levels (S3/R3) provide strong support/resistance.
+Breakouts above R3 or below S3 on 12h chart with volume expansion capture institutional moves.
+Adds volume confirmation to reduce false breakouts. Works in both bull and bear markets
+by trading breakouts regardless of direction. Target: 15-25 trades/year per symbol.
 """
 
 import numpy as np
@@ -12,73 +14,65 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 52:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 52:
+    # Get daily data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    high_9 = pd.Series(high).rolling(window=9, min_periods=9).mean()
-    low_9 = pd.Series(low).rolling(window=9, min_periods=9).mean()
-    tenkan = (high_9 + low_9) / 2
+    # Calculate Camarilla levels for each daily bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    high_26 = pd.Series(high).rolling(window=26, min_periods=26).mean()
-    low_26 = pd.Series(low).rolling(window=26, min_periods=26).mean()
-    kijun = (high_26 + low_26) / 2
+    # Camarilla formulas
+    close_prev = np.roll(close_1d, 1)
+    close_prev[0] = close_1d[0]  # first bar uses its own close
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods
-    senkou_a = ((tenkan + kijun) / 2)
+    range_1d = high_1d - low_1d
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 52 periods
-    high_52 = pd.Series(high).rolling(window=52, min_periods=52).mean()
-    low_52 = pd.Series(low).rolling(window=52, min_periods=52).mean()
-    senkou_b = ((high_52 + low_52) / 2)
+    # Resistance levels (R3 used)
+    R3 = close_prev + (range_1d * 1.2500 / 4)
     
-    # Get weekly Senkou Span B for trend filter
-    high_52_w = pd.Series(df_1w['high']).rolling(window=52, min_periods=52).mean()
-    low_52_w = pd.Series(df_1w['low']).rolling(window=52, min_periods=52).mean()
-    senkou_b_w = ((high_52_w + low_52_w) / 2).values
-    senkou_b_w_aligned = align_htf_to_ltf(prices, df_1w, senkou_b_w)
+    # Support levels (S3 used)
+    S3 = close_prev - (range_1d * 1.2500 / 4)
+    
+    # Align levels to 12h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volume_expansion = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25
     
-    for i in range(52, n):
+    for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(tenkan.iloc[i]) or np.isnan(kijun.iloc[i]) or 
-            np.isnan(senkou_a.iloc[i]) or np.isnan(senkou_b.iloc[i]) or
-            np.isnan(senkou_b_w_aligned[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Cloud top and bottom
-        cloud_top = max(senkou_a.iloc[i], senkou_b.iloc[i])
-        cloud_bottom = min(senkou_a.iloc[i], senkou_b.iloc[i])
+        # Long breakout: price breaks above R3 with volume expansion
+        long_breakout = close[i] > R3_aligned[i] and volume_expansion[i]
         
-        # Weekly trend filter: price relative to weekly Senkou B
-        weekly_uptrend = close[i] > senkou_b_w_aligned[i]
-        weekly_downtrend = close[i] < senkou_b_w_aligned[i]
+        # Short breakdown: price breaks below S3 with volume expansion
+        short_breakout = close[i] < S3_aligned[i] and volume_expansion[i]
         
-        # Long signal: price above Cloud + weekly uptrend
-        long_signal = (close[i] > cloud_top) and weekly_uptrend
-        
-        # Short signal: price below Cloud + weekly downtrend
-        short_signal = (close[i] < cloud_bottom) and weekly_downtrend
-        
-        if long_signal and position != 1:
+        if long_breakout and position != 1:
             position = 1
             signals[i] = position_size
-        elif short_signal and position != -1:
+        elif short_breakout and position != -1:
             position = -1
             signals[i] = -position_size
         else:
@@ -87,6 +81,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_Ichimoku_Bullish_Trend_Following"
-timeframe = "1d"
+name = "12h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation"
+timeframe = "12h"
 leverage = 1.0
