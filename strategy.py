@@ -34,14 +34,20 @@ def generate_signals(prices):
     tr[0] = high_low[0]  # first value
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().shift(1).values
     
+    # 12h trend filter (EMA50)
+    df_12h = get_htf_data(prices, '12h')
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25
     
-    start = max(20, 200, 14)
+    start = max(20, 200, 14, 50)
     for i in range(start, n):
         if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(avg_vol[i]) or np.isnan(ema_200_1d[i]) or np.isnan(atr[i])):
+            np.isnan(avg_vol[i]) or np.isnan(ema_200_1d[i]) or 
+            np.isnan(atr[i]) or np.isnan(ema_50_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -49,12 +55,14 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long: breakout above upper band + volume confirmation + price above EMA200
-            if (price > upper[i] and vol > 2.0 * avg_vol[i] and price > ema_200_1d[i]):
+            # Long: breakout above upper band + volume confirmation + price above EMA200 + 12h uptrend
+            if (price > upper[i] and vol > 2.0 * avg_vol[i] and 
+                price > ema_200_1d[i] and ema_50_12h_aligned[i] > ema_50_12h_aligned[i-1]):
                 position = 1
                 signals[i] = position_size
-            # Short: breakout below lower band + volume confirmation + price below EMA200
-            elif (price < lower[i] and vol > 2.0 * avg_vol[i] and price < ema_200_1d[i]):
+            # Short: breakout below lower band + volume confirmation + price below EMA200 + 12h downtrend
+            elif (price < lower[i] and vol > 2.0 * avg_vol[i] and 
+                  price < ema_200_1d[i] and ema_50_12h_aligned[i] < ema_50_12h_aligned[i-1]):
                 position = -1
                 signals[i] = -position_size
             else:
@@ -85,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Donchian_Volume_EMA200Trend_ATR"
-timeframe = "12h"
+name = "4h_1d_Donchian_Volume_EMA200Trend_12hEMA50"
+timeframe = "4h"
 leverage = 1.0
