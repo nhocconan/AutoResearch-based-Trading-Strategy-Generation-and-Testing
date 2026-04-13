@@ -3,19 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# 12h_1w1d_Camarilla_Pivot_Breakout_With_Volume_Confirmation_v2
-# Hypothesis: 12h price breaks above/below weekly or daily Camarilla R4/S4 levels with volume > 2.0x 20-period average.
-# Use the tighter (more restrictive) of weekly/daily levels to reduce false breakouts.
-# Long when price breaks above min(weekly_R4, daily_R4) + volume condition.
-# Short when price breaks below max(weekly_S4, daily_S4) + volume condition.
-# Exit when price crosses weekly/daily pivot point (average of weekly PP and daily PP).
-# Position size: 0.25 (25%).
-# Designed for 12h timeframe to target 12-37 trades/year with volume confirmation reducing false signals.
-# Expected to work in both bull (breakouts) and bear (fades from extremes) markets.
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,135 +13,117 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for Camarilla levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Daily data for Camarilla levels
+    # Daily data for KAMA and RSI
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Previous week's values for weekly calculation
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    vol_1w = df_1w['volume'].values
-    
-    prev_high_1w = np.roll(high_1w, 1)
-    prev_low_1w = np.roll(low_1w, 1)
-    prev_close_1w = np.roll(close_1w, 1)
-    prev_high_1w[0] = high_1w[0]
-    prev_low_1w[0] = low_1w[0]
-    prev_close_1w[0] = close_1w[0]
-    
-    # Previous day's values for daily calculation
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    vol_1d = df_1d['volume'].values
     
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d[0] = high_1d[0]
-    prev_low_1d[0] = low_1d[0]
-    prev_close_1d[0] = close_1d[0]
+    # KAMA calculation (Kaufman Adaptive Moving Average)
+    # Efficiency Ratio (ER) = abs(close - close[10]) / sum(abs(close - close[1])) over 10 periods
+    change = np.abs(np.subtract(close_1d[10:], close_1d[:-10]))
+    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0) if len(close_1d) > 1 else 0
+    # Proper ER calculation for each point
+    er = np.zeros_like(close_1d)
+    for i in range(10, len(close_1d)):
+        price_change = np.abs(close_1d[i] - close_1d[i-10])
+        price_volatility = np.sum(np.abs(np.diff(close_1d[i-9:i+1])))
+        er[i] = price_change / price_volatility if price_volatility > 0 else 0
+    er[:10] = 0
     
-    # Weekly VWAP approximation
-    typical_price_1w = (high_1w + low_1w + close_1w) / 3
-    vwap_num_1w = np.cumsum(typical_price_1w * vol_1w)
-    vwap_den_1w = np.cumsum(vol_1w)
-    vwap_1w = np.where(vwap_den_1w != 0, vwap_num_1w / vwap_den_1w, typical_price_1w)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)  # EMA(2)
+    slow_sc = 2 / (30 + 1) # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # Daily VWAP approximation
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3
-    vwap_num_1d = np.cumsum(typical_price_1d * vol_1d)
-    vwap_den_1d = np.cumsum(vol_1d)
-    vwap_1d = np.where(vwap_den_1d != 0, vwap_num_1d / vwap_den_1d, typical_price_1d)
+    # KAMA calculation
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # Weekly Camarilla calculation
-    range_1w = prev_high_1w - prev_low_1w
-    camarilla_pp_1w = (prev_high_1w + prev_low_1w + prev_close_1w) / 3
-    camarilla_r4_1w = camarilla_pp_1w + (range_1w * 1.1 / 2)
-    camarilla_s4_1w = camarilla_pp_1w - (range_1w * 1.1 / 2)
+    # RSI calculation (14-period)
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Daily Camarilla calculation
-    range_1d = prev_high_1d - prev_low_1d
-    camarilla_pp_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
-    camarilla_r4_1d = camarilla_pp_1d + (range_1d * 1.1 / 2)
-    camarilla_s4_1d = camarilla_pp_1d - (range_1d * 1.1 / 2)
+    avg_gain = np.zeros_like(close_1d)
+    avg_loss = np.zeros_like(close_1d)
     
-    # Align weekly data to 12h
-    camarilla_pp_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_pp_1w)
-    camarilla_r4_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4_1w)
-    camarilla_s4_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4_1w)
-    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
-    vol_ma_20_1w = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean()
-    vol_ma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20_1w.values)
+    # Wilder's smoothing
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
     
-    # Align daily data to 12h
-    camarilla_pp_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp_1d)
-    camarilla_r4_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4_1d)
-    camarilla_s4_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4_1d)
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
-    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean()
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d.values)
+    for i in range(14, len(close_1d)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Combined levels: use tighter (more restrictive) levels
-    # For resistance: use the lower of weekly/daily R4 (harder to break)
-    camarilla_r4_combined = np.minimum(camarilla_r4_1w_aligned, camarilla_r4_1d_aligned)
-    # For support: use the higher of weekly/daily S4 (harder to break)
-    camarilla_s4_combined = np.maximum(camarilla_s4_1w_aligned, camarilla_s4_1d_aligned)
-    # Pivot: average of weekly and daily PP
-    camarilla_pp_combined = (camarilla_pp_1w_aligned + camarilla_pp_1d_aligned) / 2.0
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Volume condition: use the stronger of weekly/daily volume confirmation
-    vol_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_1w)
-    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
-    vol_condition_1w = vol_1w_aligned > (vol_ma_20_1w_aligned * 2.0)
-    vol_condition_1d = vol_1d_aligned > (vol_ma_20_1d_aligned * 2.0)
-    vol_condition = vol_condition_1w | vol_condition_1d  # Either timeframe confirms
+    # Weekly trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    sma_20_1w = np.convolve(close_1w, np.ones(20)/20, mode='same')
+    # Handle edges
+    sma_20_1w[:10] = close_1w[:10].mean() if len(close_1w) >= 10 else close_1w[0]
+    sma_20_1w[-10:] = close_1w[-10:].mean() if len(close_1w) >= 10 else close_1w[-1]
+    
+    # Align indicators to lower timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    sma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_20_1w)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(100, n):
+    for i in range(30, n):
         # Skip if any required data is not ready
-        if (np.isnan(camarilla_pp_combined[i]) or np.isnan(camarilla_r4_combined[i]) or
-            np.isnan(camarilla_s4_combined[i]) or np.isnan(vwap_1w_aligned[i]) or
-            np.isnan(vwap_1d_aligned[i]) or np.isnan(vol_ma_20_1w_aligned[i]) or
-            np.isnan(vol_ma_20_1d_aligned[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(sma_20_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Breakout conditions
-        long_breakout = close[i] > camarilla_r4_combined[i]
-        short_breakout = close[i] < camarilla_s4_combined[i]
+        # KAMA direction: price above KAMA = uptrend, below = downtrend
+        kama_up = close[i] > kama_aligned[i]
+        kama_down = close[i] < kama_aligned[i]
         
-        # Exit condition
-        long_exit = close[i] < camarilla_pp_combined[i]
-        short_exit = close[i] > camarilla_pp_combined[i]
+        # RSI conditions: avoid extremes, look for momentum
+        rsi_not_overbought = rsi_aligned[i] < 70
+        rsi_not_oversold = rsi_aligned[i] > 30
+        rsi_bullish = rsi_aligned[i] > 50
+        rsi_bearish = rsi_aligned[i] < 50
+        
+        # Weekly trend filter: only trade in direction of weekly trend
+        weekly_uptrend = close[i] > sma_20_1w_aligned[i]
+        weekly_downtrend = close[i] < sma_20_1w_aligned[i]
         
         if position == 0:
-            if long_breakout and vol_condition[i]:
+            # Long: price above KAMA + RSI bullish + weekly uptrend
+            if kama_up and rsi_bullish and weekly_uptrend:
                 position = 1
                 signals[i] = position_size
-            elif short_breakout and vol_condition[i]:
+            # Short: price below KAMA + RSI bearish + weekly downtrend
+            elif kama_down and rsi_bearish and weekly_downtrend:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            if long_exit:
+            # Exit long: price below KAMA or RSI turns bearish
+            if not kama_up or not rsi_bullish:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            if short_exit:
+            # Exit short: price above KAMA or RSI turns bullish
+            if not kama_down or not rsi_bearish:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -159,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1w1d_Camarilla_Pivot_Breakout_With_Volume_Confirmation_v2"
-timeframe = "12h"
+name = "1d_1w_KAMA_RSI_WeeklyTrend"
+timeframe = "1d"
 leverage = 1.0
