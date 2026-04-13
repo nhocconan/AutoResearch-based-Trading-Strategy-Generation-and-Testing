@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_12h_1d_RSI_Confluence_V2
-Hypothesis: Long when price > 12h EMA20 and 1d RSI < 30 (oversold), short when price < 12h EMA20 and 1d RSI > 70 (overbought).
-Uses 12h EMA for trend filter and 1d RSI for mean reversion extremes. Works in bull (buy oversold in uptrend) and bear (sell overbought in downtrend).
-Target: 15-25 trades/year per symbol.
+4h_1d_Volume_Pullback_Strategy
+Hypothesis: Buy pullbacks to 1-day VWAP in strong uptrends, sell rallies to VWAP in strong downtrends.
+Trades with institutional flow using volume-weighted average price as dynamic support/resistance.
+Works in bull markets (buy dips to VWAP in uptrends) and bear markets (sell rallies to VWAP in downtrends).
+Uses 4-hour trend alignment with 1-day VWAP for institutional-grade entries. Target: 20-30 trades/year.
 """
 
 import numpy as np
@@ -12,50 +13,55 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 12h data for EMA20
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
-    
-    # Get 1d data for RSI
+    # Get 1d data for VWAP calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    delta = pd.Series(close_1d).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d = rsi_1d.values
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Calculate 1-day VWAP: typical price * volume / cumulative volume
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
+    vwap_1d = (typical_price * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    vwap_1d = vwap_1d.replace(0, np.nan).ffill().bfill().fillna(typical_price.iloc[0]).values
+    
+    # Align 1-day VWAP to 4h timeframe
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    
+    # 4h trend: 20-period EMA
+    close_s = pd.Series(close)
+    ema_20 = close_s.ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volume_filter = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25
     
-    for i in range(50, n):
-        if np.isnan(ema_12h_aligned[i]) or np.isnan(rsi_1d_aligned[i]):
+    for i in range(100, n):
+        # Skip if any required data is not ready
+        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(ema_20[i]) or 
+            np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
-        # Long: price above 12h EMA20 AND 1d RSI oversold (<30)
-        long_condition = (close[i] > ema_12h_aligned[i]) and (rsi_1d_aligned[i] < 30)
+        # Long: price pulls back to VWAP in uptrend (price above EMA20)
+        long_condition = (close[i] >= vwap_1d_aligned[i] * 0.998) and \
+                         (close[i] <= vwap_1d_aligned[i] * 1.002) and \
+                         (close[i] > ema_20[i]) and volume_filter[i]
         
-        # Short: price below 12h EMA20 AND 1d RSI overbought (>70)
-        short_condition = (close[i] < ema_12h_aligned[i]) and (rsi_1d_aligned[i] > 70)
+        # Short: price rallies to VWAP in downtrend (price below EMA20)
+        short_condition = (close[i] >= vwap_1d_aligned[i] * 0.998) and \
+                          (close[i] <= vwap_1d_aligned[i] * 1.002) and \
+                          (close[i] < ema_20[i]) and volume_filter[i]
         
         if long_condition and position != 1:
             position = 1
@@ -69,6 +75,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_1d_RSI_Confluence_V2"
-timeframe = "6h"
+name = "4h_1d_Volume_Pullback_Strategy"
+timeframe = "4h"
 leverage = 1.0
