@@ -1,4 +1,6 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -13,23 +15,23 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h Donchian bands (20-period) using previous bar's high/low
+    # 1d Donchian bands (20-period) using previous bar's high/low
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
     lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    # 4h average volume (20-period) previous bar
+    # 1d average volume (20-period) previous bar
     vol_series = pd.Series(volume)
     avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
-    # 12h EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # 1w EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     signals = np.zeros(n)
     position = 0  # -1 short, 0 flat, 1 long
@@ -40,7 +42,7 @@ def generate_signals(prices):
     for i in range(start, n):
         # Skip if any required data is not ready
         if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(avg_vol[i]) or np.isnan(ema_12h_aligned[i])):
+            np.isnan(avg_vol[i]) or np.isnan(ema_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -48,26 +50,26 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long: breakout above upper band + volume confirmation + price above 12h EMA
-            if (price > upper[i] and vol > 1.5 * avg_vol[i] and price > ema_12h_aligned[i]):
+            # Long: breakout above upper band + volume confirmation + price above 1w EMA
+            if (price > upper[i] and vol > 1.5 * avg_vol[i] and price > ema_1w_aligned[i]):
                 position = 1
                 signals[i] = position_size
-            # Short: breakout below lower band + volume confirmation + price below 12h EMA
-            elif (price < lower[i] and vol > 1.5 * avg_vol[i] and price < ema_12h_aligned[i]):
+            # Short: breakout below lower band + volume confirmation + price below 1w EMA
+            elif (price < lower[i] and vol > 1.5 * avg_vol[i] and price < ema_1w_aligned[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below lower band OR below 12h EMA
-            if price < lower[i] or price < ema_12h_aligned[i]:
+            # Exit long: price closes below lower band OR below 1w EMA
+            if price < lower[i] or price < ema_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes above upper band OR above 12h EMA
-            if price > upper[i] or price > ema_12h_aligned[i]:
+            # Exit short: price closes above upper band OR above 1w EMA
+            if price > upper[i] or price > ema_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -75,6 +77,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_Donchian_Volume_EMATrend"
-timeframe = "4h"
+name = "1d_1w_Donchian_Volume_EMA"
+timeframe = "1d"
 leverage = 1.0
