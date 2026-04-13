@@ -24,22 +24,18 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Calculate daily Camarilla pivot levels (using previous day's data)
-    # Pivot levels are calculated from previous day's OHLC
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     
-    # Camarilla levels
     pivot = (prev_high + prev_low + prev_close) / 3
     range_hl = prev_high - prev_low
     
-    # Resistance levels
     r1 = pivot + (range_hl * 1.1 / 12)
     r2 = pivot + (range_hl * 1.1 / 6)
     r3 = pivot + (range_hl * 1.1 / 4)
     r4 = pivot + (range_hl * 1.1 / 2)
     
-    # Support levels
     s1 = pivot - (range_hl * 1.1 / 12)
     s2 = pivot - (range_hl * 1.1 / 6)
     s3 = pivot - (range_hl * 1.1 / 4)
