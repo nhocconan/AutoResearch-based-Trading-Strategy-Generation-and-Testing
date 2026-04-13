@@ -1,4 +1,3 @@
-# This is the header for the solution.
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -6,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 300:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -14,20 +13,20 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d Donchian channels (20-period)
+    # 1d Donchian channels (20-period) - use previous bar's high/low
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
     lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    # 1d average volume (20-period)
+    # 1d average volume (20-period) - previous bar
     vol_series = pd.Series(volume)
     avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
     # 1d EMA200 trend filter
     ema_200_1d = pd.Series(close).ewm(span=200, min_periods=200, adjust=False).mean().values
     
-    # 1d ATR (14-period)
+    # 1d ATR (14-period) for stop-loss
     high_low = high - low
     high_close = np.abs(high - np.roll(close, 1))
     low_close = np.abs(low - np.roll(close, 1))
@@ -86,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_Donchian_Volume_EMA200Trend_ATR"
-timeframe = "1d"
+name = "4h_1d_Donchian_Volume_EMA200Trend_ATR"
+timeframe = "4h"
 leverage = 1.0
