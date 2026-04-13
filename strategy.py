@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_1w_RSI_Pullback_with_Volume_Confirmation
-Hypothesis: On daily timeframe, enter long when RSI(14) crosses above 30 from below (bullish momentum in uptrend)
-with volume > 1.5x 20-day average, and price above 200-day EMA (trend filter). Enter short when RSI crosses below 70
-from above with volume expansion and price below 200-day EMA. Uses weekly trend filter: only take longs when
-weekly close > weekly 50 EMA, shorts when weekly close < weekly 50 EMA. Designed for 1d timeframe to target
-15-25 trades/year (60-100 total over 4 years). Works in bull markets via RSI pullback longs and in bear markets
-via RSI rejection shorts, both requiring volume confirmation and trend alignment.
+1h_4h_1d_Squeeze_Breakout_Volume
+Hypothesis: Combines Bollinger Band squeeze detection on 1d with breakout confirmation on 4h and precise entry on 1h.
+In low volatility (BB width < 20th percentile), waits for 4h close outside Bollinger Bands with volume > 1.5x 20-period average.
+Enters on 1h break of the 4h breakout candle's high/low with volume confirmation.
+Works in both bull and bear markets by trading volatility expansion after contraction.
+Target: 15-37 trades/year on 1h (60-150 total over 4 years).
 """
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,93 +22,133 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily indicators
-    close_series = pd.Series(close)
-    rsi_period = 14
-    delta = close_series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/rsi_period, min_periods=rsi_period).mean()
-    avg_loss = loss.ewm(alpha=1/rsi_period, min_periods=rsi_period).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
-    
-    ema200 = close_series.ewm(span=200, min_periods=200).mean().values
-    
-    vol_ma_20 = close_series.rolling(window=20, min_periods=20).apply(lambda x: np.mean(x), raw=True).values
-    # Actually compute volume MA correctly
-    vol_series = pd.Series(volume)
-    vol_ma_20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    
-    # Weekly trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data for Bollinger Bands and squeeze detection
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    weekly_close = df_1w['close'].values
-    weekly_ema50 = pd.Series(weekly_close).ewm(span=50, min_periods=50).mean().values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Align weekly EMA50 to daily
-    weekly_ema50_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema50)
+    # Calculate Bollinger Bands (20, 2.0) on daily
+    ma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean()
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std()
+    upper_bb = ma_20 + (2.0 * std_20)
+    lower_bb = ma_20 - (2.0 * std_20)
+    bb_width = upper_bb - lower_bb
+    
+    # Calculate 20-period percentile of BB width for squeeze detection (20th percentile)
+    bb_width_series = pd.Series(bb_width.values)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=20).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
+    
+    # Squeeze condition: BB width < 20th percentile
+    squeeze = bb_width_percentile < 20.0
+    
+    # Get 4h data for breakout direction
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    volume_4h = df_4h['volume'].values
+    
+    # Calculate 4h Bollinger Bands (20, 2.0)
+    ma_20_4h = pd.Series(close_4h).rolling(window=20, min_periods=20).mean()
+    std_20_4h = pd.Series(close_4h).rolling(window=20, min_periods=20).std()
+    upper_bb_4h = ma_20_4h + (2.0 * std_20_4h)
+    lower_bb_4h = ma_20_4h - (2.0 * std_20_4h)
+    
+    # 4h breakout conditions: close outside BB with volume expansion
+    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean()
+    volume_expansion_4h = volume_4h > (vol_ma_20_4h * 1.5)
+    breakout_up = (close_4h > upper_bb_4h) & volume_expansion_4h
+    breakout_down = (close_4h < lower_bb_4h) & volume_expansion_4h
+    
+    # Align all signals to 1h timeframe
+    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze)
+    breakout_up_aligned = align_htf_to_ltf(prices, df_4h, breakout_up)
+    breakout_down_aligned = align_htf_to_ltf(prices, df_4h, breakout_down)
+    upper_bb_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_bb_4h.values)
+    lower_bb_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_bb_4h.values)
+    
+    # Session filter: 08:00-20:00 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_mask = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.25  # 25% of capital
+    position_size = 0.20  # 20% of capital
     
-    for i in range(200, n):
-        # Skip if data not ready
-        if (np.isnan(rsi_values[i]) or 
-            np.isnan(ema200[i]) or 
-            np.isnan(vol_ma_20[i]) or 
-            np.isnan(weekly_ema50_aligned[i])):
+    # Track breakout candle high/low for entry
+    breakout_high_level = np.zeros(n)
+    breakout_low_level = np.zeros(n)
+    
+    for i in range(50, n):
+        # Skip if not in session or data not ready
+        if not session_mask[i] or \
+           np.isnan(squeeze_aligned[i]) or \
+           np.isnan(breakout_up_aligned[i]) or \
+           np.isnan(breakout_down_aligned[i]) or \
+           np.isnan(upper_bb_4h_aligned[i]) or \
+           np.isnan(lower_bb_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current daily volume > 1.5x 20-day average
-        volume_expansion = volume[i] > (vol_ma_20[i] * 1.5)
-        
-        # RSI crossover conditions
-        rsi_now = rsi_values[i]
-        rsi_prev = rsi_values[i-1]
-        rsi_long_signal = (rsi_now > 30) and (rsi_prev <= 30)  # Cross above 30
-        rsi_short_signal = (rsi_now < 70) and (rsi_prev >= 70)  # Cross below 70
-        
-        # Trend filters
-        price_above_ema200 = close[i] > ema200[i]
-        price_below_ema200 = close[i] < ema200[i]
-        weekly_uptrend = weekly_ema50_aligned[i] > weekly_ema50_aligned[i-1]  # Weekly EMA50 rising
-        weekly_downtrend = weekly_ema50_aligned[i] < weekly_ema50_aligned[i-1]  # Weekly EMA50 falling
-        
-        # Entry conditions
-        long_entry = rsi_long_signal and volume_expansion and price_above_ema200 and weekly_uptrend
-        short_entry = rsi_short_signal and volume_expansion and price_below_ema200 and weekly_downtrend
-        
-        # Exit conditions: reverse signal or RSI midpoint crossover
-        exit_long = position == 1 and (rsi_now < 50 or rsi_short_signal)
-        exit_short = position == -1 and (rsi_now > 50 or rsi_long_signal)
-        
-        # Execute signals
-        if long_entry and position != 1:
-            position = 1
-            signals[i] = position_size
-        elif short_entry and position != -1:
-            position = -1
-            signals[i] = -position_size
-        elif exit_long or exit_short:
-            position = 0
-            signals[i] = 0.0
-        # Hold current position
+        # Update breakout levels when new 4h breakout occurs
+        if breakout_up_aligned[i]:
+            breakout_high_level[i] = upper_bb_4h_aligned[i]
+            breakout_low_level[i] = breakout_low_level[i-1] if i > 0 else 0
+        elif breakout_down_aligned[i]:
+            breakout_low_level[i] = lower_bb_4h_aligned[i]
+            breakout_high_level[i] = breakout_high_level[i-1] if i > 0 else 0
         else:
-            if position == 1:
+            # Carry forward levels
+            breakout_high_level[i] = breakout_high_level[i-1] if i > 0 else 0
+            breakout_low_level[i] = breakout_low_level[i-1] if i > 0 else 0
+        
+        # Entry conditions: squeeze active and price breaks 4h breakout level with volume
+        if squeeze_aligned[i]:
+            # Volume confirmation on 1h
+            vol_ma_20_1h = pd.Series(volume[:i+1]).rolling(window=20, min_periods=20).mean().iloc[-1] if i >= 20 else 0
+            volume_expansion_1h = volume[i] > (vol_ma_20_1h * 1.5) if i >= 20 else False
+            
+            # Long entry: price breaks above 4h breakout high
+            if breakout_high_level[i] > 0 and close[i] > breakout_high_level[i] and volume_expansion_1h:
+                if position != 1:
+                    position = 1
+                    signals[i] = position_size
+                else:
+                    signals[i] = position_size
+            # Short entry: price breaks below 4h breakout low
+            elif breakout_low_level[i] > 0 and close[i] < breakout_low_level[i] and volume_expansion_1h:
+                if position != -1:
+                    position = -1
+                    signals[i] = -position_size
+                else:
+                    signals[i] = -position_size
+            # Hold or flat
+            elif position == 1:
                 signals[i] = position_size
             elif position == -1:
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
+        else:
+            # No squeeze - exit any position
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
     
     return signals
 
-name = "1d_1w_RSI_Pullback_with_Volume_Confirmation"
-timeframe = "1d"
+name = "1h_4h_1d_Squeeze_Breakout_Volume"
+timeframe = "1h"
 leverage = 1.0
