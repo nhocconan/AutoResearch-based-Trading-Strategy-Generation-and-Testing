@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_1w_1d_Combined_Breakout
-Hypothesis: Trade 12h breakouts from weekly and daily price extremes (weekly high/low, daily H4/L4) with volume confirmation.
-Uses weekly range for trend context and daily Camarilla levels for precise entry. Works in bull (breakouts above weekly high + daily H4)
-and bear (breakdowns below weekly low + daily L4). Volume filter ensures institutional participation. Target: 15-30 trades/year.
+4h_1d_Combined_Pivot_Breakout
+Hypothesis: Combine 1d Camarilla (H4/L4) and Woodie pivot (R2/S2) levels for stronger breakouts.
+Only trade when price breaks BOTH pivot systems with volume expansion. Works in bull (breakouts above pivots) 
+and bear (breakdowns below pivots) markets. Volume filter ensures institutional participation. 
+Target: 20-30 trades/year to avoid fee drag.
 """
 
 import numpy as np
@@ -27,6 +28,15 @@ def calculate_camarilla(high, low, close):
     S4 = C - ((H - L) * 1.5000)
     return R1, R2, R3, R4, S1, S2, S3, S4
 
+def calculate_woodie(high, low, close):
+    """Calculate Woodie pivot levels."""
+    PP = (high + low + 2 * close) / 4
+    R1 = 2 * PP - low
+    R2 = PP + high - low
+    S1 = 2 * PP - high
+    S2 = PP - high + low
+    return PP, R1, R2, S1, S2
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -37,15 +47,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend context
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    # Get daily data for precise entry levels
+    # Get 1d data for pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -54,22 +56,21 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate weekly high/low
-    weekly_high = high_1w
-    weekly_low = low_1w
+    # Calculate 1d pivot levels
+    camarilla = calculate_camarilla(high_1d, low_1d, close_1d)
+    woodie = calculate_woodie(high_1d, low_1d, close_1d)
+    R1_c, R2_c, R3_c, R4_c, S1_c, S2_c, S3_c, S4_c = camarilla
+    PP_w, R1_w, R2_w, S1_w, S2_w = woodie
     
-    # Calculate daily Camarilla levels (H4/L4)
-    _, _, _, R4_1d, _, _, _, S4_1d = calculate_camarilla(high_1d, low_1d, close_1d)
+    # Align all data to 4h timeframe
+    R4_c_aligned = align_htf_to_ltf(prices, df_1d, R4_c)
+    R2_w_aligned = align_htf_to_ltf(prices, df_1d, R2_w)
+    S4_c_aligned = align_htf_to_ltf(prices, df_1d, S4_c)
+    S2_w_aligned = align_htf_to_ltf(prices, df_1d, S2_w)
     
-    # Align weekly and daily data to 12h timeframe
-    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
-    R4_1d_aligned = align_htf_to_ltf(prices, df_1d, R4_1d)
-    S4_1d_aligned = align_htf_to_ltf(prices, df_1d, S4_1d)
-    
-    # Volume confirmation: current volume > 2.0x 30-period average
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean()
-    volume_expansion = volume > (vol_ma_30 * 2.0)
+    # Volume confirmation: current volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volume_expansion = volume > (vol_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -77,17 +78,17 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or
-            np.isnan(R4_1d_aligned[i]) or np.isnan(S4_1d_aligned[i]) or
+        if (np.isnan(R4_c_aligned[i]) or np.isnan(R2_w_aligned[i]) or 
+            np.isnan(S4_c_aligned[i]) or np.isnan(S2_w_aligned[i]) or 
             np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Long: breakout above weekly high AND daily H4 with volume expansion
-        long_condition = (close[i] > weekly_high_aligned[i]) and (close[i] > R4_1d_aligned[i]) and volume_expansion[i]
+        # Long: breakout above BOTH R4 (Camarilla) and R2 (Woodie) with volume expansion
+        long_condition = (close[i] > R4_c_aligned[i]) and (close[i] > R2_w_aligned[i]) and volume_expansion[i]
         
-        # Short: breakdown below weekly low AND daily L4 with volume expansion
-        short_condition = (close[i] < weekly_low_aligned[i]) and (close[i] < S4_1d_aligned[i]) and volume_expansion[i]
+        # Short: breakdown below BOTH S4 (Camarilla) and S2 (Woodie) with volume expansion
+        short_condition = (close[i] < S4_c_aligned[i]) and (close[i] < S2_w_aligned[i]) and volume_expansion[i]
         
         if long_condition and position != 1:
             position = 1
@@ -101,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1w_1d_Combined_Breakout"
-timeframe = "12h"
+name = "4h_1d_Combined_Pivot_Breakout"
+timeframe = "4h"
 leverage = 1.0
