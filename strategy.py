@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_1d_4h_Camarilla_Pullback_Strategy
-Hypothesis: Daily Camarilla pivot levels (S3/R3) act as strong support/resistance.
-On 4h, we look for pullbacks to these levels with volume confirmation and alignment with
-4h EMA20 trend. This structure works in bull markets (pullbacks to support in uptrend)
-and bear markets (pullbacks to resistance in downtrend) by using price action confirmation.
-Uses 4h EMA20 as trend filter and 4h volume spike for confirmation to avoid false signals.
-Target: 20-40 trades per year per symbol.
+1d_1w_Range_Breakout_With_Volume
+Hypothesis: On daily timeframe, price breaking out of the prior week's range with volume confirmation
+captures institutional flow. In bull markets, breaks above weekly high sustain; in bear markets,
+breaks below weekly low sustain. Uses 1-week range as dynamic support/resistance. Volume filter
+avoids false breakouts. Designed for low trade frequency (<15/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -15,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 5:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,69 +21,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for range calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly high and low (from completed weekly bars)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
     
-    # Calculate Camarilla levels for each daily bar
-    range_1d = high_1d - low_1d
-    r3_1d = close_1d + 1.1 * range_1d
-    s3_1d = close_1d - 1.1 * range_1d
-    r4_1d = close_1d + 1.5 * range_1d
-    s4_1d = close_1d - 1.5 * range_1d
+    # Align weekly high/low to daily timeframe
+    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
     
-    # Align daily Camarilla levels to 4h
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    
-    # Get 4h data for EMA20 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
-    
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-day average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 2.0)
+    volume_expansion = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25
     
-    for i in range(100, n):
-        # Skip if any required data is not ready
-        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
-            np.isnan(ema_20_4h_aligned[i]) or np.isnan(volume_expansion[i])):
+    for i in range(5, n):
+        # Skip if weekly data not ready
+        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or 
+            np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions:
-        # 1. Pullback to S3 with volume expansion (support bounce)
-        # 2. Must be above 4h EMA20 for trend alignment
-        pullback_long = (low[i] <= s3_1d_aligned[i]) and (close[i] > s3_1d_aligned[i]) and volume_expansion[i]
-        long_condition = pullback_long and (close[i] > ema_20_4h_aligned[i])
+        # Long: break above weekly high with volume
+        long_breakout = (close[i] > weekly_high_aligned[i]) and volume_expansion[i]
+        # Short: break below weekly low with volume
+        short_breakout = (close[i] < weekly_low_aligned[i]) and volume_expansion[i]
         
-        # Short conditions:
-        # 1. Pullback to R3 with volume expansion (resistance rejection)
-        # 2. Must be below 4h EMA20 for trend alignment
-        pullback_short = (high[i] >= r3_1d_aligned[i]) and (close[i] < r3_1d_aligned[i]) and volume_expansion[i]
-        short_condition = pullback_short and (close[i] < ema_20_4h_aligned[i])
-        
-        if long_condition and position != 1:
+        if long_breakout and position != 1:
             position = 1
             signals[i] = position_size
-        elif short_condition and position != -1:
+        elif short_breakout and position != -1:
             position = -1
             signals[i] = -position_size
         else:
@@ -94,6 +66,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_4h_Camarilla_Pullback_Strategy"
-timeframe = "4h"
+name = "1d_1w_Range_Breakout_With_Volume"
+timeframe = "1d"
 leverage = 1.0
