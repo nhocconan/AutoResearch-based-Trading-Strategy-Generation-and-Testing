@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_12h_Camarilla_Breakout_Volume_Trend_v2
-Hypothesis: Combines 4h Camarilla breakout with 12h volume confirmation and 12h ADX trend filter.
-Enters long when price closes above H3 with volume expansion and strong 12h trend (ADX > 25).
-Enters short when price closes below L3 with volume expansion and strong 12h trend.
-Uses close price for entry/exit to reduce whipsaw vs high/low. Tightens entry conditions
-from previous version to target 20-50 trades per year (80-200 total over 4 years).
-Designed for 4h timeframe to balance trade frequency and signal quality.
-Works in both bull and bear markets by requiring strong trend alignment.
+1h_4h_1d_Trend_Filtered_MeanReversion_v1
+Hypothesis: Uses 4h RSI for mean reversion signals and 1d ADX for trend filtering on 1h timeframe.
+In long positions when 4h RSI < 30 and 1d ADX < 25 (range market), exits when RSI > 50.
+In short positions when 4h RSI > 70 and 1d ADX < 25, exits when RSI < 50.
+Uses session filter (08-20 UTC) to reduce noise. Position size fixed at 0.20.
+Designed for 1h timeframe to avoid overtrading while capturing mean reversion in ranging markets.
+Avoids trend days (ADX >= 25) to prevent whipsaw losses.
 """
 
 import numpy as np
@@ -22,33 +21,46 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 4h data for Camarilla levels
+    # Get 4h data for RSI calculation
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    if len(df_4h) < 14:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
     
-    # Calculate Camarilla pivot levels for previous 4h bar
-    hl_range = high_4h - low_4h
-    H3 = close_4h + 1.125 * hl_range
-    L3 = close_4h - 1.125 * hl_range
+    # Calculate RSI (14) on 4h data
+    def calculate_rsi(close, period=14):
+        delta = np.diff(close, prepend=close[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.zeros_like(close)
+        avg_loss = np.zeros_like(close)
+        
+        avg_gain[period] = np.mean(gain[1:period+1])
+        avg_loss[period] = np.mean(loss[1:period+1])
+        
+        for i in range(period+1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    # Get 12h data for ADX trend filter and volume average
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 14:
+    rsi_4h = calculate_rsi(close_4h, 14)
+    
+    # Get 1d data for ADX trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate ADX (14) on 12h data
+    # Calculate ADX (14) on 1d data
     def calculate_adx(high, low, close, period=14):
         plus_dm = np.zeros_like(high)
         minus_dm = np.zeros_like(high)
@@ -97,44 +109,36 @@ def generate_signals(prices):
             
         return adx
     
-    adx_12h = calculate_adx(high_12h, low_12h, close_12h, 14)
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    # Calculate 20-period volume average on 12h
-    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    # Align all signals to 1h timeframe
+    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Align all signals to 4h timeframe
-    H3_aligned = align_htf_to_ltf(prices, df_4h, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_4h, L3)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
-    vol_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20_12h)
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.25  # 25% of capital
+    position_size = 0.20  # 20% of capital
     
     for i in range(50, n):
-        # Skip if data not ready
-        if (np.isnan(H3_aligned[i]) or 
-            np.isnan(L3_aligned[i]) or 
-            np.isnan(adx_12h_aligned[i]) or 
-            np.isnan(vol_ma_20_12h_aligned[i])):
+        # Skip if data not ready or outside session
+        if (np.isnan(rsi_4h_aligned[i]) or 
+            np.isnan(adx_1d_aligned[i]) or 
+            not in_session[i]):
             signals[i] = 0.0
             continue
         
-        # Trend filter: only trade when ADX > 25 (trending market)
-        strong_trend = adx_12h_aligned[i] > 25
+        # Trend filter: only trade when ADX < 25 (range market)
+        range_market = adx_1d_aligned[i] < 25
         
-        # Volume confirmation: current 4h volume > 1.5x 12h volume MA
-        volume_expansion = volume[i] > (vol_ma_20_12h_aligned[i] * 1.5)
-        
-        # Entry conditions: price CLOSES beyond H3/L3 with volume expansion and trend filter
-        long_entry = (close[i] > H3_aligned[i]) and volume_expansion and strong_trend
-        short_entry = (close[i] < L3_aligned[i]) and volume_expansion and strong_trend
-        
-        # Exit conditions: return to previous 4h close
-        prev_close_aligned = align_htf_to_ltf(prices, df_4h, close_4h)
-        exit_long = position == 1 and close[i] <= prev_close_aligned[i]
-        exit_short = position == -1 and close[i] >= prev_close_aligned[i]
+        # Mean reversion signals based on 4h RSI
+        long_entry = (rsi_4h_aligned[i] < 30) and range_market
+        long_exit = rsi_4h_aligned[i] > 50
+        short_entry = (rsi_4h_aligned[i] > 70) and range_market
+        short_exit = rsi_4h_aligned[i] < 50
         
         # Execute signals
         if long_entry and position != 1:
@@ -143,7 +147,7 @@ def generate_signals(prices):
         elif short_entry and position != -1:
             position = -1
             signals[i] = -position_size
-        elif exit_long or exit_short:
+        elif (position == 1 and long_exit) or (position == -1 and short_exit):
             position = 0
             signals[i] = 0.0
         # Hold current position
@@ -157,6 +161,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_Camarilla_Breakout_Volume_Trend_v2"
-timeframe = "4h"
+name = "1h_4h_1d_Trend_Filtered_MeanReversion_v1"
+timeframe = "1h"
 leverage = 1.0
