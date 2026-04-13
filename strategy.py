@@ -9,11 +9,11 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Hypothesis: 4h Donchian(20) breakout with 12h volume spike and 12h chop regime filter
-    # Long: price > Donchian(20) high AND 12h volume > 1.8 * 20-period avg volume AND 12h Chop > 61.8 (ranging)
-    # Short: price < Donchian(20) low AND 12h volume > 1.8 * 20-period avg volume AND 12h Chop > 61.8 (ranging)
+    # Long: price > Donchian(20) high AND 12h volume > 2.0 * 20-period avg volume AND 12h Chop > 61.8 (ranging)
+    # Short: price < Donchian(20) low AND 12h volume > 2.0 * 20-period avg volume AND 12h Chop > 61.8 (ranging)
     # Exit: price crosses Donchian midpoint OR Chop < 38.2 (trending market begins)
     # Uses discrete position sizing (0.25) to minimize fee churn
-    # Target: 100-180 total trades over 4 years (~25-45/year) to stay within limits
+    # Target: 75-150 total trades over 4 years (~19-38/year) to stay within limits
     
     close = prices['close'].values
     high = prices['high'].values
@@ -130,10 +130,10 @@ def generate_signals(prices):
         # Exit regime: Chop < 38.2 (trending market begins)
         trending_market = chop_aligned[i] < 38.2
         
-        # Volume confirmation: current 12h volume > 1.8 * 20-period average
+        # Volume confirmation: current 12h volume > 2.0 * 20-period average
         vol_12h_current = df_12h['volume'].values
         vol_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_12h_current)
-        volume_confirm = vol_12h_aligned[i] > 1.8 * vol_ma_aligned[i]
+        volume_confirm = vol_12h_aligned[i] > 2.0 * vol_ma_aligned[i]
         
         # Donchian breakout signals
         long_breakout = close[i] > donchian_high_aligned[i]
@@ -170,6 +170,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_donchian_volume_chop_v1"
+name = "4h_12h_donchian_volume_chop_v2"
 timeframe = "4h"
 leverage = 1.0
