@@ -8,56 +8,38 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with 12h volume confirmation and 1d weekly pivot bias.
-    # Weekly pivot from 1d data provides institutional bias (bullish/bearish).
+    # Hypothesis: 1d Donchian(20) breakout with 1w trend filter and volume confirmation.
+    # Weekly trend from 1w data provides institutional bias (bullish/bearish).
     # Donchian breakout captures momentum. Volume confirms participation.
-    # Target: 75-200 total trades over 4 years = 19-50/year.
+    # Target: 30-100 total trades over 4 years = 7-25/year.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for weekly pivot (call ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w data for trend filter (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d weekly pivot (using last 5 trading days approx 1 week)
-    lookback = min(5, len(df_1d))
-    high_1d = df_1d['high'].values[-lookback:]
-    low_1d = df_1d['low'].values[-lookback:]
-    close_1d = df_1d['close'].values[-lookback:]
+    # Calculate 1w EMA(34) for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Weekly pivot levels
-    weekly_high = np.max(high_1d)
-    weekly_low = np.min(low_1d)
-    weekly_close = close_1d[-1]
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    weekly_range = weekly_high - weekly_low
-    
-    # Weekly pivot bias: above pivot = bullish, below = bearish
-    weekly_bias = 1 if weekly_close > weekly_pivot else -1
-    
-    # Get 12h data for volume confirmation (call ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    # Calculate 12h volume MA(20) for confirmation
-    volume_12h = df_12h['volume'].values
-    volume_ma = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate 4h Donchian channels (20-period)
+    # Calculate 1d Donchian channels (20-period)
     donchian_window = 20
     donchian_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
     donchian_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     
-    # Align HTF indicators to 4h timeframe
-    weekly_bias_aligned = align_htf_to_ltf(prices, df_1d, np.full_like(df_1d.index, weekly_bias, dtype=float))
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    volume_ma_aligned = align_htf_to_ltf(prices, df_12h, volume_ma)
+    # Calculate 1d volume MA(20) for confirmation
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Align HTF indicators to 1d timeframe
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    volume_ma_aligned = align_htf_to_ltf(prices, df_1w, volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,20 +47,24 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if data not ready
         if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(volume_ma_aligned[i])):
+            np.isnan(volume_ma_aligned[i]) or np.isnan(ema_34_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 12h volume MA
+        # Volume filter: current volume > 20-period MA
         volume_filter = volume[i] > volume_ma_aligned[i]
         
         # Donchian breakout conditions
         breakout_long = close[i] > donchian_high_aligned[i]  # Break above upper channel
         breakout_short = close[i] < donchian_low_aligned[i]  # Break below lower channel
         
-        # Entry conditions: breakout in direction of weekly bias with volume confirmation
-        long_entry = breakout_long and (weekly_bias_aligned[i] > 0) and volume_filter
-        short_entry = breakout_short and (weekly_bias_aligned[i] < 0) and volume_filter
+        # Trend filter: price above/below weekly EMA(34)
+        trend_up = close[i] > ema_34_1w_aligned[i]
+        trend_down = close[i] < ema_34_1w_aligned[i]
+        
+        # Entry conditions: breakout in direction of weekly trend with volume confirmation
+        long_entry = breakout_long and trend_up and volume_filter
+        short_entry = breakout_short and trend_down and volume_filter
         
         # Exit conditions: price returns to opposite Donchian level
         long_exit = close[i] < donchian_low_aligned[i]
@@ -107,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_1d_weekly_pivot_donchian_breakout_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_breakout_ema34_volume_v1"
+timeframe = "1d"
 leverage = 1.0
