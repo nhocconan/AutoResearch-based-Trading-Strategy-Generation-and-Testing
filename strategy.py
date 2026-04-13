@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 150:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,20 +21,25 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    vol_1d = df_1d['volume'].values
     
-    # Calculate 14-period ATR on 1d for volatility filter
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14 = np.zeros_like(tr)
-    atr_14[13] = tr[1:14].mean()
-    for i in range(14, len(tr)):
-        atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
+    # Calculate 10-period EMA on 1d (trend filter)
+    close_1d_series = pd.Series(close_1d)
+    ema_10_1d = close_1d_series.ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Calculate 50-period SMA on 1d (trend filter)
-    sma_50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
+    # Calculate RSI(14) on 1d
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_14 = 100 - (100 / (1 + rs))
+    
+    # Calculate Bollinger Bands (20, 2) on 1d
+    sma_20 = close_1d_series.rolling(window=20, min_periods=20).mean().values
+    std_20 = close_1d_series.rolling(window=20, min_periods=20).std().values
+    bb_upper = sma_20 + 2 * std_20
+    bb_lower = sma_20 - 2 * std_20
     
     # Get 1w data for trend confirmation
     df_1w = get_htf_data(prices, '1w')
@@ -46,40 +51,49 @@ def generate_signals(prices):
     sma_20_1w = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
     
     # Align indicators to daily timeframe
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    sma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
+    ema_10_aligned = align_htf_to_ltf(prices, df_1d, ema_10_1d)
+    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
     sma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_20_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25
     
-    for i in range(150, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(atr_14_aligned[i]) or 
-            np.isnan(sma_50_1d_aligned[i]) or
+        if (np.isnan(ema_10_aligned[i]) or 
+            np.isnan(rsi_14_aligned[i]) or
+            np.isnan(bb_upper_aligned[i]) or
+            np.isnan(bb_lower_aligned[i]) or
             np.isnan(sma_20_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below SMA50
-        above_sma50 = close[i] > sma_50_1d_aligned[i]
-        below_sma50 = close[i] < sma_50_1d_aligned[i]
+        # Trend filter: price above/below EMA10
+        above_ema = close[i] > ema_10_aligned[i]
+        below_ema = close[i] < ema_10_aligned[i]
         
-        # Volatility filter: ATR > 0 (always true but keeps structure)
-        vol_ok = atr_14_aligned[i] > 0
+        # RSI conditions: not overbought/oversold
+        rsi_not_overbought = rsi_14_aligned[i] < 70
+        rsi_not_oversold = rsi_14_aligned[i] > 30
+        
+        # Bollinger Band conditions: price near bands
+        near_upper_band = close[i] > bb_upper_aligned[i] * 0.98
+        near_lower_band = close[i] < bb_lower_aligned[i] * 1.02
         
         # Weekly trend filter: price above/below weekly SMA20
         above_weekly_sma = close[i] > sma_20_1w_aligned[i]
         below_weekly_sma = close[i] < sma_20_1w_aligned[i]
         
-        # Entry conditions: only trade in direction of both daily and weekly trend
-        long_entry = above_sma50 and vol_ok and above_weekly_sma
-        short_entry = below_sma50 and vol_ok and below_weekly_sma
+        # Entry conditions
+        long_entry = above_ema and rsi_not_overbought and near_lower_band and above_weekly_sma
+        short_entry = below_ema and rsi_not_oversold and near_upper_band and below_weekly_sma
         
-        # Exit conditions: opposite trend signal
-        exit_long = position == 1 and (below_sma50 or not above_weekly_sma)
-        exit_short = position == -1 and (above_sma50 or not below_weekly_sma)
+        # Exit conditions: opposite signal or RSI extreme
+        exit_long = position == 1 and (below_ema or rsi_14_aligned[i] > 75)
+        exit_short = position == -1 and (above_ema or rsi_14_aligned[i] < 25)
         
         # Execute signals
         if long_entry and position != 1:
@@ -102,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_sma50_atr_weekly_trend"
+name = "1d_ema_rsi_bb_weekly_filter_v2"
 timeframe = "1d"
 leverage = 1.0
