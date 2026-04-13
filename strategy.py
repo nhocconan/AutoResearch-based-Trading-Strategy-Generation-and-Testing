@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1h_4h_1D_Range_Breakout_With_Volume_Confirmation
-Hypothesis: In 1h timeframe, buy when price breaks above 4h Donchian high (20) with volume > 1.5x 20-period average and close > 4h EMA20, sell when price breaks below 4h Donchian low (20) with volume confirmation and close < 4h EMA20. Uses 4h for trend/structure and 1h for precise entry. Volume filter reduces false breakouts. Designed for 15-30 trades/year to avoid fee drag. Works in bull/bear by trading breakouts with institutional volume.
+6h_1W_1D_Volatility_Squeeze_Breakout
+Hypothesis: In 6h timeframe, buy when price breaks above weekly Bollinger upper band with volatility contraction (BBW < 50th percentile) and 1d EMA20 alignment, sell when breaks below lower band with same conditions. Uses weekly volatility regime to filter breakouts, works in bull (breakouts continuation) and bear (mean reversion in squeeze) markets. Targets 15-35 trades/year with 30% position size.
 """
 
 import numpy as np
@@ -13,64 +13,66 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 1.5)
-    
-    # 4h data for structure and trend
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Weekly data for Bollinger Bands and volatility regime
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 4h Donchian channels (20-period)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    donchian_high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Weekly Bollinger Bands (20, 2)
+    weekly_close = df_1w['close'].values
+    bb_period = 20
+    bb_std = 2
+    sma = pd.Series(weekly_close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std = pd.Series(weekly_close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_band = sma + (bb_std * std)
+    lower_band = sma - (bb_std * std)
     
-    # 4h EMA20 trend filter
-    close_4h = df_4h['close'].values
-    ema20_4h = pd.Series(close_4h).ewm(span=20, min_periods=20, adjust=False).mean().values
+    # Bollinger Width for volatility regime
+    bb_width = (upper_band - lower_band) / sma
+    # Historical 50th percentile of BB width (volatility median)
+    bb_width_median = pd.Series(bb_width).rolling(window=50, min_periods=50).median().values
+    volatility_squeeze = bb_width < bb_width_median  # True when volatility below median
     
-    # Align 4h indicators to 1h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_20)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_20)
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    # Align weekly indicators to 6h
+    upper_band_aligned = align_htf_to_ltf(prices, df_1w, upper_band)
+    lower_band_aligned = align_htf_to_ltf(prices, df_1w, lower_band)
+    volatility_squeeze_aligned = align_htf_to_ltf(prices, df_1w, volatility_squeeze.astype(float))
+    
+    # Daily EMA20 for trend alignment
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    daily_close = df_1d['close'].values
+    ema20 = pd.Series(daily_close).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema20_aligned = align_htf_to_ltf(prices, df_1d, ema20)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.20  # 20% position size
+    position_size = 0.30  # 30% position size
     
     for i in range(100, n):
-        # Skip if any required data is not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema20_4h_aligned[i]) or np.isnan(volume_expansion[i])):
+        # Skip if any data not ready
+        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or
+            np.isnan(volatility_squeeze_aligned[i]) or np.isnan(ema20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long: break above 4h Donchian high with volume expansion and close > 4h EMA20
-        long_signal = (close[i] > donchian_high_aligned[i] and 
-                      volume_expansion[i] and 
-                      close[i] > ema20_4h_aligned[i])
+        # Long: price breaks above weekly upper band + volatility squeeze + price > daily EMA20
+        long_signal = (close[i] > upper_band_aligned[i] and 
+                      volatility_squeeze_aligned[i] > 0.5 and  # True when aligned
+                      close[i] > ema20_aligned[i])
         
-        # Short: break below 4h Donchian low with volume expansion and close < 4h EMA20
-        short_signal = (close[i] < donchian_low_aligned[i] and 
-                       volume_expansion[i] and 
-                       close[i] < ema20_4h_aligned[i])
+        # Short: price breaks below weekly lower band + volatility squeeze + price < daily EMA20
+        short_signal = (close[i] < lower_band_aligned[i] and 
+                       volatility_squeeze_aligned[i] > 0.5 and  # True when aligned
+                       close[i] < ema20_aligned[i])
         
-        # Exit on opposite signal
-        if position == 1 and short_signal:
-            position = -1
-            signals[i] = -position_size
-        elif position == -1 and long_signal:
-            position = 1
-            signals[i] = position_size
-        elif position == 0:
+        if position == 0:
             if long_signal:
                 position = 1
                 signals[i] = position_size
@@ -79,12 +81,23 @@ def generate_signals(prices):
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
-        else:
-            # Hold current position
-            signals[i] = position_size if position == 1 else (-position_size if position == -1 else 0.0)
+        elif position == 1:
+            # Exit long: price breaks below weekly lower band OR price < daily EMA20
+            if close[i] < lower_band_aligned[i] or close[i] < ema20_aligned[i]:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = position_size
+        elif position == -1:
+            # Exit short: price breaks above weekly upper band OR price > daily EMA20
+            if close[i] > upper_band_aligned[i] or close[i] > ema20_aligned[i]:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -position_size
     
     return signals
 
-name = "1h_4h_1D_Range_Breakout_With_Volume_Confirmation"
-timeframe = "1h"
+name = "6h_1W_1D_Volatility_Squeeze_Breakout"
+timeframe = "6h"
 leverage = 1.0
