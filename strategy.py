@@ -5,21 +5,36 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Hypothesis: 6h Camarilla pivot breakout with 1d trend filter and volume confirmation
-    # Uses 1d HTF for trend direction (price vs EMA50) and volume spike confirmation
-    # Enters on breakout of Camarilla R4/S4 levels from prior 1d session
-    # Works in bull/bear: trend filter ensures we trade with higher timeframe momentum
-    # Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+    # Hypothesis: 12h strategy using 1w Williams %R for extreme overbought/oversold,
+    # confirmed by 1d volume spike and choppiness regime filter.
+    # Williams %R identifies reversals in ranging markets; volume confirms momentum;
+    # chop filter ensures we avoid strong trends where mean reversion fails.
+    # Designed for low trade frequency (12-37/year) to minimize fee drag on 12h timeframe.
+    # Works in both bull and bear: %R captures reversals, volume confirms, chop filter adapts to regime.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    volume = prices['volume'].values if 'volume' in prices.columns else np.ones(len(prices))
     
-    # Get 1d data for Camarilla levels, trend filter, and volume
+    # Get 1w data for Williams %R (overbought/oversold)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate 1w Williams %R (period=14)
+    highest_high_1w = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
+    lowest_low_1w = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+    williams_r_1w = -100 * (highest_high_1w - close_1w) / (highest_high_1w - lowest_low_1w + 1e-10)
+    
+    # Get 1d data for volume confirmation and choppiness
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -27,107 +42,86 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    volume_1d = df_1d['volume'].values if 'volume' in df_1d.columns else np.ones(len(df_1d))
     
-    # Calculate Camarilla pivot levels for prior 1d session
-    # PP = (H + L + C) / 3
-    # R4 = PP + (H - L) * 1.1 / 2
-    # S4 = PP - (H - L) * 1.1 / 2
-    pp_1d = (high_1d + low_1d + close_1d) / 3
-    r4_1d = pp_1d + (high_1d - low_1d) * 1.1 / 2
-    s4_1d = pp_1d - (high_1d - low_1d) * 1.1 / 2
-    
-    # Calculate 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Calculate 1d volume average (20-period) for confirmation
+    # Calculate 1d volume average (20-period)
     vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all 1d indicators to 6h primary timeframe
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate 1d choppiness index (period=14)
+    tr_1d = np.maximum(np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1])), np.abs(low_1d[1:] - close_1d[:-1]))
+    tr_1d = np.concatenate([[np.nan], tr_1d])
+    atr_sum_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
+    max_high_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop_denom = np.log10((max_high_1d - min_low_1d) / (atr_sum_1d + 1e-10)) * np.log10(14)
+    chop_1d = 100 * (np.log10(atr_sum_1d + 1e-10) / np.log10(14)) / (chop_denom + 1e-10)
+    
+    # Align all HTF indicators to 12h primary timeframe
+    williams_r_1w_aligned = align_htf_to_ltf(prices, df_1w, williams_r_1w)
     vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
     
-    # Track entry price for stoploss
-    entry_price = np.full(n, np.nan)
-    
-    # Calculate 6h ATR for stoploss
-    tr = np.maximum(np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1])), np.abs(low[1:] - close[:-1]))
-    tr = np.concatenate([[np.nan], tr])
-    atr_6h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_multiplier = 2.5
-    
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(r4_1d_aligned[i]) or 
-            np.isnan(s4_1d_aligned[i]) or
-            np.isnan(ema50_1d_aligned[i]) or
+        if (np.isnan(williams_r_1w_aligned[i]) or 
             np.isnan(vol_avg_20_1d_aligned[i]) or
-            np.isnan(atr_6h[i])):
+            np.isnan(chop_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Get 1d bar index for current 6h bar (each 1d bar = 4 6h bars)
-        idx_1d = i // 4
-        if idx_1d >= len(high_1d):
+        # Get 1d bar index for current 12h bar (each 1d bar = 2 12h bars)
+        idx_1d = i // 2
+        if idx_1d >= len(volume_1d):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x 20-period average
-        volume_confirmed = volume_1d[idx_1d] > 1.5 * vol_avg_20_1d_aligned[i]
+        # Volume confirmation: current 1d volume > 2.0x 20-period average
+        volume_confirmed = volume_1d[idx_1d] > 2.0 * vol_avg_20_1d_aligned[i]
         
-        # Trend filter: price above/below 1d EMA50
-        price_above_ema = close_1d[idx_1d] > ema50_1d_aligned[i]
-        price_below_ema = close_1d[idx_1d] < ema50_1d_aligned[i]
+        # Chop regime filter: only trade when choppy (CHOP > 61.8 = ranging market)
+        chop_regime = chop_1d_aligned[i] > 61.8
         
-        # Breakout conditions: close breaks Camarilla R4/S4 levels
-        breakout_long = close[i] > r4_1d_aligned[i]
-        breakout_short = close[i] < s4_1d_aligned[i]
+        # Williams %R extreme levels: oversold < -80, overbought > -20
+        williams_r = williams_r_1w_aligned[i]
+        oversold = williams_r < -80
+        overbought = williams_r > -20
         
-        # Entry conditions
-        enter_long = breakout_long and price_above_ema and volume_confirmed
-        enter_short = breakout_short and price_below_ema and volume_confirmed
+        # Entry conditions: mean reversion in ranging markets with volume confirmation
+        enter_long = oversold and volume_confirmed and chop_regime
+        enter_short = overbought and volume_confirmed and chop_regime
         
-        # Stoploss conditions
-        exit_long = position == 1 and not np.isnan(entry_price[i-1]) and close[i] < entry_price[i-1] - atr_multiplier * atr_6h[i]
-        exit_short = position == -1 and not np.isnan(entry_price[i-1]) and close[i] > entry_price[i-1] + atr_multiplier * atr_6h[i]
+        # Exit conditions: reverse signal or chop regime ends
+        exit_long = position == 1 and (overbought or not chop_regime)
+        exit_short = position == -1 and (oversold or not chop_regime)
         
         # Execute signals
         if enter_long and position != 1:
             position = 1
             signals[i] = position_size
-            entry_price[i] = close[i]
         elif enter_short and position != -1:
             position = -1
             signals[i] = -position_size
-            entry_price[i] = close[i]
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
-            entry_price[i] = np.nan
         elif position == -1 and exit_short:
             position = 0
             signals[i] = 0.0
-            entry_price[i] = np.nan
         # Hold current position
         else:
             if position == 1:
                 signals[i] = position_size
-                entry_price[i] = entry_price[i-1] if i > 0 else np.nan
             elif position == -1:
                 signals[i] = -position_size
-                entry_price[i] = entry_price[i-1] if i > 0 else np.nan
             else:
                 signals[i] = 0.0
-                entry_price[i] = np.nan
     
     return signals
 
-name = "6h_1d_camarilla_breakout_trend_volume_v1"
-timeframe = "6h"
+name = "12h_1w_1d_williamsr_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
