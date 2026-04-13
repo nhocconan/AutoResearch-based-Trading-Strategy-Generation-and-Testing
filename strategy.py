@@ -1,10 +1,10 @@
-# #!/usr/bin/env python3
+#!/usr/bin/env python3
 """
-12h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation
+4h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation_v4
 Hypothesis: Daily Camarilla pivot levels (S3/R3) provide strong support/resistance.
-Breakouts above R3 or below S3 on 12h chart with volume expansion capture institutional moves.
+Breakouts above R3 or below S3 on 4h chart with volume expansion capture institutional moves.
 Adds volume confirmation to reduce false breakouts. Works in both bull and bear markets
-by trading breakouts regardless of direction. Target: 12-37 trades/year per symbol.
+by trading breakouts regardless of direction. Target: 15-25 trades/year per symbol.
 """
 
 import numpy as np
@@ -43,13 +43,13 @@ def generate_signals(prices):
     # Support levels (S3 used)
     S3 = close_prev - (range_1d * 1.2500 / 4)
     
-    # Align levels to 12h timeframe
+    # Align levels to 4h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # Volume confirmation: current volume > 1.5x 30-period average
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean()
-    volume_expansion = volume > (vol_ma_30 * 1.5)
+    # Volume confirmation: current volume > 2.0x 20-period average (more strict)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volume_expansion = volume > (vol_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -80,6 +80,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation"
-timeframe = "12h"
+name = "4h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation_v4"
+timeframe = "4h"
 leverage = 1.0
