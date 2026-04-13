@@ -8,116 +8,137 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1d Donchian(20) breakout + 1w HMA(21) trend filter + volume confirmation
-    # Long: Price breaks above Donchian(20) high AND 1w HMA(21) rising AND volume > 1.5x avg
-    # Short: Price breaks below Donchian(20) low AND 1w HMA(21) falling AND volume > 1.5x avg
-    # Exit: Opposite Donchian breakout OR HMA trend reversal
-    # Using 1d for price action/volume, 1w for trend filter to avoid whipsaw
+    # Hypothesis: 6h Camarilla pivot breakout + 12h volume confirmation + 1d ADX regime
+    # Long: Close > R4 AND 12h volume > 1.5x 20-period average AND 1d ADX > 20
+    # Short: Close < S4 AND 12h volume > 1.5x 20-period average AND 1d ADX > 20
+    # Exit: Close retreats to H3/L3 levels OR ADX < 15 (trend exhaustion)
+    # Using Camarilla from 1d for pivot levels, 12h for volume confirmation, 1d for ADX regime
     # Discrete position sizing (0.25) to balance return and drawdown
-    # Target: 20-50 trades/year (~80-200 over 4 years) to minimize fee drag
+    # Target: 12-37 trades/year (~50-150 over 4 years) to minimize fee drag
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels and volume (call ONCE before loop)
+    # Get 1d data for Camarilla pivot levels (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Get 1w data for HMA trend filter (call ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Calculate 1d Donchian channels (20-period)
+    # Calculate 1d Camarilla levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Donchian high: rolling max of high
-    donch_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    # Donchian low: rolling min of low
-    donch_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # True range for Camarilla calculation
+    tr_1d = np.maximum(high_1d - low_1d, 
+                       np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
+                                  np.abs(low_1d - np.roll(close_1d, 1))))
+    tr_1d[0] = high_1d[0] - low_1d[0]  # first bar
     
-    # Calculate 1d average volume (20-period)
-    vol_1d = df_1d['volume'].values
-    avg_vol_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    # Camarilla levels based on previous day
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Calculate 1w HMA(21) for trend filter
-    close_1w = df_1w['close'].values
+    # Resistance levels
+    r1_1d = pivot_1d + (range_1d * 1.1 / 12)
+    r2_1d = pivot_1d + (range_1d * 1.1 / 6)
+    r3_1d = pivot_1d + (range_1d * 1.1 / 4)
+    r4_1d = pivot_1d + (range_1d * 1.1 / 2)
     
-    # HMA calculation: WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
-    def wma(data, window):
-        """Weighted Moving Average"""
-        if len(data) < window:
-            return np.full_like(data, np.nan)
-        weights = np.arange(1, window + 1)
-        return np.convolve(data, weights / weights.sum(), mode='valid')
+    # Support levels
+    s1_1d = pivot_1d - (range_1d * 1.1 / 12)
+    s2_1d = pivot_1d - (range_1d * 1.1 / 6)
+    s3_1d = pivot_1d - (range_1d * 1.1 / 4)
+    s4_1d = pivot_1d - (range_1d * 1.1 / 2)
     
-    # Calculate WMA for half period
-    half_period = 21 // 2  # 10
-    wma_half = wma(close_1w, half_period)
-    # Pad to match length
-    wma_half_padded = np.full_like(close_1w, np.nan)
-    wma_half_padded[half_period-1:len(wma_half)+half_period-1] = wma_half
+    # H3/L3 for exit (closer to pivot)
+    h3_1d = pivot_1d + (range_1d * 1.1 / 4)
+    l3_1d = pivot_1d - (range_1d * 1.1 / 4)
     
-    # Calculate WMA for full period
-    wma_full = wma(close_1w, 21)
-    wma_full_padded = np.full_like(close_1w, np.nan)
-    wma_full_padded[21-1:len(wma_full)+21-1] = wma_full
+    # Align 1d Camarilla levels to 6h (wait for completed 1d bar)
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
     
-    # Calculate raw HMA: 2*WMA(half) - WMA(full)
-    raw_hma = 2 * wma_half_padded - wma_full_padded
-    # Final HMA: WMA(sqrt(n)) of raw HMA
-    sqrt_period = int(np.sqrt(21))  # 4
-    hma_1w = wma(raw_hma, sqrt_period)
-    hma_1w_padded = np.full_like(close_1w, np.nan)
-    hma_1w_padded[sqrt_period-1:len(hma_1w)+sqrt_period-1] = hma_1w
+    # Get 12h data for volume confirmation (call ONCE before loop)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
+        return np.zeros(n)
     
-    # Align 1d indicators to 1d timeframe (no alignment needed as we're already on 1d)
-    # Align 1w HMA to 1d timeframe (wait for completed 1w bar)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_padded)
+    volume_12h = df_12h['volume'].values
+    # 20-period average volume on 12h
+    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20_12h)
+    
+    # Get 1d data for ADX regime (call ONCE before loop)
+    high_1d_adx = df_1d['high'].values
+    low_1d_adx = df_1d['low'].values
+    close_1d_adx = df_1d['close'].values
+    
+    # Calculate 1d ADX (14-period)
+    # True Range
+    tr1 = np.abs(high_1d_adx[1:] - low_1d_adx[1:])
+    tr2 = np.abs(high_1d_adx[1:] - close_1d_adx[:-1])
+    tr3 = np.abs(low_1d_adx[1:] - close_1d_adx[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.nan], tr])  # align with index 0
+    
+    # Directional Movement
+    up_move = high_1d_adx[1:] - high_1d_adx[:-1]
+    down_move = low_1d_adx[:-1] - low_1d_adx[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[0.0], plus_dm])
+    minus_dm = np.concatenate([[0.0], minus_dm])
+    
+    # Wilder's smoothing
+    def wilders_smoothing(data, period):
+        alpha = 1.0 / period
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            result[period-1] = np.nanmean(data[:period])
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    atr_1d_adx = wilders_smoothing(tr, 14)
+    plus_di_1d_adx = 100 * wilders_smoothing(plus_dm, 14) / atr_1d_adx
+    minus_di_1d_adx = 100 * wilders_smoothing(minus_dm, 14) / atr_1d_adx
+    dx_1d_adx = 100 * np.abs(plus_di_1d_adx - minus_di_1d_adx) / (plus_di_1d_adx + minus_di_1d_adx)
+    adx_1d_adx = wilders_smoothing(dx_1d_adx, 14)
+    
+    # Align 1d ADX to 6h
+    adx_1d_adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d_adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(donch_high_1d[i]) or np.isnan(donch_low_1d[i]) or 
-            np.isnan(avg_vol_1d[i]) or np.isnan(hma_1w_aligned[i])):
+        if (np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or 
+            np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
+            np.isnan(vol_ma_20_12h_aligned[i]) or np.isnan(adx_1d_adx_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Get aligned 1d values (since we're on 1d timeframe, use current values)
-        # For 1d timeframe, we need to align the 1d indicators to themselves
-        # Actually, since we're using 1d as primary timeframe, we can use the 1d arrays directly
-        # But we need to ensure we're using completed 1d bar data
-        # The get_htf_data for 1d already gives us completed 1d bars
+        # Volume confirmation: 12h volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * vol_ma_20_12h_aligned[i]
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > donch_high_1d[i-1]  # break above previous Donchian high
-        breakout_down = close[i] < donch_low_1d[i-1]  # break below previous Donchian low
+        # Regime filter: only trade when 1d ADX > 20 (trending market)
+        trending = adx_1d_adx_aligned[i] > 20
+        weak_trend = adx_1d_adx_aligned[i] < 15  # exit condition
         
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_spike = volume[i] > 1.5 * avg_vol_1d[i]
+        # Entry logic: Camarilla breakout + volume + trend
+        long_entry = (close[i] > r4_1d_aligned[i]) and volume_confirmed and trending
+        short_entry = (close[i] < s4_1d_aligned[i]) and volume_confirmed and trending
         
-        # HMA trend filter: check if HMA is rising or falling
-        # Need previous HMA value to determine direction
-        if i > 0 and not np.isnan(hma_1w_aligned[i-1]):
-            hma_rising = hma_1w_aligned[i] > hma_1w_aligned[i-1]
-            hma_falling = hma_1w_aligned[i] < hma_1w_aligned[i-1]
-        else:
-            hma_rising = False
-            hma_falling = False
-        
-        # Entry logic
-        long_entry = breakout_up and hma_rising and volume_spike
-        short_entry = breakout_down and hma_falling and volume_spike
-        
-        # Exit logic: opposite breakout OR HMA trend reversal
-        long_exit = breakout_down or (hma_falling and not hma_rising)  # opposite breakout or trend turning down
-        short_exit = breakout_up or (hma_rising and not hma_falling)   # opposite breakout or trend turning up
+        # Exit logic: Retreat to H3/L3 OR trend exhaustion
+        long_exit = (close[i] < h3_1d_aligned[i]) or weak_trend
+        short_exit = (close[i] > l3_1d_aligned[i]) or weak_trend
         
         if long_entry and position != 1:
             position = 1
@@ -142,6 +163,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_donchian_hma_volume_v1"
-timeframe = "1d"
+name = "6h_12h_1d_camarilla_breakout_volume_adx_v1"
+timeframe = "6h"
 leverage = 1.0
