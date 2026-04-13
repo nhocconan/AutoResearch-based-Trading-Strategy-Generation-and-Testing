@@ -13,56 +13,45 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 6h Average Volume (20-period) - previous bar
+    # 12h Donchian channels (20-period) - use previous bar's high/low
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
+    lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
+    
+    # 12h average volume (20-period) - previous bar
     vol_series = pd.Series(volume)
     avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
-    # 6h RSI (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    gain_series = pd.Series(gain)
-    loss_series = pd.Series(loss)
-    avg_gain = gain_series.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    avg_loss = loss_series.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # 12h EMA200 trend filter
+    ema_200_12h = pd.Series(close).ewm(span=200, min_periods=200, adjust=False).mean().values
     
-    # 1d Bollinger Bands (20, 2) - middle and std
+    # 12h ATR (14-period) for stop-loss
+    high_low = high - low
+    high_close = np.abs(high - np.roll(close, 1))
+    low_close = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    tr[0] = high_low[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().shift(1).values
+    
+    # 1d EMA50 for trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align 1d Bollinger Bands to 6h
-    sma_20_aligned = align_htf_to_ltf(prices, df_1d, sma_20)
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
-    
-    # 1d RSI (14-period) for trend filter
-    delta_1d = np.diff(close_1d, prepend=close_1d[0])
-    gain_1d = np.where(delta_1d > 0, delta_1d, 0)
-    loss_1d = np.where(delta_1d < 0, -delta_1d, 0)
-    gain_series_1d = pd.Series(gain_1d)
-    loss_series_1d = pd.Series(loss_1d)
-    avg_gain_1d = gain_series_1d.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    avg_loss_1d = loss_series_1d.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    rs_1d = avg_gain_1d / (avg_loss_1d + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs_1d))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d.values)
+    # 1d EMA200 for trend filter (HTF)
+    ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25
     
-    start = max(20, 14)
+    start = max(20, 200, 14)
     for i in range(start, n):
-        if (np.isnan(avg_vol[i]) or np.isnan(rsi[i]) or 
-            np.isnan(sma_20_aligned[i]) or np.isnan(upper_bb_aligned[i]) or 
-            np.isnan(lower_bb_aligned[i]) or np.isnan(rsi_1d_aligned[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(avg_vol[i]) or np.isnan(ema_200_12h[i]) or np.isnan(atr[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_200_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -70,35 +59,44 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long: price below lower BB (oversold) + RSI < 30 + volume spike + 1d RSI < 50 (bearish bias for mean reversion)
-            if (price < lower_bb_aligned[i] and rsi[i] < 30 and 
-                vol > 1.5 * avg_vol[i] and rsi_1d_aligned[i] < 50):
+            # Long: breakout above upper band + volume confirmation + price above EMA200_12h + EMA50_1d > EMA200_1d (bullish)
+            if (price > upper[i] and vol > 2.0 * avg_vol[i] and 
+                price > ema_200_12h[i] and ema_50_1d_aligned[i] > ema_200_1d_aligned[i]):
                 position = 1
                 signals[i] = position_size
-            # Short: price above upper BB (overbought) + RSI > 70 + volume spike + 1d RSI > 50 (bullish bias for mean reversion)
-            elif (price > upper_bb_aligned[i] and rsi[i] > 70 and 
-                  vol > 1.5 * avg_vol[i] and rsi_1d_aligned[i] > 50):
+            # Short: breakout below lower band + volume confirmation + price below EMA200_12h + EMA50_1d < EMA200_1d (bearish)
+            elif (price < lower[i] and vol > 2.0 * avg_vol[i] and 
+                  price < ema_200_12h[i] and ema_50_1d_aligned[i] < ema_200_1d_aligned[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses above SMA (mean reversion complete) OR RSI > 50
-            if (price > sma_20_aligned[i] or rsi[i] > 50):
+            # Exit long: price closes below lower band OR below EMA200_12h OR stop-loss hit
+            if (price < lower[i] or price < ema_200_12h[i] or 
+                price < entry_price_long - 2.0 * atr[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses below SMA (mean reversion complete) OR RSI < 50
-            if (price < sma_20_aligned[i] or rsi[i] < 50):
+            # Exit short: price closes above upper band OR above EMA200_12h OR stop-loss hit
+            if (price > upper[i] or price > ema_200_12h[i] or 
+                price > entry_price_short + 2.0 * atr[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -position_size
+        
+        # Track entry price for stop-loss calculation
+        if position != 0 and signals[i] != 0 and (i == start or signals[i-1] == 0):
+            if position == 1:
+                entry_price_long = close[i]
+            else:
+                entry_price_short = close[i]
     
     return signals
 
-name = "6h_1d_Bollinger_RSI_MeanReversion"
-timeframe = "6h"
+name = "12h_1d_Donchian_Volume_EMA200Trend_EMA50Filter"
+timeframe = "12h"
 leverage = 1.0
