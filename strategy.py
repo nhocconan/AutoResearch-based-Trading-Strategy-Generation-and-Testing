@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-1d_1w_CamarillaPivot_Breakout_TrendFilter_v2
-Hypothesis: Trade breakouts of daily Camarilla H3/L3 levels with volume expansion, filtered by weekly ADX > 25.
-Uses fixed position size of 0.25 to limit drawdown. Targets 10-20 trades/year for low fee impact.
-Works in bull/bear by following weekly trend direction.
+12h_1d_camarilla_breakout_volume
+Hypothesis: Uses daily Camarilla pivot levels (H3/L3) with volume expansion on 12h timeframe to capture high-probability breakouts.
+Uses 1-week ADX as a trend filter to avoid choppy markets. Works in both bull and bear markets by trading breakouts in
+the direction of the higher timeframe trend. Targets 20-30 trades/year to minimize fee drift.
 """
 
 import numpy as np
@@ -31,6 +31,7 @@ def generate_signals(prices):
     volume_1d = df_1d['volume'].values
     
     # Calculate Camarilla pivot levels for previous day
+    # H3 = Close + 1.125*(High-Low), L3 = Close - 1.125*(High-Low)
     hl_range = high_1d - low_1d
     H3 = close_1d + 1.125 * hl_range
     L3 = close_1d - 1.125 * hl_range
@@ -99,7 +100,7 @@ def generate_signals(prices):
     
     adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
     
-    # Align all signals to 1d timeframe
+    # Align all signals to 12h timeframe
     H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
     L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
     volume_expansion_aligned = align_htf_to_ltf(prices, df_1d, volume_expansion.astype(float))
@@ -151,6 +152,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_CamarillaPivot_Breakout_TrendFilter_v2"
-timeframe = "1d"
+name = "12h_1d_camarilla_breakout_volume"
+timeframe = "12h"
 leverage = 1.0
