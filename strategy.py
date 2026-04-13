@@ -8,67 +8,64 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian(20) breakout + 1d volume confirmation + ATR-based stoploss
-    # Long when: price breaks above Donchian(20) high AND volume > 2.0x 20-period avg volume
-    # Short when: price breaks below Donchian(20) low AND volume > 2.0x 20-period avg volume
-    # Exit: ATR trailing stop (long: price < highest_high_since_entry - 2.5*ATR; short: price > lowest_low_since_entry + 2.5*ATR)
-    # Uses discrete sizing (0.25) targeting 50-150 trades over 4 years.
-    # Volume filter reduces false breakouts; ATR stop manages risk in volatile markets.
-    # Works in bull/bear via Donchian structure providing objective breakout levels.
+    # Hypothesis: 4h Donchian(20) breakout + 1d Camarilla pivot structure + volume confirmation
+    # Long when: price breaks above Donchian(20) high AND price > Camarilla H3 (1d) AND volume > 1.5x avg volume
+    # Short when: price breaks below Donchian(20) low AND price < Camarilla L3 (1d) AND volume > 1.5x avg volume
+    # Exit when: price crosses Donchian midpoint OR volume drops below average
+    # Uses discrete sizing (0.25) targeting 75-200 trades over 4 years.
+    # Works in bull/bear via Camarilla pivot structure providing dynamic support/resistance levels.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian(20) channels on 12h
+    # Get 1d data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate 1d Camarilla pivots (using previous day's range)
+    # Camarilla levels: H4 = close + 1.5*(high-low), H3 = close + 1.125*(high-low)
+    #                 L3 = close - 1.125*(high-low), L4 = close - 1.5*(high-low)
+    # We'll use H3/L3 as entry filters and H4/L4 as stop levels
+    range_1d = high_1d - low_1d
+    h3_1d = close_1d + 1.125 * range_1d
+    l3_1d = close_1d - 1.125 * range_1d
+    h4_1d = close_1d + 1.5 * range_1d
+    l4_1d = close_1d - 1.5 * range_1d
+    
+    # Align 1d Camarilla levels to 4h timeframe
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
+    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    
+    # Calculate Donchian(20) channels on 4h
     lookback = 20
     donchian_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     donchian_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Volume confirmation: volume > 2.0x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_threshold = vol_ma * 2.0
-    
-    # ATR(14) for stoploss
-    tr1 = pd.Series(high - low).values
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1))).values
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1))).values
-    tr2[0] = 0  # first bar has no previous close
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    vol_threshold = vol_ma * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
     
-    # Track extreme prices for trailing stop
-    highest_since_entry = np.full(n, np.nan)
-    lowest_since_entry = np.full(n, np.nan)
-    
     for i in range(100, n):
         # Skip if data not ready
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_threshold[i]) or np.isnan(atr[i])):
+            np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
+            np.isnan(vol_threshold[i])):
             signals[i] = 0.0
             continue
-        
-        # Update trailing stop extremes
-        if position == 1:  # long position
-            if i == 100 or position == 0:  # new entry or just entered
-                highest_since_entry[i] = high[i]
-            else:
-                highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
-        elif position == -1:  # short position
-            if i == 100 or position == 0:  # new entry or just entered
-                lowest_since_entry[i] = low[i]
-            else:
-                lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
-        else:  # flat
-            highest_since_entry[i] = np.nan
-            lowest_since_entry[i] = np.nan
         
         # Volume confirmation
         vol_ok = volume[i] > vol_threshold[i]
@@ -77,31 +74,29 @@ def generate_signals(prices):
         long_breakout = close[i] > donchian_high[i]
         short_breakout = close[i] < donchian_low[i]
         
-        # ATR trailing stop conditions
-        stop_long = False
-        stop_short = False
-        if position == 1 and not np.isnan(highest_since_entry[i]):
-            stop_long = close[i] < (highest_since_entry[i] - 2.5 * atr[i])
-        elif position == -1 and not np.isnan(lowest_since_entry[i]):
-            stop_short = close[i] > (lowest_since_entry[i] + 2.5 * atr[i])
+        # Camarilla filters
+        long_filter = close[i] > h3_1d_aligned[i]
+        short_filter = close[i] < l3_1d_aligned[i]
         
         # Entry conditions
-        long_entry = long_breakout and vol_ok and position != 1
-        short_entry = short_breakout and vol_ok and position != -1
+        long_entry = long_breakout and long_filter and vol_ok and position != 1
+        short_entry = short_breakout and short_filter and vol_ok and position != -1
+        
+        # Exit conditions: price crosses Donchian midpoint OR volume drops below average
+        exit_long = close[i] < donchian_mid[i] or volume[i] < vol_ma[i]
+        exit_short = close[i] > donchian_mid[i] or volume[i] < vol_ma[i]
         
         # Execute signals
         if long_entry:
             position = 1
             signals[i] = position_size
-            highest_since_entry[i] = high[i]  # reset tracking
         elif short_entry:
             position = -1
             signals[i] = -position_size
-            lowest_since_entry[i] = low[i]  # reset tracking
-        elif position == 1 and (stop_long or close[i] < donchian_mid[i]):
+        elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (stop_short or close[i] > donchian_mid[i]):
+        elif position == -1 and exit_short:
             position = 0
             signals[i] = 0.0
         # Hold current position
@@ -115,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_donchian_volume_atr_stop_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_camarilla_volume_v1"
+timeframe = "4h"
 leverage = 1.0
