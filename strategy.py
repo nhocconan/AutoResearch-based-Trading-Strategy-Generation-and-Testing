@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_1w_1d_Camarilla_Breakout_Volume_v2
-Hypothesis: Uses weekly ADX (14) as trend filter and daily Camarilla pivot levels (H3/L3) for breakouts.
-Trades only when price breaks H3/L3 with volume expansion and strong weekly trend (ADX > 25).
-Exits when price returns to previous day's close.
-Designed to work in both bull and bear markets by capturing breakouts with strong momentum.
-Target: 12-37 trades per year (50-150 total over 4 years) to minimize fee drag.
+4h_12h_Camarilla_Breakout_Volume_Trend_v1
+Hypothesis: Combines 4h Camarilla breakout with 12h volume confirmation and 12h trend filter (ADX > 25).
+Enters long when price breaks above H3 with volume expansion and strong 12h trend.
+Enters short when price breaks below L3 with volume expansion and strong 12h trend.
+Exits when price returns to previous 4h close.
+Designed for 4h timeframe to balance trade frequency and signal quality.
+Target: 20-50 trades per year (80-200 total over 4 years) to minimize fee drag.
+Works in both bull and bear markets by requiring strong trend alignment.
 """
 
 import numpy as np
@@ -22,30 +24,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 4h data for Camarilla levels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate Camarilla pivot levels for previous day
-    hl_range = high_1d - low_1d
-    H3 = close_1d + 1.125 * hl_range
-    L3 = close_1d - 1.125 * hl_range
+    # Calculate Camarilla pivot levels for previous 4h bar
+    hl_range = high_4h - low_4h
+    H3 = close_4h + 1.125 * hl_range
+    L3 = close_4h - 1.125 * hl_range
     
-    # Get 1w data for ADX trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    # Get 12h data for ADX trend filter and volume average
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 14:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate ADX (14) on weekly data
+    # Calculate ADX (14) on 12h data
     def calculate_adx(high, low, close, period=14):
         plus_dm = np.zeros_like(high)
         minus_dm = np.zeros_like(high)
@@ -94,16 +97,16 @@ def generate_signals(prices):
             
         return adx
     
-    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
+    adx_12h = calculate_adx(high_12h, low_12h, close_12h, 14)
     
-    # Align all signals to 12h timeframe
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    # Calculate 20-period volume average on 12h
+    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
     
-    # Volume confirmation: current volume > 1.5x 20-period average on 12h
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_expansion = volume > (vol_ma_20 * 1.5)
+    # Align all signals to 4h timeframe
+    H3_aligned = align_htf_to_ltf(prices, df_4h, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_4h, L3)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    vol_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20_12h)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -113,19 +116,23 @@ def generate_signals(prices):
         # Skip if data not ready
         if (np.isnan(H3_aligned[i]) or 
             np.isnan(L3_aligned[i]) or 
-            np.isnan(adx_1w_aligned[i])):
+            np.isnan(adx_12h_aligned[i]) or 
+            np.isnan(vol_ma_20_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Trend filter: only trade when ADX > 25 (trending market)
-        strong_trend = adx_1w_aligned[i] > 25
+        strong_trend = adx_12h_aligned[i] > 25
+        
+        # Volume confirmation: current 4h volume > 1.5x 12h volume MA
+        volume_expansion = volume[i] > (vol_ma_20_12h_aligned[i] * 1.5)
         
         # Entry conditions: price breaks H3/L3 with volume expansion and trend filter
-        long_entry = (high[i] > H3_aligned[i]) and volume_expansion[i] and strong_trend
-        short_entry = (low[i] < L3_aligned[i]) and volume_expansion[i] and strong_trend
+        long_entry = (high[i] > H3_aligned[i]) and volume_expansion and strong_trend
+        short_entry = (low[i] < L3_aligned[i]) and volume_expansion and strong_trend
         
-        # Exit conditions: return to previous day's close
-        prev_close_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+        # Exit conditions: return to previous 4h close
+        prev_close_aligned = align_htf_to_ltf(prices, df_4h, close_4h)
         exit_long = position == 1 and close[i] <= prev_close_aligned[i]
         exit_short = position == -1 and close[i] >= prev_close_aligned[i]
         
@@ -150,6 +157,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1w_1d_Camarilla_Breakout_Volume_v2"
-timeframe = "12h"
+name = "4h_12h_Camarilla_Breakout_Volume_Trend_v1"
+timeframe = "4h"
 leverage = 1.0
