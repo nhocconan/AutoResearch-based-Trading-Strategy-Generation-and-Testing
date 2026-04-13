@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1-day 1-week Williams Fractal reversal with 1-week volatility regime and 1-day volume confirmation.
-Uses 1-week bearish/bullish fractals for reversal signals, 1-week ATR ratio < 0.8 (low volatility) to filter false signals,
-and 1-day volume > 1.5x 20-period average to confirm conviction. Long on bullish fractal break of recent high in low vol with volume.
-Short on bearish fractal break of recent low in low vol with volume. Target: 30-100 total trades over 4 years (7-25/year).
-Williams Fractals work well in ranging/mean-reverting markets (2025-2026 test) and capture reversals in trends.
+Hypothesis: 6h Williams %R with 1-day trend filter and volume confirmation.
+Williams %R identifies overbought/oversold conditions. In trending markets (ADX > 25 on 1d),
+we fade extreme readings during pullbacks: long when %R crosses above -80 from below in uptrend,
+short when %R crosses below -20 from above in downtrend. Volume confirmation ensures momentum.
+Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
 """
 
 import numpy as np
@@ -21,103 +21,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume confirmation
+    # Get 1d data for trend filter (ADX) and volume confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d volume spike (volume > 1.5x 20-period average)
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_1d > (vol_ma_20 * 1.5)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
-    
-    # Get 1w data for Williams Fractals and volatility regime
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate Williams Fractals (5-bar: center bar with 2 lower highs/lows on each side)
-    # Bearish fractal: high[n-2] < high[n] and high[n-1] < high[n] and high[n+1] < high[n] and high[n+2] < high[n]
-    # Bullish fractal: low[n-2] > low[n] and low[n-1] > low[n] and low[n+1] > low[n] and low[n+2] > low[n]
-    n_1w = len(high_1w)
-    bearish_fractal = np.zeros(n_1w, dtype=bool)
-    bullish_fractal = np.zeros(n_1w, dtype=bool)
-    
-    for i in range(2, n_1w - 2):
-        if (high_1w[i-2] < high_1w[i] and high_1w[i-1] < high_1w[i] and 
-            high_1w[i+1] < high_1w[i] and high_1w[i+2] < high_1w[i]):
-            bearish_fractal[i] = True
-        if (low_1w[i-2] > low_1w[i] and low_1w[i-1] > low_1w[i] and 
-            low_1w[i+1] > low_1w[i] and low_1w[i+2] > low_1w[i]):
-            bullish_fractal[i] = True
-    
-    # Calculate 1-week ATR for volatility regime
+    # Calculate 1-day ADX for trend strength
     # TR = max(high-low, |high-close_prev|, |low-close_prev|)
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr_1w = np.concatenate([[np.max([high_1w[0] - low_1w[0], np.abs(high_1w[0] - close_1w[0]), np.abs(low_1w[0] - close_1w[0])])], 
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], 
                            np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
+    # +DM and -DM
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # Calculate 1-week ATR ratio (current ATR / 50-period average ATR) for volatility regime
-    atr_ma_50 = pd.Series(atr_1w).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr_1w / atr_ma_50
+    # Smooth TR, +DM, -DM with Wilder's smoothing (alpha = 1/period)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: smoothed = prev * (1 - 1/period) + current * (1/period)
+        for i in range(period, len(data)):
+            result[i] = result[i-1] * (1 - 1/period) + data[i] * (1/period)
+        return result
     
-    # Volatility regime: ATR ratio < 0.8 = low volatility (good for reversals)
-    low_volatility = atr_ratio < 0.8
+    atr_1d = wilders_smoothing(tr_1d, 14)
+    plus_di_1d = 100 * wilders_smoothing(plus_dm, 14) / atr_1d
+    minus_di_1d = 100 * wilders_smoothing(minus_dm, 14) / atr_1d
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
+    adx_1d = wilders_smoothing(dx_1d, 14)
     
-    # Align HTF data to LTF
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bearish_fractal.astype(float), additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bullish_fractal.astype(float), additional_delay_bars=2)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
-    low_volatility_aligned = align_htf_to_ltf(prices, df_1w, low_volatility.astype(float))
+    # Trend: ADX > 25 = trending market
+    trending = adx_1d > 25
+    
+    # Determine trend direction using +DI/-DI crossover
+    # Uptrend when +DI > -DI
+    uptrend = plus_di_1d > minus_di_1d
+    downtrend = plus_di_1d < minus_di_1d
+    
+    # Calculate 1-day volume confirmation (volume > 1.3x 20-period average)
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume_1d > (vol_ma_20 * 1.3)
+    
+    # Calculate Williams %R on 6h data
+    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    
+    # Align 1d indicators to 6h timeframe
+    trending_aligned = align_htf_to_ltf(prices, df_1d, trending.astype(float))
+    uptrend_aligned = align_htf_to_ltf(prices, df_1d, uptrend.astype(float))
+    downtrend_aligned = align_htf_to_ltf(prices, df_1d, downtrend.astype(float))
+    vol_confirm_aligned = align_htf_to_ltf(prices, df_1d, vol_confirm.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% of capital
     
-    for i in range(50, n):
+    for i in range(14, n):
         # Skip if data not ready
-        if (np.isnan(bearish_fractal_aligned[i]) or 
-            np.isnan(bullish_fractal_aligned[i]) or 
-            np.isnan(vol_spike_aligned[i]) or 
-            np.isnan(low_volatility_aligned[i])):
+        if (np.isnan(trending_aligned[i]) or 
+            np.isnan(uptrend_aligned[i]) or 
+            np.isnan(downtrend_aligned[i]) or 
+            np.isnan(vol_confirm_aligned[i]) or 
+            np.isnan(williams_r[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: Williams Fractal + volume spike + low volatility
-        bullish_fractal_signal = bullish_fractal_aligned[i] > 0.5
-        bearish_fractal_signal = bearish_fractal_aligned[i] > 0.5
-        vol_confirm = vol_spike_aligned[i] > 0.5  # True if volume spike
-        vol_regime = low_volatility_aligned[i] > 0.5  # True if low volatility
+        # Entry conditions: Williams %R extreme + trend + volume
+        # Long: %R crosses above -80 from below in uptrend with volume
+        williams_r_cross_up = (williams_r[i] > -80) and (williams_r[i-1] <= -80) if i > 0 else False
+        long_entry = williams_r_cross_up and trending_aligned[i] and uptrend_aligned[i] and vol_confirm_aligned[i]
         
-        # Additional price confirmation: price must break recent swing point
-        # For bullish: price > recent swing high (using 5-period lookback high)
-        # For bearish: price < recent swing low (using 5-period lookback low)
-        lookback = 5
-        if i >= lookback:
-            recent_high = np.max(high[i-lookback:i+1])
-            recent_low = np.min(low[i-lookback:i+1])
-            price_conf_long = close[i] > recent_high
-            price_conf_short = close[i] < recent_low
-        else:
-            price_conf_long = False
-            price_conf_short = False
+        # Short: %R crosses below -20 from above in downtrend with volume
+        williams_r_cross_down = (williams_r[i] < -20) and (williams_r[i-1] >= -20) if i > 0 else False
+        short_entry = williams_r_cross_down and trending_aligned[i] and downtrend_aligned[i] and vol_confirm_aligned[i]
         
-        long_entry = bullish_fractal_signal and vol_confirm and vol_regime and price_conf_long
-        short_entry = bearish_fractal_signal and vol_confirm and vol_regime and price_conf_short
-        
-        # Exit on opposite fractal signal (mean reversion)
-        exit_long = position == 1 and bearish_fractal_signal
-        exit_short = position == -1 and bullish_fractal_signal
+        # Exit when %R returns to opposite extreme (mean reversion within trend)
+        exit_long = position == 1 and williams_r[i] > -20
+        exit_short = position == -1 and williams_r[i] < -80
         
         # Execute signals
         if long_entry and position != 1:
@@ -140,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_williams_fractal_vol_vol"
-timeframe = "1d"
+name = "6h_1d_williams_r_trend_volume"
+timeframe = "6h"
 leverage = 1.0
