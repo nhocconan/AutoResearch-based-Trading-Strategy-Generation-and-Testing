@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h timeframe with 1d Donchian breakout and volume confirmation.
-# Long: Price breaks above 1d Donchian upper channel (20-period high) + volume > 1.5x average volume.
-# Short: Price breaks below 1d Donchian lower channel (20-period low) + volume > 1.5x average volume.
-# Uses 1d Donchian channels for trend structure, 4h for execution with volume confirmation.
-# Exit: Price crosses back through the opposite Donchian band.
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+# Hypothesis: 12h timeframe with 1d Donchian breakout and volume confirmation.
+# Long: Price closes above 1d Donchian upper channel (20-period high) + volume > 1.3x average volume.
+# Short: Price closes below 1d Donchian lower channel (20-period low) + volume > 1.3x average volume.
+# Uses 1d Donchian channels for trend structure, 12h for execution with volume confirmation.
+# Position size: 0.25. Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+# Designed to work in both bull and bear markets by following institutional breakouts.
 
 def generate_signals(prices):
     n = len(prices)
@@ -40,7 +40,7 @@ def generate_signals(prices):
     for i in range(20, n):
         avg_volume[i] = np.mean(volume[i-20:i])
     
-    # Align 1d Donchian channels to 4h
+    # Align 1d Donchian channels to 12h
     donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
@@ -61,29 +61,29 @@ def generate_signals(prices):
         upper = donchian_high_aligned[i]
         lower = donchian_low_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirm = vol > 1.5 * avg_vol
+        # Volume confirmation: current volume > 1.3x average volume
+        volume_confirm = vol > 1.3 * avg_vol
         
         if position == 0:
-            # Long: price breaks above upper channel + volume confirmation
+            # Long: price closes above upper channel + volume confirmation
             if (price > upper and volume_confirm):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below lower channel + volume confirmation
+            # Short: price closes below lower channel + volume confirmation
             elif (price < lower and volume_confirm):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below lower channel
+            # Exit long: price closes below lower channel (opposite side)
             if price < lower:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above upper channel
+            # Exit short: price closes above upper channel (opposite side)
             if price > upper:
                 position = 0
                 signals[i] = 0.0
@@ -92,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Donchian_Breakout_Volume"
-timeframe = "4h"
+name = "12h_1d_Donchian_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
