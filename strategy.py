@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d ATR breakout with 1w trend filter and volume confirmation.
-# Uses daily ATR-based breakout channels (ATR multiplier = 2.0) to capture momentum.
-# Weekly EMA(50) as trend filter ensures alignment with higher timeframe direction.
-# Volume confirmation filters false breakouts (volume > 1.5x 20-day average).
-# Designed for low trade frequency (target: 10-25 trades/year) to minimize fee drag.
-# Works in bull markets via breakout continuation and in bear via short breakdowns.
+# Hypothesis: 12h Camarilla pivot levels with 1d trend filter and volume confirmation.
+# Camarilla pivots provide precise support/resistance levels based on prior day's range.
+# In strong trends, price tends to respect S3/R3 levels; in ranges, it oscillates between S1/R1.
+# Combined with 1d trend filter (EMA50) and volume spikes, it filters false breakouts.
+# Target: 12-37 trades per year (50-150 total over 4 years) for 12h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,69 +19,99 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-week data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 1-day data for trend filter and Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # EMA(50) for 1w trend filter
-    ema50_1w = np.zeros(len(close_1w))
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # EMA(50) for 1d trend filter
+    ema50_1d = np.zeros(len(close_1d))
     ema_multiplier = 2 / (50 + 1)
-    ema50_1w[0] = close_1w[0]
-    for i in range(1, len(close_1w)):
-        ema50_1w[i] = (close_1w[i] - ema50_1w[i-1]) * ema_multiplier + ema50_1w[i-1]
+    ema50_1d[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        ema50_1d[i] = (close_1d[i] - ema50_1d[i-1]) * ema_multiplier + ema50_1d[i-1]
     
-    # Align 1w EMA to 1d timeframe
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Align 1d EMA to 12h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # True Range and ATR(14) for breakout channels
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]  # First bar: no previous close
-    atr = np.zeros(n)
-    atr[13] = np.mean(tr[:14])  # Seed ATR with first 14 values
-    for i in range(14, n):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14  # Wilder's smoothing
+    # Calculate Camarilla pivot levels from previous day
+    # R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4), etc.
+    camarilla_r4 = np.full(len(close_1d), np.nan)
+    camarilla_r3 = np.full(len(close_1d), np.nan)
+    camarilla_r2 = np.full(len(close_1d), np.nan)
+    camarilla_r1 = np.full(len(close_1d), np.nan)
+    camarilla_s1 = np.full(len(close_1d), np.nan)
+    camarilla_s2 = np.full(len(close_1d), np.nan)
+    camarilla_s3 = np.full(len(close_1d), np.nan)
+    camarilla_s4 = np.full(len(close_1d), np.nan)
     
-    # ATR-based breakout channels
-    upper_channel = np.roll(close, 1) + 2.0 * atr  # Previous close + 2*ATR
-    lower_channel = np.roll(close, 1) - 2.0 * atr  # Previous close - 2*ATR
+    for i in range(1, len(close_1d)):
+        if not (np.isnan(high_1d[i-1]) or np.isnan(low_1d[i-1]) or np.isnan(close_1d[i-1])):
+            H = high_1d[i-1]
+            L = low_1d[i-1]
+            C = close_1d[i-1]
+            range_hl = H - L
+            
+            camarilla_r4[i] = C + (range_hl * 1.1 / 2)
+            camarilla_r3[i] = C + (range_hl * 1.1 / 4)
+            camarilla_r2[i] = C + (range_hl * 1.1 / 6)
+            camarilla_r1[i] = C + (range_hl * 1.1 / 12)
+            camarilla_s1[i] = C - (range_hl * 1.1 / 12)
+            camarilla_s2[i] = C - (range_hl * 1.1 / 6)
+            camarilla_s3[i] = C - (range_hl * 1.1 / 4)
+            camarilla_s4[i] = C - (range_hl * 1.1 / 2)
     
-    # Average volume (20-day) for volume confirmation
-    avg_volume = np.zeros(n)
-    for i in range(20, n):
-        avg_volume[i] = np.mean(volume[i-20:i])
+    # Align Camarilla levels to 12h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r2)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s2)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    
+    # Average volume (4-period = 2 days) for volume confirmation
+    avg_volume = np.full(n, np.nan)
+    for i in range(4, n):
+        avg_volume[i] = np.mean(volume[i-4:i])
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(20, n):
+    for i in range(4, n):
         # Skip if any required data is not ready
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        prev_close = close[i-1]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        ema_trend = ema50_1w_aligned[i]
+        ema_trend = ema50_1d_aligned[i]
+        r3 = r3_aligned[i]
+        s3 = s3_aligned[i]
+        r1 = r1_aligned[i]
+        s1 = s1_aligned[i]
         
         # Volume confirmation: current volume > 1.5x average volume
         volume_confirm = vol > 1.5 * avg_vol
         
         if position == 0:
-            # Long: Break above upper channel + above 1w EMA50 + volume confirmation
-            if (price > upper_channel[i] and
+            # Long: Price crosses above R3 with volume + above 1d EMA50
+            if (price > r3 and 
                 price > ema_trend and
                 volume_confirm):
                 position = 1
                 signals[i] = position_size
-            # Short: Break below lower channel + below 1w EMA50 + volume confirmation
-            elif (price < lower_channel[i] and
+            # Short: Price crosses below S3 with volume + below 1d EMA50
+            elif (price < s3 and 
                   price < ema_trend and
                   volume_confirm):
                 position = -1
@@ -90,17 +119,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Price breaks below lower channel or trend turns bearish
-            if (price < lower_channel[i] or
-                price < ema_trend):
+            # Exit long: Price crosses below R1 or trend changes
+            if (price < r1 or price < ema_trend):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Price breaks above upper channel or trend turns bullish
-            if (price > upper_channel[i] or
-                price > ema_trend):
+            # Exit short: Price crosses above S1 or trend changes
+            if (price > s1 or price > ema_trend):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -108,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_ATR_Breakout_Trend_Volume"
-timeframe = "1d"
+name = "12h_1d_CamarillaPivot_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
