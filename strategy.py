@@ -1,12 +1,12 @@
-# %%
 #!/usr/bin/env python3
 """
-[40564] 1d_1w_kama_rsi_chop
-Hypothesis: Daily KAMA trend direction with RSI momentum filter and weekly Choppiness Index regime filter.
-Uses KAMA (adaptive moving average) to identify trend direction, RSI for momentum strength,
-and weekly Choppiness Index to filter trades to trending regimes only (CHOP < 38.2).
-Designed to work in both bull and bear markets by focusing on strong trending moves.
-Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag.
+12h_1d_keltner_breakout_volume
+Hypothesis: 12h Keltner Channel breakout with 1d volume confirmation.
+In bull markets: buy breakouts above upper Keltner (20, 2.0) with volume surge.
+In bear markets: sell breakdowns below lower Keltner with volume surge.
+Uses 1d volume > 1.5x 20-period average to confirm institutional participation.
+Keltner Channels adapt to volatility, reducing false breakouts in low-vol regimes.
+Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
 """
 
 import numpy as np
@@ -21,110 +21,62 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for Choppiness Index (trend regime filter)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate weekly Choppiness Index (14-period)
-    wh = df_1w['high'].values
-    wl = df_1w['low'].values
-    wc = df_1w['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # True Range calculation
-    tr1 = wh[1:] - wl[1:]
-    tr2 = np.abs(wh[1:] - wc[:-1])
-    tr3 = np.abs(wl[1:] - wc[:-1])
-    tr_first = np.max([wh[0] - wl[0], np.abs(wh[0] - wc[0]), np.abs(wl[0] - wc[0])])
-    tr = np.concatenate([[tr_first], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate 1d volume spike (volume > 1.5x 20-period average)
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_1d > (vol_ma_20 * 1.5)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
     
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    max_high = pd.Series(wh).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(wl).rolling(window=14, min_periods=14).min().values
-    range_max_min = max_high - min_low
+    # Calculate 12h Keltner Channel (20, 2.0)
+    # Middle = EMA20 of close
+    # Upper = Middle + 2.0 * ATR(10)
+    # Lower = Middle - 2.0 * ATR(10)
+    close_series = pd.Series(close)
+    ema_middle = close_series.ewm(span=20, min_periods=20, adjust=False).mean().values
     
-    # Avoid division by zero
-    chop = np.where(range_max_min != 0, 
-                    100 * np.log10(atr_sum / range_max_min) / np.log10(14), 
-                    50)  # neutral when no range
+    # True Range for ATR
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], 
+                        np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=10, min_periods=10, adjust=False).mean().values
     
-    # Market regime: CHOP > 61.8 = range, CHOP < 38.2 = trend
-    trending_weekly = chop < 38.2
-    trending_weekly_aligned = align_htf_to_ltf(prices, df_1w, trending_weekly.astype(float))
+    keltner_upper = ema_middle + 2.0 * atr
+    keltner_lower = ema_middle - 2.0 * atr
     
-    # Calculate daily KAMA (adaptive moving average)
-    # Efficiency Ratio: ER = |close - close[10]| / sum(|close - close[1]|) over 10 periods
-    change = np.abs(np.diff(close, n=10))  # |close - close[10]|
-    volatility = np.abs(np.diff(close, n=1))  # |close - close[1]|
-    
-    # Pad arrays for calculation
-    change_padded = np.concatenate([[np.nan] * 10, change])
-    volatility_padded = np.concatenate([[np.nan], volatility])
-    
-    # Calculate ER using rolling sum
-    change_sum = pd.Series(change_padded).rolling(window=10, min_periods=10).sum().values[10:]
-    volatility_sum = pd.Series(volatility_padded).rolling(window=10, min_periods=10).sum().values
-    
-    # ER = change_sum / volatility_sum, handle division by zero
-    er = np.where(volatility_sum != 0, change_sum / volatility_sum, 0)
-    
-    # Smoothing constants: sc = [ER * (fastest - slowest) + slowest]^2
-    # fastest = 2/(2+1) = 0.6667, slowest = 2/(30+1) = 0.0645
-    sc = (er * 0.6022 + 0.0645) ** 2
-    
-    # Calculate KAMA
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # Start after 10 periods
-    
-    for i in range(10, n):
-        if not np.isnan(sc[i-10]) and not np.isnan(kama[i-1]):
-            kama[i] = kama[i-1] + sc[i-10] * (close[i] - kama[i-1])
-    
-    # Align KAMA to daily timeframe
-    kama_aligned = kama  # Already daily
-    
-    # Calculate daily RSI (14-period)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    
-    # Handle first average
-    avg_gain = np.concatenate([[np.nan] * 13, avg_gain])
-    avg_loss = np.concatenate([[np.nan] * 13, avg_loss])
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Signals
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% of capital
     
-    for i in range(20, n):  # Start after warmup period
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(kama_aligned[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(trending_weekly_aligned[i])):
+        if (np.isnan(ema_middle[i]) or 
+            np.isnan(keltner_upper[i]) or 
+            np.isnan(keltner_lower[i]) or 
+            np.isnan(vol_spike_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: Price above/below KAMA + RSI momentum + weekly trend
-        price_above_kama = close[i] > kama_aligned[i]
-        price_below_kama = close[i] < kama_aligned[i]
-        rsi_overbought = rsi[i] > 60  # Momentum confirmation for longs
-        rsi_oversold = rsi[i] < 40   # Momentum confirmation for shorts
-        weekly_trend = trending_weekly_aligned[i] > 0.5
+        # Entry conditions: Keltner breakout + volume spike
+        breakout_long = close[i] > keltner_upper[i]
+        breakout_short = close[i] < keltner_lower[i]
+        vol_confirm = vol_spike_aligned[i] > 0.5  # True if volume spike
         
-        long_entry = price_above_kama and rsi_overbought and weekly_trend
-        short_entry = price_below_kama and rsi_oversold and weekly_trend
+        long_entry = breakout_long and vol_confirm
+        short_entry = breakout_short and vol_confirm
         
-        # Exit when price crosses KAMA in opposite direction
-        exit_long = position == 1 and close[i] < kama_aligned[i]
-        exit_short = position == -1 and close[i] > kama_aligned[i]
+        # Exit when price returns to middle line (mean reversion)
+        exit_long = position == 1 and close[i] < ema_middle[i]
+        exit_short = position == -1 and close[i] > ema_middle[i]
         
         # Execute signals
         if long_entry and position != 1:
@@ -147,7 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_kama_rsi_chop"
-timeframe = "1d"
+name = "12h_1d_keltner_breakout_volume"
+timeframe = "12h"
 leverage = 1.0
-# %%
