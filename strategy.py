@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_1d_Weekly_Camarilla_Pivot_Breakout_Volume_Confirmation
-Hypothesis: Weekly (1w) timeframe provides stronger trend context than daily.
-Breakouts above weekly R3 or below weekly S3 on 12h chart with volume expansion capture
-major institutional moves while avoiding minor false breakouts. Uses 1d for volume context
-to avoid overnight gaps. Designed for 12-37 trades/year to stay within fee limits.
-Works in bull markets (breakouts continuation) and bear markets (breakdowns continuation).
+4h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation_v4
+Hypothesis: Daily Camarilla pivot levels (S3/R3) provide strong support/resistance.
+Breakouts above R3 or below S3 on 4h chart with volume expansion capture institutional moves.
+Adds volume confirmation and requires minimum 4-bar separation between signals to reduce overtrading.
+Works in both bull and bear markets by trading breakouts regardless of direction. Target: 20-30 trades/year per symbol.
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 300:  # Need sufficient history for weekly and daily calculations
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,71 +21,73 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for primary trend context (more reliable than daily)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Get daily data for volume confirmation (avoid overnight gaps)
+    # Get daily data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Weekly Camarilla levels
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate Camarilla levels for each daily bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    close_prev_1w = np.roll(close_1w, 1)
-    close_prev_1w[0] = close_1w[0]  # first bar uses its own close
+    # Camarilla formulas
+    close_prev = np.roll(close_1d, 1)
+    close_prev[0] = close_1d[0]  # first bar uses its own close
     
-    range_1w = high_1w - low_1w
+    range_1d = high_1d - low_1d
     
-    # Weekly Resistance (R3) and Support (S3)
-    R3_1w = close_prev_1w + (range_1w * 1.2500 / 4)
-    S3_1w = close_prev_1w - (range_1w * 1.2500 / 4)
+    # Resistance levels (R3 used)
+    R3 = close_prev + (range_1d * 1.2500 / 4)
     
-    # Align weekly levels to 12h timeframe
-    R3_1w_aligned = align_htf_to_ltf(prices, df_1w, R3_1w)
-    S3_1w_aligned = align_htf_to_ltf(prices, df_1w, S3_1w)
+    # Support levels (S3 used)
+    S3 = close_prev - (range_1d * 1.2500 / 4)
     
-    # Calculate Daily Average Volume for confirmation (avoid overnight gaps)
-    volume_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean()
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d.values)
+    # Align levels to 4h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # Volume expansion: current volume > 1.8x 20-day average volume
-    volume_expansion = volume > (vol_ma_20_1d_aligned * 1.8)
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volume_expansion = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.25  # 25% position size to manage drawdown
+    position_size = 0.25
+    last_signal_bar = -10  # track last signal bar to enforce minimum separation
     
-    for i in range(300, n):  # Start after sufficient warmup
+    for i in range(200, n):
         # Skip if any required data is not ready
-        if (np.isnan(R3_1w_aligned[i]) or np.isnan(S3_1w_aligned[i]) or 
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
             np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Long breakout: price breaks above weekly R3 with volume expansion
-        long_breakout = close[i] > R3_1w_aligned[i] and volume_expansion[i]
+        # Enforce minimum 4-bar separation between signals
+        if i - last_signal_bar < 4:
+            signals[i] = position_size if position == 1 else (-position_size if position == -1 else 0.0)
+            continue
         
-        # Short breakdown: price breaks below weekly S3 with volume expansion
-        short_breakout = close[i] < S3_1w_aligned[i] and volume_expansion[i]
+        # Long breakout: price breaks above R3 with volume expansion
+        long_breakout = close[i] > R3_aligned[i] and volume_expansion[i]
+        
+        # Short breakdown: price breaks below S3 with volume expansion
+        short_breakout = close[i] < S3_aligned[i] and volume_expansion[i]
         
         if long_breakout and position != 1:
             position = 1
             signals[i] = position_size
+            last_signal_bar = i
         elif short_breakout and position != -1:
             position = -1
             signals[i] = -position_size
+            last_signal_bar = i
         else:
             # Hold current position
             signals[i] = position_size if position == 1 else (-position_size if position == -1 else 0.0)
     
     return signals
 
-name = "12h_1d_Weekly_Camarilla_Pivot_Breakout_Volume_Confirmation"
-timeframe = "12h"
+name = "4h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation_v4"
+timeframe = "4h"
 leverage = 1.0
