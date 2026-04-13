@@ -8,68 +8,49 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Camarilla pivot breakout with 1d trend filter and volume confirmation.
-    # Long when price breaks above Camarilla H3 level AND 1d close > 1d EMA50 (bullish trend) AND 12h volume > 1.3x 20-period MA.
-    # Short when price breaks below Camarilla L3 level AND 1d close < 1d EMA50 (bearish trend) AND 12h volume > 1.3x 20-period MA.
-    # Exit when price re-enters Camarilla H3-L3 range (mean reversion).
-    # Uses Camarilla pivots for structure, 1d EMA for trend, volume for confirmation.
-    # Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+    # Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+    # Long when price breaks above Donchian high(20) AND 1d close > 1d EMA50 (bullish trend) AND 4h volume > 1.5x 20-period MA.
+    # Short when price breaks below Donchian low(20) AND 1d close < 1d EMA50 (bearish trend) AND 4h volume > 1.5x 20-period MA.
+    # Exit when price re-enters Donchian channel (mean reversion).
+    # Uses Donchian for structure, 1d EMA for trend, volume for confirmation.
+    # Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation and trend filter
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla pivot levels from previous day
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # H4 = Pivot + Range * 1.1/2
-    # H3 = Pivot + Range * 1.1/4
-    # H2 = Pivot + Range * 1.1/6
-    # H1 = Pivot + Range * 1.1/12
-    # L1 = Pivot - Range * 1.1/12
-    # L2 = Pivot - Range * 1.1/6
-    # L3 = Pivot - Range * 1.1/4
-    # L4 = Pivot - Range * 1.1/2
-    
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    
-    h3_1d = pivot_1d + range_1d * 1.1 / 4
-    l3_1d = pivot_1d - range_1d * 1.1 / 4
-    h4_1d = pivot_1d + range_1d * 1.1 / 2
-    l4_1d = pivot_1d - range_1d * 1.1 / 2
     
     # Calculate 1d EMA50 for trend filter
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 1d indicators to 12h timeframe
-    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
-    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
-    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Get 12h data for volume confirmation and price
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 4h data for Donchian channels and volume confirmation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    volume_12h = df_12h['volume'].values
-    vol_ma_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    volume_4h = df_4h['volume'].values
     
-    # Align 12h close for price comparison
-    close_12h_aligned = align_htf_to_ltf(prices, df_12h, close)
+    # Calculate Donchian channels (20-period)
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 4h volume MA(20)
+    vol_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    
+    # Align 4h indicators to 4h timeframe (no alignment needed as we're already on 4h)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -77,34 +58,32 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_12h_aligned[i]) or 
-            np.isnan(close_12h_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.3x 20-period average
-        volume_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_12h)
-        volume_spike = volume_12h_aligned[i] > 1.3 * vol_ma_12h_aligned[i]
+        # Volume confirmation: current 4h volume > 1.5x 20-period average
+        volume_spike = volume[i] > 1.5 * vol_ma_4h_aligned[i]
         
-        # Price relative to Camarilla levels
-        price_above_h3 = close_12h_aligned[i] > h3_1d_aligned[i]
-        price_below_l3 = close_12h_aligned[i] < l3_1d_aligned[i]
-        price_in_range = (close_12h_aligned[i] >= l3_1d_aligned[i]) & (close_12h_aligned[i] <= h3_1d_aligned[i])
+        # Price relative to Donchian channels
+        price_above_high = close[i] > donchian_high_aligned[i]
+        price_below_low = close[i] < donchian_low_aligned[i]
+        price_in_channel = (close[i] >= donchian_low_aligned[i]) & (close[i] <= donchian_high_aligned[i])
         
         # Trend filter: 1d close vs EMA50
-        trend_bullish = close_12h_aligned[i] > ema50_1d_aligned[i]  # Using 12h close vs 1d EMA50
-        trend_bearish = close_12h_aligned[i] < ema50_1d_aligned[i]
+        trend_bullish = close[i] > ema50_1d_aligned[i]  # Using 4h close vs 1d EMA50
+        trend_bearish = close[i] < ema50_1d_aligned[i]
         
         # Entry conditions
-        if price_above_h3 and trend_bullish and volume_spike and position != 1:
+        if price_above_high and trend_bullish and volume_spike and position != 1:
             position = 1
             signals[i] = position_size
-        elif price_below_l3 and trend_bearish and volume_spike and position != -1:
+        elif price_below_low and trend_bearish and volume_spike and position != -1:
             position = -1
             signals[i] = -position_size
-        # Exit conditions: price re-enters H3-L3 range
-        elif price_in_range and position != 0:
+        # Exit conditions: price re-enters Donchian channel
+        elif price_in_channel and position != 0:
             position = 0
             signals[i] = 0.0
         # Hold current position
@@ -118,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_camarilla_pivot_breakout_ema_volume_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_breakout_ema_volume_v1"
+timeframe = "4h"
 leverage = 1.0
