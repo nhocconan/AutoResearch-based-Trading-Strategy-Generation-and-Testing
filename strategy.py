@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -38,7 +38,7 @@ def generate_signals(prices):
     volume_1d = df_1d['volume'].values
     volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all data to 4h timeframe
+    # Align all data to daily timeframe (primary)
     donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
@@ -48,27 +48,21 @@ def generate_signals(prices):
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if any required data is not ready
         if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
             np.isnan(ema_20_1w_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current 4h volume > 1.5x daily volume MA (adjusted for 4h)
-        # 6x 4h periods per day, so daily MA/6 = approximate 4h period MA
-        volume_4h_approx_ma = volume_ma_20_1d_aligned[i] / 6
-        volume_condition = volume[i] > (volume_4h_approx_ma * 1.5)
+        # Volume condition: current daily volume > 1.5x daily volume MA
+        volume_condition = volume[i] > (volume_ma_20_1d_aligned[i] * 1.5)
         
         # Trend filter: weekly EMA20 direction
-        # Long when price > weekly EMA20
-        # Short when price < weekly EMA20
         long_trend = close[i] > ema_20_1w_aligned[i]
         short_trend = close[i] < ema_20_1w_aligned[i]
         
         # Entry conditions: Donchian breakout with volume and trend confirmation
-        # Long when price breaks above Donchian high with volume and uptrend
-        # Short when price breaks below Donchian low with volume and downtrend
         breakout_long = close[i] > donchian_high_aligned[i]
         breakout_short = close[i] < donchian_low_aligned[i]
         
@@ -98,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d1w_Donchian_Breakout_Volume_Trend_Filter_v1"
-timeframe = "4h"
+name = "1d_Donchian_Breakout_Volume_Trend_Filter_v1"
+timeframe = "1d"
 leverage = 1.0
