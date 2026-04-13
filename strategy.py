@@ -8,10 +8,10 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Camarilla pivot breakout with 1d weekly pivot bias and volume confirmation.
-    # Weekly pivot from 1d data determines structural bias: price above weekly pivot = bullish bias (long breakouts only),
-    # price below weekly pivot = bearish bias (short breakouts only). Camarilla levels (H3/L3) from 1d provide entry zones.
-    # Volume confirmation ensures breakout validity. Target: 50-150 total trades over 4 years = 12-37/year.
+    # Hypothesis: 1d Camarilla pivot breakout with 1w trend filter and volume confirmation.
+    # Weekly trend from 1w data determines structural bias: price above weekly EMA20 = bullish bias (long breakouts only),
+    # price below weekly EMA20 = bearish bias (short breakouts only). Camarilla pivot breakouts from 1d provide entry timing.
+    # Volume confirmation ensures breakout validity. Target: 30-100 total trades over 4 years = 7-25/year.
     # Works in bull markets (long breakouts with bullish bias) and bear markets (short breakouts with bearish bias).
     
     close = prices['close'].values
@@ -19,39 +19,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for weekly pivot and Camarilla levels (call ONCE before loop)
+    # Get 1d data for Camarilla pivots (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly pivot points from 1d OHLC
-    # Weekly pivot = (Prior week HIGH + LOW + CLOSE) / 3
-    # We approximate weekly using rolling window of 5 days (1 trading week)
+    # Get 1w data for weekly EMA20 trend filter (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Calculate 1d Camarilla pivot levels (based on prior day OHLC)
+    # Camarilla levels: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), etc.
+    # We use R3 and S3 as breakout levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Weekly high/low/close using 5-day rolling window
-    week_high = pd.Series(high_1d).rolling(window=5, min_periods=5).max().values
-    week_low = pd.Series(low_1d).rolling(window=5, min_periods=5).min().values
-    week_close = pd.Series(close_1d).rolling(window=5, min_periods=5).last().values
+    # Prior day's range
+    prev_high = pd.Series(high_1d).shift(1).values
+    prev_low = pd.Series(low_1d).shift(1).values
+    prev_close = pd.Series(close_1d).shift(1).values
     
-    # Weekly pivot point
-    weekly_pivot = (week_high + week_low + week_close) / 3.0
+    # Calculate Camarilla R3 and S3 levels
+    camarilla_r3 = prev_close + ((prev_high - prev_low) * 1.1 / 4)
+    camarilla_s3 = prev_close - ((prev_high - prev_low) * 1.1 / 4)
     
-    # Align weekly pivot to 12h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    # Align Camarilla levels to 1d timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Calculate 1d Camarilla levels (H3, L3)
-    # Camarilla: H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4
-    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 4.0
-    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 4.0
+    # Calculate 1w EMA20 for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align Camarilla levels to 12h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Align weekly EMA20 to 1d timeframe
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Calculate 12h volume MA(20) for confirmation
+    # Calculate 1d volume MA(20) for confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -59,23 +64,23 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volume filter: current volume > 20-period MA
         volume_filter = volume[i] > volume_ma[i]
         
-        # Breakout conditions at Camarilla H3/L3 levels
-        long_breakout = close[i] > camarilla_h3_aligned[i]  # Break above H3
-        short_breakout = close[i] < camarilla_l3_aligned[i]  # Break below L3
+        # Breakout conditions at Camarilla R3 and S3 levels
+        long_breakout = close[i] > camarilla_r3_aligned[i]  # Break above R3
+        short_breakout = close[i] < camarilla_s3_aligned[i]  # Break below S3
         
-        # Weekly pivot bias: price above pivot = bullish bias, below = bearish bias
-        bullish_bias = close[i] > weekly_pivot_aligned[i]
-        bearish_bias = close[i] < weekly_pivot_aligned[i]
+        # Weekly trend bias: price above weekly EMA20 = bullish bias, below = bearish bias
+        bullish_bias = close[i] > ema_20_1w_aligned[i]
+        bearish_bias = close[i] < ema_20_1w_aligned[i]
         
-        # Entry conditions: breakout in direction of weekly pivot bias
+        # Entry conditions: breakout in direction of weekly trend bias
         long_entry = long_breakout and bullish_bias and volume_filter
         short_entry = short_breakout and bearish_bias and volume_filter
         
@@ -106,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_camarilla_weekly_pivot_v1"
-timeframe = "12h"
+name = "1d_1w_camarilla_breakout_weekly_ema_v1"
+timeframe = "1d"
 leverage = 1.0
