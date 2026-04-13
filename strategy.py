@@ -3,102 +3,75 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h timeframe with daily Camarilla pivot reversal + volume confirmation + chop filter
-# Long when price crosses above Camarilla H3 level with volume surge in choppy market (CHOP>61.8)
-# Short when price crosses below Camarilla L3 level with volume surge in choppy market (CHOP>61.8)
-# Exit on opposite H4/L4 touch or when CHOP<38.2 (trending market)
-# Target: 100-180 total trades over 4 years (25-45/year) using mean reversion in ranging markets
-# Uses 1d for Camarilla levels and chop filter, 4h for execution
+# Hypothesis: 6h timeframe with 1-day Williams %R mean reversion + 1-week trend filter
+# Long when 1d Williams %R < -80 (oversold) and price > 1w EMA200 (bullish long-term trend)
+# Short when 1d Williams %R > -20 (overbought) and price < 1w EMA200 (bearish long-term trend)
+# Exit when Williams %R crosses -50 (mean reversion complete)
+# Williams %R identifies exhaustion points; EMA200 filter ensures alignment with major trend
+# Target: 60-120 total trades over 4 years (15-30/year) to balance opportunity and cost
+# Uses weekly EMA to avoid counter-trend trades in strong trends, improving win rate
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot and chop filter
+    # Get 1-day data for Williams %R
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels (based on previous day)
-    # H4 = close + 1.1*(high-low)*1.1/2, H3 = close + 1.1*(high-low)*1.1/4, etc.
-    # Actually standard: H4 = close + 1.1*(high-low)*1.1/2, H3 = close + 1.1*(high-low)*1.1/4
-    # Simpler: range = high-low, H3 = close + 1.1*range/4, L3 = close - 1.1*range/4
-    # H4 = close + 1.1*range/2, L4 = close - 1.1*range/2
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = high_1d[0]  # first bar
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
+    # Calculate 14-period Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
     
-    range_1d = prev_high - prev_low
-    camarilla_h3 = prev_close + 1.1 * range_1d / 4
-    camarilla_l3 = prev_close - 1.1 * range_1d / 4
-    camarilla_h4 = prev_close + 1.1 * range_1d / 2
-    camarilla_l4 = prev_close - 1.1 * range_1d / 2
+    # Get 1-week data for EMA200 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
+        return np.zeros(n)
     
-    # Calculate Choppiness Index (14-period)
-    # CHOP = 100 * log10(sum(ATR14)/(n * true_range)) / log10(n)
-    # Simplified: high-low as true range proxy
-    tr1 = high_1d - low_1d
-    atr14 = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
-    sum_atr14 = pd.Series(atr14).rolling(window=14, min_periods=14).sum().values
-    n_tr = pd.Series(tr1).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(sum_atr14 / n_tr) / np.log10(14)
-    chop = np.where(n_tr == 0, 50, chop)  # avoid division by zero
+    close_1w = df_1w['close'].values
+    ema200_1w = pd.Series(close_1w).ewm(span=200, min_periods=200, adjust=False).mean().values
     
-    # Align 1d indicators to 4h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Align 1-day Williams %R to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # Volume average (20-period)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align 1-week EMA200 to 6h timeframe
+    ema200_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% of capital
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(ema200_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume surge condition
-        volume_surge = volume[i] > 1.5 * vol_ma_20[i]
+        wr = williams_r_aligned[i]
+        price = close[i]
+        ema200 = ema200_aligned[i]
         
-        # Choppy market condition (range-bound)
-        choppy = chop_aligned[i] > 61.8
+        # Entry conditions
+        long_entry = (wr < -80) and (price > ema200)
+        short_entry = (wr > -20) and (price < ema200)
         
-        # Camarilla level touches
-        touch_h3 = close[i] >= camarilla_h3_aligned[i]
-        touch_l3 = close[i] <= camarilla_l3_aligned[i]
-        touch_h4 = close[i] >= camarilla_h4_aligned[i]
-        touch_l4 = close[i] <= camarilla_l4_aligned[i]
-        
-        # Entry logic: touch H3/L3 + volume surge + choppy market
-        long_entry = touch_h3 and volume_surge and choppy
-        short_entry = touch_l3 and volume_surge and choppy
-        
-        # Exit conditions: touch H4/L4 or chop < 38.2 (trending)
-        exit_long = position == 1 and (touch_h4 or chop_aligned[i] < 38.2)
-        exit_short = position == -1 and (touch_l4 or chop_aligned[i] < 38.2)
+        # Exit conditions: Williams %R crosses -50 (mean reversion midpoint)
+        exit_long = (position == 1) and (wr > -50)
+        exit_short = (position == -1) and (wr < -50)
         
         # Execute signals
         if long_entry and position != 1:
@@ -121,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_camarilla_chop_volume_reversal_v1"
-timeframe = "4h"
+name = "6h_1d_1w_williams_r_mean_reversion_v1"
+timeframe = "6h"
 leverage = 1.0
