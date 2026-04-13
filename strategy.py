@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_1d_Midpoint_Bounce_With_Trend
-Hypothesis: Price tends to bounce off the daily midpoint (H+L)/2 in trending markets.
-We take long when price > daily midpoint and 4h close > 4h EMA20, short when price < daily midpoint and 4h close < 4h EMA20.
-Works in bull markets (buying dips) and bear markets (selling rallies) by following the 4h trend.
-Target: 20-30 trades/year per symbol.
+4h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation_v4
+Hypothesis: Daily Camarilla pivot levels (S4/R4) provide stronger support/resistance than S3/R3.
+Breakouts above R4 or below S4 on 4h chart with volume expansion capture institutional moves.
+Adds volume confirmation to reduce false breakouts. Works in both bull and bear markets
+by trading breakouts regardless of direction. Target: 15-25 trades/year per symbol.
 """
 
 import numpy as np
@@ -13,62 +13,73 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get daily data for midpoint
+    # Get daily data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate daily midpoint: (H+L)/2
+    # Calculate Camarilla levels for each daily bar
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    midpoint_1d = (high_1d + low_1d) / 2.0
+    close_1d = df_1d['close'].values
     
-    # Align midpoint to 4h timeframe
-    midpoint_aligned = align_htf_to_ltf(prices, df_1d, midpoint_1d)
+    # Camarilla formulas
+    close_prev = np.roll(close_1d, 1)
+    close_prev[0] = close_1d[0]  # first bar uses its own close
     
-    # 4h EMA20 for trend filter
-    close_series = pd.Series(close)
-    ema_20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    range_1d = high_1d - low_1d
+    
+    # Resistance levels (R4 used for stronger breakout)
+    R4 = close_prev + (range_1d * 1.5000 / 2)
+    
+    # Support levels (S4 used for stronger breakdown)
+    S4 = close_prev - (range_1d * 1.5000 / 2)
+    
+    # Align levels to 4h timeframe
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    
+    # Volume confirmation: current volume > 1.8x 20-period average (stricter)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volume_expansion = volume > (vol_ma_20 * 1.8)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if any required data is not ready
-        if np.isnan(midpoint_aligned[i]) or np.isnan(ema_20[i]):
+        if (np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or 
+            np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Long condition: price above daily midpoint AND 4h close above EMA20
-        long_condition = close[i] > midpoint_aligned[i] and close[i] > ema_20[i]
+        # Long breakout: price breaks above R4 with volume expansion
+        long_breakout = close[i] > R4_aligned[i] and volume_expansion[i]
         
-        # Short condition: price below daily midpoint AND 4h close below EMA20
-        short_condition = close[i] < midpoint_aligned[i] and close[i] < ema_20[i]
+        # Short breakdown: price breaks below S4 with volume expansion
+        short_breakout = close[i] < S4_aligned[i] and volume_expansion[i]
         
-        if long_condition and position != 1:
+        if long_breakout and position != 1:
             position = 1
             signals[i] = position_size
-        elif short_condition and position != -1:
+        elif short_breakout and position != -1:
             position = -1
             signals[i] = -position_size
-        elif not long_condition and not short_condition and position != 0:
-            # Exit when conditions not met
-            position = 0
-            signals[i] = 0.0
         else:
             # Hold current position
             signals[i] = position_size if position == 1 else (-position_size if position == -1 else 0.0)
     
     return signals
 
-name = "4h_1d_Midpoint_Bounce_With_Trend"
+name = "4h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation_v4"
 timeframe = "4h"
 leverage = 1.0
