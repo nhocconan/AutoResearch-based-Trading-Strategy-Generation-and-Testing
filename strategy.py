@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_12h_Camarilla_Breakout_Volume_Trend_v1
-Hypothesis: Combines 4h Camarilla breakout with 12h volume confirmation and 12h trend filter (ADX > 25).
-Enters long when price breaks above H3 with volume expansion and strong 12h trend.
-Enters short when price breaks below L3 with volume expansion and strong 12h trend.
-Exits when price returns to previous 4h close.
+4h_12h_Camarilla_Breakout_Volume_Trend_v2
+Hypothesis: Combines 4h Camarilla breakout with 12h volume confirmation and 12h ADX trend filter.
+Enters long when price closes above H3 with volume expansion and strong 12h trend (ADX > 25).
+Enters short when price closes below L3 with volume expansion and strong 12h trend.
+Uses close price for entry/exit to reduce whipsaw vs high/low. Tightens entry conditions
+from previous version to target 20-50 trades per year (80-200 total over 4 years).
 Designed for 4h timeframe to balance trade frequency and signal quality.
-Target: 20-50 trades per year (80-200 total over 4 years) to minimize fee drag.
 Works in both bull and bear markets by requiring strong trend alignment.
 """
 
@@ -127,9 +127,9 @@ def generate_signals(prices):
         # Volume confirmation: current 4h volume > 1.5x 12h volume MA
         volume_expansion = volume[i] > (vol_ma_20_12h_aligned[i] * 1.5)
         
-        # Entry conditions: price breaks H3/L3 with volume expansion and trend filter
-        long_entry = (high[i] > H3_aligned[i]) and volume_expansion and strong_trend
-        short_entry = (low[i] < L3_aligned[i]) and volume_expansion and strong_trend
+        # Entry conditions: price CLOSES beyond H3/L3 with volume expansion and trend filter
+        long_entry = (close[i] > H3_aligned[i]) and volume_expansion and strong_trend
+        short_entry = (close[i] < L3_aligned[i]) and volume_expansion and strong_trend
         
         # Exit conditions: return to previous 4h close
         prev_close_aligned = align_htf_to_ltf(prices, df_4h, close_4h)
@@ -157,6 +157,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_Camarilla_Breakout_Volume_Trend_v1"
+name = "4h_12h_Camarilla_Breakout_Volume_Trend_v2"
 timeframe = "4h"
 leverage = 1.0
