@@ -8,10 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Donchian(20) breakout + 1d weekly pivot direction + volume confirmation
-    # Donchian breakout captures momentum bursts; 1d weekly pivot provides institutional bias
-    # Volume > 1.5x 20-period average confirms participation
-    # Target: 12-25 trades/year (50-100 total over 4 years) for low fee drag
+    # Hypothesis: 4h Camarilla H3/L3 breakout with 1d weekly pivot bias and volume confirmation
+    # Camarilla H3/L3 provides precise intraday support/resistance levels
+    # Weekly pivot from 1d timeframe gives institutional bias for multi-day context
+    # Volume > 1.8x 20-period average confirms institutional participation
+    # Target: 15-30 trades/year (60-120 total over 4 years) for low fee drag
     
     close = prices['close'].values
     high = prices['high'].values
@@ -28,7 +29,6 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate previous week's pivot (using previous 5 trading days ~ 1 week)
-    # Weekly high/low/close from 5d ago to 1d ago
     weekly_high = np.full(len(high_1d), np.nan)
     weekly_low = np.full(len(low_1d), np.nan)
     weekly_close = np.full(len(close_1d), np.nan)
@@ -47,21 +47,25 @@ def generate_signals(prices):
     weekly_r3 = weekly_high + 2 * (weekly_pivot - weekly_low)
     weekly_s3 = weekly_low - 2 * (weekly_high - weekly_pivot)
     
-    # Get 6h Donchian(20) for breakout
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
+    # Calculate 4h Camarilla levels (H3/L3) - using previous day's range
+    camarilla_h3 = np.full(n, np.nan)
+    camarilla_l3 = np.full(n, np.nan)
     
+    for i in range(1, n):
+        # Previous day's high, low, close for Camarilla calculation
+        prev_high = high[i-1]
+        prev_low = low[i-1]
+        prev_close = close[i-1]
+        camarilla_h3[i] = prev_close + 1.1 * (prev_high - prev_low) / 4
+        camarilla_l3[i] = prev_close - 1.1 * (prev_high - prev_low) / 4
+    
+    # Volume confirmation (>1.8x 20-period average)
+    vol_ma = np.full(n, np.nan)
     for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
+        vol_ma[i] = np.mean(volume[i-20:i])
+    volume_spike = volume > (1.8 * vol_ma)
     
-    # Get 6h volume for confirmation (>1.5x 20-period average)
-    vol_ma_6h = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma_6h[i] = np.mean(volume[i-20:i])
-    volume_spike_6h = volume > (1.5 * vol_ma_6h)
-    
-    # Align all indicators to LTF (6h)
+    # Align all 1d indicators to 4h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
@@ -70,9 +74,6 @@ def generate_signals(prices):
     r3_aligned = align_htf_to_ltf(prices, df_1d, weekly_r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, weekly_s3)
     
-    donchian_high_aligned = donchian_high  # Already LTF
-    donchian_low_aligned = donchian_low    # Already LTF
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -80,16 +81,16 @@ def generate_signals(prices):
         # Skip if data not ready
         if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
             np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or np.isnan(volume_spike_6h[i])):
+            np.isnan(s3_aligned[i]) or np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or 
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Breakout conditions
-        long_breakout = close[i] > donchian_high_aligned[i]
-        short_breakout = close[i] < donchian_low_aligned[i]
+        # Breakout conditions at Camarilla H3/L3 levels
+        long_breakout = close[i] > camarilla_h3[i]
+        short_breakout = close[i] < camarilla_l3[i]
         
-        # Weekly pivot bias
+        # Weekly pivot bias from 1d timeframe
         bullish_bias = close[i] > pivot_aligned[i]
         bearish_bias = close[i] < pivot_aligned[i]
         
@@ -97,11 +98,11 @@ def generate_signals(prices):
         strong_bullish = close[i] > r1_aligned[i]
         strong_bearish = close[i] < s1_aligned[i]
         
-        # Entry logic: Breakout + pivot alignment + volume confirmation
-        long_entry = long_breakout and bullish_bias and strong_bullish and volume_spike_6h[i]
-        short_entry = short_breakout and bearish_bias and strong_bearish and volume_spike_6h[i]
+        # Entry logic: Camarilla breakout + weekly pivot alignment + volume confirmation
+        long_entry = long_breakout and bullish_bias and strong_bullish and volume_spike[i]
+        short_entry = short_breakout and bearish_bias and strong_bearish and volume_spike[i]
         
-        # Exit logic: price returns to weekly pivot or opposite breakout
+        # Exit logic: price returns to weekly pivot or opposite Camarilla breakout
         long_exit = close[i] <= pivot_aligned[i] or short_breakout
         short_exit = close[i] >= pivot_aligned[i] or long_breakout
         
@@ -128,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_donchian_breakout_weekly_pivot_volume_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_h3l3_weekly_pivot_volume_v1"
+timeframe = "4h"
 leverage = 1.0
