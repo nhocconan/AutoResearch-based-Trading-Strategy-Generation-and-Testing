@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h timeframe with 1w Ichimoku Cloud and volume confirmation.
-# Long: Price above Kumo (cloud) + Tenkan-sen > Kijun-sen (bullish TK cross) + volume > 1.5x avg volume (20-period).
-# Short: Price below Kumo + Tenkan-sen < Kijun-sen (bearish TK cross) + volume > 1.5x avg volume.
-# Uses weekly Ichimoku for trend structure, 6h for execution with volume confirmation.
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
+# Hypothesis: 12h timeframe with 1w Parabolic SAR trend and 1d RSI mean reversion.
+# Long: 1w SAR below close (uptrend) AND 1d RSI < 30 (oversold) AND price > 12h VWAP.
+# Short: 1w SAR above close (downtrend) AND 1d RSI > 70 (overbought) AND price < 12h VWAP.
+# Uses 1w SAR for trend filter, 1d RSI for mean reversion entry, 12h VWAP for entry confirmation.
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,106 +19,138 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for Ichimoku Cloud
+    # 1w data for Parabolic SAR
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 52:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Ichimoku Cloud parameters
-    tenkan_period = 9
-    kijun_period = 26
-    senkou_span_b_period = 52
+    # Parabolic SAR (0.02 step, 0.2 max)
+    psar = np.zeros(len(close_1w))
+    trend = np.ones(len(close_1w))  # 1 for uptrend, -1 for downtrend
+    af = 0.02
+    ep = high_1w[0]
+    psar[0] = low_1w[0]
     
-    # Calculate Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    tenkan_sen = np.full(len(close_1w), np.nan)
-    for i in range(tenkan_period - 1, len(close_1w)):
-        window_high = np.max(high_1w[i - tenkan_period + 1:i + 1])
-        window_low = np.min(low_1w[i - tenkan_period + 1:i + 1])
-        tenkan_sen[i] = (window_high + window_low) / 2
+    for i in range(1, len(close_1w)):
+        if trend[i-1] == 1:  # uptrend
+            psar[i] = psar[i-1] + af * (ep - psar[i-1])
+            if low_1w[i] < psar[i]:
+                trend[i] = -1
+                psar[i] = ep
+                af = 0.02
+                ep = low_1w[i]
+            else:
+                trend[i] = 1
+                if high_1w[i] > ep:
+                    ep = high_1w[i]
+                    af = min(af + 0.02, 0.2)
+        else:  # downtrend
+            psar[i] = psar[i-1] + af * (ep - psar[i-1])
+            if high_1w[i] > psar[i]:
+                trend[i] = 1
+                psar[i] = ep
+                af = 0.02
+                ep = high_1w[i]
+            else:
+                trend[i] = -1
+                if low_1w[i] < ep:
+                    ep = low_1w[i]
+                    af = min(af + 0.02, 0.2)
     
-    # Calculate Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    kijun_sen = np.full(len(close_1w), np.nan)
-    for i in range(kijun_period - 1, len(close_1w)):
-        window_high = np.max(high_1w[i - kijun_period + 1:i + 1])
-        window_low = np.min(low_1w[i - kijun_period + 1:i + 1])
-        kijun_sen[i] = (window_high + window_low) / 2
+    # 1d data for RSI
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
     
-    # Calculate Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = np.full(len(close_1w), np.nan)
-    for i in range(len(close_1w)):
-        if not np.isnan(tenkan_sen[i]) and not np.isnan(kijun_sen[i]):
-            senkou_span_a[i] = (tenkan_sen[i] + kijun_sen[i]) / 2
+    close_1d = df_1d['close'].values
     
-    # Calculate Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    senkou_span_b = np.full(len(close_1w), np.nan)
-    for i in range(senkou_span_b_period - 1, len(close_1w)):
-        window_high = np.max(high_1w[i - senkou_span_b_period + 1:i + 1])
-        window_low = np.min(low_1w[i - senkou_span_b_period + 1:i + 1])
-        senkou_span_b[i] = (window_high + window_low) / 2
+    # RSI (14-period)
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Average volume (20-period) for volume confirmation
-    avg_volume = np.full(n, np.nan)
-    for i in range(20, n):
-        avg_volume[i] = np.mean(volume[i-20:i])
+    avg_gain = np.zeros(len(close_1d))
+    avg_loss = np.zeros(len(close_1d))
     
-    # Align weekly Ichimoku components to 6h
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1w, tenkan_sen)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_1w, kijun_sen)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_a)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_b)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
+    
+    for i in range(14, len(close_1d)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.zeros(len(close_1d))
+    rsi = np.zeros(len(close_1d))
+    for i in range(13, len(close_1d)):
+        if avg_loss[i] != 0:
+            rs[i] = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100 - (100 / (1 + rs[i]))
+        else:
+            rsi[i] = 100
+    
+    # 12h VWAP
+    vwap = np.zeros(n)
+    cumulative_volume = 0.0
+    cumulative_price_volume = 0.0
+    
+    for i in range(n):
+        typical_price = (high[i] + low[i] + close[i]) / 3
+        cumulative_price_volume += typical_price * volume[i]
+        cumulative_volume += volume[i]
+        if cumulative_volume != 0:
+            vwap[i] = cumulative_price_volume / cumulative_volume
+        else:
+            vwap[i] = typical_price
+    
+    # Align 1w PSAR and trend to 12h
+    psar_aligned = align_htf_to_ltf(prices, df_1w, psar)
+    trend_aligned = align_htf_to_ltf(prices, df_1w, trend)
+    
+    # Align 1d RSI to 12h
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(52, n):
+    for i in range(14, n):
         # Skip if any required data is not ready
-        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
-            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or 
-            np.isnan(avg_volume[i])):
+        if (np.isnan(psar_aligned[i]) or np.isnan(trend_aligned[i]) or 
+            np.isnan(rsi_aligned[i]) or np.isnan(vwap[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol = volume[i]
-        avg_vol = avg_volume[i]
-        tenkan = tenkan_sen_aligned[i]
-        kijun = kijun_sen_aligned[i]
-        span_a = senkou_span_a_aligned[i]
-        span_b = senkou_span_b_aligned[i]
-        
-        # Kumo (Cloud) boundaries
-        upper_kumo = max(span_a, span_b)
-        lower_kumo = min(span_a, span_b)
-        
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirm = vol > 1.5 * avg_vol
+        psar_val = psar_aligned[i]
+        trend_val = trend_aligned[i]
+        rsi_val = rsi_aligned[i]
+        vwap_val = vwap[i]
         
         if position == 0:
-            # Long: Price above Kumo + bullish TK cross + volume confirmation
-            if (price > upper_kumo and tenkan > kijun and volume_confirm):
+            # Long: 1w uptrend AND 1d RSI < 30 AND price > 12h VWAP
+            if (trend_val == 1 and rsi_val < 30 and price > vwap_val):
                 position = 1
                 signals[i] = position_size
-            # Short: Price below Kumo + bearish TK cross + volume confirmation
-            elif (price < lower_kumo and tenkan < kijun and volume_confirm):
+            # Short: 1w downtrend AND 1d RSI > 70 AND price < 12h VWAP
+            elif (trend_val == -1 and rsi_val > 70 and price < vwap_val):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Price crosses below Kumo or bearish TK cross
-            if (price < lower_kumo or tenkan < kijun):
+            # Exit long: 1w trend turns down OR RSI > 70
+            if (trend_val == -1 or rsi_val > 70):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Price crosses above Kumo or bullish TK cross
-            if (price > upper_kumo or tenkan > kijun):
+            # Exit short: 1w trend turns up OR RSI < 30
+            if (trend_val == 1 or rsi_val < 30):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -126,6 +158,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_Ichimoku_Cloud_TK_Cross_Volume"
-timeframe = "6h"
+name = "12h_1w_1d_SAR_RSI_VWAP"
+timeframe = "12h"
 leverage = 1.0
