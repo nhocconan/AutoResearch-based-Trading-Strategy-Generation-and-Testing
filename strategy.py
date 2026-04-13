@@ -5,12 +5,13 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1h Camarilla H3/L3 mean reversion with 4h volume confirmation and 1d trend filter
+    # Hypothesis: 1h mean reversion at 4h Camarilla H3/L3 with 4h volume spike and 1d trend filter
     # Designed for low trade frequency (15-37/year) to minimize fee drag on 1h timeframe
     # Uses 4h/1d for signal direction, 1h only for entry timing precision
+    # Works in both bull and bear: mean reversion in range, trend filter avoids counter-trend trades
     
     close = prices['close'].values
     high = prices['high'].values
@@ -69,7 +70,12 @@ def generate_signals(prices):
             continue
         
         # Volume confirmation: current 4h volume > 1.5x 20-period average
-        volume_confirmed = volume_4h[i // 4] > 1.5 * vol_avg_20_4h_aligned[i]
+        # Get the 4h bar index for current 1h bar (each 4h bar = 4 1h bars)
+        idx_4h = i // 4
+        if idx_4h >= len(volume_4h):
+            signals[i] = 0.0
+            continue
+        volume_confirmed = volume_4h[idx_4h] > 1.5 * vol_avg_20_4h_aligned[i]
         
         # Mean reversion conditions at Camarilla H3/L3 levels
         reversion_long = close[i] < camarilla_l3_aligned[i]  # Price below L3 -> long (expect bounce up)
