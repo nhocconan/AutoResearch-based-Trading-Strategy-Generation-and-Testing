@@ -27,26 +27,15 @@ def generate_signals(prices):
     if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate 4h Donchian channels (20-period)
+    # Calculate 4h Donchian channels (20-period) with min_periods
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
     
-    def rolling_max(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i >= window - 1:
-                result[i] = np.max(arr[i-window+1:i+1])
-        return result
-    
-    def rolling_min(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i >= window - 1:
-                result[i] = np.min(arr[i-window+1:i+1])
-        return result
-    
-    highest_high = rolling_max(high_4h, 20)
-    lowest_low = rolling_min(low_4h, 20)
+    # Vectorized rolling max/min using pandas for efficiency and min_periods
+    high_series = pd.Series(high_4h)
+    low_series = pd.Series(low_4h)
+    highest_high = high_series.rolling(window=20, min_periods=20).max().values
+    lowest_low = low_series.rolling(window=20, min_periods=20).min().values
     donchian_high = highest_high
     donchian_low = lowest_low
     donchian_mid = (donchian_high + donchian_low) / 2.0
@@ -56,16 +45,10 @@ def generate_signals(prices):
     donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
     donchian_mid_aligned = align_htf_to_ltf(prices, df_4h, donchian_mid)
     
-    # Calculate 12h volume average (20-period)
+    # Calculate 12h volume average (20-period) with min_periods
     volume_12h = df_12h['volume'].values
-    def rolling_mean(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i >= window - 1:
-                result[i] = np.mean(arr[i-window+1:i+1])
-        return result
-    
-    vol_ma_20 = rolling_mean(volume_12h, 20)
+    volume_series = pd.Series(volume_12h)
+    vol_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     vol_ma_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
     
     # Calculate 12h Chop Index (Choppiness Index)
@@ -80,28 +63,13 @@ def generate_signals(prices):
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
     tr = np.concatenate([[np.nan], tr])  # align with index 0
     
-    # ATR (14-period) using Wilder's smoothing
-    def wilders_smoothing(data, period):
-        alpha = 1.0 / period
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            result[period-1] = np.nanmean(data[:period])
-        for i in range(period, len(data)):
-            if not np.isnan(result[i-1]):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # ATR (14-period) using Wilder's smoothing with min_periods via pandas ewm
+    tr_series = pd.Series(tr)
+    atr_12h = tr_series.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    atr_12h = wilders_smoothing(tr, 14)
-    
-    # Sum of True Range over 14 periods
-    def rolling_sum(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i >= window - 1:
-                result[i] = np.sum(arr[i-window+1:i+1])
-        return result
-    
-    sum_tr_14 = rolling_sum(tr, 14)
+    # Sum of True Range over 14 periods with min_periods
+    tr_series_for_sum = pd.Series(tr)
+    sum_tr_14 = tr_series_for_sum.rolling(window=14, min_periods=14).sum().values
     
     # Chop Index = 100 * log10(sum(TR14) / (ATR14 * 14)) / log10(14)
     chop = np.where((atr_12h * 14) > 0,
