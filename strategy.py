@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_1d_camarilla_breakout_vol_trend_v1
-Hypothesis: On 12h timeframe, price breaking above Camarilla H3 or below L3 with daily volume expansion and daily ADX trend filter captures institutional breakout moves. Works in bull markets (breakouts continue) and bear markets (mean-reversion fails, so breakouts are rarer but stronger when they occur). Target: 12-37 trades/year to avoid fee drag.
+4h_1d_donchian_breakout_volume
+Hypothesis: On 4h timeframe, price breaking above/below Donchian(20) with volume expansion (>1.5x 20-bar avg) and daily ATR filter (>0.015) captures momentum moves. Works in bull (breakouts continue) and bear (breakouts rarer but stronger when they occur). Target: 20-50 trades/year to avoid fee drag.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,7 +18,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels
+    # Get daily data for ATR filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -26,84 +26,54 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla levels from previous day's range
-    # H3 = Close + 1.1 * (High - Low) / 4
-    # L3 = Close - 1.1 * (High - Low) / 4
-    range_1d = high_1d - low_1d
-    camarilla_h3 = close_1d + 1.1 * range_1d / 4
-    camarilla_l3 = close_1d - 1.1 * range_1d / 4
+    # Calculate Donchian channels (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Daily volume expansion: current volume > 1.5x 10-period average
-    vol_ma_10 = pd.Series(volume_1d).rolling(window=10, min_periods=10).mean().values
-    volume_expansion = volume_1d > (vol_ma_10 * 1.5)
-    
-    # Calculate ADX (14-period) for trend strength
+    # Calculate ATR (14-period) on daily for volatility filter
     tr1 = np.abs(high_1d - low_1d)
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = np.nan
     
-    up_move = np.where(high_1d - np.roll(high_1d, 1) > 0, high_1d - np.roll(high_1d, 1), 0)
-    down_move = np.where(np.roll(low_1d, 1) - low_1d > 0, np.roll(low_1d, 1) - low_1d, 0)
-    up_move[0] = 0
-    down_move[0] = 0
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    volatility_filter = atr > 0.015  # Only trade when volatility is sufficient
     
-    def wilders_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        result[period-1] = np.nanmean(data[:period])
-        for i in range(period, len(data)):
-            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-            else:
-                result[i] = np.nan
-        return result
+    # Volume expansion: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_expansion = volume > (vol_ma_20 * 1.5)
     
-    period = 14
-    atr = wilders_smooth(tr, period)
-    plus_dm = wilders_smooth(up_move, period)
-    minus_dm = wilders_smooth(down_move, period)
-    
-    plus_di = 100 * plus_dm / atr
-    minus_di = 100 * minus_dm / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilders_smooth(dx, period)
-    strong_trend = adx > 20  # Moderate trend filter
-    
-    # Align all signals to 12h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    volume_expansion_aligned = align_htf_to_ltf(prices, df_1d, volume_expansion.astype(float))
-    strong_trend_aligned = align_htf_to_ltf(prices, df_1d, strong_trend.astype(float))
+    # Align all signals to 4h timeframe
+    high_max_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high}), high_max)
+    low_min_aligned = align_htf_to_ltf(prices, pd.DataFrame({'low': low}), low_min)
+    volatility_filter_aligned = align_htf_to_ltf(prices, df_1d, volatility_filter.astype(float))
+    volume_expansion_aligned = align_htf_to_ltf(prices, pd.DataFrame({'volume': volume}), volume_expansion.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% of capital
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(volume_expansion_aligned[i]) or 
-            np.isnan(strong_trend_aligned[i])):
+        if (np.isnan(high_max_aligned[i]) or 
+            np.isnan(low_min_aligned[i]) or 
+            np.isnan(volatility_filter_aligned[i]) or 
+            np.isnan(volume_expansion_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: Break of Camarilla H3/L3 with volume and trend
-        long_break = close[i] > camarilla_h3_aligned[i]
-        short_break = close[i] < camarilla_l3_aligned[i]
+        # Entry conditions: Donchian breakout with volume and volatility
+        long_break = close[i] > high_max_aligned[i]
+        short_break = close[i] < low_min_aligned[i]
         
-        long_entry = long_break and volume_expansion_aligned[i] > 0.5 and strong_trend_aligned[i] > 0.5
-        short_entry = short_break and volume_expansion_aligned[i] > 0.5 and strong_trend_aligned[i] > 0.5
+        long_entry = long_break and volume_expansion_aligned[i] > 0.5 and volatility_filter_aligned[i] > 0.5
+        short_entry = short_break and volume_expansion_aligned[i] > 0.5 and volatility_filter_aligned[i] > 0.5
         
-        # Exit when price returns to previous day's close (mean reversion to equilibrium)
-        prev_close_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
-        exit_long = position == 1 and close[i] <= prev_close_aligned[i]
-        exit_short = position == -1 and close[i] >= prev_close_aligned[i]
+        # Exit when price returns to opposite Donchian level (mean reversion)
+        exit_long = position == 1 and close[i] <= low_min_aligned[i]
+        exit_short = position == -1 and close[i] >= high_max_aligned[i]
         
         # Execute signals
         if long_entry and position != 1:
@@ -126,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_camarilla_breakout_vol_trend_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_breakout_volume"
+timeframe = "4h"
 leverage = 1.0
