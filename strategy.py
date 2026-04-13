@@ -8,45 +8,51 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with 1d EMA200 trend filter and volume confirmation (>2.0x 20-period average)
-    # Uses 1d EMA200 for strong trend filter to avoid counter-trend whipsaws in bear markets (2022 crash protection)
-    # Volume spike requires >2.0x average for institutional confirmation (tighter = fewer trades, less fee drag)
-    # Exits on Donchian midpoint return or trend reversal
-    # Tight entry conditions target 15-25 trades/year (60-100 total over 4 years) to minimize fee drag
-    # Works in bull markets via trend-following breakouts, in bear via avoided false breakouts
+    # Hypothesis: 4h Camarilla H3/L3 breakout with 12h EMA50 trend filter and volume confirmation (>2.0x average)
+    # Camarilla pivot levels provide high-probability reversal/continuation points from intraday structure
+    # 12h EMA50 filters for intermediate trend alignment to avoid counter-trend whipsaws
+    # Volume spike >2.0x 20-period average confirms institutional participation
+    # Exits on H3/L3 retest or trend reversal
+    # Target: 20-30 trades/year (80-120 total over 4 years) for low fee drag
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian calculation
+    # Get 4h data for Camarilla calculation
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    if len(df_4h) < 30:
         return np.zeros(n)
     
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate previous 4h bar's Donchian levels (20-period)
-    lookback = 20
-    upper_4h = np.full(len(high_4h), np.nan)
-    lower_4h = np.full(len(low_4h), np.nan)
+    # Calculate previous 4h bar's Camarilla levels (H3, L3)
+    # Based on previous 4h bar's range
+    camarilla_h3 = np.full(len(high_4h), np.nan)
+    camarilla_l3 = np.full(len(low_4h), np.nan)
     
-    for i in range(lookback, len(high_4h)):
-        upper_4h[i] = np.max(high_4h[i-lookback:i])
-        lower_4h[i] = np.min(low_4h[i-lookback:i])
+    for i in range(1, len(high_4h)):
+        # Use previous bar's high/low/close for Camarilla calculation
+        ph = high_4h[i-1]
+        pl = low_4h[i-1]
+        pc = close_4h[i-1]
+        rang = ph - pl
+        
+        camarilla_h3[i] = pc + rang * 1.1 / 4  # H3 level
+        camarilla_l3[i] = pc - rang * 1.1 / 4  # L3 level
     
-    # Get 1d EMA200 for trend filter
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Get 12h EMA50 for trend filter
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Get 4h volume for confirmation (>2.0x 20-period average)
     vol_ma_4h = np.full(n, np.nan)
@@ -55,42 +61,35 @@ def generate_signals(prices):
     volume_spike_4h = volume > (2.0 * vol_ma_4h)
     
     # Align all indicators to LTF (4h)
-    upper_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_4h)
-    lower_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_4h)
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    h3_4h_aligned = align_htf_to_ltf(prices, df_4h, camarilla_h3)
+    l3_4h_aligned = align_htf_to_ltf(prices, df_4h, camarilla_l3)
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(upper_4h_aligned[i]) or np.isnan(lower_4h_aligned[i]) or 
-            np.isnan(ema200_1d_aligned[i]) or np.isnan(volume_spike_4h[i])):
+        if (np.isnan(h3_4h_aligned[i]) or np.isnan(l3_4h_aligned[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(volume_spike_4h[i])):
             signals[i] = 0.0
             continue
         
         # Breakout conditions
-        long_breakout = close[i] > upper_4h_aligned[i]
-        short_breakout = close[i] < lower_4h_aligned[i]
+        long_breakout = close[i] > h3_4h_aligned[i]
+        short_breakout = close[i] < l3_4h_aligned[i]
         
-        # 1d trend filter (EMA200)
-        bullish_trend = close[i] > ema200_1d_aligned[i]
-        bearish_trend = close[i] < ema200_1d_aligned[i]
+        # 12h trend filter (EMA50)
+        bullish_trend = close[i] > ema50_12h_aligned[i]
+        bearish_trend = close[i] < ema50_12h_aligned[i]
         
         # Entry logic: Breakout + trend alignment + volume confirmation
         long_entry = long_breakout and bullish_trend and volume_spike_4h[i]
         short_entry = short_breakout and bearish_trend and volume_spike_4h[i]
         
-        # Exit logic: price returns to Donchian midpoint
-        donchian_mid = (upper_4h + lower_4h) / 2
-        donchian_mid_aligned = align_htf_to_ltf(prices, df_4h, donchian_mid)
-        
-        # Exit when price returns to midpoint (within 0.2% tolerance)
-        midpoint_distance = abs(close[i] - donchian_mid_aligned[i]) / close[i]
-        at_midpoint = midpoint_distance < 0.002
-        
-        long_exit = at_midpoint or not bullish_trend
-        short_exit = at_midpoint or not bearish_trend
+        # Exit logic: price retests H3/L3 or trend reversal
+        long_exit = (close[i] <= h3_4h_aligned[i] * 1.001) or not bullish_trend  # Retest H3 or trend change
+        short_exit = (close[i] >= l3_4h_aligned[i] * 0.999) or not bearish_trend  # Retest L3 or trend change
         
         if long_entry and position != 1:
             position = 1
@@ -115,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_breakout_ema200_volume_v1"
+name = "4h_12h_camarilla_h3l3_ema50_volume_v1"
 timeframe = "4h"
 leverage = 1.0
