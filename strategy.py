@@ -8,19 +8,19 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Camarilla pivot breakout with 1d trend filter and volume confirmation
-    # Long when: price breaks above 12h H3 AND 1d close > 1d EMA50 AND volume > 1.5x avg volume
-    # Short when: price breaks below 12h L3 AND 1d close < 1d EMA50 AND volume > 1.5x avg volume
-    # Exit when: price crosses 12h pivot point (PP) OR volume drops below average
-    # Uses discrete sizing (0.25) targeting 50-150 trades over 4 years.
-    # Works in bull/bear via 1d EMA50 trend filter and Camarilla pivot structure.
+    # Hypothesis: 4h Donchian(20) breakout + 12h ATR-based volatility filter + volume confirmation
+    # Long when: price breaks above Donchian(20) high AND 12h ATR ratio > 1.2 (expanding volatility) AND volume > 1.3x avg volume
+    # Short when: price breaks below Donchian(20) low AND 12h ATR ratio > 1.2 AND volume > 1.3x avg volume
+    # Exit when: price crosses Donchian midpoint OR ATR ratio drops below 0.8 (low volatility)
+    # Uses discrete sizing (0.25) targeting 50-100 trades over 4 years.
+    # Works in bull/bear via volatility expansion capturing momentum bursts after consolidation.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla pivots
+    # Get 12h data for ATR calculation
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) < 30:
         return np.zeros(n)
@@ -29,32 +29,34 @@ def generate_signals(prices):
     low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
     
-    # Calculate 12h Camarilla pivots (using previous bar's range)
-    # Camarilla levels: H3 = close + 1.125*(high-low), L3 = close - 1.125*(high-low)
-    #                 PP = (high + low + close) / 3
-    range_12h = high_12h - low_12h
-    h3_12h = close_12h + 1.125 * range_12h
-    l3_12h = close_12h - 1.125 * range_12h
-    pp_12h = (high_12h + low_12h + close_12h) / 3.0
+    # Calculate 12h ATR(14)
+    tr1 = np.abs(high_12h[1:] - low_12h[1:])
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr_12h = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_12h = np.concatenate([[np.nan], tr_12h])  # align indices
     
-    # Align 12h Camarilla levels to 12h timeframe (no additional delay needed)
-    h3_12h_aligned = align_htf_to_ltf(prices, df_12h, h3_12h)
-    l3_12h_aligned = align_htf_to_ltf(prices, df_12h, l3_12h)
-    pp_12h_aligned = align_htf_to_ltf(prices, df_12h, pp_12h)
+    atr_12h = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Calculate 12h ATR(50) for longer-term average
+    tr_12h_long = np.concatenate([[np.nan], tr_12h])
+    atr_12h_long = pd.Series(tr_12h_long).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    close_1d = df_1d['close'].values
-    # Calculate 1d EMA50
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # ATR ratio: short-term / long-term ( >1 = expanding volatility)
+    atr_ratio = np.where(atr_12h_long > 0, atr_12h / atr_12h_long, np.nan)
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Align 12h ATR ratio to 4h timeframe
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_12h, atr_ratio)
+    
+    # Calculate Donchian(20) channels on 4h
+    lookback = 20
+    donchian_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    donchian_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
+    
+    # Volume confirmation: volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_threshold = vol_ma * 1.5
+    vol_threshold = vol_ma * 1.3
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -62,30 +64,28 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(h3_12h_aligned[i]) or np.isnan(l3_12h_aligned[i]) or 
-            np.isnan(pp_12h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(vol_threshold[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(atr_ratio_aligned[i]) or np.isnan(vol_threshold[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
         vol_ok = volume[i] > vol_threshold[i]
         
-        # Breakout conditions
-        long_breakout = close[i] > h3_12h_aligned[i]
-        short_breakout = close[i] < l3_12h_aligned[i]
+        # Volatility expansion filter (ATR ratio > 1.2)
+        vol_expansion = atr_ratio_aligned[i] > 1.2
         
-        # Trend filter: 1d EMA50
-        long_trend = close[i] > ema_50_1d_aligned[i]
-        short_trend = close[i] < ema_50_1d_aligned[i]
+        # Breakout conditions
+        long_breakout = close[i] > donchian_high[i]
+        short_breakout = close[i] < donchian_low[i]
         
         # Entry conditions
-        long_entry = long_breakout and long_trend and vol_ok and position != 1
-        short_entry = short_breakout and short_trend and vol_ok and position != -1
+        long_entry = long_breakout and vol_expansion and vol_ok and position != 1
+        short_entry = short_breakout and vol_expansion and vol_ok and position != -1
         
-        # Exit conditions: price crosses 12h pivot point OR volume drops below average
-        exit_long = close[i] < pp_12h_aligned[i] or volume[i] < vol_ma[i]
-        exit_short = close[i] > pp_12h_aligned[i] or volume[i] < vol_ma[i]
+        # Exit conditions: price crosses Donchian midpoint OR ATR ratio drops below 0.8 (low volatility)
+        exit_long = close[i] < donchian_mid[i] or atr_ratio_aligned[i] < 0.8
+        exit_short = close[i] > donchian_mid[i] or atr_ratio_aligned[i] < 0.8
         
         # Execute signals
         if long_entry:
@@ -111,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_camarilla_ema50_volume_v1"
-timeframe = "12h"
+name = "4h_12h_donchian_atr_volume_v1"
+timeframe = "4h"
 leverage = 1.0
