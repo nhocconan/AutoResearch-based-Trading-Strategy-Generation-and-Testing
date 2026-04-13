@@ -8,12 +8,12 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian(20) breakout with 1d volume and ADX regime filter
+    # Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ADX regime filter
     # Long when price breaks above 20-period high + 1d volume > 1.2x 20-day average + 1d ADX > 25
     # Short when price breaks below 20-period low + 1d volume > 1.2x 20-day average + 1d ADX > 25
     # Exit when price crosses 10-period moving average in opposite direction
     # Uses discrete position sizing (0.25) to minimize fee churn and manage drawdown
-    # Target: 50-150 total trades over 4 years (~12-37/year) to avoid fee drag
+    # Target: 75-200 total trades over 4 years (~19-50/year) to avoid fee drag
     # Volume filter ensures breakouts occur with institutional participation
     # ADX filter ensures we only trade in trending markets, avoiding chop
     
@@ -73,14 +73,14 @@ def generate_signals(prices):
     
     adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
     
-    # Align all 1d indicators to 12h
+    # Align all 1d indicators to 4h
     vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Pre-calculate Donchian channels for 12h timeframe
+    # Pre-calculate Donchian channels for 4h timeframe
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_high = high_series.rolling(window=20, min_periods=20).max().values
@@ -138,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_donchian_breakout_volume_adx_v2"
-timeframe = "12h"
+name = "4h_1d_donchian_breakout_volume_adx_v1"
+timeframe = "4h"
 leverage = 1.0
