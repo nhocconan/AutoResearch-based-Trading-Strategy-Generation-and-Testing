@@ -8,12 +8,12 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1d Williams Alligator + 1w EMA200 trend filter + volume confirmation
-    # Long: price > Alligator Jaw (13) + price > Alligator Teeth (8) + price > Alligator Lips (5) + price > 1w EMA200 + volume > 1.5x 20-period average
-    # Short: price < Alligator Jaw + price < Alligator Teeth + price < Alligator Lips + price < 1w EMA200 + volume > 1.5x 20-period average
-    # Exit: price crosses Alligator Jaw or 1w EMA200
-    # Using 1d timeframe for lower trade frequency, Williams Alligator for trend identification,
-    # 1w EMA200 for strong multi-week trend filter, and volume confirmation to avoid false signals.
+    # Hypothesis: 6h Donchian(20) breakout with 1d ADX(14) trend filter + volume confirmation
+    # Long: price > Donchian(20) high + 1d ADX > 25 + volume > 2.0x 20-period average
+    # Short: price < Donchian(20) low + 1d ADX > 25 + volume > 2.0x 20-period average
+    # Exit: opposite Donchian breakout OR 1d ADX < 20 (trend weakening)
+    # Using 6h timeframe for lower frequency, 1d ADX for strong trend filter (avoid whipsaw),
+    # and volume spike confirmation to avoid false breakouts.
     # Discrete position sizing (0.25) to minimize fee churn.
     
     close = prices['close'].values
@@ -21,106 +21,99 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams Alligator
+    # Get 1d data for ADX(14) trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Williams Alligator (Smoothed Moving Average - SMMA)
-    # Jaw: 13-period SMMA of median price, shifted 8 bars forward
-    # Teeth: 8-period SMMA of median price, shifted 5 bars forward  
-    # Lips: 5-period SMMA of median price, shifted 3 bars forward
-    median_price_1d = (high_1d + low_1d) / 2
+    # Calculate ADX(14) with min_periods
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align indices
     
-    def smma(arr, period):
-        """Smoothed Moving Average"""
-        result = np.full_like(arr, np.nan, dtype=np.float64)
-        if len(arr) < period:
+    # +DM and -DM
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
+    
+    # Smoothed TR, +DM, -DM (Wilder's smoothing)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
             return result
-        # First value is SMA
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: SMMA = (prev_SMMA * (period-1) + current_price) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        # First value: simple average
+        result[period-1] = np.nanmean(data[:period])
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]):
+                result[i] = (result[i-1] * (period - 1) + data[i]) / period
         return result
     
-    jaw_1d = smma(median_price_1d, 13)
-    teeth_1d = smma(median_price_1d, 8)
-    lips_1d = smma(median_price_1d, 5)
+    atr = wilders_smoothing(tr, 14)
+    atr_plus = wilders_smoothing(plus_dm, 14)
+    atr_minus = wilders_smoothing(minus_dm, 14)
     
-    # Shift according to Alligator specification
-    jaw_1d_shifted = np.full_like(jaw_1d, np.nan)
-    teeth_1d_shifted = np.full_like(teeth_1d, np.nan)
-    lips_1d_shifted = np.full_like(lips_1d, np.nan)
+    # DI+ and DI-
+    plus_di = np.where(atr != 0, (atr_plus / atr) * 100, 0)
+    minus_di = np.where(atr != 0, (atr_minus / atr) * 100, 0)
     
-    if len(jaw_1d) > 8:
-        jaw_1d_shifted[8:] = jaw_1d[:-8]
-    if len(teeth_1d) > 5:
-        teeth_1d_shifted[5:] = teeth_1d[:-5]
-    if len(lips_1d) > 3:
-        lips_1d_shifted[3:] = lips_1d[:-3]
+    # DX and ADX
+    dx = np.where((plus_di + minus_di) != 0, 
+                  np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
+    adx = wilders_smoothing(dx, 14)
     
-    # Get 1w data for EMA200 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
-        return np.zeros(n)
+    # Get 6h Donchian(20) for breakout with min_periods
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
     
-    close_1w = df_1w['close'].values
+    for i in range(20, n):
+        donchian_high[i] = np.max(high[i-20:i])
+        donchian_low[i] = np.min(low[i-20:i])
     
-    # Calculate 1w EMA200 with min_periods
-    ema_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 200:
-        ema_1w[199] = np.mean(close_1w[:200])  # SMA200 as seed
-        multiplier = 2 / (200 + 1)
-        for i in range(200, len(close_1w)):
-            ema_1w[i] = (close_1w[i] * multiplier) + (ema_1w[i-1] * (1 - multiplier))
-    
-    # Align indicators to 1d timeframe
-    jaw_1d_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d_shifted)
-    teeth_1d_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d_shifted)
-    lips_1d_aligned = align_htf_to_ltf(prices, df_1d, lips_1d_shifted)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Volume confirmation (>1.5x 20-period average)
+    # Get 6h volume for confirmation (>2.0x 20-period average)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
+    
+    # Align 1d ADX to 6h
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(jaw_1d_aligned[i]) or np.isnan(teeth_1d_aligned[i]) or 
-            np.isnan(lips_1d_aligned[i]) or np.isnan(ema_1w_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Alligator alignment conditions
-        bullish_alligator = (close[i] > jaw_1d_aligned[i] and 
-                            close[i] > teeth_1d_aligned[i] and 
-                            close[i] > lips_1d_aligned[i])
-        bearish_alligator = (close[i] < jaw_1d_aligned[i] and 
-                            close[i] < teeth_1d_aligned[i] and 
-                            close[i] < lips_1d_aligned[i])
+        # Breakout conditions
+        long_breakout = close[i] > donchian_high[i]
+        short_breakout = close[i] < donchian_low[i]
         
-        # Trend filter from 1w EMA200
-        bullish_trend = close[i] > ema_1w_aligned[i]
-        bearish_trend = close[i] < ema_1w_aligned[i]
+        # Trend filter from 1d ADX
+        strong_trend = adx_aligned[i] > 25
+        weak_trend = adx_aligned[i] < 20
         
-        # Entry logic: Alligator alignment + trend alignment + volume confirmation
-        long_entry = bullish_alligator and bullish_trend and volume_spike[i]
-        short_entry = bearish_alligator and bearish_trend and volume_spike[i]
+        # Entry logic: Breakout + strong trend + volume confirmation
+        long_entry = long_breakout and strong_trend and volume_spike[i]
+        short_entry = short_breakout and strong_trend and volume_spike[i]
         
-        # Exit logic: Alligator misalignment or trend reversal
-        long_exit = not bullish_alligator or not bullish_trend
-        short_exit = not bearish_alligator or not bearish_trend
+        # Exit logic: opposite breakout or trend weakening
+        long_exit = short_breakout or weak_trend
+        short_exit = long_breakout or weak_trend
         
         if long_entry and position != 1:
             position = 1
@@ -145,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_williams_alligator_ema200_volume_v1"
-timeframe = "1d"
+name = "6h_1d_donchian_breakout_adx_volume_v1"
+timeframe = "6h"
 leverage = 1.0
