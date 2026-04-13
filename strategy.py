@@ -45,7 +45,7 @@ def generate_signals(prices):
     # Calculate 20-period SMA on 1w
     sma_20_1w = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
     
-    # Align indicators to 4h timeframe
+    # Align indicators to daily timeframe
     ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
     sma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_20_1w)
@@ -67,8 +67,8 @@ def generate_signals(prices):
         below_ema = close[i] < ema_20_aligned[i]
         
         # RSI conditions: avoid extreme levels
-        rsi_not_overbought = rsi_14_aligned[i] < 75
-        rsi_not_oversold = rsi_14_aligned[i] > 25
+        rsi_not_overbought = rsi_14_aligned[i] < 80
+        rsi_not_oversold = rsi_14_aligned[i] > 20
         
         # Weekly trend filter: price above/below weekly SMA20
         above_weekly_sma = close[i] > sma_20_1w_aligned[i]
@@ -79,8 +79,8 @@ def generate_signals(prices):
         short_entry = below_ema and rsi_not_oversold and below_weekly_sma
         
         # Exit conditions: opposite signal or RSI extreme
-        exit_long = position == 1 and (below_ema or rsi_14_aligned[i] > 80)
-        exit_short = position == -1 and (above_ema or rsi_14_aligned[i] < 20)
+        exit_long = position == 1 and (below_ema or rsi_14_aligned[i] > 85)
+        exit_short = position == -1 and (above_ema or rsi_14_aligned[i] < 15)
         
         # Execute signals
         if long_entry and position != 1:
@@ -103,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_ema20_rsi14_weekly_sma20_filter"
-timeframe = "4h"
+name = "1d_ema20_rsi14_weekly_sma20_filter_v2"
+timeframe = "1d"
 leverage = 1.0
