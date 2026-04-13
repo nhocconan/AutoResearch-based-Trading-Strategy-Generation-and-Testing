@@ -13,7 +13,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for Donchian channels and volume
+    # Daily data for 4-hour analysis
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -37,7 +37,7 @@ def generate_signals(prices):
     volume_1d = df_1d['volume'].values
     volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all data to 12-hour timeframe
+    # Align all data to 4-hour timeframe
     donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
@@ -54,10 +54,10 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current 12h volume > 1.5x daily volume MA (adjusted for 12h)
-        # 2 12h periods per day, so daily MA/2 = approximate 12h period MA
-        volume_12h_approx_ma = volume_ma_20_1d_aligned[i] / 2
-        volume_condition = volume[i] > (volume_12h_approx_ma * 1.5)
+        # Volume condition: current 4h volume > 1.5x daily volume MA (adjusted for 4h)
+        # 6 4h periods per day, so daily MA/6 = approximate 4h period MA
+        volume_4h_approx_ma = volume_ma_20_1d_aligned[i] / 6
+        volume_condition = volume[i] > (volume_4h_approx_ma * 1.5)
         
         # Trend filter: weekly EMA20 direction
         # Long when price > weekly EMA20
@@ -97,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d1w_Donchian_Breakout_Volume_Trend_Filter_v1"
-timeframe = "12h"
+name = "4h_1d1w_Donchian_Breakout_Volume_Trend_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
