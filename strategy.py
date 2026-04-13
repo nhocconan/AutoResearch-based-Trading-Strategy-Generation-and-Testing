@@ -3,12 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe with 1d Donchian breakout and volume confirmation.
-# Long: Price closes above 1d Donchian upper channel (20-period high) + volume > 1.3x average volume.
-# Short: Price closes below 1d Donchian lower channel (20-period low) + volume > 1.3x average volume.
-# Uses 1d Donchian channels for trend structure, 12h for execution with volume confirmation.
-# Position size: 0.25. Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
-# Designed to work in both bull and bear markets by following institutional breakouts.
+# Hypothesis: 4h timeframe with 12h/1d confluence - Long when price > 12h EMA(20) AND price > 1d VWAP with volume > 1.5x avg volume.
+# Short when price < 12h EMA(20) AND price < 1d VWAP with volume > 1.5x avg volume.
+# Uses VWAP for institutional reference and EMA for trend alignment. Volume confirms institutional participation.
+# Target: 25-40 trades/year (100-160 total over 4 years) for balanced frequency.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,29 +18,48 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for Donchian channels
+    # 12h data for EMA trend
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    # Calculate EMA(20) on 12h
+    ema_12h = np.full(len(close_12h), np.nan)
+    if len(close_12h) >= 20:
+        ema_12h[19] = np.mean(close_12h[:20])
+        for i in range(20, len(close_12h)):
+            ema_12h[i] = (close_12h[i] * 0.0952) + (ema_12h[i-1] * 0.9048)
+    
+    # 1d data for VWAP
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Donchian channels (20-period high/low) using previous day's data
-    donchian_high = np.full(len(high_1d), np.nan)
-    donchian_low = np.full(len(low_1d), np.nan)
-    for i in range(20, len(high_1d)):
-        donchian_high[i] = np.max(high_1d[i-20:i])
-        donchian_low[i] = np.min(low_1d[i-20:i])
+    # Calculate VWAP (typical price * volume) cumulative
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3
+    vwap_1d = np.full(len(close_1d), np.nan)
+    cum_tpv = 0.0
+    cum_vol = 0.0
+    for i in range(len(close_1d)):
+        cum_tpv += typical_price_1d[i] * volume_1d[i]
+        cum_vol += volume_1d[i]
+        if cum_vol > 0:
+            vwap_1d[i] = cum_tpv / cum_vol
     
     # Average volume (20-period) for volume confirmation
     avg_volume = np.full(n, np.nan)
     for i in range(20, n):
         avg_volume[i] = np.mean(volume[i-20:i])
     
-    # Align 1d Donchian channels to 12h
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Align 12h EMA and 1d VWAP to 4h
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -50,7 +67,7 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+        if (np.isnan(ema_12h_aligned[i]) or np.isnan(vwap_1d_aligned[i]) or 
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
@@ -58,33 +75,33 @@ def generate_signals(prices):
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        upper = donchian_high_aligned[i]
-        lower = donchian_low_aligned[i]
+        ema = ema_12h_aligned[i]
+        vwap = vwap_1d_aligned[i]
         
-        # Volume confirmation: current volume > 1.3x average volume
-        volume_confirm = vol > 1.3 * avg_vol
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirm = vol > 1.5 * avg_vol
         
         if position == 0:
-            # Long: price closes above upper channel + volume confirmation
-            if (price > upper and volume_confirm):
+            # Long: price > EMA AND price > VWAP + volume confirmation
+            if (price > ema and price > vwap and volume_confirm):
                 position = 1
                 signals[i] = position_size
-            # Short: price closes below lower channel + volume confirmation
-            elif (price < lower and volume_confirm):
+            # Short: price < EMA AND price < VWAP + volume confirmation
+            elif (price < ema and price < vwap and volume_confirm):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below lower channel (opposite side)
-            if price < lower:
+            # Exit long: price < EMA OR price < VWAP
+            if price < ema or price < vwap:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes above upper channel (opposite side)
-            if price > upper:
+            # Exit short: price > EMA OR price > VWAP
+            if price > ema or price > vwap:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -92,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Donchian_Breakout_Volume"
-timeframe = "12h"
+name = "4h_12h_1d_EMA_VWAP_Volume"
+timeframe = "4h"
 leverage = 1.0
