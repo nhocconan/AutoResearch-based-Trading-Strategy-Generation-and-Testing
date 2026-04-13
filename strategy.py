@@ -8,7 +8,7 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian channel breakout with 1d volume confirmation and ADX > 20 regime filter.
+    # Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ADX > 20 regime filter.
     # Long when price breaks above upper Donchian(20) with volume spike and ADX > 20.
     # Short when price breaks below lower Donchian(20) with volume spike and ADX > 20.
     # Exit when price crosses the Donchian midpoint (mean reversion to equilibrium).
