@@ -21,26 +21,18 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    vol_1d = df_1d['volume'].values
     
-    # Calculate 20-period EMA on 1d (trend filter)
+    # Calculate 12-period EMA on 1d (trend filter)
     close_1d_series = pd.Series(close_1d)
-    ema_20_1d = close_1d_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_12_1d = close_1d_series.ewm(span=12, adjust=False, min_periods=12).mean().values
     
-    # Calculate RSI(14) on 1d
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14 = 100 - (100 / (1 + rs))
+    # Calculate 26-period EMA on 1d
+    ema_26_1d = close_1d_series.ewm(span=26, adjust=False, min_periods=26).mean().values
     
-    # Calculate Bollinger Bands (20, 2) on 1d
-    sma_20 = close_1d_series.rolling(window=20, min_periods=20).mean().values
-    std_20 = close_1d_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = sma_20 + 2 * std_20
-    bb_lower = sma_20 - 2 * std_20
+    # Calculate MACD on 1d
+    macd_line = ema_12_1d - ema_26_1d
+    macd_signal = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
+    macd_hist = macd_line - macd_signal
     
     # Get 1w data for trend confirmation
     df_1w = get_htf_data(prices, '1w')
@@ -52,10 +44,7 @@ def generate_signals(prices):
     sma_20_1w = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
     
     # Align indicators to daily timeframe
-    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
-    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
-    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
+    macd_hist_aligned = align_htf_to_ltf(prices, df_1d, macd_hist)
     sma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_20_1w)
     
     signals = np.zeros(n)
@@ -64,37 +53,26 @@ def generate_signals(prices):
     
     for i in range(250, n):
         # Skip if data not ready
-        if (np.isnan(ema_20_aligned[i]) or 
-            np.isnan(rsi_14_aligned[i]) or
-            np.isnan(bb_upper_aligned[i]) or
-            np.isnan(bb_lower_aligned[i]) or
+        if (np.isnan(macd_hist_aligned[i]) or 
             np.isnan(sma_20_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below EMA20
-        above_ema = close[i] > ema_20_aligned[i]
-        below_ema = close[i] < ema_20_aligned[i]
-        
-        # RSI conditions: not overbought/oversold
-        rsi_not_overbought = rsi_14_aligned[i] < 70
-        rsi_not_oversold = rsi_14_aligned[i] > 30
-        
-        # Bollinger Band conditions: price near bands
-        near_upper_band = close[i] > bb_upper_aligned[i] * 0.98
-        near_lower_band = close[i] < bb_lower_aligned[i] * 1.02
+        # MACD histogram conditions
+        macd_positive = macd_hist_aligned[i] > 0
+        macd_negative = macd_hist_aligned[i] < 0
         
         # Weekly trend filter: price above/below weekly SMA20
         above_weekly_sma = close[i] > sma_20_1w_aligned[i]
         below_weekly_sma = close[i] < sma_20_1w_aligned[i]
         
         # Entry conditions
-        long_entry = above_ema and rsi_not_overbought and near_lower_band and above_weekly_sma
-        short_entry = below_ema and rsi_not_oversold and near_upper_band and below_weekly_sma
+        long_entry = macd_positive and above_weekly_sma
+        short_entry = macd_negative and below_weekly_sma
         
-        # Exit conditions: opposite signal or RSI extreme
-        exit_long = position == 1 and (below_ema or rsi_14_aligned[i] > 75)
-        exit_short = position == -1 and (above_ema or rsi_14_aligned[i] < 25)
+        # Exit conditions: opposite MACD signal
+        exit_long = position == 1 and macd_negative
+        exit_short = position == -1 and macd_positive
         
         # Execute signals
         if long_entry and position != 1:
@@ -117,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_ema_rsi_bb_weekly_filter"
-timeframe = "1d"
+name = "6h_1d_macd_hist_trend"
+timeframe = "6h"
 leverage = 1.0
