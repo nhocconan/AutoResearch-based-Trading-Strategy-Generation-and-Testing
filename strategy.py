@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_1d1w_Angle_of_Attack
-Hypothesis: Price crosses above/below 60-period EMA on 6h chart with 1d volume confirmation and 1w trend filter.
-Long when 6h close > 60-period EMA + 1d volume > 1.5x 20-period average + 1w close > 1w EMA50.
-Short when 6h close < 60-period EMA + 1d volume > 1.5x 20-period average + 1w close < 1w EMA50.
-Exit when price crosses back below/above 60-period EMA or 1w trend reverses.
-Designed for 6h timeframe to target 20-40 trades/year with trend-following in both bull/bear markets.
+4h_1d1w_Camarilla_Pivot_Breakout_Volume_Trend_Hybrid
+Hypothesis: 4h close breaks above/below daily Camarilla R4/S4 with volume surge and weekly trend alignment.
+Long when price > R4, volume > 2x 20-day average, weekly close > weekly SMA50.
+Short when price < S4, volume > 2x 20-day average, weekly close < weekly SMA50.
+Exit when price crosses daily pivot point (PP) or weekly trend reverses.
+Designed for 4h timeframe to target 20-40 trades/year with strong trend capture in both bull/bear markets.
+Uses volume confirmation and weekly trend filter to reduce false breakouts and improve win rate.
 """
 
 import numpy as np
@@ -14,79 +15,102 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     
-    # 60-period EMA on 6h
-    close_series = pd.Series(close)
-    ema_60 = close_series.ewm(span=60, adjust=False, min_periods=60).mean().values
-    
-    # 1d volume confirmation
+    # Daily data for Camarilla levels and volume
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     vol_1d = df_1d['volume'].values
-    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    
+    # Previous day's values for today's Camarilla calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
+    
+    # Calculate daily Camarilla levels
+    range_1d = prev_high - prev_low
+    camarilla_pp = (prev_high + prev_low + prev_close) / 3
+    camarilla_r4 = camarilla_pp + (range_1d * 1.1 / 2)
+    camarilla_s4 = camarilla_pp - (range_1d * 1.1 / 2)
+    
+    # Align daily Camarilla levels to 4h
+    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    
+    # Daily volume and 20-period average
+    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean()
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20.values)
     vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
     
-    # 1w trend filter using EMA50
+    # Weekly trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    sma_50 = pd.Series(close_1w).rolling(window=50, min_periods=50).mean()
+    sma_50_aligned = align_htf_to_ltf(prices, df_1w, sma_50.values)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(ema_60[i]) or np.isnan(vol_ma_20_aligned[i]) or np.isnan(vol_1d_aligned[i]) or
-            np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(camarilla_pp_aligned[i]) or np.isnan(camarilla_r4_aligned[i]) or
+            np.isnan(camarilla_s4_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or
+            np.isnan(sma_50_aligned[i]) or np.isnan(vol_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current 1d volume > 1.5x 20-period average
-        vol_condition = vol_1d_aligned[i] > (vol_ma_20_aligned[i] * 1.5)
+        # Volume condition: current daily volume > 2x 20-period average
+        vol_condition = vol_1d_aligned[i] > (vol_ma_20_aligned[i] * 2.0)
         
-        # 1w trend condition
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
+        # Weekly trend condition
+        uptrend = close[i] > sma_50_aligned[i]
+        downtrend = close[i] < sma_50_aligned[i]
         
-        # EMA cross conditions
-        ema_cross_up = close[i] > ema_60[i]
-        ema_cross_down = close[i] < ema_60[i]
+        # Breakout conditions
+        long_breakout = close[i] > camarilla_r4_aligned[i]
+        short_breakout = close[i] < camarilla_s4_aligned[i]
         
         # Exit conditions
-        ema_cross_down_exit = close[i] < ema_60[i]  # for long exit
-        ema_cross_up_exit = close[i] > ema_60[i]    # for short exit
-        trend_reverse_long = close[i] < ema_50_1w_aligned[i]  # uptrend broken
-        trend_reverse_short = close[i] > ema_50_1w_aligned[i]  # downtrend broken
+        long_exit = close[i] < camarilla_pp_aligned[i]
+        short_exit = close[i] > camarilla_pp_aligned[i]
+        trend_reverse_long = close[i] < sma_50_aligned[i]  # uptrend broken
+        trend_reverse_short = close[i] > sma_50_aligned[i]  # downtrend broken
         
         if position == 0:
-            if ema_cross_up and vol_condition and uptrend:
+            if long_breakout and vol_condition and uptrend:
                 position = 1
                 signals[i] = position_size
-            elif ema_cross_down and vol_condition and downtrend:
+            elif short_breakout and vol_condition and downtrend:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            if ema_cross_down_exit or trend_reverse_long:
+            if long_exit or trend_reverse_long:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            if ema_cross_up_exit or trend_reverse_short:
+            if short_exit or trend_reverse_short:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -94,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d1w_Angle_of_Attack"
-timeframe = "6h"
+name = "4h_1d1w_Camarilla_Pivot_Breakout_Volume_Trend_Hybrid"
+timeframe = "4h"
 leverage = 1.0
