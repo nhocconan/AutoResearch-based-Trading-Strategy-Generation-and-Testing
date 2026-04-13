@@ -3,69 +3,77 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h timeframe with 12h Donchian breakout and 1d trend filter.
-# Long: Price breaks above 12h Donchian upper (20-period) + price > 1d EMA200 + volume > 1.5x avg volume (20-period).
-# Short: Price breaks below 12h Donchian lower (20-period) + price < 1d EMA200 + volume > 1.5x avg volume.
-# Uses 12h for breakout structure, 1d for trend filter, 6h for entry timing with volume confirmation.
-# Session filter: 08-20 UTC to avoid low-liquidity hours.
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
+# Hypothesis: 4h timeframe with 1d Bollinger Bands squeeze + RSI reversal + volume confirmation.
+# Long: Bollinger Bands width < 20th percentile (squeeze) + RSI < 30 + volume > 1.3x avg volume.
+# Short: Bollinger Bands width < 20th percentile (squeeze) + RSI > 70 + volume > 1.3x avg volume.
+# Uses Bollinger squeeze to identify low volatility periods primed for breakout/reversal,
+# RSI for overbought/oversold conditions, volume to confirm participation.
+# Position size: 0.25 (25%). Target: 20-50 trades/year to avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
     # Session filter: 08-20 UTC (pre-compute hours)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    # 12h data for Donchian channels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    
-    # 12h Donchian channels (20-period)
-    donchian_high = np.full(len(high_12h), np.nan)
-    donchian_low = np.full(len(low_12h), np.nan)
-    for i in range(20, len(high_12h)):
-        donchian_high[i] = np.max(high_12h[i-20:i])
-        donchian_low[i] = np.min(low_12h[i-20:i])
-    
-    # 1d data for EMA200 trend filter
+    # 1d data for Bollinger Bands and RSI
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Bollinger Bands (20, 2.0)
+    bb_period = 20
+    bb_mult = 2.0
+    sma_20 = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_20 = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).std().values
+    bb_upper = sma_20 + bb_mult * std_20
+    bb_lower = sma_20 - bb_mult * std_20
+    bb_width = bb_upper - bb_lower
+    
+    # Percentile rank of BB width (252-period lookback ~ 1 year)
+    bb_width_pct = np.full(len(bb_width), np.nan)
+    for i in range(252, len(bb_width)):
+        bb_width_pct[i] = (bb_width[i] <= bb_width[i-252:i]).sum() / 252 * 100
+    
+    # RSI (14)
+    rsi_period = 14
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, min_periods=rsi_period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, min_periods=rsi_period, adjust=False).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
     # Average volume (20-period) for volume confirmation
-    avg_volume = np.full(n, np.nan)
-    for i in range(20, n):
-        avg_volume[i] = np.mean(volume[i-20:i])
+    avg_volume_1d = np.full(len(volume), np.nan)
+    for i in range(20, len(volume)):
+        avg_volume_1d[i] = np.mean(volume[i-20:i])
     
-    # Align 12h Donchian to 6h
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
-    
-    # Align 1d EMA200 to 6h
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Align 1d indicators to 4h
+    bb_width_pct_aligned = align_htf_to_ltf(prices, df_1d, bb_width_pct)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    avg_volume_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(20, n):
+    for i in range(252, n):  # Start after BB percentile lookback
         # Skip if any required data is not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_200_1d_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(bb_width_pct_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(avg_volume_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -75,43 +83,38 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        price = close[i]
+        bb_width_pct_val = bb_width_pct_aligned[i]
+        rsi_val = rsi_aligned[i]
         vol = volume[i]
-        avg_vol = avg_volume[i]
-        upper = donchian_high_aligned[i]
-        lower = donchian_low_aligned[i]
-        ema_trend = ema_200_1d_aligned[i]
+        avg_vol = avg_volume_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirm = vol > 1.5 * avg_vol
+        # Bollinger squeeze: width < 20th percentile
+        squeeze = bb_width_pct_val < 20
+        
+        # Volume confirmation: current volume > 1.3x average volume
+        volume_confirm = vol > 1.3 * avg_vol
         
         if position == 0:
-            # Long: break above Donchian high + above EMA200 + volume confirmation
-            if (price > upper and 
-                price > ema_trend and
-                volume_confirm):
+            # Long: squeeze + RSI < 30 (oversold) + volume confirmation
+            if squeeze and (rsi_val < 30) and volume_confirm:
                 position = 1
                 signals[i] = position_size
-            # Short: break below Donchian low + below EMA200 + volume confirmation
-            elif (price < lower and 
-                  price < ema_trend and
-                  volume_confirm):
+            # Short: squeeze + RSI > 70 (overbought) + volume confirmation
+            elif squeeze and (rsi_val > 70) and volume_confirm:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below Donchian low or below EMA200
-            if (price < lower or
-                price < ema_trend):
+            # Exit long: RSI > 50 (exit oversold condition) or squeeze breaks
+            if (rsi_val > 50) or (bb_width_pct_val >= 20):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes above Donchian high or above EMA200
-            if (price > upper or
-                price > ema_trend):
+            # Exit short: RSI < 50 (exit overbought condition) or squeeze breaks
+            if (rsi_val < 50) or (bb_width_pct_val >= 20):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -119,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_1d_Donchian_EMA_Volume"
-timeframe = "6h"
+name = "4h_1d_Bollinger_Squeeze_RSI_Volume"
+timeframe = "4h"
 leverage = 1.0
