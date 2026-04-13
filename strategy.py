@@ -5,105 +5,78 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
-    # Hypothesis: 6h Elder Ray (Bull/Bear Power) + 1d ADX trend filter
-    # Bull Power = High - EMA13 (buying pressure)
-    # Bear Power = Low - EMA13 (selling pressure)
-    # Long: Bull Power > 0 and Bear Power < 0 (bullish momentum) + 1d ADX > 25 (strong trend)
-    # Short: Bull Power < 0 and Bear Power > 0 (bearish momentum) + 1d ADX > 25 (strong trend)
-    # Exit: Opposite Elder Ray signal or ADX < 20 (trend weakening)
-    # Uses 1d ADX for regime filter to avoid whipsaws in ranging markets
-    # Elder Ray captures momentum extremes, ADX ensures we only trade strong trends
-    # Works in bull (buy strength) and bear (sell weakness) with trend confirmation
-    # Target: 60-120 total trades over 4 years (15-30/year) to balance opportunity and fees
+    # Hypothesis: 12h Williams %R mean reversion with 1w EMA trend filter
+    # Long: Williams %R < -80 (oversold) + price > 1w EMA50 (uptrend)
+    # Short: Williams %R > -20 (overbought) + price < 1w EMA50 (downtrend)
+    # Exit: Williams %R crosses -50 (mean reversion midpoint)
+    # Uses 1w EMA for trend alignment to avoid counter-trend trades
+    # Williams %R identifies extreme price exhaustion points
+    # Works in bull (buy dips in uptrend) and bear (sell rallies in downtrend)
+    # Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and fees
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get 6h data for primary timeframe
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
+    # Get 12h data for primary timeframe
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Get 1d data for ADX trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 1w data for EMA trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 6h EMA13 for Elder Ray
-    ema_13_6h = pd.Series(close_6h).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate 12h Williams %R (14-period)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close_12h) / (highest_high - lowest_low) * -100
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Calculate 6h Elder Ray components
-    bull_power = high_6h - ema_13_6h  # Buying pressure
-    bear_power = low_6h - ema_13_6h   # Selling pressure
+    # Calculate 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 1d ADX (14-period) for trend strength
-    # True Range
-    tr1 = pd.Series(high_1d).diff().abs()
-    tr2 = (pd.Series(high_1d) - pd.Series(close_1d).shift()).abs()
-    tr3 = (pd.Series(low_1d) - pd.Series(close_1d).shift()).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
-    
-    # Directional Movement
-    dm_plus = pd.Series(high_1d).diff()
-    dm_minus = -pd.Series(low_1d).diff()
-    dm_plus = np.where((dm_plus > dm_minus) & (dm_plus > 0), dm_plus, 0)
-    dm_minus = np.where((dm_minus > dm_plus) & (dm_minus > 0), dm_minus, 0)
-    
-    # Smoothed DM and TR
-    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_smooth = pd.Series(atr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / np.where(atr_smooth == 0, 1, atr_smooth)
-    di_minus = 100 * dm_minus_smooth / np.where(atr_smooth == 0, 1, atr_smooth)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / np.where((di_plus + di_minus) == 0, 1, (di_plus + di_minus))
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Align 1d ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align 1w EMA50 to 12h timeframe
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
     
-    for i in range(30, n):  # start from 30 to have enough data for ADX
+    for i in range(14, n):  # start from 14 to have enough data for Williams %R
         # Skip if data not ready
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Elder Ray conditions
-        bullish_momentum = bull_power[i] > 0 and bear_power[i] < 0
-        bearish_momentum = bull_power[i] < 0 and bear_power[i] > 0
+        # Williams %R conditions
+        oversold = williams_r[i] < -80
+        overbought = williams_r[i] > -20
+        exit_signal = williams_r[i] > -50  # exit when crosses above -50
         
-        # Trend filter from 1d ADX
-        strong_trend = adx_aligned[i] > 25
-        weak_trend = adx_aligned[i] < 20
+        # Trend filter from 1w EMA50
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
         # Entry conditions
-        long_entry = bullish_momentum and strong_trend and position != 1
-        short_entry = bearish_momentum and strong_trend and position != -1
+        long_entry = oversold and uptrend and position != 1
+        short_entry = overbought and downtrend and position != -1
         
         # Exit conditions
-        exit_long = position == 1 and (not bullish_momentum or weak_trend)
-        exit_short = position == -1 and (not bearish_momentum or weak_trend)
+        exit_long = position == 1 and exit_signal
+        exit_short = position == -1 and exit_signal
         
         # Execute signals
         if long_entry:
@@ -129,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_elder_ray_adx_filter_v1"
-timeframe = "6h"
+name = "12h_1w_williamsr_trend_filter_v1"
+timeframe = "12h"
 leverage = 1.0
