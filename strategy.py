@@ -1,17 +1,11 @@
-# 4h_1d_camarilla_breakout_volume_filter
-# Hypothesis: Camarilla pivot levels on daily chart act as strong support/resistance zones.
-# A breakout above/below these levels with volume confirmation signals strong momentum.
-# Uses 12h trend filter to avoid counter-trend trades. Works in both bull (breakouts continue) 
-# and bear (breakdowns continue) markets by trading with the higher timeframe trend.
-# Target: 20-40 trades/year to minimize fee drag.
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,92 +13,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels
+    # Get 1d data for calculations
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels from previous day
-    # H4 = Close + 1.1/2 * (High - Low) = Close + 0.55 * (High - Low)
-    # L4 = Close - 1.1/2 * (High - Low) = Close - 0.55 * (High - Low)
-    # H3 = Close + 1.1/4 * (High - Low) = Close + 0.275 * (High - Low)
-    # L3 = Close - 1.1/4 * (High - Low) = Close - 0.275 * (High - Low)
-    # H2 = Close + 1.1/6 * (High - Low) = Close + 0.1833 * (High - Low)
-    # L2 = Close - 1.1/6 * (High - Low) = Close - 0.1833 * (High - Low)
-    # H1 = Close + 1.1/12 * (High - Low) = Close + 0.0916 * (High - Low)
-    # L1 = Close - 1.1/12 * (High - Low) = Close - 0.0916 * (High - Low)
+    # Calculate daily ATR(14)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate for previous day (shifted by 1)
-    high_prev = np.roll(high_1d, 1)
-    low_prev = np.roll(low_1d, 1)
-    close_prev = np.roll(close_1d, 1)
-    high_prev[0] = high_prev[1] if len(high_prev) > 1 else high_prev[0]
-    low_prev[0] = low_prev[1] if len(low_prev) > 1 else low_prev[0]
-    close_prev[0] = close_prev[1] if len(close_prev) > 1 else close_prev[0]
+    # Calculate 20-period EMA on 1d (trend filter)
+    close_1d_series = pd.Series(close_1d)
+    ema_20_1d = close_1d_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    rangeprev = high_prev - low_prev
-    H4 = close_prev + 0.55 * rangeprev
-    L4 = close_prev - 0.55 * rangeprev
-    H3 = close_prev + 0.275 * rangeprev
-    L3 = close_prev - 0.275 * rangeprev
-    H2 = close_prev + 0.1833 * rangeprev
-    L2 = close_prev - 0.1833 * rangeprev
-    H1 = close_prev + 0.0916 * rangeprev
-    L1 = close_prev - 0.0916 * rangeprev
+    # Calculate 14-period RSI on 1d
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_14 = 100 - (100 / (1 + rs))
     
-    # Get 12h trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    # EMA 20 on 12h for trend
-    close_12h_series = pd.Series(close_12h)
-    ema_20_12h = close_12h_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Align all to 4h timeframe
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
-    
-    # Volume confirmation: volume > 1.5x average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (1.5 * vol_ma)
+    # Align indicators to 1h timeframe
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.25  # 25% of capital
+    position_size = 0.20  # 20% of capital
     
-    for i in range(20, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or 
-            np.isnan(ema_20_12h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(atr_14_aligned[i]) or 
+            np.isnan(ema_20_aligned[i]) or
+            np.isnan(rsi_14_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter
-        uptrend = close[i] > ema_20_12h_aligned[i]
-        downtrend = close[i] < ema_20_12h_aligned[i]
+        # Trend filter: price above/below EMA20
+        above_ema = close[i] > ema_20_aligned[i]
+        below_ema = close[i] < ema_20_aligned[i]
         
-        # Breakout conditions with volume confirmation
-        long_breakout = (close[i] > H4_aligned[i]) and vol_confirm[i]
-        short_breakout = (close[i] < L4_aligned[i]) and vol_confirm[i]
+        # RSI conditions: avoid extreme levels
+        rsi_not_overbought = rsi_14_aligned[i] < 75
+        rsi_not_oversold = rsi_14_aligned[i] > 25
         
-        # Exit when price returns to opposite level or trend changes
-        exit_long = position == 1 and (close[i] < L3_aligned[i] or not uptrend)
-        exit_short = position == -1 and (close[i] > H3_aligned[i] or not downtrend)
+        # Volatility filter: require sufficient ATR
+        vol_ok = atr_14_aligned[i] > 0
+        
+        # Entry conditions
+        long_entry = above_ema and rsi_not_overbought and vol_ok
+        short_entry = below_ema and rsi_not_oversold and vol_ok
+        
+        # Exit conditions: opposite signal or RSI extreme
+        exit_long = position == 1 and (below_ema or rsi_14_aligned[i] > 80)
+        exit_short = position == -1 and (above_ema or rsi_14_aligned[i] < 20)
         
         # Execute signals
-        if long_breakout and position != 1:
+        if long_entry and position != 1:
             position = 1
             signals[i] = position_size
-        elif short_breakout and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -position_size
         elif exit_long or exit_short:
@@ -121,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_camarilla_breakout_volume_filter"
-timeframe = "4h"
+name = "1h_ema20_rsi14_atr14_filter"
+timeframe = "1h"
 leverage = 1.0
