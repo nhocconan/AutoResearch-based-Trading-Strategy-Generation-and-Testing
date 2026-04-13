@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_1w_KAMA_Trend_Filter_With_Volume_Confirmation
-Hypothesis: KAMA adapts to market noise, providing reliable trend direction on daily.
-Trend confirmed by price > KAMA (long) or < KAMA (short) with volume expansion.
-Uses weekly trend filter: only trade long when weekly close > weekly EMA20, short when <.
-Volume confirmation reduces false signals. Works in bull (trend following) and bear (counter-trend reversals via weekly filter).
-Target: 10-20 trades/year per symbol.
+12h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation_v1
+Hypothesis: Daily Camarilla pivot levels (S3/R3) provide strong support/resistance.
+Breakouts above R3 or below S3 on 12h chart with volume expansion capture institutional moves.
+Adds volume confirmation to reduce false breakouts. Works in both bull and bear markets
+by trading breakouts regardless of direction. Target: 12-37 trades/year per symbol.
 """
 
 import numpy as np
@@ -17,40 +16,40 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for KAMA
+    # Get daily data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate KAMA (20, 2, 30)
+    # Calculate Camarilla levels for each daily bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.abs(np.diff(close_1d))
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * 0.6 + 0.06) ** 2  # 2 = fast SC, 30 = slow SC
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    # Camarilla formulas
+    close_prev = np.roll(close_1d, 1)
+    close_prev[0] = close_1d[0]  # first bar uses its own close
     
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    range_1d = high_1d - low_1d
     
-    # Align to daily timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Resistance levels (R3 used)
+    R3 = close_prev + (range_1d * 1.2500 / 4)
     
-    # Volume confirmation: current volume > 1.3x 20-day average
+    # Support levels (S3 used)
+    S3 = close_prev - (range_1d * 1.2500 / 4)
+    
+    # Align levels to 12h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 1.3)
+    volume_expansion = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -58,25 +57,21 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(ema_20_1w_aligned[i]) or 
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
             np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions: price > KAMA, weekly close > weekly EMA20, volume expansion
-        long_condition = (close[i] > kama_aligned[i]) and \
-                         (close_1w[-1] > ema_20_1w_aligned[i] if i < len(ema_20_1w_aligned) else False) and \
-                         volume_expansion[i]
+        # Long breakout: price breaks above R3 with volume expansion
+        long_breakout = close[i] > R3_aligned[i] and volume_expansion[i]
         
-        # Short conditions: price < KAMA, weekly close < weekly EMA20, volume expansion
-        short_condition = (close[i] < kama_aligned[i]) and \
-                          (close_1w[-1] < ema_20_1w_aligned[i] if i < len(ema_20_1w_aligned) else False) and \
-                          volume_expansion[i]
+        # Short breakdown: price breaks below S3 with volume expansion
+        short_breakout = close[i] < S3_aligned[i] and volume_expansion[i]
         
-        if long_condition and position != 1:
+        if long_breakout and position != 1:
             position = 1
             signals[i] = position_size
-        elif short_condition and position != -1:
+        elif short_breakout and position != -1:
             position = -1
             signals[i] = -position_size
         else:
@@ -85,6 +80,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_KAMA_Trend_Filter_With_Volume_Confirmation"
-timeframe = "1d"
+name = "12h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation_v1"
+timeframe = "12h"
 leverage = 1.0
