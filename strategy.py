@@ -8,78 +8,80 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Donchian(20) breakout with 1d volume regime filter.
-    # Long when price breaks above 20-period 6h high AND 1d volume is in expansion regime (ATR ratio > 1.2).
-    # Short when price breaks below 20-period 6h low AND 1d volume is in expansion regime.
-    # Exit on opposite Donchian(10) break or volume contraction.
-    # Uses discrete size 0.25 to minimize fee churn.
-    # Target: 50-150 total trades over 4 years (12-37/year).
+    # Hypothesis: 4h Donchian(20) breakout + volume confirmation + ATR regime filter.
+    # Long when price breaks above 20-period Donchian high with volume spike and ATR ratio > 0.8 (trending regime).
+    # Short when price breaks below 20-period Donchian low with volume spike and ATR ratio > 0.8.
+    # Exit when price returns to 20-period Donchian midpoint (mean reversion).
+    # Uses discrete position size 0.25 to minimize fee churn.
+    # Target: 75-200 total trades over 4 years (19-50/year) for BTC/ETH/SOL.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data (call ONCE before loop)
+    # Get 1d data for regime filter (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d ATR(14) for volume regime filter
+    # Calculate 1d ATR for regime filter (trending vs ranging)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
     # True Range calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # First bar
-    tr2[0] = np.abs(high_1d[0] - close_1d[0])  # First bar
-    tr3[0] = np.abs(low_1d[0] - close_1d[0])  # First bar
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
     
-    # ATR(14) with min_periods
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # ATR(14) on 1d
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # ATR ratio: current ATR / 20-period ATR mean (expansion > 1.2, contraction < 0.8)
-    atr_ma_20 = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values
-    atr_ratio = atr_14 / np.where(atr_ma_20 > 0, atr_ma_20, 1e-10)
+    # 1d ATR ratio: current ATR / 50-period mean ATR (regime filter)
+    atr_ma_50 = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr_1d / atr_ma_50
     
-    # Align HTF indicators to 6h timeframe
+    # Align 1d ATR ratio to 4h
     atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    # Calculate 6h Donchian channels (20 for entry, 10 for exit)
-    # Donchian(20) high/low for breakout entry
+    # Calculate 4h Donchian channels (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    donchian_high_20 = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = low_series.rolling(window=20, min_periods=20).min().values
-    # Donchian(10) high/low for exit
-    donchian_high_10 = high_series.rolling(window=10, min_periods=10).max().values
-    donchian_low_10 = low_series.rolling(window=10, min_periods=10).min().values
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2.0
+    
+    # Calculate 4h volume mean (20-period) with min_periods
+    volume_series = pd.Series(volume)
+    vol_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high_20[i]) or np.isnan(donchian_low_20[i]) or
-            np.isnan(donchian_high_10[i]) or np.isnan(donchian_low_10[i]) or
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(vol_ma_20[i]) or
             np.isnan(atr_ratio_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume regime filters
-        volume_expansion = atr_ratio_aligned[i] > 1.2  # ATR expansion regime
-        volume_contraction = atr_ratio_aligned[i] < 0.8  # ATR contraction regime
+        # Volume filter: current 4h volume > 1.8 * 20-period mean (volume spike)
+        volume_confirmation = volume[i] > 1.8 * vol_ma_20[i]
         
-        # Entry conditions: Donchian(20) break with volume expansion
-        long_entry = (close[i] > donchian_high_20[i] and volume_expansion)
-        short_entry = (close[i] < donchian_low_20[i] and volume_expansion)
+        # Regime filter: ATR ratio > 0.8 (trending market)
+        regime_filter = atr_ratio_aligned[i] > 0.8
         
-        # Exit conditions: Donchian(10) break in opposite direction OR volume contraction
-        long_exit = (close[i] < donchian_low_10[i]) or volume_contraction
-        short_exit = (close[i] > donchian_high_10[i]) or volume_contraction
+        # Entry conditions: price breaks Donchian levels with volume confirmation and trending regime
+        long_entry = (close[i] > donchian_high[i] and volume_confirmation and regime_filter)
+        short_entry = (close[i] < donchian_low[i] and volume_confirmation and regime_filter)
+        
+        # Exit conditions: price returns to Donchian midpoint (mean reversion)
+        long_exit = close[i] < donchian_mid[i]
+        short_exit = close[i] > donchian_mid[i]
         
         if long_entry and position != 1:
             position = 1
@@ -104,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_donchian_breakout_volume_regime_v1"
-timeframe = "6h"
+name = "4h_donchian_volume_regime_v1"
+timeframe = "4h"
 leverage = 1.0
