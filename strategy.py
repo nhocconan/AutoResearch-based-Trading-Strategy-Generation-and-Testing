@@ -5,19 +5,21 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian breakout with 1d volume confirmation and chop regime filter
-    # Designed for low trade frequency (19-50/year) to minimize fee drag
-    # Works in trending markets via breakouts; chop filter avoids whipsaws in ranging markets
+    # Hypothesis: 6h Williams %R extreme + 1d EMA200 trend filter + volume spike
+    # Williams %R identifies overbought/oversold conditions (below -80 = oversold, above -20 = overbought)
+    # In strong trends (price > EMA200 for longs, < EMA200 for shorts), extreme %R often precedes continuation
+    # Volume spike confirms institutional interest at extreme levels
+    # Designed for low frequency: ~25-40 trades/year to minimize fee drag
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values if 'volume' in prices.columns else np.ones(len(prices))
     
-    # Get 1d data for HTF volume and chop regime
+    # Get 1d data for HTF Williams %R, EMA200, and volume
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -27,70 +29,53 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values if 'volume' in df_1d.columns else np.ones(len(df_1d))
     
-    # Calculate 1d volume average (20-period)
+    # Calculate 1d Williams %R (14-period)
+    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14) * -100
+    
+    # Calculate 1d EMA200 for trend filter
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Calculate 1d volume average (20-period) for spike detection
     vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1d ATR for chop regime (ATR(14))
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate 1d true range average for chop (using TR)
-    tr_avg_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate 1d high-low range for chop
-    hl_range_1d = high_1d - low_1d
-    hl_avg_14_1d = pd.Series(hl_range_1d).rolling(window=14, min_periods=14).mean().values
-    
-    # Choppiness Index: CHOP = 100 * log10(sum(TR14) / (sum(HL14) * 14)) / log10(14)
-    # Simplified: CHOP > 61.8 = ranging, CHOP < 38.2 = trending
-    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    sum_hl_14 = pd.Series(hl_range_1d).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(sum_tr_14 / (sum_hl_14 * 14)) / np.log10(14)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Align HTF indicators to 4h
+    # Align all HTF indicators to 6h primary timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Calculate 4h Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
     
-    for i in range(20, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or
-            np.isnan(vol_avg_20_1d_aligned[i]) or
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(ema200_1d_aligned[i]) or
+            np.isnan(vol_avg_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x 20-period 1d volume average
-        # Use 4h volume but compare to 1d average volume (scaled)
-        volume_confirmed = volume[i] > 1.5 * vol_avg_20_1d_aligned[i]
+        # Volume confirmation: current 1d volume > 2.0x 20-period average (significant spike)
+        volume_spike = volume_1d[i] > 2.0 * vol_avg_20_1d_aligned[i]
         
-        # Regime filter: only trade when trending (CHOP < 38.2)
-        trending_regime = chop_aligned[i] < 38.2
+        # Williams %R extreme conditions
+        wr_oversold = williams_r_aligned[i] < -80   # Oversold - potential long
+        wr_overbought = williams_r_aligned[i] > -20 # Overbought - potential short
         
-        # Donchian breakout conditions
-        breakout_long = close[i] > high_20[i-1]  # Break above 20-period high
-        breakout_short = close[i] < low_20[i-1]  # Break below 20-period low
+        # Trend filter: only trade in direction of 1d EMA200
+        trend_filter_long = close[i] > ema200_1d_aligned[i]   # Uptrend
+        trend_filter_short = close[i] < ema200_1d_aligned[i]  # Downtrend
         
-        # Entry conditions: breakout + volume + trending regime
-        enter_long = breakout_long and volume_confirmed and trending_regime
-        enter_short = breakout_short and volume_confirmed and trending_regime
+        # Entry conditions: extreme %R + volume spike + trend alignment
+        enter_long = wr_oversold and volume_spike and trend_filter_long
+        enter_short = wr_overbought and volume_spike and trend_filter_short
         
-        # Exit conditions: opposite Donchian breakout or middle line
-        donchian_mid = (high_20[i] + low_20[i]) / 2
-        exit_long = position == 1 and (close[i] < donchian_mid or breakout_short)
-        exit_short = position == -1 and (close[i] > donchian_mid or breakout_long)
+        # Exit conditions: %R returns to neutral territory (-50 level)
+        exit_long = position == 1 and williams_r_aligned[i] > -50
+        exit_short = position == -1 and williams_r_aligned[i] < -50
         
         # Execute signals
         if enter_long and position != 1:
@@ -116,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_breakout_volume_chop_v1"
-timeframe = "4h"
+name = "6h_1d_williamsr_extreme_volume_trend_v1"
+timeframe = "6h"
 leverage = 1.0
