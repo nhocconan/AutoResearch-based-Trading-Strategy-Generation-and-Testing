@@ -8,15 +8,12 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and 1d ADX regime filter
-    # Long when price breaks above 4h Donchian upper (20) + 1d volume > 1.5 * 20-period mean + 1d ADX > 25
-    # Short when price breaks below 4h Donchian lower (20) + same filters
-    # Exit when price returns to 4h Donchian middle (midpoint of upper/lower)
-    # Uses discrete position sizing (0.25) to balance return and drawdown
-    # Target: 80-150 total trades over 4 years (~20-38/year) to avoid excessive fee drag
-    # Donchian channels provide clear trend-following structure
-    # Volume confirmation ensures breakouts have institutional participation
-    # Daily ADX filter ensures we only trade when higher timeframe is trending
+    # Hypothesis: 4h Donchian(20) breakout with 1d volume spike (current volume > 2.0 * 20-period mean) 
+    # and 1d ADX regime filter (ADX > 25). Long on bullish breakout, short on bearish breakout.
+    # Exit when price crosses the 4h Donchian middle. Uses discrete position sizing (0.25).
+    # Volume spike filter ensures breakouts have strong participation, reducing false signals.
+    # ADX filter ensures we only trade in trending regimes on higher timeframe.
+    # Target: 80-150 total trades over 4 years to avoid excessive fee drag.
     
     close = prices['close'].values
     high = prices['high'].values
@@ -108,8 +105,8 @@ def generate_signals(prices):
         volume_1d_current = df_1d['volume'].values
         vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d_current)
         
-        # Volume filter: current 1d volume > 1.5 * 20-period mean
-        volume_confirmation = vol_1d_aligned[i] > 1.5 * vol_ma_aligned[i]
+        # Volume filter: current 1d volume > 2.0 * 20-period mean (spike filter)
+        volume_confirmation = vol_1d_aligned[i] > 2.0 * vol_ma_aligned[i]
         
         # ADX filter: trending market (ADX > 25)
         trending_market = adx_aligned[i] > 25
@@ -149,6 +146,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_breakout_volume_adx_v1"
+name = "4h_1d_donchian_breakout_volume_spike_adx_v1"
 timeframe = "4h"
 leverage = 1.0
