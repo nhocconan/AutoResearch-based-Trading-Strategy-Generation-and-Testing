@@ -5,55 +5,66 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout + 1d Camarilla pivot structure + volume confirmation
-    # Long when: price breaks above Donchian(20) high AND price > Camarilla H3 (1d) AND volume > 1.5x avg volume
-    # Short when: price breaks below Donchian(20) low AND price < Camarilla L3 (1d) AND volume > 1.5x avg volume
-    # Exit when: price crosses Donchian midpoint OR volume drops below average
-    # Uses discrete sizing (0.25) targeting 75-200 trades over 4 years.
-    # Works in bull/bear via Camarilla pivot structure providing dynamic support/resistance levels.
+    # Hypothesis: 6h Elder Ray + ADX regime filter
+    # Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
+    # Long when: Bull Power > 0 AND Bear Power < 0 AND ADX > 25 (trending)
+    # Short when: Bear Power > 0 AND Bull Power < 0 AND ADX > 25 (trending)
+    # Exit when: ADX < 20 (range) OR power signals weaken
+    # Uses discrete sizing (0.25) targeting 50-150 trades over 4 years.
+    # Works in bull/bear via ADX regime filter avoiding whipsaws in sideways markets.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
+    # Calculate EMA(13) for Elder Ray
+    ema13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Elder Ray components
+    bull_power = high - ema13  # Bull Power = High - EMA
+    bear_power = ema13 - low   # Bear Power = EMA - Low
     
-    # Calculate 1d Camarilla pivots (using previous day's range)
-    # Camarilla levels: H4 = close + 1.5*(high-low), H3 = close + 1.125*(high-low)
-    #                 L3 = close - 1.125*(high-low), L4 = close - 1.5*(high-low)
-    # We'll use H3/L3 as entry filters and H4/L4 as stop levels
-    range_1d = high_1d - low_1d
-    h3_1d = close_1d + 1.125 * range_1d
-    l3_1d = close_1d - 1.125 * range_1d
-    h4_1d = close_1d + 1.5 * range_1d
-    l4_1d = close_1d - 1.5 * range_1d
+    # Calculate ADX(14) for regime filter
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
     
-    # Align 1d Camarilla levels to 4h timeframe
-    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
-    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
-    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    # Directional Movement
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Calculate Donchian(20) channels on 4h
-    lookback = 20
-    donchian_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    donchian_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # Smoothed TR, DM+, DM- using Wilder's smoothing (alpha = 1/period)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        alpha = 1.0 / period
+        # First value is simple average
+        if len(data) >= period:
+            result[period-1] = np.nanmean(data[:period])
+            for i in range(period, len(data)):
+                result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
+        return result
     
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_threshold = vol_ma * 1.5
+    atr = wilders_smoothing(tr, 14)
+    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
+    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilders_smoothing(dx, 14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -61,30 +72,26 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
-            np.isnan(vol_threshold[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(adx[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        vol_ok = volume[i] > vol_threshold[i]
+        # Regime filter: ADX > 25 for trending market
+        strong_trend = adx[i] > 25
+        weak_trend = adx[i] < 20
         
-        # Breakout conditions
-        long_breakout = close[i] > donchian_high[i]
-        short_breakout = close[i] < donchian_low[i]
-        
-        # Camarilla filters
-        long_filter = close[i] > h3_1d_aligned[i]
-        short_filter = close[i] < l3_1d_aligned[i]
+        # Power signals
+        bull_strong = bull_power[i] > 0
+        bear_strong = bear_power[i] > 0
         
         # Entry conditions
-        long_entry = long_breakout and long_filter and vol_ok and position != 1
-        short_entry = short_breakout and short_filter and vol_ok and position != -1
+        long_entry = bull_strong and strong_trend and position != 1
+        short_entry = bear_strong and strong_trend and position != -1
         
-        # Exit conditions: price crosses Donchian midpoint OR volume drops below average
-        exit_long = close[i] < donchian_mid[i] or volume[i] < vol_ma[i]
-        exit_short = close[i] > donchian_mid[i] or volume[i] < vol_ma[i]
+        # Exit conditions: weak trend OR power signals weaken
+        exit_long = weak_trend or not bull_strong
+        exit_short = weak_trend or not bear_strong
         
         # Execute signals
         if long_entry:
@@ -110,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_camarilla_volume_v1"
-timeframe = "4h"
+name = "6h_elder_ray_adx_regime_v1"
+timeframe = "6h"
 leverage = 1.0
