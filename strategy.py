@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d volume confirmation and ATR stop.
-# Uses Donchian channels (20-period high/low) for breakout signals.
-# Daily volume filter ensures breakouts have conviction.
-# ATR-based stop loss limits downside risk.
-# Target: 100-200 total trades over 4 years (25-50/year) for balanced frequency.
+# Hypothesis: 6h Bollinger Band Squeeze with 1d Trend Filter and Volume Confirmation
+# Bollinger Bands squeeze (low volatility) indicates impending breakout.
+# Daily trend filter ensures we only take breakouts in direction of higher timeframe trend.
+# Volume confirmation validates breakout strength.
+# Target: 50-150 total trades over 4 years (12-37/year) to stay within profitable range.
+# Works in both bull and bear markets by filtering for trend direction.
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,26 +25,34 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 6h Bollinger Bands (20, 2.0)
+    close_series = pd.Series(close)
+    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_series.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2.0 * bb_std
+    bb_lower = bb_middle - 2.0 * bb_std
+    bb_width = bb_upper - bb_lower
     
-    # Calculate daily volume and its 20-period average
+    # Bollinger Band Squeeze: width below 20-period average width
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    squeeze_condition = bb_width < bb_width_ma
+    
+    # Daily trend: EMA(50) vs EMA(200)
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    daily_uptrend = ema_50_1d > ema_200_1d
+    daily_downtrend = ema_50_1d < ema_200_1d
+    
+    # Daily volume confirmation
     volume_1d = df_1d['volume'].values
     volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate ATR for stop loss
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Align data to 4h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low}), donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low}), donchian_low)
+    # Align all data to 6h timeframe
+    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze_condition.astype(float))
+    daily_uptrend_aligned = align_htf_to_ltf(prices, df_1d, daily_uptrend.astype(float))
+    daily_downtrend_aligned = align_htf_to_ltf(prices, df_1d, daily_downtrend.astype(float))
     volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
-    atr_aligned = align_htf_to_ltf(prices, pd.DataFrame({'tr': tr}), atr)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -51,36 +60,40 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(volume_ma_20_1d_aligned[i]) or np.isnan(atr_aligned[i])):
+        if (np.isnan(squeeze_aligned[i]) or np.isnan(daily_uptrend_aligned[i]) or
+            np.isnan(daily_downtrend_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current 4h volume > 1.5x daily volume MA (adjusted for 4h)
-        # 6 4h periods per day, so daily MA/6 = approximate 4h period MA
-        volume_4h_approx_ma = volume_ma_20_1d_aligned[i] / 6
-        volume_condition = volume[i] > (volume_4h_approx_ma * 1.5)
+        # Volume condition: current 6h volume > 1.5x daily volume MA (adjusted for 6h)
+        # 4 6h periods per day, so daily MA/4 = approximate 6h period MA
+        volume_6h_approx_ma = volume_ma_20_1d_aligned[i] / 4
+        volume_condition = volume[i] > (volume_6h_approx_ma * 1.5)
         
-        # Entry conditions: Donchian breakout with volume confirmation
+        # Bollinger Band breakout conditions
+        breakout_up = close[i] > bb_upper[i]
+        breakout_down = close[i] < bb_lower[i]
+        
+        # Entry conditions: Bollinger Band breakout with squeeze, trend alignment, and volume
         if position == 0:
-            if close[i] > donchian_high_aligned[i] and volume_condition:
+            if squeeze_aligned[i] > 0.5 and breakout_up and daily_uptrend_aligned[i] > 0.5 and volume_condition:
                 position = 1
                 signals[i] = position_size
-            elif close[i] < donchian_low_aligned[i] and volume_condition:
+            elif squeeze_aligned[i] > 0.5 and breakout_down and daily_downtrend_aligned[i] > 0.5 and volume_condition:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit when price breaks below Donchian low or ATR stop hit
-            if close[i] < donchian_low_aligned[i] or close[i] <= (signals[i-1] * position_size * close[i-1] + 2 * atr_aligned[i]):
+            # Exit when price returns to middle band or trend changes
+            if close[i] < bb_middle[i] or daily_downtrend_aligned[i] > 0.5:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit when price breaks above Donchian high or ATR stop hit
-            if close[i] > donchian_high_aligned[i] or close[i] >= (signals[i-1] * position_size * close[i-1] - 2 * atr_aligned[i]):
+            # Exit when price returns to middle band or trend changes
+            if close[i] > bb_middle[i] or daily_uptrend_aligned[i] > 0.5:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -88,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Donchian_Breakout_Volume_ATR_Stop"
-timeframe = "4h"
+name = "6h_1d_Bollinger_Squeeze_Trend_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
