@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
+"""
+Hypothesis: 1d 55-day Donchian breakout with weekly trend filter and volume confirmation.
+Long when price breaks above upper Donchian band in bullish weekly trend with above-average volume.
+Short when price breaks below lower Donchian band in bearish weekly trend with above-average volume.
+Exit when price returns to the midpoint of the Donchian channel.
+Designed for low-frequency, high-conviction trades to minimize fee drag and capture major trends.
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,103 +21,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volatility and regime filtering
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 55:
         return np.zeros(n)
     
-    # Calculate 1d True Range for volatility regime
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly EMA(55) for trend
+    weekly_close = df_weekly['close'].values
+    weekly_ema = pd.Series(weekly_close).ewm(span=55, adjust=False, min_periods=55).mean().values
+    weekly_ema_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema)
     
-    # True Range calculation
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], 
-                           np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Get daily data for Donchian channels and volume
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 55:
+        return np.zeros(n)
     
-    # 10-period ATR of daily volatility
-    atr_10 = pd.Series(tr_1d).rolling(window=10, min_periods=10).mean().values
-    # 30-period ATR for longer-term volatility comparison
-    atr_30 = pd.Series(tr_1d).rolling(window=30, min_periods=30).mean().values
+    daily_high = df_daily['high'].values
+    daily_low = df_daily['low'].values
+    daily_volume = df_daily['volume'].values
+    daily_close = df_daily['close'].values
     
-    # Volatility regime: ATR10/ATR30 > 1.2 = high vol (trend following), < 0.8 = low vol (mean reversion)
-    vol_ratio = np.where(atr_30 > 0, atr_10 / atr_30, 1.0)
-    high_vol_regime = vol_ratio > 1.2
-    low_vol_regime = vol_ratio < 0.8
+    # 55-day Donchian channels
+    upper_channel = pd.Series(daily_high).rolling(window=55, min_periods=55).max().values
+    lower_channel = pd.Series(daily_low).rolling(window=55, min_periods=55).min().values
+    channel_mid = (upper_channel + lower_channel) / 2
     
-    # Calculate 4-period RSI for mean reversion signals
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/4, adjust=False, min_periods=4).mean()
-    avg_loss = loss.ewm(alpha=1/4, adjust=False, min_periods=4).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Volume confirmation: current volume > 20-day average volume
+    vol_ma_20 = pd.Series(daily_volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = daily_volume > vol_ma_20
     
-    # Calculate 4h Bollinger Bands (20, 2.0) for mean reversion
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2.0 * std_20
-    lower_bb = sma_20 - 2.0 * std_20
+    # Align daily indicators to 1-minute timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_daily, upper_channel)
+    lower_aligned = align_htf_to_ltf(prices, df_daily, lower_channel)
+    mid_aligned = align_htf_to_ltf(prices, df_daily, channel_mid)
+    vol_filter_aligned = align_htf_to_ltf(prices, df_daily, volume_filter.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% of capital
     
-    for i in range(20, n):
+    for i in range(55, n):
         # Skip if data not ready
-        if (np.isnan(atr_10[i-10] if i >= 10 else np.nan) or 
-            np.isnan(atr_30[i-30] if i >= 30 else np.nan) or 
-            np.isnan(rsi_values[i]) or 
-            np.isnan(sma_20[i]) or 
-            np.isnan(std_20[i])):
+        if (np.isnan(weekly_ema_aligned[i]) or 
+            np.isnan(upper_aligned[i]) or 
+            np.isnan(lower_aligned[i]) or 
+            np.isnan(mid_aligned[i]) or 
+            np.isnan(vol_filter_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Align volatility regime to current 4h bar
-        # For high vol regime: use previous day's value (already completed)
-        high_vol = high_vol_regime[i-1] if i >= 1 else False
-        low_vol = low_vol_regime[i-1] if i >= 1 else False
+        # Trend filter: price above/below weekly EMA
+        bullish_trend = close[i] > weekly_ema_aligned[i]
+        bearish_trend = close[i] < weekly_ema_aligned[i]
         
-        # Mean reversion in low volatility regime: RSI extremes at Bollinger Bands
-        if low_vol:
-            # RSI oversold at lower Bollinger Band -> long
-            rsi_oversold = rsi_values[i] < 30
-            price_at_lower_bb = close[i] <= lower_bb[i]
-            long_entry = rsi_oversold and price_at_lower_bb
-            
-            # RSI overbought at upper Bollinger Band -> short
-            rsi_overbought = rsi_values[i] > 70
-            price_at_upper_bb = close[i] >= upper_bb[i]
-            short_entry = rsi_overbought and price_at_upper_bb
-        else:
-            long_entry = False
-            short_entry = False
+        # Entry conditions
+        long_entry = (close[i] > upper_aligned[i]) and bullish_trend and vol_filter_aligned[i]
+        short_entry = (close[i] < lower_aligned[i]) and bearish_trend and vol_filter_aligned[i]
         
-        # Trend following in high volatility regime: breakouts with momentum
-        if high_vol:
-            # Breakout above upper Bollinger Band with RSI strength -> long
-            breakout_upper = close[i] > upper_bb[i]
-            rsi_strong = rsi_values[i] > 50
-            long_entry = breakout_upper and rsi_strong
-            
-            # Breakdown below lower Bollinger Band with RSI weakness -> short
-            breakdown_lower = close[i] < lower_bb[i]
-            rsi_weak = rsi_values[i] < 50
-            short_entry = breakdown_lower and rsi_weak
-        else:
-            # In medium volatility, no clear edge - stay flat
-            long_entry = False
-            short_entry = False
-        
-        # Exit conditions: RSI returns to neutral zone (40-60)
-        rsi_exit = 40 <= rsi_values[i] <= 60
-        exit_long = position == 1 and rsi_exit
-        exit_short = position == -1 and rsi_exit
+        # Exit conditions: return to channel midpoint
+        exit_long = position == 1 and close[i] < mid_aligned[i]
+        exit_short = position == -1 and close[i] > mid_aligned[i]
         
         # Execute signals
         if long_entry and position != 1:
@@ -132,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_rsi_bb_volatility_regime"
-timeframe = "4h"
+name = "1d_55d_donchian_weekly_trend_volume"
+timeframe = "1d"
 leverage = 1.0
