@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,18 +13,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for calculations
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1d data for calculations
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    vol_4h = df_4h['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    vol_1d = df_1d['volume'].values
     
-    # Calculate RSI(14) on 4h
-    delta = np.diff(close_4h, prepend=close_4h[0])
+    # Calculate 10-period EMA on 1d (trend filter)
+    close_1d_series = pd.Series(close_1d)
+    ema_10_1d = close_1d_series.ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    # Calculate 14-period RSI on 1d
+    delta = np.diff(close_1d, prepend=close_1d[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
@@ -32,67 +36,61 @@ def generate_signals(prices):
     rs = avg_gain / (avg_loss + 1e-10)
     rsi_14 = 100 - (100 / (1 + rs))
     
-    # Calculate Bollinger Bands (20, 2) on 4h
-    close_4h_series = pd.Series(close_4h)
-    sma_20 = close_4h_series.rolling(window=20, min_periods=20).mean().values
-    std_20 = close_4h_series.rolling(window=20, min_periods=20).std().values
+    # Calculate Bollinger Bands (20, 2) on 1d
+    sma_20 = close_1d_series.rolling(window=20, min_periods=20).mean().values
+    std_20 = close_1d_series.rolling(window=20, min_periods=20).std().values
     bb_upper = sma_20 + 2 * std_20
     bb_lower = sma_20 - 2 * std_20
     
-    # Get 1d data for trend confirmation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w data for trend confirmation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    # Calculate 50-period EMA on 1d
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    close_1w = df_1w['close'].values
+    # Calculate 20-period SMA on 1w
+    sma_20_1w = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
     
-    # Align indicators to hourly timeframe
-    rsi_14_aligned = align_htf_to_ltf(prices, df_4h, rsi_14)
-    bb_upper_aligned = align_htf_to_ltf(prices, df_4h, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_4h, bb_lower)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Calculate 1h Bollinger Bands for entry timing
-    close_series = pd.Series(close)
-    sma_20_1h = close_series.rolling(window=20, min_periods=20).mean().values
-    std_20_1h = close_series.rolling(window=20, min_periods=20).std().values
-    bb_upper_1h = sma_20_1h + 2 * std_20_1h
-    bb_lower_1h = sma_20_1h - 2 * std_20_1h
+    # Align indicators to 6h timeframe
+    ema_10_aligned = align_htf_to_ltf(prices, df_1d, ema_10_1d)
+    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
+    sma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_20_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.20
+    position_size = 0.25
     
-    for i in range(200, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(rsi_14_aligned[i]) or 
+        if (np.isnan(ema_10_aligned[i]) or 
+            np.isnan(rsi_14_aligned[i]) or
             np.isnan(bb_upper_aligned[i]) or
             np.isnan(bb_lower_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i])):
+            np.isnan(sma_20_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # 4h trend filter: price above/below EMA50 on 1d
-        above_ema = close[i] > ema_50_1d_aligned[i]
-        below_ema = close[i] < ema_50_1d_aligned[i]
+        # Trend filter: price above/below EMA10
+        above_ema = close[i] > ema_10_aligned[i]
+        below_ema = close[i] < ema_10_aligned[i]
         
-        # 4h RSI conditions: not overbought/oversold
+        # RSI conditions: not overbought/oversold
         rsi_not_overbought = rsi_14_aligned[i] < 70
         rsi_not_oversold = rsi_14_aligned[i] > 30
         
-        # 4h Bollinger Band conditions: price near bands
+        # Bollinger Band conditions: price near bands
         near_upper_band = close[i] > bb_upper_aligned[i] * 0.98
         near_lower_band = close[i] < bb_lower_aligned[i] * 1.02
         
-        # 1h Bollinger Band conditions: price near bands for entry timing
-        near_upper_1h = close[i] > bb_upper_1h[i] * 0.98
-        near_lower_1h = close[i] < bb_lower_1h[i] * 1.02
+        # Weekly trend filter: price above/below weekly SMA20
+        above_weekly_sma = close[i] > sma_20_1w_aligned[i]
+        below_weekly_sma = close[i] < sma_20_1w_aligned[i]
         
         # Entry conditions
-        long_entry = above_ema and rsi_not_overbought and near_lower_band and near_lower_1h
-        short_entry = below_ema and rsi_not_oversold and near_upper_band and near_upper_1h
+        long_entry = above_ema and rsi_not_overbought and near_lower_band and above_weekly_sma
+        short_entry = below_ema and rsi_not_oversold and near_upper_band and below_weekly_sma
         
         # Exit conditions: opposite signal or RSI extreme
         exit_long = position == 1 and (below_ema or rsi_14_aligned[i] > 75)
@@ -119,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4h_1d_rsi_bb_ema_filter"
-timeframe = "1h"
+name = "6h_1d_ema_rsi_bb_weekly_filter"
+timeframe = "6h"
 leverage = 1.0
