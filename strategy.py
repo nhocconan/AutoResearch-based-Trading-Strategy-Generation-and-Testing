@@ -3,16 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe with 1d/1w Donchian breakout and volume confirmation.
-# Long: Price breaks above 1d Donchian upper (20) with volume > 1.5x 20-period average.
-# Short: Price breaks below 1d Donchian lower (20) with volume > 1.5x 20-period average.
-# Trend filter: Price > 1w 200-period EMA (bullish bias) for longs, Price < 1w 200-period EMA (bearish bias) for shorts.
-# This captures breakouts with institutional volume while respecting higher timeframe trend.
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:  # need enough for 20 lookback + EMA warmup
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,89 +13,61 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for Donchian channels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # 4h Donchian bands (20-period) using previous bar's high/low
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
+    lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
+    
+    # 4h average volume (20-period) previous bar
+    vol_series = pd.Series(volume)
+    avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
+    
+    # 12h EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # 20-period Donchian channels on daily
-    donch_high_1d = np.full(len(high_1d), np.nan)
-    donch_low_1d = np.full(len(low_1d), np.nan)
-    for i in range(20, len(high_1d)):
-        donch_high_1d[i] = np.max(high_1d[i-20:i])
-        donch_low_1d[i] = np.min(low_1d[i-20:i])
-    
-    # 1w data for trend filter (200-period EMA)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    # Calculate 200-period EMA on weekly
-    ema_200_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 200:
-        alpha = 2.0 / (200 + 1)
-        ema_200_1w[199] = np.mean(close_1w[:200])
-        for i in range(200, len(close_1w)):
-            ema_200_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_200_1w[i-1]
-    
-    # Average volume (20-period) for volume confirmation
-    avg_volume = np.full(n, np.nan)
-    for i in range(20, n):
-        avg_volume[i] = np.mean(volume[i-20:i])
-    
-    # Align 1d Donchian levels to 12h
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
-    
-    # Align 1w EMA200 to 12h
-    ema_200_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     signals = np.zeros(n)
-    position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.25  # 25% position size
+    position = 0  # -1 short, 0 flat, 1 long
+    position_size = 0.25
     
-    for i in range(20, n):
+    # Start loop after warmup period (max of 20, 50)
+    start = max(20, 50)  # actually we shifted, so need extra?
+    for i in range(start, n):
         # Skip if any required data is not ready
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
-            np.isnan(ema_200_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(avg_vol[i]) or np.isnan(ema_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        avg_vol = avg_volume[i]
-        upper = donch_high_aligned[i]
-        lower = donch_low_aligned[i]
-        ema200 = ema_200_aligned[i]
-        
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirm = vol > 1.5 * avg_vol
         
         if position == 0:
-            # Long: price breaks above upper band + volume confirmation + bullish trend (price > weekly EMA200)
-            if (price > upper and volume_confirm and price > ema200):
+            # Long: breakout above upper band + volume confirmation + price above 12h EMA
+            if (price > upper[i] and vol > 1.5 * avg_vol[i] and price > ema_12h_aligned[i]):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below lower band + volume confirmation + bearish trend (price < weekly EMA200)
-            elif (price < lower and volume_confirm and price < ema200):
+            # Short: breakout below lower band + volume confirmation + price below 12h EMA
+            elif (price < lower[i] and vol > 1.5 * avg_vol[i] and price < ema_12h_aligned[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below lower band (opposite band)
-            if price < lower:
+            # Exit long: price closes below lower band OR below 12h EMA
+            if price < lower[i] or price < ema_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes above upper band (opposite band)
-            if price > upper:
+            # Exit short: price closes above upper band OR above 12h EMA
+            if price > upper[i] or price > ema_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -110,6 +75,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_1w_Donchian_Breakout_Volume_Trend"
-timeframe = "12h"
+name = "4h_12h_Donchian_Volume_EMATrend"
+timeframe = "4h"
 leverage = 1.0
