@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot bounce with 1d volume confirmation and trend filter.
-# Camarilla levels provide precise support/resistance for mean reversion.
-# Volume confirms institutional interest at pivot levels.
-# 1d trend filter ensures we trade with higher timeframe momentum.
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+# Hypothesis: 4h Camarilla pivot reversal with volume confirmation and ADX trend filter.
+# Camarilla levels provide high-probability reversal zones in both trending and ranging markets.
+# Volume confirmation ensures reversals have institutional participation.
+# ADX filter avoids counter-trend trades in strong trends, favoring mean reversion in ranges.
+# Target: 80-150 total trades over 4 years (20-38/year) for 4h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,130 +19,141 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for multi-timeframe analysis
+    # Daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 12h Camarilla pivot levels (based on previous day)
-    camarilla_h4 = np.full(n, np.nan)  # Resistance 1
-    camarilla_l4 = np.full(n, np.nan)  # Support 1
-    camarilla_h3 = np.full(n, np.nan)  # Resistance 2
-    camarilla_l3 = np.full(n, np.nan)  # Support 2
-    
-    # Calculate pivots using previous day's OHLC
+    # Calculate ADX (14-period) for trend strength filter on 4h data
+    adx_period = 14
+    tr = np.zeros(n)
     for i in range(1, n):
-        # Get previous day's OHLC (assuming 12h bars, 2 per day)
-        prev_idx = i - 2
-        if prev_idx >= 0:
-            # We need daily OHLC, so we'll use the 1d data
-            pass
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    # Calculate Camarilla levels from 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    for i in range(1, n):
+        up_move = high[i] - high[i-1]
+        down_move = low[i-1] - low[i]
+        plus_dm[i] = up_move if up_move > down_move and up_move > 0 else 0
+        minus_dm[i] = down_move if down_move > up_move and down_move > 0 else 0
     
-    camarilla_h4_1d = np.full(len(close_1d), np.nan)
-    camarilla_l4_1d = np.full(len(close_1d), np.nan)
-    camarilla_h3_1d = np.full(len(close_1d), np.nan)
-    camarilla_l3_1d = np.full(len(close_1d), np.nan)
-    camarilla_h2_1d = np.full(len(close_1d), np.nan)
-    camarilla_l2_1d = np.full(len(close_1d), np.nan)
-    camarilla_h1_1d = np.full(len(close_1d), np.nan)
-    camarilla_l1_1d = np.full(len(close_1d), np.nan)
-    pivot_1d = np.full(len(close_1d), np.nan)
+    # Smoothed values
+    atr = np.zeros(n)
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
+    dx = np.zeros(n)
     
-    for i in range(1, len(close_1d)):
-        high_val = high_1d[i-1]  # previous day high
-        low_val = low_1d[i-1]    # previous day low
-        close_val = close_1d[i-1] # previous day close
-        
-        pivot = (high_val + low_val + close_val) / 3.0
-        range_val = high_val - low_val
-        
-        camarilla_h1_1d[i] = close_val + range_val * 1.1 / 12
-        camarilla_l1_1d[i] = close_val - range_val * 1.1 / 12
-        camarilla_h2_1d[i] = close_val + range_val * 1.1 / 6
-        camarilla_l2_1d[i] = close_val - range_val * 1.1 / 6
-        camarilla_h3_1d[i] = close_val + range_val * 1.1 / 4
-        camarilla_l3_1d[i] = close_val - range_val * 1.1 / 4
-        camarilla_h4_1d[i] = close_val + range_val * 1.1 / 2
-        camarilla_l4_1d[i] = close_val - range_val * 1.1 / 2
-        pivot_1d[i] = pivot
+    # Initial values
+    if adx_period < n:
+        atr[adx_period] = np.mean(tr[1:adx_period+1])
+        plus_di[adx_period] = 100 * np.mean(plus_dm[1:adx_period+1]) / atr[adx_period]
+        minus_di[adx_period] = 100 * np.mean(minus_dm[1:adx_period+1]) / atr[adx_period]
+        dx[adx_period] = 100 * abs(plus_di[adx_period] - minus_di[adx_period]) / (plus_di[adx_period] + minus_di[adx_period]) if (plus_di[adx_period] + minus_di[adx_period]) > 0 else 0
     
-    # Align Camarilla levels to 12h timeframe
-    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4_1d)
-    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4_1d)
-    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3_1d)
-    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3_1d)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    # Wilder smoothing
+    for i in range(adx_period+1, n):
+        atr[i] = (atr[i-1] * (adx_period-1) + tr[i]) / adx_period
+        plus_di[i] = 100 * ((plus_di[i-1] * (adx_period-1) + plus_dm[i]) / adx_period) / atr[i] if atr[i] > 0 else 0
+        minus_di[i] = 100 * ((minus_di[i-1] * (adx_period-1) + minus_dm[i]) / adx_period) / atr[i] if atr[i] > 0 else 0
+        dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i]) if (plus_di[i] + minus_di[i]) > 0 else 0
     
-    # Calculate 1d average volume for confirmation
-    vol_1d = df_1d['volume'].values
-    avg_vol_1d = np.zeros(len(vol_1d))
-    for i in range(20, len(vol_1d)):
-        avg_vol_1d[i] = np.mean(vol_1d[i-20:i])
-    avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d)
-    
-    # Calculate 1d EMA for trend filter
-    ema_1d = np.zeros(len(close_1d))
-    for i in range(50, len(close_1d)):
-        if i == 50:
-            ema_1d[i] = np.mean(close_1d[:i])
+    adx = np.zeros(n)
+    for i in range(2*adx_period, n):
+        if i == 2*adx_period:
+            adx[i] = np.mean(dx[adx_period:i+1])
         else:
-            ema_1d[i] = close_1d[i] * 0.04 + ema_1d[i-1] * 0.96
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+            adx[i] = (adx[i-1] * (adx_period-1) + dx[i]) / adx_period
+    
+    # Calculate average volume (20-period) for volume confirmation
+    avg_volume = np.zeros(n)
+    for i in range(20, n):
+        avg_volume[i] = np.mean(volume[i-20:i])
+    
+    # Calculate Camarilla levels from previous day's OHLC
+    camarilla_H5 = np.full(n, np.nan)
+    camarilla_H4 = np.full(n, np.nan)
+    camarilla_H3 = np.full(n, np.nan)
+    camarilla_L3 = np.full(n, np.nan)
+    camarilla_L4 = np.full(n, np.nan)
+    camarilla_L5 = np.full(n, np.nan)
+    
+    for i in range(len(df_1d)):
+        if i < 1:
+            continue
+        # Previous day's OHLC
+        prev_high = df_1d['high'].iloc[i-1]
+        prev_low = df_1d['low'].iloc[i-1]
+        prev_close = df_1d['close'].iloc[i-1]
+        
+        # Camarilla calculations
+        range_val = prev_high - prev_low
+        camarilla_H5[i] = prev_close + 1.1 * range_val * 1.1
+        camarilla_H4[i] = prev_close + 1.1 * range_val * 0.55
+        camarilla_H3[i] = prev_close + 1.1 * range_val * 0.275
+        camarilla_L3[i] = prev_close - 1.1 * range_val * 0.275
+        camarilla_L4[i] = prev_close - 1.1 * range_val * 0.55
+        camarilla_L5[i] = prev_close - 1.1 * range_val * 1.1
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_H5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H5)
+    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
+    camarilla_H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3)
+    camarilla_L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3)
+    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
+    camarilla_L5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if any required data is not ready
-        if (np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]) or 
-            np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
-            np.isnan(pivot_aligned[i]) or np.isnan(avg_vol_1d_aligned[i]) or
-            np.isnan(ema_1d_aligned[i])):
+        if (np.isnan(adx[i]) or np.isnan(avg_volume[i]) or 
+            np.isnan(camarilla_H5_aligned[i]) or np.isnan(camarilla_L5_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        avg_vol = avg_vol_1d_aligned[i]
-        h4 = h4_1d_aligned[i]
-        l4 = l4_1d_aligned[i]
-        h3 = h3_1d_aligned[i]
-        l3 = l3_1d_aligned[i]
-        pivot_val = pivot_aligned[i]
-        ema_val = ema_1d_aligned[i]
+        avg_vol = avg_volume[i]
+        adx_val = adx[i]
         
-        # Volume confirmation: current volume > 1.3x average daily volume
+        # Get today's Camarilla levels (aligned to current 4h bar)
+        H5 = camarilla_H5_aligned[i]
+        H4 = camarilla_H4_aligned[i]
+        H3 = camarilla_H3_aligned[i]
+        L3 = camarilla_L3_aligned[i]
+        L4 = camarilla_L4_aligned[i]
+        L5 = camarilla_L5_aligned[i]
+        
+        # Volume confirmation: current volume > 1.3x average volume
         volume_confirm = vol > 1.3 * avg_vol
         
+        # ADX filter: only trade when ADX < 25 (ranging market) for mean reversion
+        ranging_filter = adx_val < 25
+        
         if position == 0:
-            # Long near support: price touches L3 or L4 with volume, above EMA (uptrend)
-            if volume_confirm and price > ema_val:
-                if abs(price - l3) < (h4 - l4) * 0.02 or abs(price - l4) < (h4 - l4) * 0.02:
-                    position = 1
-                    signals[i] = position_size
-            # Short near resistance: price touches H3 or H4 with volume, below EMA (downtrend)
-            elif volume_confirm and price < ema_val:
-                if abs(price - h3) < (h4 - l4) * 0.02 or abs(price - h4) < (h4 - l4) * 0.02:
-                    position = -1
-                    signals[i] = -position_size
+            # Long: price touches L3 or L4 with volume confirmation in ranging market
+            if (price <= L3 or price <= L4) and volume_confirm and ranging_filter:
+                position = 1
+                signals[i] = position_size
+            # Short: price touches H3 or H4 with volume confirmation in ranging market
+            elif (price >= H3 or price >= H4) and volume_confirm and ranging_filter:
+                position = -1
+                signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price reaches pivot or shows weakness
-            if price >= pivot_val or vol < 0.7 * avg_vol:
+            # Exit long: price reaches H3 or H4, or ADX strengthens (trend emerging)
+            if (price >= H3 or price >= H4) or adx_val > 30:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price reaches pivot or shows weakness
-            if price <= pivot_val or vol < 0.7 * avg_vol:
+            # Exit short: price reaches L3 or L4, or ADX strengthens (trend emerging)
+            if (price <= L3 or price <= L4) or adx_val > 30:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -150,6 +161,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_Pivot_Bounce_Volume_Trend"
-timeframe = "12h"
+name = "4h_1d_Camarilla_Pivot_Reversion_Volume_ADX"
+timeframe = "4h"
 leverage = 1.0
