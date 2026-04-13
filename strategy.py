@@ -1,14 +1,14 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot level touch with daily volume confirmation and ADX trend filter.
-# Uses daily Camarilla pivot levels (support/resistance) from the previous day.
-# Long when price touches S3/S2 with bullish momentum (ADX rising), short when touching R3/R2 with bearish momentum.
-# Volume confirmation ensures institutional participation. ADX filter avoids ranging markets.
-# Timeframe 12h reduces trade frequency to minimize fee drag while capturing meaningful moves.
-# Target: 50-150 total trades over 4 years (12-37/year) to stay within profitable range.
+# Hypothesis: 1d daily KAMA trend with weekly ADX trend filter and volume confirmation.
+# Uses KAMA (Kaufman Adaptive Moving Average) to capture trend direction while adapting to volatility.
+# Weekly ADX > 25 ensures we only trade in strong trends, avoiding choppy markets.
+# Volume confirmation ensures breakouts/instability have conviction.
+# Target: 30-100 total trades over 4 years (7-25/year) to stay within profitable range.
+# Works in both bull and bear markets by only trading when trend is strong (ADX filter).
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,71 +20,76 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for multi-timeframe analysis
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Weekly data for multi-timeframe analysis
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels (based on previous day)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate KAMA on weekly close
+    close_1w = df_1w['close'].values
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close_1w, n=10))
+    volatility = np.sum(np.abs(np.diff(close_1w)), axis=1)
+    # Avoid division by zero
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # Initialize KAMA
+    kama = np.full_like(close_1w, np.nan, dtype=float)
+    kama[9] = close_1w[9]  # Start after first 10 periods
+    for i in range(10, len(close_1w)):
+        if np.isnan(sc[i]):
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close_1w[i] - kama[i-1])
     
-    # Previous day's values for pivot calculation (shift by 1 to avoid look-ahead)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    # First day will have invalid values (from roll), but will be filtered by min_periods later
+    # Calculate ADX on weekly
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_val = prev_high - prev_low
-    
-    # Camarilla levels
-    s3 = prev_close - (range_val * 1.1000 / 6)
-    s2 = prev_close - (range_val * 1.1000 / 4)
-    s1 = prev_close - (range_val * 1.1000 / 6)
-    r1 = prev_close + (range_val * 1.1000 / 6)
-    r2 = prev_close + (range_val * 1.1000 / 4)
-    r3 = prev_close + (range_val * 1.1000 / 6)
-    
-    # Calculate daily ADX for trend strength
     # True Range
-    tr1 = prev_high - prev_low
-    tr2 = np.abs(prev_high - np.roll(prev_close, 1))
-    tr3 = np.abs(prev_low - np.roll(prev_close, 1))
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
     
     # Directional Movement
-    plus_dm = np.where((prev_high - np.roll(prev_high, 1)) > (np.roll(prev_low, 1) - prev_low), 
-                       np.maximum(prev_high - np.roll(prev_high, 1), 0), 0)
-    minus_dm = np.where((np.roll(prev_low, 1) - prev_low) > (prev_high - np.roll(prev_high, 1)), 
-                        np.maximum(np.roll(prev_low, 1) - prev_low, 0), 0)
+    up_move = high_1w[1:] - high_1w[:-1]
+    down_move = low_1w[:-1] - low_1w[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
     
-    # Smooth TR, +DM, -DM
-    tr_period = 14
-    atr = pd.Series(tr).rolling(window=tr_period, min_periods=tr_period).mean().values
-    plus_dm_smoothed = pd.Series(plus_dm).rolling(window=tr_period, min_periods=tr_period).mean().values
-    minus_dm_smoothed = pd.Series(minus_dm).rolling(window=tr_period, min_periods=tr_period).mean().values
+    # Smoothed values
+    def wilders_smooth(data, period):
+        result = np.full_like(data, np.nan, dtype=float)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nansum(data[:period]) / period
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
     
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smoothed / atr
-    minus_di = 100 * minus_dm_smoothed / atr
+    atr = wilders_smooth(tr, 14)
+    plus_di = 100 * wilders_smooth(plus_dm, 14) / atr
+    minus_di = 100 * wilders_smooth(minus_dm, 14) / atr
+    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
+    adx = wilders_smooth(dx, 14)
     
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=tr_period, min_periods=tr_period).mean().values
+    # Calculate weekly volume and its 20-period average
+    volume_1w = df_1w['volume'].values
+    volume_ma_20_1w = np.full_like(volume_1w, np.nan, dtype=float)
+    for i in range(19, len(volume_1w)):
+        volume_ma_20_1w[i] = np.mean(volume_1w[i-19:i+1])
     
-    # Calculate daily volume and its 20-period average
-    volume_1d = df_1d['volume'].values
-    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all data to 12-hour timeframe
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
+    # Align all data to daily timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1w, kama)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    volume_ma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_ma_20_1w)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -92,48 +97,41 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is not ready
-        if (np.isnan(s3_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(volume_ma_20_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current 12h volume > 1.5x daily volume MA (adjusted for 12h)
-        volume_12h_approx_ma = volume_ma_20_1d_aligned[i] / 2
-        volume_condition = volume[i] > (volume_12h_approx_ma * 1.5)
+        # Volume condition: current daily volume > 1.5x weekly volume MA (adjusted for daily)
+        # Approximate: 5 trading days per week, so weekly MA/5 = approximate daily period MA
+        volume_daily_approx_ma = volume_ma_20_1w_aligned[i] / 5
+        volume_condition = volume[i] > (volume_daily_approx_ma * 1.5)
         
-        # ADX condition: trending market (ADX > 25)
-        adx_condition = adx_aligned[i] > 25
+        # ADX condition: strong trend
+        strong_trend = adx_aligned[i] > 25
         
-        # Price proximity to Camarilla levels (within 0.1% of level)
-        proximity_threshold = 0.001  # 0.1%
-        near_s2 = abs(close[i] - s2_aligned[i]) / close[i] < proximity_threshold
-        near_s3 = abs(close[i] - s3_aligned[i]) / close[i] < proximity_threshold
-        near_r2 = abs(close[i] - r2_aligned[i]) / close[i] < proximity_threshold
-        near_r3 = abs(close[i] - r3_aligned[i]) / close[i] < proximity_threshold
-        
-        # Entry conditions
+        # Entry conditions: KAMA trend with volume and ADX filter
+        # Long when price above KAMA with volume and strong trend
+        # Short when price below KAMA with volume and strong trend
         if position == 0:
-            # Long when near S2/S3 with bullish momentum
-            if (near_s2 or near_s3) and volume_condition and adx_condition:
+            if close[i] > kama_aligned[i] and volume_condition and strong_trend:
                 position = 1
                 signals[i] = position_size
-            # Short when near R2/R3 with bearish momentum
-            elif (near_r2 or near_r3) and volume_condition and adx_condition:
+            elif close[i] < kama_aligned[i] and volume_condition and strong_trend:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit when price moves away from support or ADX weakens
-            if close[i] > s2_aligned[i] * 1.02 or adx_aligned[i] < 20:  # 2% above S2 or weak trend
+            # Exit when price crosses below KAMA or trend weakens
+            if close[i] < kama_aligned[i] or adx_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit when price moves away from resistance or ADX weakens
-            if close[i] < r2_aligned[i] * 0.98 or adx_aligned[i] < 20:  # 2% below R2 or weak trend
+            # Exit when price crosses above KAMA or trend weakens
+            if close[i] > kama_aligned[i] or adx_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -141,6 +139,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_Pivot_Touch_Volume_ADX_Filter_v1"
-timeframe = "12h"
+name = "1d_1w_KAMA_ADX_Volume_Filter_v1"
+timeframe = "1d"
 leverage = 1.0
