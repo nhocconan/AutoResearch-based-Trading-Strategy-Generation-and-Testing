@@ -8,14 +8,31 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    # Hypothesis: 6h Camarilla pivot breakout with 1d volume confirmation
+    # Long: price breaks above R4 + 1d volume > 1.5x 20-period average
+    # Short: price breaks below S4 + 1d volume > 1.5x 20-period average
+    # Exit: price returns to daily pivot point (PP)
+    # Uses Camarilla levels from prior 1d for structure, volume for confirmation
+    # Breakouts with volume are reliable in both bull and bear markets
+    # Target: 60-120 total trades over 4 years (15-30/year) to minimize fee drag
+    
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for primary timeframe
+    # Get 6h data for primary timeframe
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 2:
+        return np.zeros(n)
+    
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    
+    # Get 1d data for Camarilla pivots and volume (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -23,92 +40,62 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Get 1w data for HTF trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
+    # Calculate prior 1d Camarilla levels
+    # Based on prior day's range: R4 = C + (H-L)*1.1/2, S4 = C - (H-L)*1.1/2
+    # PP = (H+L+C)/3
+    prior_high_1d = np.concatenate([[np.nan], high_1d[:-1]])  # shift by 1 bar
+    prior_low_1d = np.concatenate([[np.nan], low_1d[:-1]])
+    prior_close_1d = np.concatenate([[np.nan], close_1d[:-1]])
     
-    close_1w = df_1w['close'].values
+    cam_pp = (prior_high_1d + prior_low_1d + prior_close_1d) / 3
+    cam_range = prior_high_1d - prior_low_1d
+    cam_r4 = cam_pp + cam_range * 1.1 / 2
+    cam_s4 = cam_pp - cam_range * 1.1 / 2
     
-    # Calculate 1d Donchian channels (20-period)
-    highest_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Align Camarilla levels to 6h timeframe
+    cam_pp_aligned = align_htf_to_ltf(prices, df_1d, cam_pp)
+    cam_r4_aligned = align_htf_to_ltf(prices, df_1d, cam_r4)
+    cam_s4_aligned = align_htf_to_ltf(prices, df_1d, cam_s4)
     
-    # Calculate 1d ATR (14-period) for volatility filter and stoploss
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate 1d volume SMA (20-period) for volume confirmation
-    vol_sma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate 1w EMA (50-period) for HTF trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align indicators to 1d timeframe
-    highest_high_aligned = align_htf_to_ltf(prices, df_1d, highest_high)
-    lowest_low_aligned = align_htf_to_ltf(prices, df_1d, lowest_low)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
-    vol_sma_aligned = align_htf_to_ltf(prices, df_1d, vol_sma)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d volume average (20-period)
+    vol_avg_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
     
-    for i in range(20, n):  # start from 20 to have enough data for Donchian
+    for i in range(20, n):  # start from 20 to have enough data for volume average
         # Skip if data not ready
-        if (np.isnan(highest_high_aligned[i]) or np.isnan(lowest_low_aligned[i]) or 
-            np.isnan(atr_aligned[i]) or np.isnan(vol_sma_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(cam_r4_aligned[i]) or np.isnan(cam_s4_aligned[i]) or 
+            np.isnan(cam_pp_aligned[i]) or np.isnan(vol_avg_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > highest_high_aligned[i-1]  # break above upper channel
-        breakout_down = close[i] < lowest_low_aligned[i-1]  # break below lower channel
+        # Volume confirmation: current 1d volume > 1.5x 20-period average
+        # Get current 1d volume (aligned)
+        curr_vol_1d = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
+        volume_confirmed = curr_vol_1d > 1.5 * vol_avg_20_aligned[i]
         
-        # Volume confirmation (current volume > 1.5 * average volume)
-        volume_confirm = volume[i] > 1.5 * vol_sma_aligned[i]
+        # Breakout conditions
+        breakout_long = close[i] > cam_r4_aligned[i] and volume_confirmed
+        breakout_short = close[i] < cam_s4_aligned[i] and volume_confirmed
         
-        # HTF trend filter (price > 1w EMA50 for long, price < 1w EMA50 for short)
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
-        
-        # Entry conditions
-        long_entry = breakout_up and volume_confirm and uptrend and position != 1
-        short_entry = breakout_down and volume_confirm and downtrend and position != -1
-        
-        # Exit conditions: ATR-based stoploss
-        exit_long = position == 1 and close[i] <= (signals[i-1] * position_size > 0 and 
-                                                (entry_price := highest_high_aligned[i-1]) and 
-                                                close[i] <= entry_price - 2.5 * atr_aligned[i])
-        exit_short = position == -1 and close[i] >= (signals[i-1] * position_size < 0 and 
-                                                   (entry_price := lowest_low_aligned[i-1]) and 
-                                                   close[i] >= entry_price + 2.5 * atr_aligned[i])
-        
-        # Track entry price for stoploss calculation
-        if long_entry:
-            entry_price = highest_high_aligned[i-1]
-        elif short_entry:
-            entry_price = lowest_low_aligned[i-1]
-        else:
-            entry_price = getattr(locals(), 'entry_price', close[i])
+        # Exit conditions: return to daily pivot point
+        exit_long = position == 1 and close[i] <= cam_pp_aligned[i]
+        exit_short = position == -1 and close[i] >= cam_pp_aligned[i]
         
         # Execute signals
-        if long_entry:
+        if breakout_long and position != 1:
             position = 1
             signals[i] = position_size
-        elif short_entry:
+        elif breakout_short and position != -1:
             position = -1
             signals[i] = -position_size
-        elif position == 1 and close[i] <= entry_price - 2.5 * atr_aligned[i]:
+        elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] >= entry_price + 2.5 * atr_aligned[i]:
+        elif position == -1 and exit_short:
             position = 0
             signals[i] = 0.0
         # Hold current position
@@ -122,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_donchian_breakout_volume_trend_v1"
-timeframe = "1d"
+name = "6h_1d_camarilla_breakout_volume_v1"
+timeframe = "6h"
 leverage = 1.0
