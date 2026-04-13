@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-6h Elder Ray + Volume + 1-day Trend Filter
-Trades Elder Ray bull/bear power crossovers with volume confirmation, only when 1-day ADX > 25.
-Designed for 6h timeframe to target 50-150 total trades over 4 years (12-37/year).
-Works in both bull and bear markets by trading with the trend as measured by daily ADX.
+12h Donchian Breakout with Volume Confirmation and 1-day ADX Trend Filter.
+Trades breakouts from Donchian channels (20-period) confirmed by volume spikes,
+only in trending markets (1-day ADX > 25) to avoid false breakouts in ranging conditions.
+Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year).
+Works in both bull and bear markets by trading breakouts in the direction of the trend.
 """
 
 import numpy as np
@@ -20,31 +21,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 6h data for EMA13 (Elder Ray)
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
+    # Get 12h data for Donchian channels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    close_6h = df_6h['close'].values
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # EMA13 for Elder Ray calculation
-    ema13 = pd.Series(close_6h).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Donchian Channels (20-period)
+    donch_period = 20
+    upper = pd.Series(high_12h).rolling(window=donch_period, min_periods=donch_period).max().values
+    lower = pd.Series(low_12h).rolling(window=donch_period, min_periods=donch_period).min().values
     
-    # Elder Ray components
-    bull_power = high_6h - ema13
-    bear_power = low_6h - ema13
+    # Breakout: close > upper band (long) or close < lower band (short)
+    breakout_up = close_12h > upper
+    breakout_down = close_12h < lower
     
-    # Elder Ray signals: bull power crosses above zero (long), bear power crosses below zero (short)
-    bull_cross_up = (bull_power[1:] > 0) & (bull_power[:-1] <= 0)
-    bear_cross_down = (bear_power[1:] < 0) & (bear_power[:-1] >= 0)
-    bull_cross_up = np.concatenate([[False], bull_cross_up])
-    bear_cross_down = np.concatenate([[False], bear_cross_down])
-    
-    # Align Elder Ray signals to 6h
-    bull_cross_up_aligned = align_htf_to_ltf(prices, df_6h, bull_cross_up.astype(float))
-    bear_cross_down_aligned = align_htf_to_ltf(prices, df_6h, bear_cross_down.astype(float))
+    # Align to 12h timeframe (primary)
+    breakout_up_aligned = align_htf_to_ltf(prices, df_12h, breakout_up.astype(float))
+    breakout_down_aligned = align_htf_to_ltf(prices, df_12h, breakout_down.astype(float))
     
     # Get 1d data for volume and ADX
     df_1d = get_htf_data(prices, '1d')
@@ -66,8 +63,8 @@ def generate_signals(prices):
     tr1 = high_1d[1:] - low_1d[1:]
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr0 = np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])
-    tr = np.concatenate([[tr0], np.maximum(tr1, np.maximum(tr2, tr3))])
+    tr = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], 
+                        np.maximum(tr1, np.maximum(tr2, tr3))])
     
     # Directional Movement
     dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
@@ -87,10 +84,10 @@ def generate_signals(prices):
     di_minus = 100 * dm_minus_14 / tr_14
     
     # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # ADX > 25 = trending market
+    # ADX > 25 = trending market (good for breakouts)
     trending = adx > 25
     trending_aligned = align_htf_to_ltf(prices, df_1d, trending.astype(float))
     
@@ -100,24 +97,26 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(bull_cross_up_aligned[i]) or 
-            np.isnan(bear_cross_down_aligned[i]) or 
+        if (np.isnan(breakout_up_aligned[i]) or 
+            np.isnan(breakout_down_aligned[i]) or 
             np.isnan(vol_spike_aligned[i]) or 
             np.isnan(trending_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: Elder Ray crossover + volume spike + trending market
-        long_entry = (bull_cross_up_aligned[i] > 0.5 and 
+        # Entry conditions: Donchian breakout + volume spike + trending market
+        long_entry = (breakout_up_aligned[i] > 0.5 and 
                       vol_spike_aligned[i] > 0.5 and 
                       trending_aligned[i] > 0.5)
-        short_entry = (bear_cross_down_aligned[i] > 0.5 and 
+        short_entry = (breakout_down_aligned[i] > 0.5 and 
                        vol_spike_aligned[i] > 0.5 and 
                        trending_aligned[i] > 0.5)
         
-        # Exit when opposite Elder Ray signal occurs
-        exit_long = position == 1 and bear_cross_down_aligned[i] > 0.5
-        exit_short = position == -1 and bull_cross_up_aligned[i] > 0.5
+        # Exit when price returns to middle of Donchian channel
+        middle = (upper + lower) / 2
+        middle_aligned = align_htf_to_ltf(prices, df_12h, middle)
+        exit_long = position == 1 and close[i] <= middle_aligned[i]
+        exit_short = position == -1 and close[i] >= middle_aligned[i]
         
         # Execute signals
         if long_entry and position != 1:
@@ -140,6 +139,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_elder_ray_volume_trend"
-timeframe = "6h"
+name = "12h_donchian_breakout_volume_trend"
+timeframe = "12h"
 leverage = 1.0
