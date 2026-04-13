@@ -51,12 +51,16 @@ def generate_signals(prices):
     # Calculate 20-period SMA on 1w
     sma_20_1w = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
     
-    # Align indicators to daily timeframe
+    # Align indicators to 4h timeframe
     ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
     bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
     bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
     sma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_20_1w)
+    
+    # Volume filter: volume above 10-period average
+    vol_ma = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    volume_filter = volume > vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -68,7 +72,8 @@ def generate_signals(prices):
             np.isnan(rsi_14_aligned[i]) or
             np.isnan(bb_upper_aligned[i]) or
             np.isnan(bb_lower_aligned[i]) or
-            np.isnan(sma_20_1w_aligned[i])):
+            np.isnan(sma_20_1w_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -88,9 +93,9 @@ def generate_signals(prices):
         above_weekly_sma = close[i] > sma_20_1w_aligned[i]
         below_weekly_sma = close[i] < sma_20_1w_aligned[i]
         
-        # Entry conditions
-        long_entry = above_ema and rsi_not_overbought and near_lower_band and above_weekly_sma
-        short_entry = below_ema and rsi_not_oversold and near_upper_band and below_weekly_sma
+        # Entry conditions with volume filter
+        long_entry = above_ema and rsi_not_overbought and near_lower_band and above_weekly_sma and volume_filter[i]
+        short_entry = below_ema and rsi_not_oversold and near_upper_band and below_weekly_sma and volume_filter[i]
         
         # Exit conditions: opposite signal or RSI extreme
         exit_long = position == 1 and (below_ema or rsi_14_aligned[i] > 75)
@@ -117,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_ema_rsi_bb_weekly_filter"
-timeframe = "1d"
+name = "4h_1d_1w_ema_rsi_bb_volume_filter"
+timeframe = "4h"
 leverage = 1.0
