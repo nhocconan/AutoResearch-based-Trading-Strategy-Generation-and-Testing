@@ -8,16 +8,17 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Williams %R mean reversion with 1d trend filter
-    # Long when: Williams %R(14) < -80 (oversold) AND price > 1d EMA50 (uptrend)
-    # Short when: Williams %R(14) > -20 (overbought) AND price < 1d EMA50 (downtrend)
-    # Exit when: Williams %R crosses -50 (mean reversion complete) OR adverse 1d EMA50 crossover
+    # Hypothesis: 12h Donchian(20) breakout with 1d trend filter and volume confirmation
+    # Long when: price breaks above Donchian(20) high AND price > 1d EMA50 (uptrend) AND volume > 1.5x 20-period avg volume
+    # Short when: price breaks below Donchian(20) low AND price < 1d EMA50 (downtrend) AND volume > 1.5x 20-period avg volume
+    # Exit when: price crosses Donchian(20) midpoint OR adverse 1d EMA50 crossover
     # Uses discrete sizing (0.25) targeting 50-150 trades over 4 years.
-    # Works in bull/bear via 1d EMA50 trend filter preventing counter-trend trades.
+    # Donchian provides objective structure, volume confirms conviction, 1d EMA50 prevents counter-trend trades.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -29,11 +30,15 @@ def generate_signals(prices):
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate Williams %R(14) on 6h
-    lookback = 14
+    # Calculate Donchian channels (20-period)
+    lookback = 20
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    donchian_mid = (highest_high + lowest_low) / 2.0
+    
+    # Calculate volume filter: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -41,27 +46,29 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(williams_r[i]) or np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Williams %R conditions
-        oversold = williams_r[i] < -80
-        overbought = williams_r[i] > -20
-        mean_reversion_exit = williams_r[i] > -50  # Exit long when crosses above -50
-        mean_reversion_exit_short = williams_r[i] < -50  # Exit short when crosses below -50
+        # Donchian breakout conditions
+        long_breakout = close[i] > highest_high[i]
+        short_breakout = close[i] < lowest_low[i]
         
         # 1d EMA50 trend filter
         uptrend = close[i] > ema50_1d_aligned[i]
         downtrend = close[i] < ema50_1d_aligned[i]
         
+        # Volume confirmation
+        vol_confirm = volume_filter[i]
+        
         # Entry conditions
-        long_entry = oversold and uptrend and position != 1
-        short_entry = overbought and downtrend and position != -1
+        long_entry = long_breakout and uptrend and vol_confirm and position != 1
+        short_entry = short_breakout and downtrend and vol_confirm and position != -1
         
         # Exit conditions
-        exit_long = mean_reversion_exit or (position == 1 and not uptrend)
-        exit_short = mean_reversion_exit_short or (position == -1 and not downtrend)
+        exit_long = (position == 1 and (close[i] < donchian_mid[i] or not uptrend))
+        exit_short = (position == -1 and (close[i] > donchian_mid[i] or not downtrend))
         
         # Execute signals
         if long_entry:
@@ -87,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_williams_r_mean_reversion_trend_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_breakout_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
