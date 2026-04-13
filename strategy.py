@@ -13,40 +13,23 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d high/low for Camarilla pivot calculation
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    close_series = pd.Series(close)
-    
-    # Calculate 1d Camarilla pivot levels (using previous day's data)
-    # Pivot = (H + L + C) / 3
-    pivot = (high_series + low_series + close_series) / 3
-    range_hl = high_series - low_series
-    
-    # Resistance levels
-    r1 = pivot + (range_hl * 1.1 / 12)
-    r2 = pivot + (range_hl * 1.1 / 6)
-    r3 = pivot + (range_hl * 1.1 / 4)
-    r4 = pivot + (range_hl * 1.1 / 2)
-    
-    # Support levels
-    s1 = pivot - (range_hl * 1.1 / 12)
-    s2 = pivot - (range_hl * 1.1 / 6)
-    s3 = pivot - (range_hl * 1.1 / 4)
-    s4 = pivot - (range_hl * 1.1 / 2)
-    
-    # Use previous day's levels to avoid look-ahead
-    r1_prev = r1.shift(1).values
-    r2_prev = r2.shift(1).values
-    s1_prev = s1.shift(1).values
-    s2_prev = s2.shift(1).values
+    # 1w Donchian channels (20-period) - use previous bar's high/low
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    high_1w_series = pd.Series(high_1w)
+    low_1w_series = pd.Series(low_1w)
+    upper_1w = high_1w_series.rolling(window=20, min_periods=20).max().shift(1).values
+    lower_1w = low_1w_series.rolling(window=20, min_periods=20).min().shift(1).values
+    upper_1w_aligned = align_htf_to_ltf(prices, df_1w, upper_1w)
+    lower_1w_aligned = align_htf_to_ltf(prices, df_1w, lower_1w)
     
     # 1d average volume (20-period) - previous bar
     vol_series = pd.Series(volume)
     avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
     # 1d EMA200 trend filter
-    ema_200_1d = close_series.ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_200_1d = pd.Series(close).ewm(span=200, min_periods=200, adjust=False).mean().values
     
     # 1d ATR (14-period) for stop-loss
     high_low = high - low
@@ -62,7 +45,7 @@ def generate_signals(prices):
     
     start = max(20, 200, 14)
     for i in range(start, n):
-        if (np.isnan(r1_prev[i]) or np.isnan(s1_prev[i]) or 
+        if (np.isnan(upper_1w_aligned[i]) or np.isnan(lower_1w_aligned[i]) or 
             np.isnan(avg_vol[i]) or np.isnan(ema_200_1d[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -71,27 +54,27 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long: price touches S1 support + volume reversal + price above EMA200
-            if (price <= s1_prev[i] and vol > 1.5 * avg_vol[i] and price > ema_200_1d[i]):
+            # Long: breakout above 1w upper band + volume confirmation + price above EMA200
+            if (price > upper_1w_aligned[i] and vol > 2.0 * avg_vol[i] and price > ema_200_1d[i]):
                 position = 1
                 signals[i] = position_size
-            # Short: price touches R1 resistance + volume reversal + price below EMA200
-            elif (price >= r1_prev[i] and vol > 1.5 * avg_vol[i] and price < ema_200_1d[i]):
+            # Short: breakout below 1w lower band + volume confirmation + price below EMA200
+            elif (price < lower_1w_aligned[i] and vol > 2.0 * avg_vol[i] and price < ema_200_1d[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price reaches S2 support OR below EMA200 OR stop-loss hit
-            if (price <= s2_prev[i] or price < ema_200_1d[i] or 
+            # Exit long: price closes below 1w lower band OR below EMA200 OR stop-loss hit
+            if (price < lower_1w_aligned[i] or price < ema_200_1d[i] or 
                 price < entry_price_long - 2.0 * atr[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price reaches R2 resistance OR above EMA200 OR stop-loss hit
-            if (price >= r2_prev[i] or price > ema_200_1d[i] or 
+            # Exit short: price closes above 1w upper band OR above EMA200 OR stop-loss hit
+            if (price > upper_1w_aligned[i] or price > ema_200_1d[i] or 
                 price > entry_price_short + 2.0 * atr[i]):
                 position = 0
                 signals[i] = 0.0
@@ -107,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_Pivot_Volume_EMA200Trend_ATR"
-timeframe = "4h"
+name = "1d_1w_Donchian_Volume_EMA200Trend_ATR"
+timeframe = "1d"
 leverage = 1.0
