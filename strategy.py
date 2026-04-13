@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h timeframe with 1d EMA trend filter and 4h Donchian breakout.
-# Long: Price breaks above Donchian(20) high + EMA50(1d) > EMA200(1d) + volume > 1.5x average volume (20-period).
-# Short: Price breaks below Donchian(20) low + EMA50(1d) < EMA200(1d) + volume > 1.5x average volume.
-# Uses 1d EMA crossover for trend filter, 4h Donchian breakout for entry with volume confirmation.
-# Trend filter ensures we trade in the direction of higher timeframe trend.
-# Volume confirmation adds confirmation of institutional interest.
-# Position size: 0.25 (25% of capital) to manage risk during drawdowns.
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+# Hypothesis: 6h timeframe with weekly pivot levels and volume confirmation.
+# Long: Price crosses above weekly R4 level + volume > 2x average volume (20-period).
+# Short: Price crosses below weekly S4 level + volume > 2x average volume.
+# Uses weekly pivot levels for major support/resistance structure, 6h for execution.
+# Weekly pivots provide strong institutional levels that work in both bull and bear markets.
+# Volume confirmation filters out false breakouts.
+# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,52 +21,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Weekly data for pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate EMA50 and EMA200 on daily timeframe
-    ema50_1d = np.full(len(close_1d), np.nan)
-    ema200_1d = np.full(len(close_1d), np.nan)
-    
-    # EMA50 calculation
-    alpha_50 = 2.0 / (50 + 1)
-    for i in range(len(close_1d)):
-        if i == 0:
-            ema50_1d[i] = close_1d[i]
-        elif np.isnan(ema50_1d[i-1]):
-            ema50_1d[i] = close_1d[i]
-        else:
-            ema50_1d[i] = alpha_50 * close_1d[i] + (1 - alpha_50) * ema50_1d[i-1]
-    
-    # EMA200 calculation
-    alpha_200 = 2.0 / (200 + 1)
-    for i in range(len(close_1d)):
-        if i == 0:
-            ema200_1d[i] = close_1d[i]
-        elif np.isnan(ema200_1d[i-1]):
-            ema200_1d[i] = close_1d[i]
-        else:
-            ema200_1d[i] = alpha_200 * close_1d[i] + (1 - alpha_200) * ema200_1d[i-1]
-    
-    # Donchian channel (20-period) on 4h
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
+    # Calculate weekly pivot levels (using previous week's data)
+    pivot = np.full(len(close_1w), np.nan)
+    r4 = np.full(len(close_1w), np.nan)
+    s4 = np.full(len(close_1w), np.nan)
+    for i in range(1, len(close_1w)):
+        # Previous week's OHLC
+        ph = high_1w[i-1]
+        pl = low_1w[i-1]
+        pc = close_1w[i-1]
+        
+        # Standard pivot point
+        pp = (ph + pl + pc) / 3.0
+        
+        # Weekly R4 and S4 levels
+        r4[i] = pc + 3 * (ph - pl)  # R4 = Close + 3*(High-Low)
+        s4[i] = pc - 3 * (ph - pl)  # S4 = Close - 3*(High-Low)
     
     # Average volume (20-period) for volume confirmation
     avg_volume = np.full(n, np.nan)
     for i in range(20, n):
         avg_volume[i] = np.mean(volume[i-20:i])
     
-    # Align 1d EMA values to 4h
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Align weekly pivot levels to 6h
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -75,8 +62,7 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or 
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
@@ -84,39 +70,33 @@ def generate_signals(prices):
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        d_high = donchian_high[i]
-        d_low = donchian_low[i]
-        ema50 = ema50_1d_aligned[i]
-        ema200 = ema200_1d_aligned[i]
+        r4_level = r4_aligned[i]
+        s4_level = s4_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirm = vol > 1.5 * avg_vol
-        
-        # Trend filter: EMA50 > EMA200 for uptrend, EMA50 < EMA200 for downtrend
-        uptrend = ema50 > ema200
-        downtrend = ema50 < ema200
+        # Volume confirmation: current volume > 2x average volume
+        volume_confirm = vol > 2.0 * avg_vol
         
         if position == 0:
-            # Long: price breaks above Donchian high + uptrend + volume confirmation
-            if (price > d_high and uptrend and volume_confirm):
+            # Long: price crosses above R4 + volume confirmation
+            if (price > r4_level and volume_confirm):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below Donchian low + downtrend + volume confirmation
-            elif (price < d_low and downtrend and volume_confirm):
+            # Short: price crosses below S4 + volume confirmation
+            elif (price < s4_level and volume_confirm):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below Donchian low (opposite boundary)
-            if price < d_low:
+            # Exit long: price closes below S4 (opposite level)
+            if price < s4_level:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above Donchian high (opposite boundary)
-            if price > d_high:
+            # Exit short: price closes above R4 (opposite level)
+            if price > r4_level:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -124,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_EMA_Trend_Donchian_Breakout_Volume"
-timeframe = "4h"
+name = "6h_1w_Pivot_R4S4_Volume"
+timeframe = "6h"
 leverage = 1.0
