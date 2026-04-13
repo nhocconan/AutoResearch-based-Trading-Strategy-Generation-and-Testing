@@ -23,11 +23,20 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     vol_1d = df_1d['volume'].values
     
-    # Calculate 10-period EMA on 1d (trend filter)
-    close_1d_series = pd.Series(close_1d)
-    ema_10_1d = close_1d_series.ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Calculate Donchian(20) channels on 1d
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Calculate RSI(14) on 1d
+    # Calculate 1d ATR(14) for volatility filter
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = np.inf  # First bar has no previous close
+    tr3[0] = np.inf
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate 1d RSI(14) for momentum filter
     delta = np.diff(close_1d, prepend=close_1d[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -36,17 +45,18 @@ def generate_signals(prices):
     rs = avg_gain / (avg_loss + 1e-10)
     rsi_14 = 100 - (100 / (1 + rs))
     
-    # Get 1w data for trend confirmation
+    # Get 1w data for trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 20:
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
-    # Calculate 20-period SMA on 1w
     sma_20_1w = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
     
-    # Align indicators to 12h timeframe
-    ema_10_aligned = align_htf_to_ltf(prices, df_1d, ema_10_1d)
+    # Align indicators to 4h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
     sma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_20_1w)
     
@@ -56,31 +66,36 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema_10_aligned[i]) or 
+        if (np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or
+            np.isnan(atr_1d_aligned[i]) or
             np.isnan(rsi_14_aligned[i]) or
             np.isnan(sma_20_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below EMA10
-        above_ema = close[i] > ema_10_aligned[i]
-        below_ema = close[i] < ema_10_aligned[i]
+        # Price relative to Donchian channels
+        above_donchian_high = close[i] > donchian_high_aligned[i]
+        below_donchian_low = close[i] < donchian_low_aligned[i]
         
-        # RSI conditions: avoid extreme levels
-        rsi_not_overbought = rsi_14_aligned[i] < 80
-        rsi_not_oversold = rsi_14_aligned[i] > 20
+        # Volatility filter: avoid low volatility periods
+        vol_filter = atr_1d_aligned[i] > np.nanpercentile(atr_1d_aligned[:i+1], 30)
         
-        # Weekly trend filter: price above/below weekly SMA20
+        # Momentum filter: RSI not extreme
+        rsi_not_overbought = rsi_14_aligned[i] < 70
+        rsi_not_oversold = rsi_14_aligned[i] > 30
+        
+        # Weekly trend filter
         above_weekly_sma = close[i] > sma_20_1w_aligned[i]
         below_weekly_sma = close[i] < sma_20_1w_aligned[i]
         
         # Entry conditions
-        long_entry = above_ema and rsi_not_overbought and above_weekly_sma
-        short_entry = below_ema and rsi_not_oversold and below_weekly_sma
+        long_entry = above_donchian_high and vol_filter and rsi_not_overbought and above_weekly_sma
+        short_entry = below_donchian_low and vol_filter and rsi_not_oversold and below_weekly_sma
         
-        # Exit conditions: opposite signal or RSI extreme
-        exit_long = position == 1 and (below_ema or rsi_14_aligned[i] > 85)
-        exit_short = position == -1 and (above_ema or rsi_14_aligned[i] < 15)
+        # Exit conditions: opposite signal or volatility expansion
+        exit_long = position == 1 and (below_donchian_low or atr_1d_aligned[i] > 2.0 * atr_1d_aligned[i-1])
+        exit_short = position == -1 and (above_donchian_high or atr_1d_aligned[i] > 2.0 * atr_1d_aligned[i-1])
         
         # Execute signals
         if long_entry and position != 1:
@@ -103,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_ema10_rsi14_weekly_sma20_filter"
-timeframe = "12h"
+name = "4h_1d_donchian_vol_rsi_weekly_filter"
+timeframe = "4h"
 leverage = 1.0
