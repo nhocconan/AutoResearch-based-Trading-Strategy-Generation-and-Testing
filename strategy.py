@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h timeframe with 1d Bollinger Bands and volume confirmation.
-# Long: Price crosses above upper Bollinger Band + volume > 1.5x average volume.
-# Short: Price crosses below lower Bollinger Band + volume > 1.5x average volume.
-# Bollinger Bands from 1d provide volatility-based support/resistance structure.
-# Volume confirmation ensures breakouts are supported by participation.
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
+# Hypothesis: 12h timeframe with 1d ATR-based breakout and volume confirmation.
+# Long: Price closes above (1d high + 0.5 * 14-day ATR) with volume > 1.3x 20-period average.
+# Short: Price closes below (1d low - 0.5 * 14-day ATR) with volume > 1.3x 20-period average.
+# Uses volatility-adjusted breakout levels from daily timeframe to filter noise.
+# Volume confirmation ensures breakouts have institutional participation.
+# Conservative position sizing (0.25) to manage drawdown in volatile markets.
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,32 +21,44 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for Bollinger Bands
+    # 1d data for ATR and price levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 15:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Bollinger Bands (20, 2) using previous day's data
-    upper_bb = np.full(len(close_1d), np.nan)
-    lower_bb = np.full(len(close_1d), np.nan)
-    for i in range(20, len(close_1d)):
-        # Previous 20 days' close
-        window = close_1d[i-20:i]
-        ma = np.mean(window)
-        std = np.std(window)
-        upper_bb[i] = ma + 2 * std
-        lower_bb[i] = ma - 2 * std
+    # Calculate 14-day ATR on daily timeframe
+    tr1 = np.zeros(len(high_1d))
+    tr2 = np.zeros(len(high_1d))
+    tr3 = np.zeros(len(high_1d))
+    tr1[1:] = np.abs(high_1d[1:] - low_1d[1:])
+    tr2[1:] = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3[1:] = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    atr_14 = np.full(len(high_1d), np.nan)
+    for i in range(14, len(tr)):
+        atr_14[i] = np.mean(tr[i-13:i+1])
+    
+    # Calculate breakout levels: ±0.5 * ATR from daily high/low
+    breakout_up = np.full(len(high_1d), np.nan)
+    breakout_down = np.full(len(high_1d), np.nan)
+    for i in range(len(high_1d)):
+        if not np.isnan(atr_14[i]):
+            breakout_up[i] = high_1d[i] + 0.5 * atr_14[i]
+            breakout_down[i] = low_1d[i] - 0.5 * atr_14[i]
     
     # Average volume (20-period) for volume confirmation
     avg_volume = np.full(n, np.nan)
     for i in range(20, n):
         avg_volume[i] = np.mean(volume[i-20:i])
     
-    # Align 1d Bollinger Bands to 6h
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    # Align 1d breakout levels to 12h
+    breakout_up_aligned = align_htf_to_ltf(prices, df_1d, breakout_up)
+    breakout_down_aligned = align_htf_to_ltf(prices, df_1d, breakout_down)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -53,7 +66,7 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is not ready
-        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or 
+        if (np.isnan(breakout_up_aligned[i]) or np.isnan(breakout_down_aligned[i]) or 
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
@@ -61,33 +74,33 @@ def generate_signals(prices):
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        ub = upper_bb_aligned[i]
-        lb = lower_bb_aligned[i]
+        up_level = breakout_up_aligned[i]
+        down_level = breakout_down_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirm = vol > 1.5 * avg_vol
+        # Volume confirmation: current volume > 1.3x average volume
+        volume_confirm = vol > 1.3 * avg_vol
         
         if position == 0:
-            # Long: price crosses above upper BB + volume confirmation
-            if (price > ub and volume_confirm):
+            # Long: price closes above breakout_up + volume confirmation
+            if (price > up_level and volume_confirm):
                 position = 1
                 signals[i] = position_size
-            # Short: price crosses below lower BB + volume confirmation
-            elif (price < lb and volume_confirm):
+            # Short: price closes below breakout_down + volume confirmation
+            elif (price < down_level and volume_confirm):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below lower BB (opposite band)
-            if price < lb:
+            # Exit long: price closes below breakout_down (opposite level)
+            if price < down_level:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes above upper BB (opposite band)
-            if price > ub:
+            # Exit short: price closes above breakout_up (opposite level)
+            if price > up_level:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -95,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Bollinger_Bands_Volume"
-timeframe = "6h"
+name = "12h_1d_ATR_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
