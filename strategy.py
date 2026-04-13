@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_1d_Keltner_Channel_Breakout
-Hypothesis: Trade breakouts from daily Keltner Channel on 4h timeframe with volume confirmation.
-Keltner Channel adapts to volatility, providing dynamic support/resistance. 
-Breakouts above upper channel signal bullish momentum; breakdowns below lower channel signal bearish momentum.
-Volume confirmation filters out low-participation moves. Designed to work in both bull and bear markets
-by capturing momentum bursts during regime shifts.
-Target: 25-35 trades/year to minimize fee drag.
+12h_1w_1d_Camarilla_Pivot_Volume_Strategy
+Hypothesis: Trade Camarilla pivot level touches on 12h timeframe with volume confirmation and 1d trend filter.
+Camarilla levels (H3, L3) act as intraday support/resistance. Price approaching these levels with
+volume expansion indicates institutional interest. 1d EMA200 ensures trades align with long-term trend.
+Works in both bull (buy dips to L3 in uptrend) and bear (sell rallies to H3 in downtrend) markets.
+Target: 15-25 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,53 +22,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Keltner Channel (ATR-based bands)
+    # Get daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Camarilla levels from previous day
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
     
-    # Calculate ATR(10) for daily data
-    tr_1d = np.maximum(high_1d[1:] - low_1d[1:], 
-                       np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), 
-                                  np.abs(low_1d[1:] - close_1d[:-1])))
-    tr_1d = np.concatenate([[np.nan], tr_1d])  # align length
-    atr_10_1d = pd.Series(tr_1d).rolling(window=10, min_periods=10).mean()
+    # Camarilla formulas
+    range_prev = high_prev - low_prev
+    H3 = close_prev + (range_prev * 1.1 / 2)
+    L3 = close_prev - (range_prev * 1.1 / 2)
+    H4 = close_prev + (range_prev * 1.1)
+    L4 = close_prev - (range_prev * 1.1)
     
-    # Calculate EMA(20) of close for daily data
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean()
+    # Align Camarilla levels to 12h
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
     
-    # Calculate Keltner Channel: upper = EMA + 2*ATR, lower = EMA - 2*ATR
-    kc_upper_1d = ema_20_1d + (2 * atr_10_1d)
-    kc_lower_1d = ema_20_1d - (2 * atr_10_1d)
+    # Get weekly data for trend filter (1-week EMA200 equivalent)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Align Keltner Channel to 4h
-    kc_upper_aligned = align_htf_to_ltf(prices, df_1d, kc_upper_1d.values)
-    kc_lower_aligned = align_htf_to_ltf(prices, df_1d, kc_lower_1d.values)
+    close_1w = df_1w['close'].values
+    # Weekly EMA20 (approximates daily EMA200 on 12h chart)
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Volume confirmation: current volume > 1.5x 20-period average (moderate filter)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 1.5)
+    # Volume confirmation: current volume > 1.8x 30-period average
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean()
+    volume_expansion = volume > (vol_ma_30 * 1.8)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if any required data is not ready
-        if (np.isnan(kc_upper_aligned[i]) or np.isnan(kc_lower_aligned[i]) or 
-            np.isnan(volume_expansion[i])):
+        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or 
+            np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or
+            np.isnan(ema_20_aligned[i]) or np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Long: breakout above upper Keltner Channel with volume expansion
-        long_condition = (close[i] > kc_upper_aligned[i]) and volume_expansion[i]
+        # Long: price approaches L3 from below with volume expansion and above weekly EMA20
+        long_condition = (
+            (low[i] <= L3_aligned[i] * 1.001) and  # Allow small tolerance for touch
+            (close[i] > L3_aligned[i]) and         # Confirmed bounce
+            volume_expansion[i] and
+            (close[i] > ema_20_aligned[i])
+        )
         
-        # Short: breakdown below lower Keltner Channel with volume expansion
-        short_condition = (close[i] < kc_lower_aligned[i]) and volume_expansion[i]
+        # Short: price approaches H3 from above with volume expansion and below weekly EMA20
+        short_condition = (
+            (high[i] >= H3_aligned[i] * 0.999) and # Allow small tolerance for touch
+            (close[i] < H3_aligned[i]) and         # Confirmed rejection
+            volume_expansion[i] and
+            (close[i] < ema_20_aligned[i])
+        )
         
         if long_condition and position != 1:
             position = 1
@@ -83,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Keltner_Channel_Breakout"
-timeframe = "4h"
+name = "12h_1w_1d_Camarilla_Pivot_Volume_Strategy"
+timeframe = "12h"
 leverage = 1.0
