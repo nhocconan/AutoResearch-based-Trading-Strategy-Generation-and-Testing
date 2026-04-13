@@ -5,93 +5,108 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 60:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian(20) breakout with 1d volume spike and chop regime filter
-    # Long: price breaks above 20-period high + volume > 1.5x 20-period avg + chop > 61.8 (range)
-    # Short: price breaks below 20-period low + volume > 1.5x 20-period avg + chop > 61.8 (range)
-    # Exit: price crosses 10-period midpoint (mean reversion in range)
-    # Uses 1d data for volume and chop filters to avoid noise on 12h
-    # Donchian breakouts capture momentum in ranging markets
-    # Volume spike confirms institutional interest
-    # Chop filter ensures we only trade in ranging regimes where mean reversion works
-    # Target: 60-120 total trades over 4 years (15-30/year) to minimize fee drag
+    # Hypothesis: 1h Camarilla breakout with 4h trend filter and session
+    # Long: price breaks above H3 (4h) + 4h close > open (bullish) + UTC 08-20
+    # Short: price breaks below L3 (4h) + 4h close < open (bearish) + UTC 08-20
+    # Exit: price retreats to 4h midpoint (P) or opposite Camarilla level
+    # Uses 4h Camarilla levels for structure, 1h for precise entry timing
+    # Session filter reduces noise and fee drag
+    # Target: 60-150 total trades over 4 years (15-37/year)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    open_ = prices['open'].values
+    open_time = prices['open_time'].values
     
-    # Get 12h data for primary timeframe
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 4h data for Camarilla levels and trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    open_4h = df_4h['open'].values
     
-    # Get 1d data for HTF filters
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Calculate 4h Camarilla levels (based on previous day's range)
+    # P = (high + low + close) / 3
+    # R4 = close + (high - low) * 1.1/2
+    # R3 = close + (high - low) * 1.1/4
+    # R2 = close + (high - low) * 1.1/6
+    # R1 = close + (high - low) * 1.1/12
+    # S1 = close - (high - low) * 1.1/12
+    # S2 = close - (high - low) * 1.1/6
+    # S3 = close - (high - low) * 1.1/4
+    # S4 = close - (high - low) * 1.1/2
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Use previous 4h bar's high/low/close for today's levels
+    prev_high_4h = np.roll(high_4h, 1)
+    prev_low_4h = np.roll(low_4h, 1)
+    prev_close_4h = np.roll(close_4h, 1)
+    # First bar will have NaN due to roll, handled by min_periods logic
     
-    # Calculate 12h Donchian channels (20-period)
-    highest_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_high + lowest_low) / 2.0
+    camarilla_p = (prev_high_4h + prev_low_4h + prev_close_4h) / 3
+    camarilla_range = prev_high_4h - prev_low_4h
+    camarilla_h3 = camarilla_p + camarilla_range * 1.1 / 4
+    camarilla_l3 = camarilla_p - camarilla_range * 1.1 / 4
+    camarilla_h4 = camarilla_p + camarilla_range * 1.1 / 2
+    camarilla_l4 = camarilla_p - camarilla_range * 1.1 / 2
     
-    # Calculate 1d volume spike filter (volume > 1.5x 20-period avg)
-    vol_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_1d > (1.5 * vol_ma)
+    # Align Camarilla levels to 1h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_l3)
+    camarilla_p_aligned = align_htf_to_ltf(prices, df_4h, camarilla_p)
     
-    # Calculate 1d chop regime filter (chop > 61.8 = ranging)
-    # Chop = 100 * log10(sum(ATR(1), n) / (log10(n) * (HHH - LLL)))
-    atr_1 = np.maximum(np.maximum(high_1d - low_1d, np.abs(high_1d - np.roll(close_1d, 1))), np.abs(low_1d - np.roll(close_1d, 1)))
-    atr_1[0] = high_1d[0] - low_1d[0]  # first bar
-    sum_atr = pd.Series(atr_1).rolling(window=20, min_periods=20).sum().values
-    highest_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    chop = 100 * np.log10(sum_atr) / (np.log10(20) * np.log10((highest_high_20 - lowest_low_20) + 1e-10))
-    chop = np.where((highest_high_20 - lowest_low_20) == 0, 100, chop)  # avoid div by zero
-    chop_regime = chop > 61.8  # ranging market
+    # 4h trend filter: bullish if close > open, bearish if close < open
+    bullish_4h = close_4h > open_4h
+    bearish_4h = close_4h < open_4h
+    bullish_4h_aligned = align_htf_to_ltf(prices, df_4h, bullish_4h)
+    bearish_4h_aligned = align_htf_to_ltf(prices, df_4h, bearish_4h)
     
-    # Align HTF filters to 12h timeframe
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
-    chop_regime_aligned = align_htf_to_ltf(prices, df_1d, chop_regime.astype(float))
+    # Session filter: UTC 08-20
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.25  # 25% position size
+    position_size = 0.20  # 20% position size
     
-    for i in range(20, n):  # start from 20 to have enough data for Donchian
+    for i in range(1, n):  # start from 1 to have previous 4h bar
         # Skip if data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_spike_aligned[i]) or np.isnan(chop_regime_aligned[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(bullish_4h_aligned[i]) or np.isnan(bearish_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Donchian breakout conditions
-        breakout_up = close_12h[i] > highest_high[i]
-        breakout_down = close_12h[i] < lowest_low[i]
+        # Skip if outside session
+        if not in_session[i]:
+            if position == 1:
+                signals[i] = position_size
+            elif position == -1:
+                signals[i] = -position_size
+            else:
+                signals[i] = 0.0
+            continue
         
-        # HTF filters
-        volume_confirmed = vol_spike_aligned[i] > 0.5
-        chop_filter = chop_regime_aligned[i] > 0.5
+        # Breakout conditions
+        long_breakout = close[i] > camarilla_h3_aligned[i]
+        short_breakout = close[i] < camarilla_l3_aligned[i]
+        
+        # Trend filter conditions
+        long_trend = bullish_4h_aligned[i]
+        short_trend = bearish_4h_aligned[i]
         
         # Entry conditions
-        long_entry = breakout_up and volume_confirmed and chop_filter and position != 1
-        short_entry = breakout_down and volume_confirmed and chop_filter and position != -1
+        long_entry = long_breakout and long_trend and position != 1
+        short_entry = short_breakout and short_trend and position != -1
         
-        # Exit conditions: mean reversion to midpoint
-        exit_long = position == 1 and close_12h[i] < donchian_mid[i]
-        exit_short = position == -1 and close_12h[i] > donchian_mid[i]
+        # Exit conditions: retreat to midpoint or opposite level
+        exit_long = position == 1 and (close[i] < camarilla_p_aligned[i] or close[i] < camarilla_l3_aligned[i])
+        exit_short = position == -1 and (close[i] > camarilla_p_aligned[i] or close[i] > camarilla_h3_aligned[i])
         
         # Execute signals
         if long_entry:
@@ -117,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_donchian_volume_chop_filter_v1"
-timeframe = "12h"
+name = "1h_4h_camarilla_breakout_trend_session_v1"
+timeframe = "1h"
 leverage = 1.0
