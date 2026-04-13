@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-4h_1D_Camarilla_Breakout_Volume_Confirmation_v2
+4h_1D_Camarilla_Breakout_Volume_Confirmation_v3
 Hypothesis: Buy when price breaks above daily Camarilla H4 level with volume > 2.0x 50-period average and price > daily EMA50, sell when price breaks below daily L4 level with volume confirmation and price < daily EMA50. Uses 4h primary timeframe with 1d trend filter. Added minimum holding period of 8 bars (32 hours) to reduce overtrading and filter false breakouts. Designed to work in both bull and bear markets by capturing genuine breakouts with strong volume and trend alignment.
 """
 
@@ -94,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1D_Camarilla_Breakout_Volume_Confirmation_v2"
+name = "4h_1D_Camarilla_Breakout_Volume_Confirmation_v3"
 timeframe = "4h"
 leverage = 1.0
