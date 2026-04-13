@@ -8,11 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Donchian(20) breakout with 1d EMA50 trend filter + volume confirmation
-    # Long: price > Donchian(20) high + price > 1d EMA50 + volume > 2.0x 20-period average
-    # Short: price < Donchian(20) low + price < 1d EMA50 + volume > 2.0x 20-period average
-    # Exit: opposite Donchian breakout OR price crosses 1d EMA50
-    # Using 6h timeframe for lower trade frequency (target 12-37/year), 1d EMA50 for strong trend filter,
+    # Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter + volume confirmation
+    # Long: price > Donchian(20) high + price > 1d EMA34 + volume > 2.0x 20-period average
+    # Short: price < Donchian(20) low + price < 1d EMA34 + volume > 2.0x 20-period average
+    # Exit: opposite Donchian breakout OR price crosses 1d EMA34
+    # Using 12h timeframe for lower trade frequency (target: 12-37/year), 1d EMA34 for strong trend filter,
     # and volume spike confirmation to avoid false breakouts in choppy markets.
     # Discrete position sizing (0.25) to minimize fee churn.
     
@@ -21,22 +21,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA50 with min_periods
+    # Calculate 1d EMA34 with min_periods
     ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema_1d[49] = np.mean(close_1d[:50])  # SMA50 as seed
-        multiplier = 2 / (50 + 1)
-        for i in range(50, len(close_1d)):
+    if len(close_1d) >= 34:
+        ema_1d[33] = np.mean(close_1d[:34])  # SMA34 as seed
+        multiplier = 2 / (34 + 1)
+        for i in range(34, len(close_1d)):
             ema_1d[i] = (close_1d[i] * multiplier) + (ema_1d[i-1] * (1 - multiplier))
     
-    # Get 6h Donchian(20) for breakout with min_periods
+    # Get 12h Donchian(20) for breakout with min_periods
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     
@@ -44,13 +44,13 @@ def generate_signals(prices):
         donchian_high[i] = np.max(high[i-20:i])
         donchian_low[i] = np.min(low[i-20:i])
     
-    # Get 6h volume for confirmation (>2.0x 20-period average)
+    # Get 12h volume for confirmation (>2.0x 20-period average)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     volume_spike = volume > (2.0 * vol_ma)
     
-    # Align 1d EMA50 to 6h
+    # Align 1d EMA34 to 12h
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     signals = np.zeros(n)
@@ -67,7 +67,7 @@ def generate_signals(prices):
         long_breakout = close[i] > donchian_high[i]
         short_breakout = close[i] < donchian_low[i]
         
-        # Trend filter from 1d EMA50
+        # Trend filter from 1d EMA34
         bullish_trend = close[i] > ema_1d_aligned[i]
         bearish_trend = close[i] < ema_1d_aligned[i]
         
@@ -102,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_donchian_breakout_ema50_volume_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_breakout_ema34_volume_v1"
+timeframe = "12h"
 leverage = 1.0
