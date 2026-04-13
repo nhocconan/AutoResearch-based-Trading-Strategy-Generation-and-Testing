@@ -1,18 +1,11 @@
-# [40546] 4h_1d_camarilla_breakout_volume_chop
-# Hypothesis: 4h Camarilla breakout with 1d volume confirmation and chop regime filter.
-# Uses 1d volume spike (volume > 1.5x 20-period average) to confirm breakout strength.
-# Uses 4h Choppiness Index (CHOP > 61.8 = range, CHOP < 38.2 = trend) to avoid false breakouts in chop.
-# Long when price breaks above Camarilla H4 level in trending market with volume spike.
-# Short when price breaks below Camarilla L4 level in trending market with volume spike.
-# Target: 75-200 trades over 4 years (19-50/year) to avoid fee drag.
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,56 +13,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for volume confirmation
+    # Get 1d data for volatility and regime filtering
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    volume_1d = df_1d['volume'].values
+    # Calculate 1d True Range for volatility regime
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d volume spike (volume > 1.5x 20-period average)
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_1d > (vol_ma_20 * 1.5)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
+    # True Range calculation
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], 
+                           np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Calculate 4h Camarilla levels (based on previous day)
-    # H4 = close + 1.1*(high-low)*1.1/2
-    # L4 = close - 1.1*(high-low)*1.1/2
-    # We need previous day's OHLC
-    df_1d_ohlc = get_htf_data(prices, '1d')
-    if len(df_1d_ohlc) < 2:
-        return np.zeros(n)
+    # 10-period ATR of daily volatility
+    atr_10 = pd.Series(tr_1d).rolling(window=10, min_periods=10).mean().values
+    # 30-period ATR for longer-term volatility comparison
+    atr_30 = pd.Series(tr_1d).rolling(window=30, min_periods=30).mean().values
     
-    prev_close = df_1d_ohlc['close'].shift(1).values
-    prev_high = df_1d_ohlc['high'].shift(1).values
-    prev_low = df_1d_ohlc['low'].shift(1).values
+    # Volatility regime: ATR10/ATR30 > 1.2 = high vol (trend following), < 0.8 = low vol (mean reversion)
+    vol_ratio = np.where(atr_30 > 0, atr_10 / atr_30, 1.0)
+    high_vol_regime = vol_ratio > 1.2
+    low_vol_regime = vol_ratio < 0.8
     
-    camarilla_h4 = prev_close + 1.1 * (prev_high - prev_low) * 1.1 / 2
-    camarilla_l4 = prev_close - 1.1 * (prev_high - prev_low) * 1.1 / 2
+    # Calculate 4-period RSI for mean reversion signals
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/4, adjust=False, min_periods=4).mean()
+    avg_loss = loss.ewm(alpha=1/4, adjust=False, min_periods=4).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d_ohlc, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d_ohlc, camarilla_l4)
-    
-    # Calculate 4h Choppiness Index (14-period)
-    # CHOP = 100 * log10(sum(TR over 14) / (max(high)-min(low) over 14)) / log10(14)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], 
-                        np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    range_max_min = max_high - min_low
-    
-    # Avoid division by zero
-    chop = np.where(range_max_min != 0, 
-                    100 * np.log10(atr_sum / range_max_min) / np.log10(14), 
-                    50)  # neutral when no range
-    
-    # Market regime: CHOP > 61.8 = range, CHOP < 38.2 = trend
-    trending_market = chop < 38.2
+    # Calculate 4h Bollinger Bands (20, 2.0) for mean reversion
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2.0 * std_20
+    lower_bb = sma_20 - 2.0 * std_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -77,27 +62,54 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h4_aligned[i]) or 
-            np.isnan(camarilla_l4_aligned[i]) or 
-            np.isnan(vol_spike_aligned[i]) or 
-            np.isnan(trending_market[i])):
+        if (np.isnan(atr_10[i-10] if i >= 10 else np.nan) or 
+            np.isnan(atr_30[i-30] if i >= 30 else np.nan) or 
+            np.isnan(rsi_values[i]) or 
+            np.isnan(sma_20[i]) or 
+            np.isnan(std_20[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: Camarilla breakout + volume spike + trending market
-        breakout_long = close[i] > camarilla_h4_aligned[i]
-        breakout_short = close[i] < camarilla_l4_aligned[i]
-        vol_confirm = vol_spike_aligned[i] > 0.5  # True if volume spike
-        trend_filter = trending_market[i]
+        # Align volatility regime to current 4h bar
+        # For high vol regime: use previous day's value (already completed)
+        high_vol = high_vol_regime[i-1] if i >= 1 else False
+        low_vol = low_vol_regime[i-1] if i >= 1 else False
         
-        long_entry = breakout_long and vol_confirm and trend_filter
-        short_entry = breakout_short and vol_confirm and trend_filter
+        # Mean reversion in low volatility regime: RSI extremes at Bollinger Bands
+        if low_vol:
+            # RSI oversold at lower Bollinger Band -> long
+            rsi_oversold = rsi_values[i] < 30
+            price_at_lower_bb = close[i] <= lower_bb[i]
+            long_entry = rsi_oversold and price_at_lower_bb
+            
+            # RSI overbought at upper Bollinger Band -> short
+            rsi_overbought = rsi_values[i] > 70
+            price_at_upper_bb = close[i] >= upper_bb[i]
+            short_entry = rsi_overbought and price_at_upper_bb
+        else:
+            long_entry = False
+            short_entry = False
         
-        # Exit when price returns to Camarilla center (close of previous day)
-        camarilla_close = prev_close[i] if i < len(prev_close) else camarilla_h4_aligned[i]  # fallback
-        camarilla_close_aligned = align_htf_to_ltf(prices, df_1d_ohlc, prev_close)
-        exit_long = position == 1 and close[i] < camarilla_close_aligned[i]
-        exit_short = position == -1 and close[i] > camarilla_close_aligned[i]
+        # Trend following in high volatility regime: breakouts with momentum
+        if high_vol:
+            # Breakout above upper Bollinger Band with RSI strength -> long
+            breakout_upper = close[i] > upper_bb[i]
+            rsi_strong = rsi_values[i] > 50
+            long_entry = breakout_upper and rsi_strong
+            
+            # Breakdown below lower Bollinger Band with RSI weakness -> short
+            breakdown_lower = close[i] < lower_bb[i]
+            rsi_weak = rsi_values[i] < 50
+            short_entry = breakdown_lower and rsi_weak
+        else:
+            # In medium volatility, no clear edge - stay flat
+            long_entry = False
+            short_entry = False
+        
+        # Exit conditions: RSI returns to neutral zone (40-60)
+        rsi_exit = 40 <= rsi_values[i] <= 60
+        exit_long = position == 1 and rsi_exit
+        exit_short = position == -1 and rsi_exit
         
         # Execute signals
         if long_entry and position != 1:
@@ -120,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_camarilla_breakout_volume_chop"
+name = "4h_rsi_bb_volatility_regime"
 timeframe = "4h"
 leverage = 1.0
