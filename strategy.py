@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 150:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,82 +13,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Calculate weekly pivot points (standard formula)
-    high_w = df_1w['high'].values
-    low_w = df_1w['low'].values
-    close_w = df_1w['close'].values
-    
-    # Pivot Point = (H + L + C)/3
-    pivot = (high_w + low_w + close_w) / 3
-    # Support 1 = (2*P) - H
-    s1 = (2 * pivot) - high_w
-    # Resistance 1 = (2*P) - L
-    r1 = (2 * pivot) - low_w
-    # Support 2 = P - (H - L)
-    s2 = pivot - (high_w - low_w)
-    # Resistance 2 = P + (H - L)
-    r2 = pivot + (high_w - low_w)
-    
-    # Get daily data for volume and price action
+    # Get 1d data for calculations
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    vol_d = df_1d['volume'].values
-    close_d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    vol_1d = df_1d['volume'].values
     
-    # Volume spike detection (current day > 1.5x 20-day average)
-    vol_series = pd.Series(vol_d)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_spike = vol_d > (vol_ma * 1.5)
+    # Calculate 20-period EMA on 1d (trend filter)
+    close_1d_series = pd.Series(close_1d)
+    ema_20_1d = close_1d_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align weekly pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    # Calculate RSI(14) on 1d
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_14 = 100 - (100 / (1 + rs))
     
-    # Align daily volume spike to 6h timeframe
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
+    # Calculate Bollinger Bands (20, 2) on 1d
+    sma_20 = close_1d_series.rolling(window=20, min_periods=20).mean().values
+    std_20 = close_1d_series.rolling(window=20, min_periods=20).std().values
+    bb_upper = sma_20 + 2 * std_20
+    bb_lower = sma_20 - 2 * std_20
+    
+    # Align indicators to 12h timeframe
+    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25
     
-    for i in range(200, n):
+    for i in range(150, n):
         # Skip if data not ready
-        if (np.isnan(pivot_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or
-            np.isnan(s2_aligned[i]) or
-            np.isnan(vol_spike_aligned[i])):
+        if (np.isnan(ema_20_aligned[i]) or 
+            np.isnan(rsi_14_aligned[i]) or
+            np.isnan(bb_upper_aligned[i]) or
+            np.isnan(bb_lower_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Price relative to weekly pivot levels
-        at_pivot = abs(close[i] - pivot_aligned[i]) < (pivot_aligned[i] * 0.005)  # Within 0.5% of pivot
-        near_r1 = abs(close[i] - r1_aligned[i]) < (r1_aligned[i] * 0.005)  # Within 0.5% of R1
-        near_s1 = abs(close[i] - s1_aligned[i]) < (s1_aligned[i] * 0.005)  # Within 0.5% of S1
-        near_r2 = abs(close[i] - r2_aligned[i]) < (r2_aligned[i] * 0.005)  # Within 0.5% of R2
-        near_s2 = abs(close[i] - s2_aligned[i]) < (s2_aligned[i] * 0.005)  # Within 0.5% of S2
+        # Trend filter: price above/below EMA20
+        above_ema = close[i] > ema_20_aligned[i]
+        below_ema = close[i] < ema_20_aligned[i]
         
-        # Volume confirmation
-        vol_confirmed = vol_spike_aligned[i]
+        # RSI conditions: not overbought/oversold
+        rsi_not_overbought = rsi_14_aligned[i] < 70
+        rsi_not_oversold = rsi_14_aligned[i] > 30
         
-        # Entry logic: fade at S1/R1, breakout at S2/R2 with volume
-        long_entry = (near_s1 or near_s2) and vol_confirmed and close[i] > close[i-1]  # Bounce off support with volume
-        short_entry = (near_r1 or near_r2) and vol_confirmed and close[i] < close[i-1]  # Reject resistance with volume
+        # Bollinger Band conditions: price near bands (mean reversion)
+        near_upper_band = close[i] > bb_upper_aligned[i] * 0.98
+        near_lower_band = close[i] < bb_lower_aligned[i] * 1.02
         
-        # Exit on opposite signal or when price moves away from pivot area
-        exit_long = position == 1 and (close[i] < pivot_aligned[i] * 0.995 or close[i] > r2_aligned[i] * 1.005)
-        exit_short = position == -1 and (close[i] > pivot_aligned[i] * 1.005 or close[i] < s2_aligned[i] * 0.995)
+        # Entry conditions: buy dips in uptrend, sell rallies in downtrend
+        long_entry = above_ema and rsi_not_overbought and near_lower_band
+        short_entry = below_ema and rsi_not_oversold and near_upper_band
+        
+        # Exit conditions: opposite signal or RSI extreme
+        exit_long = position == 1 and (below_ema or rsi_14_aligned[i] > 75)
+        exit_short = position == -1 and (above_ema or rsi_14_aligned[i] < 25)
         
         # Execute signals
         if long_entry and position != 1:
@@ -111,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_weekly_pivot_volume_reversion"
-timeframe = "6h"
+name = "12h_ema_rsi_bb_mean_reversion"
+timeframe = "12h"
 leverage = 1.0
