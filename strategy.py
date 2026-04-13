@@ -8,20 +8,32 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Camarilla H4/L4 breakout with 1d EMA50 trend filter
-    # Works in both bull/bear: Camarilla captures 12h reversals, 1d EMA50 filters false breakouts
-    # Target: 12-37 trades/year to minimize fee drag (50-150 total over 4 years)
+    # Hypothesis: 4h Camarilla pivot breakout with 1d trend filter and volume confirmation
+    # Works in both bull and bear: Camarilla captures intraday reversals, 1d trend filters false breakouts,
+    # volume confirms momentum, ATR stoploss controls risk
+    # Target: 30-60 trades/year to minimize fee drag
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values if 'volume' in prices.columns else np.ones(len(prices))
     
-    # Get 1d data for Camarilla levels and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 4h data for Camarilla levels (primary timeframe)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # Get 1d data for trend filter and volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Get daily OHLC
+    daily_open = df_1d['open'].values
     daily_high = df_1d['high'].values
     daily_low = df_1d['low'].values
     daily_close = df_1d['close'].values
@@ -31,13 +43,13 @@ def generate_signals(prices):
     camarilla_h4 = daily_close + (daily_high - daily_low) * 1.1 / 2
     camarilla_l4 = daily_close - (daily_high - daily_low) * 1.1 / 2
     
-    # Get 1d EMA50 for trend filter
+    # Get 1d data for trend filter (EMA 50)
     ema_50_1d = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Get 1d volume 20-period average for confirmation
+    # Get 1d volume for confirmation (20-period average)
     vol_avg_20_1d = pd.Series(daily_volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align all HTF indicators to 12h primary timeframe
+    # Align all HTF indicators to 4h primary timeframe
     camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
     camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
@@ -46,6 +58,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
+    atr_multiplier = 2.0  # ATR stoploss multiplier
+    
+    # Calculate 4h ATR for stoploss
+    tr = np.maximum(np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1])), np.abs(low[1:] - close[:-1]))
+    tr = np.concatenate([[np.nan], tr])
+    atr_4h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     # Track entry price for stoploss
     entry_price = np.full(n, np.nan)
@@ -55,12 +73,13 @@ def generate_signals(prices):
         if (np.isnan(camarilla_h4_aligned[i]) or 
             np.isnan(camarilla_l4_aligned[i]) or
             np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(vol_avg_20_1d_aligned[i])):
+            np.isnan(vol_avg_20_1d_aligned[i]) or
+            np.isnan(atr_4h[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current 1d volume > 1.3x 20-period average
-        idx_1d = i // 2  # 12h bars per day = 2
+        idx_1d = i // 6
         if idx_1d >= len(daily_volume):
             signals[i] = 0.0
             continue
@@ -74,24 +93,9 @@ def generate_signals(prices):
         enter_long = (close[i] > camarilla_h4_aligned[i]) and trend_up and volume_confirmed
         enter_short = (close[i] < camarilla_l4_aligned[i]) and trend_down and volume_confirmed
         
-        # ATR-based stoploss (using 12h ATR)
-        if i >= 14:
-            tr = np.maximum(np.maximum(high[i] - low[i], np.abs(high[i] - close[i-1])), np.abs(low[i] - close[i-1]))
-            atr_12h = np.sqrt(np.mean(np.maximum(np.maximum(
-                high[i-13:i+1] - low[i-13:i+1],
-                np.abs(high[i-13:i+1] - np.roll(high[i-13:i+1], 1))[1:]),
-                np.abs(low[i-13:i+1] - np.roll(high[i-13:i+1], 1))[1:]
-            )))
-            atr_12h = max(atr_12h, 1e-8)  # avoid division by zero
-        else:
-            atr_12h = np.nan
-        
-        if np.isnan(atr_12h):
-            atr_12h = 0.01 * close[i]  # fallback
-        
-        # Stoploss conditions: 2.5 * ATR
-        exit_long = position == 1 and not np.isnan(entry_price[i-1]) and close[i] < entry_price[i-1] - 2.5 * atr_12h
-        exit_short = position == -1 and not np.isnan(entry_price[i-1]) and close[i] > entry_price[i-1] + 2.5 * atr_12h
+        # Stoploss conditions
+        exit_long = position == 1 and not np.isnan(entry_price[i-1]) and close[i] < entry_price[i-1] - atr_multiplier * atr_4h[i]
+        exit_short = position == -1 and not np.isnan(entry_price[i-1]) and close[i] > entry_price[i-1] + atr_multiplier * atr_4h[i]
         
         # Execute signals
         if enter_long and position != 1:
@@ -124,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_camarilla_pivot_breakout_trend_volume_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_pivot_breakout_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
