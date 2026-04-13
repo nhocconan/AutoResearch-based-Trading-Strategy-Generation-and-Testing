@@ -8,11 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Camarilla pivot breakout with weekly trend filter and volume spike confirmation.
-    # Long when price breaks above R4 with 1w EMA50 > EMA200 (uptrend) and volume > 2x average.
-    # Short when price breaks below S4 with 1w EMA50 < EMA200 (downtrend) and volume > 2x average.
-    # Exit when price retreats to R3/S3 or opposite pivot level.
-    # Uses weekly trend to avoid counter-trend breakouts and volume spike for confirmation.
+    # Hypothesis: 12h Camarilla pivot breakout with 1d trend filter and volume confirmation.
+    # Long when price breaks above Camarilla H3 level and 1d EMA50 > EMA200 (uptrend) and volume > 1.5x average.
+    # Short when price breaks below Camarilla L3 level and 1d EMA50 < EMA200 (downtrend) and volume > 1.5x average.
+    # Exit when price crosses Camarilla pivot point (mean reversion to equilibrium).
+    # Uses Camarilla pivot structure from 1d for key support/resistance levels.
     # Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
     
     close = prices['close'].values
@@ -20,53 +20,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Camarilla pivot levels (using previous day's OHLC)
-    # We need to shift by 1 to avoid look-ahead: use previous day's data for today's levels
+    # Get 1d data for Camarilla pivots and trend filter (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each 1d bar (based on that day's OHLC)
-    # Then align to 6h timeframe with proper delay
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Camarilla levels: R4 = close + 1.5*(high-low), S4 = close - 1.5*(high-low)
-    # R3 = close + 1.125*(high-low), S3 = close - 1.125*(high-low)
-    # We use previous day's levels to avoid look-ahead
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d[0] = np.nan  # First value has no previous
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
+    # Calculate Camarilla pivot levels for 1d
+    # Pivot = (High + Low + Close) / 3
+    # Range = High - Low
+    # H3 = Pivot + (Range * 1.1 / 4)
+    # L3 = Pivot - (Range * 1.1 / 4)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    H3_1d = pivot_1d + (range_1d * 1.1 / 4.0)
+    L3_1d = pivot_1d - (range_1d * 1.1 / 4.0)
     
-    camarilla_r4 = prev_close_1d + 1.5 * (prev_high_1d - prev_low_1d)
-    camarilla_s4 = prev_close_1d - 1.5 * (prev_high_1d - prev_low_1d)
-    camarilla_r3 = prev_close_1d + 1.125 * (prev_high_1d - prev_low_1d)
-    camarilla_s3 = prev_close_1d - 1.125 * (prev_high_1d - prev_low_1d)
+    # Calculate EMA50 and EMA200 on 1d for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Get 1w data for EMA trend filter (call ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Align HTF indicators to 12h timeframe
+    H3_1d_aligned = align_htf_to_ltf(prices, df_1d, H3_1d)
+    L3_1d_aligned = align_htf_to_ltf(prices, df_1d, L3_1d)
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    close_1w = df_1w['close'].values
-    
-    # Calculate EMA50 and EMA200 on 1w
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # Align HTF indicators to 6h timeframe
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
-    
-    # Calculate volume average (20-period) on 6h
+    # Calculate volume average (20-period) on 12h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -74,27 +58,26 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(ema200_1w_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(H3_1d_aligned[i]) or np.isnan(L3_1d_aligned[i]) or 
+            np.isnan(pivot_1d_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(ema200_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: 1w EMA50 > EMA200 for uptrend, < for downtrend
-        uptrend = ema50_1w_aligned[i] > ema200_1w_aligned[i]
-        downtrend = ema50_1w_aligned[i] < ema200_1w_aligned[i]
+        # Trend filter: 1d EMA50 > EMA200 for uptrend, < for downtrend
+        uptrend = ema50_1d_aligned[i] > ema200_1d_aligned[i]
+        downtrend = ema50_1d_aligned[i] < ema200_1d_aligned[i]
         
-        # Volume confirmation: current volume > 2x 20-period average
-        volume_confirm = volume[i] > 2.0 * vol_ma[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirm = volume[i] > 1.5 * vol_ma[i]
         
         # Breakout conditions
-        long_breakout = close[i] > camarilla_r4_aligned[i]
-        short_breakout = close[i] < camarilla_s4_aligned[i]
+        long_breakout = close[i] > H3_1d_aligned[i]
+        short_breakout = close[i] < L3_1d_aligned[i]
         
-        # Exit conditions: retreat to R3/S3 or opposite pivot level
-        long_exit = close[i] < camarilla_r3_aligned[i] or close[i] < camarilla_s4_aligned[i]
-        short_exit = close[i] > camarilla_s3_aligned[i] or close[i] > camarilla_r4_aligned[i]
+        # Exit conditions: price crosses pivot point (mean reversion)
+        long_exit = close[i] < pivot_1d_aligned[i]
+        short_exit = close[i] > pivot_1d_aligned[i]
         
         # Fixed position size (discrete levels to minimize fee churn)
         position_size = 0.25
@@ -124,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_camarilla_breakout_weekly_trend_volume_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
