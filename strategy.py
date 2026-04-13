@@ -8,7 +8,7 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian(20) breakout with 1d ATR volatility filter.
+    # Hypothesis: 4h Donchian(20) breakout with 1d ATR volatility filter.
     # ATR filter ensures breakouts occur during sufficient volatility regimes.
     # Donchian breakouts capture momentum; ATR filter avoids low-volatility false breakouts.
     # Works in bull/bear via volatility regime targeting.
@@ -24,9 +24,9 @@ def generate_signals(prices):
     if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Get 12h data for Donchian channels (call ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 4h data for Donchian channels (call ONCE before loop)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
     # Calculate 1d ATR(14)
@@ -43,16 +43,16 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 12h Donchian(20) channels
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    upper_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Calculate 4h Donchian(20) channels
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    upper_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Align HTF indicators to 12h timeframe
+    # Align HTF indicators to 4h timeframe
     atr_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    upper_20_aligned = align_htf_to_ltf(prices, df_12h, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_12h, lower_20)
+    upper_20_aligned = align_htf_to_ltf(prices, df_4h, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_4h, lower_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -104,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_donchian_atr_volatility_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_atr_volatility_v1"
+timeframe = "4h"
 leverage = 1.0
