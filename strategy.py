@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_1d_1w_Power_Trend_Aligned
-Hypothesis: Combines daily Elder Ray (bull/bear power) with weekly trend alignment and volume confirmation on 6h.
-Elder Ray measures bull power (high - EMA13) and bear power (EMA13 - low) to detect institutional buying/selling pressure.
-Weekly trend filter ensures we only trade in direction of higher timeframe momentum.
-Volume confirms institutional participation.
-Works in bull markets via strong bull power + uptrend, and in bear markets via strong bear power + downtrend.
-Target: 20-40 trades/year on 6h (80-160 total over 4 years).
+12h_1w_Donchian_Breakout_With_Volume_Confirmation
+Hypothesis: Combines weekly Donchian channel breakout with volume confirmation on 12h timeframe.
+In trending markets, price breaks out of weekly Donchian(20) channel with above-average volume.
+Works in both bull and bear markets by capturing strong directional moves after consolidation.
+Target: 12-37 trades/year on 12h (50-150 total over 4 years).
 """
 
 import numpy as np
@@ -23,86 +21,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Elder Ray calculation
+    # Get weekly data for Donchian channel
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly Donchian channel (20 periods)
+    highest_high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max()
+    lowest_low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min()
+    
+    # Weekly breakout conditions
+    breakout_up = close_1w > highest_high_20
+    breakout_down = close_1w < lowest_low_20
+    
+    # Get daily data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean()
+    volume_expansion_1d = volume_1d > (vol_ma_20_1d * 1.5)
     
-    # Calculate EMA13 on daily close
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Align all signals to 12h timeframe
+    breakout_up_aligned = align_htf_to_ltf(prices, df_1w, breakout_up)
+    breakout_down_aligned = align_htf_to_ltf(prices, df_1w, breakout_down)
+    volume_expansion_aligned = align_htf_to_ltf(prices, df_1d, volume_expansion_1d)
     
-    # Calculate Elder Ray components
-    bull_power = high_1d - ema13_1d  # Bull power: high minus EMA
-    bear_power = ema13_1d - low_1d   # Bear power: EMA minus low
-    
-    # Get weekly data for trend direction
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    # Weekly EMA21 for trend
-    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    weekly_uptrend = close_1w > ema21_1w
-    weekly_downtrend = close_1w < ema21_1w
-    
-    # Align all signals to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend)
-    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend)
-    
-    # Volume confirmation on 6h: volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_confirmation = volume > (vol_ma_20 * 1.5)
+    # Session filter: 08:00-20:00 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_mask = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% of capital
     
     for i in range(50, n):
-        # Skip if data not ready
-        if np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or \
-           np.isnan(weekly_uptrend_aligned[i]) or np.isnan(weekly_downtrend_aligned[i]):
+        # Skip if not in session or data not ready
+        if not session_mask[i] or \
+           np.isnan(breakout_up_aligned[i]) or \
+           np.isnan(breakout_down_aligned[i]) or \
+           np.isnan(volume_expansion_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Long conditions: strong bull power + weekly uptrend + volume confirmation
-        long_condition = (bull_power_aligned[i] > 0) and weekly_uptrend_aligned[i] and volume_confirmation[i]
-        
-        # Short conditions: strong bear power + weekly downtrend + volume confirmation
-        short_condition = (bear_power_aligned[i] > 0) and weekly_downtrend_aligned[i] and volume_confirmation[i]
-        
-        # Exit conditions: power weakening or trend reversal
-        exit_long = (bull_power_aligned[i] <= 0) or not weekly_uptrend_aligned[i]
-        exit_short = (bear_power_aligned[i] <= 0) or not weekly_downtrend_aligned[i]
-        
-        if long_condition and position != 1:
-            position = 1
-            signals[i] = position_size
-        elif short_condition and position != -1:
-            position = -1
-            signals[i] = -position_size
-        elif position == 1 and exit_long:
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and exit_short:
-            position = 0
-            signals[i] = 0.0
+        # Entry conditions: weekly breakout with volume expansion
+        if breakout_up_aligned[i] and volume_expansion_aligned[i]:
+            if position != 1:
+                position = 1
+                signals[i] = position_size
+            else:
+                signals[i] = position_size
+        elif breakout_down_aligned[i] and volume_expansion_aligned[i]:
+            if position != -1:
+                position = -1
+                signals[i] = -position_size
+            else:
+                signals[i] = -position_size
         elif position == 1:
+            # Hold long position
             signals[i] = position_size
         elif position == -1:
+            # Hold short position
             signals[i] = -position_size
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "6h_1d_1w_Power_Trend_Aligned"
-timeframe = "6h"
+name = "12h_1w_Donchian_Breakout_With_Volume_Confirmation"
+timeframe = "12h"
 leverage = 1.0
