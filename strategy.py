@@ -5,96 +5,93 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # 4h data for trend and structure
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # 1d data for volume context
+    # Daily data for pivot levels and volume
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 4h Donchian channels (20-period)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Calculate daily Camarilla pivot levels (using previous day's data)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Donchian upper and lower bands
-    donchian_upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Pivot point and range
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
     
-    # 4h ATR for volatility filter
-    tr1 = high_4h[1:] - low_4h[1:]
-    tr2 = np.abs(high_4h[1:] - np.concatenate([[high_4h[0]], high_4h[:-1]]))
-    tr3 = np.abs(low_4h[1:] - np.concatenate([[low_4h[0]], low_4h[:-1]]))
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Key Camarilla levels (tighter bands for fewer trades)
+    r1 = pivot + (range_hl * 1.1 / 12)
+    s1 = pivot - (range_hl * 1.1 / 12)
     
-    # 1d volume average for context
+    # Weekly trend filter (40-period EMA for smoother trend)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    ema_40_1w = pd.Series(df_1w['close'].values).ewm(span=40, adjust=False, min_periods=40).mean()
+    
+    # Daily volume confirmation
     volume_1d = df_1d['volume'].values
-    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean()
     
-    # Align all to 1h timeframe
-    donchian_upper_1h = align_htf_to_ltf(prices, df_4h, donchian_upper)
-    donchian_lower_1h = align_htf_to_ltf(prices, df_4h, donchian_lower)
-    atr_4h_1h = align_htf_to_ltf(prices, df_4h, atr_4h)
-    volume_ma_20_1d_1h = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Align all data to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    ema_40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_40_1w.values)
+    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d.values)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
-    for i in range(100, n):
-        # Skip if not in session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-            
+    for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(donchian_upper_1h[i]) or np.isnan(donchian_lower_1h[i]) or
-            np.isnan(atr_4h_1h[i]) or np.isnan(volume_ma_20_1d_1h[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema_40_1w_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current volume > 1.3x 1d average (adjusted for timeframe)
-        volume_condition = volume[i] > (volume_ma_20_1d_1h[i] * 1.3)
+        # Volume condition: current 12h volume > 1.3x 20-period average daily volume
+        # (conservative threshold to reduce trades)
+        volume_condition = volume[i] > (volume_ma_20_1d_aligned[i] * 1.3)
         
-        # ATR filter: avoid extremely low volatility
-        atr_condition = atr_4h_1h[i] > 0
+        # Trend filter: only trade in direction of weekly trend
+        long_trend = close[i] > ema_40_1w_aligned[i]
+        short_trend = close[i] < ema_40_1w_aligned[i]
+        
+        # Entry conditions: price at key Camarilla levels with volume and trend
+        # Long at S1 with volume and uptrend
+        # Short at R1 with volume and downtrend
+        at_support = abs(close[i] - s1_aligned[i]) / s1_aligned[i] < 0.003  # Within 0.3%
+        at_resistance = abs(close[i] - r1_aligned[i]) / r1_aligned[i] < 0.003  # Within 0.3%
         
         if position == 0:
-            # Long: break above Donchian upper with volume and volatility
-            if close[i] > donchian_upper_1h[i] and volume_condition and atr_condition:
+            if at_support and volume_condition and long_trend:
                 position = 1
                 signals[i] = position_size
-            # Short: break below Donchian lower with volume and volatility
-            elif close[i] < donchian_lower_1h[i] and volume_condition and atr_condition:
+            elif at_resistance and volume_condition and short_trend:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price touches or crosses below Donchian lower
-            if close[i] < donchian_lower_1h[i]:
+            # Exit when price reaches pivot or shows weakness
+            if close[i] >= pivot_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price touches or crosses above Donchian upper
-            if close[i] > donchian_upper_1h[i]:
+            # Exit when price reaches pivot or shows strength
+            if close[i] <= pivot_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -102,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4h_Donchian_Breakout_Volume_Filter"
-timeframe = "1h"
+name = "12h_1d1w_Camarilla_Pivot_Breakout_With_Volume_Confirmation_v4"
+timeframe = "12h"
 leverage = 1.0
