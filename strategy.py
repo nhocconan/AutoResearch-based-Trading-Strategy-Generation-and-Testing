@@ -1,29 +1,47 @@
 #!/usr/bin/env python3
 """
-1d_1w_12h_Camarilla_Breakout
-Hypothesis: Breakout above/below weekly Camarilla R4/S4 with 1d trend filter and volume confirmation. Uses weekly support/resistance as structural levels, 1d EMA for trend alignment, and volume spike to confirm institutional participation. Designed for low trade frequency (<15/year) to minimize fee drag while capturing major trend continuations in both bull and bear markets.
+6h_12h_ADX_Trend_Reversal
+Hypothesis: In 12h trends (ADX > 25), 6h reversals occur when price rejects 12h EMA21 with RSI divergence.
+Works in bull/bear by trading pullbacks in strong trends. Uses ADX trend filter + RSI divergence for precise entries.
+Target: 20-35 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels."""
-    range_val = high - low
-    range_val = np.where(range_val == 0, 1e-10, range_val)
-    C = close
-    H = high
-    L = low
-    R1 = C + ((H - L) * 1.0833)
-    R2 = C + ((H - L) * 1.1666)
-    R3 = C + ((H - L) * 1.2500)
-    R4 = C + ((H - L) * 1.5000)
-    S1 = C - ((H - L) * 1.0833)
-    S2 = C - ((H - L) * 1.1666)
-    S3 = C - ((H - L) * 1.2500)
-    S4 = C - ((H - L) * 1.5000)
-    return R1, R2, R3, R4, S1, S2, S3, S4
+def calculate_adx(high, low, close, period=14):
+    """Calculate Average Directional Index."""
+    plus_dm = np.diff(high, prepend=high[0])
+    minus_dm = np.diff(low, prepend=low[0])
+    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0.0)
+    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0.0)
+    
+    tr = np.maximum(np.absolute(np.diff(high, prepend=high[0])),
+                    np.maximum(np.absolute(np.diff(low, prepend=low[0])),
+                               np.absolute(np.diff(close, prepend=close[0]))))
+    
+    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False).mean().values
+    
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/period, adjust=False).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/period, adjust=False).mean().values / atr
+    
+    dx = 100 * np.absolute(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False).mean().values
+    return adx
+
+def calculate_rsi(close, period=14):
+    """Calculate Relative Strength Index."""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False).mean().values
+    
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
 def generate_signals(prices):
     n = len(prices)
@@ -33,77 +51,66 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get weekly data for structural levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get 12h data for trend filter and EMA
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate weekly Camarilla levels
-    R1_1w, R2_1w, R3_1w, R4_1w, S1_1w, S2_1w, S3_1w, S4_1w = calculate_camarilla(high_1w, low_1w, close_1w)
+    # 12h ADX trend filter
+    adx_12h = calculate_adx(high_12h, low_12h, close_12h, 14)
+    strong_trend = adx_12h > 25
     
-    # Align weekly levels to daily
-    R4_1w_aligned = align_htf_to_ltf(prices, df_1w, R4_1w)
-    S4_1w_aligned = align_htf_to_ltf(prices, df_1w, S4_1w)
+    # 12h EMA21 for dynamic support/resistance
+    ema_21_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Get daily data for trend filter and volume
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # 6h RSI for divergence detection
+    rsi_6h = calculate_rsi(close, 14)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
-    
-    # 1d trend filter: 50 EMA
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend = close_1d > ema_50
-    downtrend = close_1d < ema_50
-    
-    # Volume confirmation: current volume > 1.5x 20-day average
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume_1d > (vol_ma_20 * 1.5)
+    # Align 12h indicators to 6h
+    strong_trend_aligned = align_htf_to_ltf(prices, df_12h, strong_trend.astype(float))
+    ema_21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_21_12h)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if any required data is not ready
-        if (np.isnan(R4_1w_aligned[i]) or np.isnan(S4_1w_aligned[i]) or 
-            np.isnan(uptrend[i]) or np.isnan(downtrend[i]) or
-            np.isnan(volume_expansion[i])):
+        if (np.isnan(strong_trend_aligned[i]) or 
+            np.isnan(ema_21_12h_aligned[i]) or
+            np.isnan(rsi_6h[i])):
             signals[i] = 0.0
             continue
         
-        # Long: break above weekly R4 in uptrend with volume expansion
-        long_condition = (close[i] > R4_1w_aligned[i]) and uptrend[i] and volume_expansion[i]
+        # Bullish reversal: price rejects 12h EMA21 from below with RSI oversold
+        bullish_reject = (close[i] > ema_21_12h_aligned[i] and 
+                         low[i] <= ema_21_12h_aligned[i] * 1.002 and  # within 0.2% of EMA
+                         rsi_6h[i] < 35 and
+                         strong_trend_aligned[i] > 0.5)
         
-        # Short: break below weekly S4 in downtrend with volume expansion
-        short_condition = (close[i] < S4_1w_aligned[i]) and downtrend[i] and volume_expansion[i]
+        # Bearish reversal: price rejects 12h EMA21 from above with RSI overbought
+        bearish_reject = (close[i] < ema_21_12h_aligned[i] and 
+                         high[i] >= ema_21_12h_aligned[i] * 0.998 and  # within 0.2% of EMA
+                         rsi_6h[i] > 65 and
+                         strong_trend_aligned[i] > 0.5)
         
-        if long_condition and position != 1:
+        if bullish_reject and position != 1:
             position = 1
             signals[i] = position_size
-        elif long_condition and position == 1:
-            signals[i] = position_size
-        elif short_condition and position != -1:
+        elif bearish_reject and position != -1:
             position = -1
             signals[i] = -position_size
-        elif short_condition and position == -1:
-            signals[i] = -position_size
         else:
-            # Exit: reverse signal or loss of trend/volume
-            if position == 1 and (not uptrend[i] or not volume_expansion[i]):
+            # Exit on trend weakening or opposite signal
+            if position == 1 and (strong_trend_aligned[i] <= 0.5 or bearish_reject):
                 position = 0
                 signals[i] = 0.0
-            elif position == -1 and (not downtrend[i] or not volume_expansion[i]):
+            elif position == -1 and (strong_trend_aligned[i] <= 0.5 or bullish_reject):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -111,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_12h_Camarilla_Breakout"
-timeframe = "1d"
+name = "6h_12h_ADX_Trend_Reversal"
+timeframe = "6h"
 leverage = 1.0
