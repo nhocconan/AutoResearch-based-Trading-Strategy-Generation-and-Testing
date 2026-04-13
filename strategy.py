@@ -5,53 +5,54 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1d Donchian breakout with weekly trend filter and volume confirmation
-    # Long: price breaks above 20-period Donchian high AND weekly EMA200 uptrend AND volume > 1.3x average
-    # Short: price breaks below 20-period Donchian low AND weekly EMA200 downtrend AND volume > 1.3x average
-    # Exit: price returns to 10-period Donchian midpoint or volume drops below average
-    # Using 1d for signal generation (Donchian breakout), 1w for trend filter
+    # Hypothesis: 6h Camarilla pivot breakout with 1d trend filter and volume confirmation
+    # Long: price breaks above H3 (resistance) AND volume > 1.3x 20-period average AND price > 1d EMA50
+    # Short: price breaks below L3 (support) AND volume > 1.3x 20-period average AND price < 1d EMA50
+    # Exit: price returns to pivot point (mean reversion in 6h timeframe)
+    # Using 1d for Camarilla pivots (structure) and EMA50 (trend), 6h only for entry timing
     # Discrete position sizing (0.25) to balance return and drawdown
+    # Target: 12-37 trades/year (~50-150 over 4 years) to minimize fee drag
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Get 1d data for Donchian channels (call ONCE before loop)
+    # Get 1d data for Camarilla pivots and EMA50 (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
+    # Calculate 1d Camarilla pivots (based on previous 1d bar)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 20-period Donchian channels on 1d
-    donchian_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donchian_mid_10 = (pd.Series(high_1d).rolling(window=10, min_periods=10).max().values + 
-                       pd.Series(low_1d).rolling(window=10, min_periods=10).min().values) / 2
+    # PIVOT = (H + L + C) / 3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    # RANGE = H - L
+    range_1d = high_1d - low_1d
     
-    # Align 1d Donchian levels to 1d timeframe (no shift needed as we're already on 1d)
-    donchian_high_20_aligned = donchian_high_20  # Already aligned to 1d
-    donchian_low_20_aligned = donchian_low_20
-    donchian_mid_10_aligned = donchian_mid_10
+    # Camarilla levels:
+    # H3 = C + RANGE * 1.1/4
+    # L3 = C - RANGE * 1.1/4
+    h3_1d = close_1d + range_1d * 1.1 / 4
+    l3_1d = close_1d - range_1d * 1.1 / 4
     
-    # Get 1w data for trend filter (weekly EMA200)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
-        # Fallback: use 1d EMA50 if 1w not enough data
-        ema_trend = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-        ema_trend_aligned = ema_trend
-    else:
-        close_1w = df_1w['close'].values
-        ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-        ema_trend_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # Align 1d Camarilla levels to 6h (wait for completed 1d bar)
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     
-    # Volume confirmation: >1.3x 20-period average
+    # 1d EMA50 for trend filter
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Volume confirmation: >1.3x 20-period average (to reduce false signals)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -60,28 +61,27 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]) or 
-            np.isnan(donchian_mid_10_aligned[i]) or np.isnan(volume_spike[i]) or
-            np.isnan(ema_trend_aligned[i])):
+        if (np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
         vol_confirm = volume_spike[i]
         
-        # Trend filter: only long in weekly uptrend, only short in weekly downtrend
-        long_trend_ok = close[i] > ema_trend_aligned[i]
-        short_trend_ok = close[i] < ema_trend_aligned[i]
+        # Trend filter: only long if price > 1d EMA50, only short if price < 1d EMA50
+        long_trend_ok = close[i] > ema_1d_aligned[i]
+        short_trend_ok = close[i] < ema_1d_aligned[i]
         
-        # Entry logic: Donchian breakout + volume + trend
-        long_entry = (close[i] > donchian_high_20_aligned[i]) and vol_confirm and long_trend_ok
-        short_entry = (close[i] < donchian_low_20_aligned[i]) and vol_confirm and short_trend_ok
+        # Entry logic: Camarilla breakout + volume + trend
+        long_entry = (close[i] > h3_1d_aligned[i]) and vol_confirm and long_trend_ok
+        short_entry = (close[i] < l3_1d_aligned[i]) and vol_confirm and short_trend_ok
         
-        # Exit logic: return to 10-period midpoint or volume dry-up
-        long_exit = (close[i] < donchian_mid_10_aligned[i]) or not vol_confirm
-        short_exit = (close[i] > donchian_mid_10_aligned[i]) or not vol_confirm
+        # Exit logic: return to pivot (mean reversion)
+        long_exit = close[i] < pivot_1d_aligned[i]
+        short_exit = close[i] > pivot_1d_aligned[i]
         
         if long_entry and position != 1:
             position = 1
@@ -106,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_donchian_breakout_weekly_trend_volume_v1"
-timeframe = "1d"
+name = "6h_1d_camarilla_breakout_volume_trend_v1"
+timeframe = "6h"
 leverage = 1.0
