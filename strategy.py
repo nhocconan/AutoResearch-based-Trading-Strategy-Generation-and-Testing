@@ -8,17 +8,16 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and 1d trend filter
-    # Long: price breaks above H3 level + volume > 1.3x 20-period average + 1d close > 1d EMA50
-    # Short: price breaks below L3 level + volume > 1.3x 20-period average + 1d close < 1d EMA50
-    # Uses discrete sizing (0.25) to minimize fee drag and ATR-based stoploss
-    # Target: 12-37 trades/year to stay within 12h optimal range
+    # Hypothesis: 4h Camarilla breakout with 1d volume confirmation and 1d EMA trend filter
+    # Long: price breaks above H3 + volume > 1.5x 20-period 1d avg volume + 1d close > 1d EMA50
+    # Short: price breaks below L3 + volume > 1.5x 20-period 1d avg volume + 1d close < 1d EMA50
+    # Uses ATR-based stoploss and discrete sizing (0.25) to minimize fee drag
+    # Target: 20-50 trades/year to stay within 4h optimal range and avoid overtrading
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time']
     
     # Get 1d data for Camarilla pivots, volume confirmation, and trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -45,7 +44,7 @@ def generate_signals(prices):
     # Calculate 1d EMA50 for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align all indicators to 12h timeframe
+    # Align all indicators to 4h timeframe
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
@@ -58,8 +57,8 @@ def generate_signals(prices):
     # Track entry price for stoploss
     entry_price = np.full(n, np.nan)
     
-    # Calculate ATR using true range approximation for 12h timeframe
-    atr_12h = np.zeros(n)
+    # Calculate ATR using true range approximation for 4h timeframe
+    atr_4h = np.zeros(n)
     for i in range(1, n):
         tr = max(
             high[i] - low[i],
@@ -67,9 +66,9 @@ def generate_signals(prices):
             abs(low[i] - close[i-1])
         )
         if i < 14:
-            atr_12h[i] = tr  # Simple average for warmup
+            atr_4h[i] = tr  # Simple average for warmup
         else:
-            atr_12h[i] = 0.93 * atr_12h[i-1] + 0.07 * tr  # Wilder's smoothing
+            atr_4h[i] = 0.93 * atr_4h[i-1] + 0.07 * tr  # Wilder's smoothing
     
     for i in range(50, n):
         # Skip if data not ready
@@ -80,15 +79,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.3x 20-period average
-        # Note: Using 12h volume directly for confirmation (more responsive)
-        vol_avg_20_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        if np.isnan(vol_avg_20_12h[i]):
-            signals[i] = 0.0
-            continue
-        volume_confirmed = volume[i] > 1.3 * vol_avg_20_12h[i]
+        # Volume confirmation: current 4h volume > 1.5x 20-period 1d average volume
+        # Using 1d volume average as more stable reference for institutional interest
+        volume_confirmed = volume[i] > 1.5 * vol_avg_20_1d_aligned[i]
         
-        # Trend filter: 12h close above/below EMA50
+        # Trend filter: 1d EMA50 direction
         uptrend = close[i] > ema_50_1d_aligned[i]
         downtrend = close[i] < ema_50_1d_aligned[i]
         
@@ -97,8 +92,8 @@ def generate_signals(prices):
         breakout_short = (close[i] < l3_aligned[i]) and volume_confirmed and downtrend
         
         # Stoploss: 2x ATR below/above entry
-        exit_long = position == 1 and not np.isnan(entry_price[i-1]) and close[i] < entry_price[i-1] - 2.0 * atr_12h[i]
-        exit_short = position == -1 and not np.isnan(entry_price[i-1]) and close[i] > entry_price[i-1] + 2.0 * atr_12h[i]
+        exit_long = position == 1 and not np.isnan(entry_price[i-1]) and close[i] < entry_price[i-1] - 2.0 * atr_4h[i]
+        exit_short = position == -1 and not np.isnan(entry_price[i-1]) and close[i] > entry_price[i-1] + 2.0 * atr_4h[i]
         
         # Execute signals
         if breakout_long and position != 1:
@@ -131,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_camarilla_volume_trend_v2"
-timeframe = "12h"
+name = "4h_1d_camarilla_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
