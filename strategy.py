@@ -8,56 +8,56 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h strategy using 1d Camarilla pivot levels with volume confirmation
-    # Camarilla pivots identify intraday support/resistance where reversals often occur.
-    # Volume spike confirms institutional interest at these levels.
-    # Works in both bull/bear markets as pivots adapt to recent price action.
-    # Discrete sizing (0.25) minimizes fee drag. Target: 12-37 trades/year.
+    # Hypothesis: 4h strategy using 1h RSI extremes with 12h EMA trend filter and volume confirmation
+    # Works in both bull and bear: RSI < 30 for long, > 70 for short captures mean reversion,
+    # 12h EMA > price for longs, < price for shorts ensures trend alignment,
+    # volume confirmation ensures momentum. Discrete sizing (0.25) minimizes fee drag.
+    # Target: 20-40 trades/year to stay within 4h optimal range.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values if 'volume' in prices.columns else np.ones(len(prices))
     
-    # Get 1d data for Camarilla pivots and volume
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1h data for RSI (primary HTF for reversal signals)
+    df_1h = get_htf_data(prices, '1h')
+    if len(df_1h) < 14:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values if 'volume' in df_1d.columns else np.ones(len(df_1d))
+    close_1h = df_1h['close'].values
+    high_1h = df_1h['high'].values
+    low_1h = df_1h['low'].values
     
-    # Calculate 1d Camarilla pivot levels (based on previous day)
-    # Pivot = (H + L + C) / 3
-    # R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4), R2 = C + ((H-L) * 1.1/6), R1 = C + ((H-L) * 1.1/12)
-    # S1 = C - ((H-L) * 1.1/12), S2 = C - ((H-L) * 1.1/6), S3 = C - ((H-L) * 1.1/4), S4 = C - ((H-L) * 1.1/2)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r4_1d = close_1d + (range_1d * 1.1 / 2)
-    r3_1d = close_1d + (range_1d * 1.1 / 4)
-    r2_1d = close_1d + (range_1d * 1.1 / 6)
-    r1_1d = close_1d + (range_1d * 1.1 / 12)
-    s1_1d = close_1d - (range_1d * 1.1 / 12)
-    s2_1d = close_1d - (range_1d * 1.1 / 6)
-    s3_1d = close_1d - (range_1d * 1.1 / 4)
-    s4_1d = close_1d - (range_1d * 1.1 / 2)
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
     
-    # Get 1d volume average for confirmation (20-period)
-    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    close_12h = df_12h['close'].values
     
-    # Align all HTF indicators to 12h primary timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    # Get 1h volume for confirmation (20-period average)
+    volume_1h = df_1h['volume'].values if 'volume' in df_1h.columns else np.ones(len(df_1h))
+    
+    # Calculate 1h RSI (14-period)
+    delta = pd.Series(close_1h).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values  # neutral when undefined
+    
+    # Calculate 12h EMA (50-period)
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Get 1h volume average (20-period)
+    vol_avg_20_1h = pd.Series(volume_1h).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all HTF indicators to 4h primary timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1h, rsi)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    vol_avg_20_1h_aligned = align_htf_to_ltf(prices, df_1h, vol_avg_20_1h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,39 +66,32 @@ def generate_signals(prices):
     # Track entry price for stoploss
     entry_price = np.full(n, np.nan)
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(pivot_1d_aligned[i]) or 
-            np.isnan(r1_1d_aligned[i]) or
-            np.isnan(s1_1d_aligned[i]) or
-            np.isnan(vol_avg_20_1d_aligned[i])):
+        if (np.isnan(rsi_aligned[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or
+            np.isnan(vol_avg_20_1h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 2.0x 20-period average
-        idx_1d = i // (24 * 2)  # 1d bars in 12h timeframe (2 bars per day)
-        if idx_1d >= len(volume_1d):
+        # Volume confirmation: current 1h volume > 1.5x 20-period average
+        idx_1h = i // 3  # 1h bars in 4h timeframe (3 bars per 4h)
+        if idx_1h >= len(volume_1h):
             signals[i] = 0.0
             continue
-        volume_confirmed = volume_1d[idx_1d] > 2.0 * vol_avg_20_1d_aligned[i]
+        volume_confirmed = volume_1h[idx_1h] > 1.5 * vol_avg_20_1h_aligned[i]
         
-        # Entry conditions: price touches Camarilla levels with volume
-        # Long at S1/S2 with volume, Short at R1/R2 with volume
-        price = close[i]
-        touch_s1 = abs(price - s1_1d_aligned[i]) / s1_1d_aligned[i] < 0.001  # 0.1% tolerance
-        touch_s2 = abs(price - s2_1d_aligned[i]) / s2_1d_aligned[i] < 0.001
-        touch_r1 = abs(price - r1_1d_aligned[i]) / r1_1d_aligned[i] < 0.001
-        touch_r2 = abs(price - r2_1d_aligned[i]) / r2_1d_aligned[i] < 0.001
+        # Trend filter: price relative to 12h EMA
+        price_above_ema = close[i] > ema_50_12h_aligned[i]
+        price_below_ema = close[i] < ema_50_12h_aligned[i]
         
-        enter_long = (touch_s1 or touch_s2) and volume_confirmed
-        enter_short = (touch_r1 or touch_r2) and volume_confirmed
+        # Entry conditions: RSI extremes + trend alignment + volume
+        enter_long = (rsi_aligned[i] < 30) and price_above_ema and volume_confirmed
+        enter_short = (rsi_aligned[i] > 70) and price_below_ema and volume_confirmed
         
-        # Stoploss: 1.5x ATR based on 1d range
-        if idx_1d < len(high_1d) and idx_1d < len(low_1d):
-            daily_range = high_1d[idx_1d] - low_1d[idx_1d]
-            stop_distance = daily_range * 0.75  # 75% of daily range
-        else:
-            stop_distance = 0
+        # Stoploss: 2x ATR based on 1h true range (simplified using hourly range)
+        hourly_range = high_1h[idx_1h] - low_1h[idx_1h] if idx_1h < len(high_1h) else 0
+        stop_distance = hourly_range * 1.5  # 150% of hourly range
         
         exit_long = position == 1 and not np.isnan(entry_price[i-1]) and close[i] < entry_price[i-1] - stop_distance
         exit_short = position == -1 and not np.isnan(entry_price[i-1]) and close[i] > entry_price[i-1] + stop_distance
@@ -134,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_camarilla_pivot_volume_v1"
-timeframe = "12h"
+name = "4h_1h_12h_rsi_extreme_ema_volume_v1"
+timeframe = "4h"
 leverage = 1.0
