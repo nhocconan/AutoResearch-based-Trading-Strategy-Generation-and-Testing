@@ -3,113 +3,104 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h TRIX momentum with 1d volume spike confirmation and 1w trend filter.
-# Long: TRIX crosses above zero + 1d volume > 2x 20-day avg + price above 1w EMA200
-# Short: TRIX crosses below zero + 1d volume > 2x 20-day avg + price below 1w EMA200
-# TRIX (12,26,9) captures momentum shifts; volume spike confirms institutional interest;
-# 1w EMA200 filters for primary trend alignment. Works in bull/bear by requiring trend alignment.
-# Target: 80-160 total trades over 4 years (20-40/year) for 4h timeframe.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d trend filter and volume confirmation.
+# Bull Power = High - EMA13, Bear Power = EMA13 - Low (EMA13 on 6h)
+# Trend filter: 1d EMA50 - only go long when price > EMA50, short when price < EMA50
+# Volume confirmation: current volume > 1.3x average volume (20-period)
+# Elder Ray identifies institutional buying/selling pressure
+# EMA50 trend filter ensures we trade with higher timeframe trend
+# Volume confirmation reduces false signals
+# Works in bull markets (strong Bull Power) and bear markets (strong Bear Power)
+# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-day data for volume spike
+    # 6h EMA13 for Elder Ray
+    ema13 = np.full(n, np.nan)
+    if len(close) >= 13:
+        close_series = pd.Series(close)
+        ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).values
+    
+    # 6h Bull Power and Bear Power
+    bull_power = high - ema13
+    bear_power = ema13 - low
+    
+    # 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    volume_1d = df_1d['volume'].values
-    avg_volume_1d = np.full(len(volume_1d), np.nan)
-    for i in range(20, len(volume_1d)):
-        avg_volume_1d[i] = np.mean(volume_1d[i-20:i])
-    volume_spike = volume_1d > (2.0 * avg_volume_1d)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
+    close_1d = df_1d['close'].values
     
-    # 1-week data for EMA200 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 210:
-        return np.zeros(n)
+    # 1d EMA50 for trend filter
+    ema50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        close_1d_series = pd.Series(close_1d)
+        ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).values
     
-    close_1w = df_1w['close'].values
-    ema_200_1w = np.full(len(close_1w), np.nan)
-    for i in range(200, len(close_1w)):
-        ema_200_1w[i] = np.mean(close_1w[i-200:i])  # Simple MA for EMA200 approximation
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # Align 1d EMA50 to 6h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # TRIX (12,26,9) on 4h close
-    ema1 = np.full(n, np.nan)
-    ema2 = np.full(n, np.nan)
-    ema3 = np.full(n, np.nan)
-    for i in range(12, n):
-        if i == 12:
-            ema1[i] = np.mean(close[0:12])
-        else:
-            ema1[i] = (close[i] * 2/(12+1)) + (ema1[i-1] * (1 - 2/(12+1)))
-    for i in range(26, n):
-        if i == 26:
-            ema2[i] = np.mean(ema1[0:26])
-        else:
-            ema2[i] = (ema1[i] * 2/(26+1)) + (ema2[i-1] * (1 - 2/(26+1)))
-    for i in range(9, n):
-        if i == 9:
-            ema3[i] = np.mean(ema2[0:9])
-        else:
-            ema3[i] = (ema2[i] * 2/(9+1)) + (ema3[i-1] * (1 - 2/(9+1)))
-    trix = np.full(n, np.nan)
-    for i in range(1, n):
-        if not np.isnan(ema3[i]) and not np.isnan(ema3[i-1]) and ema3[i-1] != 0:
-            trix[i] = (ema3[i] - ema3[i-1]) / ema3[i-1] * 100
+    # Average volume (20-period = 20*6h = 5 days) for volume confirmation
+    avg_volume = np.full(n, np.nan)
+    if len(volume) >= 20:
+        volume_series = pd.Series(volume)
+        avg_volume = volume_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(1, n):
+    for i in range(20, n):
         # Skip if any required data is not ready
-        if (np.isnan(trix[i]) or np.isnan(trix[i-1]) or 
-            np.isnan(volume_spike_aligned[i]) or 
-            np.isnan(ema_200_1w_aligned[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        trix_now = trix[i]
-        trix_prev = trix[i-1]
-        vol_spike = volume_spike_aligned[i]
-        ema200 = ema_200_1w_aligned[i]
+        vol = volume[i]
+        avg_vol = avg_volume[i]
+        ema50 = ema50_1d_aligned[i]
+        
+        # Volume confirmation: current volume > 1.3x average volume
+        volume_confirm = vol > 1.3 * avg_vol
         
         if position == 0:
-            # Long: TRIX crosses above zero + volume spike + price above weekly EMA200
-            if (trix_prev <= 0 and trix_now > 0 and 
-                vol_spike and 
-                price > ema200):
+            # Long: Bull Power > 0 (buying pressure) + above EMA50 + volume confirmation
+            if (bull_power[i] > 0 and 
+                price > ema50 and
+                volume_confirm):
                 position = 1
                 signals[i] = position_size
-            # Short: TRIX crosses below zero + volume spike + price below weekly EMA200
-            elif (trix_prev >= 0 and trix_now < 0 and 
-                  vol_spike and 
-                  price < ema200):
+            # Short: Bear Power > 0 (selling pressure) + below EMA50 + volume confirmation
+            elif (bear_power[i] > 0 and 
+                  price < ema50 and
+                  volume_confirm):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: TRIX crosses below zero or price below weekly EMA200
-            if (trix_now < 0 or
-                price < ema200):
+            # Exit long: Bear Power > 0 (selling pressure takes over) or below EMA50
+            if (bear_power[i] > 0 or
+                price < ema50):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: TRIX crosses above zero or price above weekly EMA200
-            if (trix_now > 0 or
-                price > ema200):
+            # Exit short: Bull Power > 0 (buying pressure takes over) or above EMA50
+            if (bull_power[i] > 0 or
+                price > ema50):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -117,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1w_TRIX_Volume_Spike"
-timeframe = "4h"
+name = "6h_1d_ElderRay_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
