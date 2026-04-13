@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_1w_KAMA_RSI_Trend_Filter_v3
-Hypothesis: On daily timeframe, use KAMA to determine trend direction, RSI(2) for mean-reversion entries within the trend, and weekly trend filter to avoid counter-trend trades. KAMA adapts to market noise, reducing false signals in chop. RSI(2) captures short-term reversals in trending markets. Weekly trend ensures alignment with higher-timeframe momentum. Designed for low trade frequency (<20/year) to minimize fee drag in both bull and bear markets.
+12h_1d_Camarilla_Pullback_Reversal
+Hypothesis: Trade reversions from Camarilla pivot levels on 12h timeframe with 1d trend filter and volume confirmation.
+In ranging markets (2025-2026), price often reverts to mean after touching S3/R3 levels.
+In trending markets, pullbacks to S4/R4 with 1d trend alignment offer high-probability entries.
+Volume spike confirms institutional interest at these key levels.
+Target: 15-25 trades/year to minimize fee drag while capturing mean reversion and trend pullbacks.
 """
 
 import numpy as np
@@ -10,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,75 +22,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA trend indicator on daily
+    # Get daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.abs(np.subtract(close_1d[1:], close_1d[:-1]))
-    volatility = np.append(volatility, 0)  # same length
-    er = np.zeros_like(close_1d, dtype=np.float64)
-    for i in range(len(close_1d)):
-        if i >= 9:
-            direction = np.abs(close_1d[i] - close_1d[i-9])
-            volatility_sum = np.sum(volatility[i-9:i+1])
-            er[i] = direction / volatility_sum if volatility_sum != 0 else 0
-        else:
-            er[i] = 0
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)
-    slow_sc = 2 / (30 + 1)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    # KAMA calculation
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
-    # RSI(2) on daily for entry signals
-    rsi_period = 2
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=rsi_period, min_periods=rsi_period).mean().values
-    avg_loss = pd.Series(loss).rolling(window=rsi_period, min_periods=rsi_period).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Calculate Camarilla levels from previous day
+    # Typical = (H+L+C)/3
+    typical = (high_1d + low_1d + close_1d) / 3.0
+    range_hl = high_1d - low_1d
     
-    # Weekly trend filter: price above/below weekly EMA20
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 20:
-        return np.zeros(n)
+    # Camarilla levels
+    S1 = close_1d - (range_hl * 1.1 / 12)
+    S2 = close_1d - (range_hl * 1.1 / 6)
+    S3 = close_1d - (range_hl * 1.1 / 4)
+    S4 = close_1d - (range_hl * 1.1 / 2)
+    R1 = close_1d + (range_hl * 1.1 / 12)
+    R2 = close_1d + (range_hl * 1.1 / 6)
+    R3 = close_1d + (range_hl * 1.1 / 4)
+    R4 = close_1d + (range_hl * 1.1 / 2)
     
-    close_weekly = df_weekly['close'].values
-    ema_20_weekly = pd.Series(close_weekly).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_20_weekly)
+    # Align Camarilla levels to 12h
+    S1_12h = align_htf_to_ltf(prices, df_1d, S1)
+    S2_12h = align_htf_to_ltf(prices, df_1d, S2)
+    S3_12h = align_htf_to_ltf(prices, df_1d, S3)
+    S4_12h = align_htf_to_ltf(prices, df_1d, S4)
+    R1_12h = align_htf_to_ltf(prices, df_1d, R1)
+    R2_12h = align_htf_to_ltf(prices, df_1d, R2)
+    R3_12h = align_htf_to_ltf(prices, df_1d, R3)
+    R4_12h = align_htf_to_ltf(prices, df_1d, R4)
+    
+    # 1d EMA50 trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volume_expansion = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.25  # 25% position size
+    position_size = 0.25
     
-    for i in range(30, n):  # start after warmup
+    for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(ema_20_weekly_aligned[i])):
+        if (np.isnan(S3_12h[i]) or np.isnan(R3_12h[i]) or np.isnan(S4_12h[i]) or 
+            np.isnan(R4_12h[i]) or np.isnan(ema_50_12h[i]) or np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend direction from KAMA
-        uptrend = close[i] > kama_aligned[i]
-        downtrend = close[i] < kama_aligned[i]
+        # Long: price touches S3/S4 with volume expansion and above daily EMA50 (bullish bias)
+        long_condition = volume_expansion[i] and (close[i] <= S3_12h[i] or close[i] <= S4_12h[i]) and (close[i] > ema_50_12h[i])
         
-        # Long: in uptrend, RSI(2) oversold (<10), price above weekly EMA20
-        long_condition = uptrend and (rsi_aligned[i] < 10) and (close[i] > ema_20_weekly_aligned[i])
-        
-        # Short: in downtrend, RSI(2) overbought (>90), price below weekly EMA20
-        short_condition = downtrend and (rsi_aligned[i] > 90) and (close[i] < ema_20_weekly_aligned[i])
+        # Short: price touches R3/R4 with volume expansion and below daily EMA50 (bearish bias)
+        short_condition = volume_expansion[i] and (close[i] >= R3_12h[i] or close[i] >= R4_12h[i]) and (close[i] < ema_50_12h[i])
         
         if long_condition and position != 1:
             position = 1
@@ -100,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_KAMA_RSI_Trend_Filter_v3"
-timeframe = "1d"
+name = "12h_1d_Camarilla_Pullback_Reversal"
+timeframe = "12h"
 leverage = 1.0
