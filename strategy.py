@@ -1,4 +1,9 @@
-#!/usr/bin/env python3
+# 4h_1d_camarilla_breakout_vol_filter
+# Hypothesis: Camarilla pivot levels on 1d act as strong support/resistance in both bull and bear markets.
+# Price touching L3 (bullish) or H3 (bearish) with volume confirmation provides high-probability entries.
+# Volume filter reduces false breakouts. Trend filter (price vs 200-period EMA) avoids counter-trend trades.
+# Target: 20-40 trades/year per symbol with ~60% win rate. Works in trends (breakouts) and ranges (mean reversion at extremes).
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -13,7 +18,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for HTF calculations
+    # Get 1d data for Camarilla levels and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -21,30 +26,44 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 14-period ATR on 1d for volatility
-    high_low = high_1d - low_1d
-    high_close = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    low_close = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    atr_14 = np.full(len(tr), np.nan)
-    for i in range(14, len(tr)):
-        atr_14[i] = np.mean(tr[i-14:i])
+    # Calculate Camarilla levels for each 1d bar (using previous day's range)
+    camarilla_h3 = np.full(len(close_1d), np.nan)
+    camarilla_l3 = np.full(len(close_1d), np.nan)
+    camarilla_h4 = np.full(len(close_1d), np.nan)
+    camarilla_l4 = np.full(len(close_1d), np.nan)
     
-    # Calculate 20-period EMA on 1d (trend filter)
+    for i in range(1, len(close_1d)):
+        # Previous day's range
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        range_val = prev_high - prev_low
+        
+        if range_val <= 0:
+            continue
+            
+        camarilla_h3[i] = prev_close + 1.1 * range_val / 6
+        camarilla_l3[i] = prev_close - 1.1 * range_val / 6
+        camarilla_h4[i] = prev_close + 1.1 * range_val / 2
+        camarilla_l4[i] = prev_close - 1.1 * range_val / 2
+    
+    # Calculate 200-period EMA on 1d for trend filter
     close_1d_series = pd.Series(close_1d)
-    ema_20_1d = close_1d_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_200_1d = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate volume ratio (current vs 20-period average)
-    volume_1d_series = pd.Series(volume_1d)
-    vol_ma_20 = volume_1d_series.rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.divide(volume_1d, vol_ma_20, out=np.full_like(volume_1d, np.nan), where=vol_ma_20!=0)
+    # Calculate 20-period volume average for volume filter
+    volume_20 = np.full(len(volume), np.nan)
+    for i in range(20, len(volume)):
+        volume_20[i] = np.mean(volume[i-20:i])
     
-    # Align indicators to 6h timeframe
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
-    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
+    # Align indicators to 4h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    volume_20_aligned = align_htf_to_ltf(prices, df_1d, volume_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -52,29 +71,30 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(atr_14_aligned[i]) or 
-            np.isnan(ema_20_aligned[i]) or 
-            np.isnan(vol_ratio_aligned[i])):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
+            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
+            np.isnan(ema_200_aligned[i]) or np.isnan(volume_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below EMA20
-        above_ema = close[i] > ema_20_aligned[i]
-        below_ema = close[i] < ema_20_aligned[i]
+        # Volume filter: current volume > 20-period average
+        vol_filter = volume[i] > volume_20_aligned[i]
         
-        # Volatility filter: ATR > 0.5 * price (avoid choppy markets)
-        vol_filter = atr_14_aligned[i] > 0.005 * close[i]
+        # Trend filter: price above/below 200 EMA
+        above_ema = close[i] > ema_200_aligned[i]
+        below_ema = close[i] < ema_200_aligned[i]
         
-        # Volume filter: volume > 1.5 * average
-        vol_confirm = vol_ratio_aligned[i] > 1.5
+        # Camarilla touch conditions
+        touch_h3 = high[i] >= h3_aligned[i] and low[i] <= h3_aligned[i]  # price touched H3
+        touch_l3 = high[i] >= l3_aligned[i] and low[i] <= l3_aligned[i]  # price touched L3
         
-        # Entry conditions: trend + volatility + volume
-        long_entry = above_ema and vol_filter and vol_confirm
-        short_entry = below_ema and vol_filter and vol_confirm
+        # Entry conditions
+        long_entry = touch_l3 and above_ema and vol_filter  # bullish touch in uptrend
+        short_entry = touch_h3 and below_ema and vol_filter  # bearish touch in downtrend
         
-        # Exit conditions: trend reversal or volatility collapse
-        exit_long = position == 1 and (below_ema or not vol_filter)
-        exit_short = position == -1 and (above_ema or not vol_filter)
+        # Exit conditions: opposite touch or mean reversion to center
+        exit_long = position == 1 and (touch_h3 or close[i] >= (h3_aligned[i] + l3_aligned[i]) / 2)
+        exit_short = position == -1 and (touch_l3 or close[i] <= (h3_aligned[i] + l3_aligned[i]) / 2)
         
         # Execute signals
         if long_entry and position != 1:
@@ -97,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_ema20_vol_filter"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_vol_filter"
+timeframe = "4h"
 leverage = 1.0
