@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_1w_Breakout_Trend_Volume_Strategy
-Hypothesis: Daily breakouts of 10-day high/low filtered by weekly EMA trend and volume expansion.
-Captures strong trending moves in both bull and bear markets. Low trade frequency to avoid fee drag.
-Target: 15-25 trades/year per symbol.
+12h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation
+Hypothesis: Daily Camarilla pivot levels act as strong support/resistance. 
+Breakout above H3 or below L3 with volume > 1.5x 20-period average triggers trend continuation.
+Trades only in trending markets (14-period ADX > 25) to avoid whipsaws in ranging markets.
+Position size: 0.25. Target: 15-25 trades/year per symbol.
+Works in bull markets via breakouts above H3 and in bear markets via breakdowns below L3.
 """
 
 import numpy as np
@@ -20,50 +22,81 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # True Range and ATR for stop loss
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[0], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate ADX for trend filter (14-period)
+    def calculate_adx(high, low, close, window=14):
+        # True Range
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.concatenate([[0], np.maximum(tr1, np.maximum(tr2, tr3))])
+        
+        # Directional Movement
+        dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                           np.maximum(high[1:] - high[:-1], 0), 0)
+        dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                            np.maximum(low[:-1] - low[1:], 0), 0)
+        dm_plus = np.concatenate([[0], dm_plus])
+        dm_minus = np.concatenate([[0], dm_minus])
+        
+        # Smoothed values
+        tr_sum = pd.Series(tr).rolling(window=window, min_periods=window).sum()
+        dm_plus_sum = pd.Series(dm_plus).rolling(window=window, min_periods=window).sum()
+        dm_minus_sum = pd.Series(dm_minus).rolling(window=window, min_periods=window).sum()
+        
+        # Directional Indicators
+        plus_di = 100 * dm_plus_sum / tr_sum
+        minus_di = 100 * dm_minus_sum / tr_sum
+        
+        # DX and ADX
+        dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
+        adx = pd.Series(dx).rolling(window=window, min_periods=window).mean()
+        return adx.fillna(0).values
     
-    # Daily breakout levels: 10-day high/low
-    high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
-    low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
+    adx = calculate_adx(high, low, close, 14)
     
-    # Volume confirmation: current volume > 1.3x 20-day average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_expansion = volume > (vol_ma_20 * 1.3)
+    # Daily Camarilla pivot levels (using previous day's OHLC)
+    prev_close = np.roll(close, 1)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close[0] = np.nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
     
-    # Weekly EMA trend filter (using 1w data)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
-        ema21_1w = np.full(len(prices), np.nan)
-    else:
-        close_1w = df_1w['close'].values
-        ema21_1w_raw = pd.Series(close_1w).ewm(span=21, min_periods=21, adjust=False).mean().values
-        ema21_1w = align_htf_to_ltf(prices, df_1w, ema21_1w_raw)
+    # Camarilla levels
+    range_val = prev_high - prev_low
+    h3 = prev_close + range_val * 1.1 / 4
+    l3 = prev_close - range_val * 1.1 / 4
+    h4 = prev_close + range_val * 1.1 / 2
+    l4 = prev_close - range_val * 1.1 / 2
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volume_expansion = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(30, n):  # warmup period
+    for i in range(50, n):  # warmup period
         # Skip if any required data is not ready
-        if (np.isnan(high_10[i]) or np.isnan(low_10[i]) or 
-            np.isnan(ema21_1w[i]) or np.isnan(volume_expansion[i])):
+        if (np.isnan(prev_close[i]) or np.isnan(prev_high[i]) or np.isnan(prev_low[i]) or 
+            np.isnan(h3[i]) or np.isnan(l3[i]) or np.isnan(adx[i]) or 
+            np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Long signal: break above 10-day high with volume expansion and weekly uptrend
-        long_signal = (high[i] > high_10[i] and 
-                      volume_expansion[i] and 
-                      close[i] > ema21_1w[i])
+        # Trend filter: only trade when ADX > 25 (trending market)
+        is_trending = adx[i] > 25
         
-        # Short signal: break below 10-day low with volume expansion and weekly downtrend
-        short_signal = (low[i] < low_10[i] and 
+        # Long signal: break above H3 with volume expansion and trending market
+        long_signal = (high[i] > h3[i] and 
+                      volume_expansion[i] and 
+                      is_trending)
+        
+        # Short signal: break below L3 with volume expansion and trending market
+        short_signal = (low[i] < l3[i] and 
                        volume_expansion[i] and 
-                       close[i] < ema21_1w[i])
+                       is_trending)
         
         if long_signal and position != 1:
             position = 1
@@ -77,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_Breakout_Trend_Volume_Strategy"
-timeframe = "1d"
+name = "12h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation"
+timeframe = "12h"
 leverage = 1.0
