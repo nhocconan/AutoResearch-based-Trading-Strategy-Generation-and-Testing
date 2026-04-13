@@ -1,31 +1,24 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Breakout_Trend_Filter
-Hypothesis: Breakout above R3 or below S3 on 12h chart with 1d trend filter (price above/below 200 EMA) 
-and volume confirmation. Works in bull via breakouts above resistance, bear via breakouts below support.
-Volume ensures institutional participation. Target: 15-30 trades/year per symbol.
+4h_12h_Combined_Trend_Breakout
+Hypothesis: 4h Donchian breakout with 12h trend filter (HMA21) and volume confirmation.
+Works in bull markets via breakouts above upper band and in bear markets via breakdowns below lower band.
+Volume ensures institutional participation. Target: 25-35 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels."""
-    range_val = high - low
-    range_val = np.where(range_val == 0, 1e-10, range_val)
-    C = close
-    H = high
-    L = low
-    R1 = C + ((H - L) * 1.0833)
-    R2 = C + ((H - L) * 1.1666)
-    R3 = C + ((H - L) * 1.2500)
-    R4 = C + ((H - L) * 1.5000)
-    S1 = C - ((H - L) * 1.0833)
-    S2 = C - ((H - L) * 1.1666)
-    S3 = C - ((H - L) * 1.2500)
-    S4 = C - ((H - L) * 1.5000)
-    return R1, R2, R3, R4, S1, S2, S3, S4
+def calculate_hma(arr, period):
+    """Calculate Hull Moving Average."""
+    half = period // 2
+    sqrt = int(np.sqrt(period))
+    wma2 = pd.Series(arr).ewm(span=half, adjust=False).mean()
+    wma1 = pd.Series(arr).ewm(span=period, adjust=False).mean()
+    raw = 2 * wma2 - wma1
+    hma = pd.Series(raw).ewm(span=sqrt, adjust=False).mean()
+    return hma.values
 
 def generate_signals(prices):
     n = len(prices)
@@ -37,28 +30,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 4h data for Donchian channels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # 1d trend filter: price above/below 200 EMA
-    ema_200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    uptrend = close_1d > ema_200
-    downtrend = close_1d < ema_200
+    # 4h Donchian channels (20-period)
+    high_max = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Camarilla levels on daily
-    R1_1d, R2_1d, R3_1d, R4_1d, S1_1d, S2_1d, S3_1d, S4_1d = calculate_camarilla(high_1d, low_1d, close_1d)
+    # Get 12h data for trend filter (HMA21)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 21:
+        return np.zeros(n)
     
-    # Align all data to 12h timeframe
-    R3_1d_aligned = align_htf_to_ltf(prices, df_1d, R3_1d)
-    S3_1d_aligned = align_htf_to_ltf(prices, df_1d, S3_1d)
-    uptrend_aligned = align_htf_to_ltf(prices, df_1d, uptrend.astype(float))
-    downtrend_aligned = align_htf_to_ltf(prices, df_1d, downtrend.astype(float))
+    hma_21 = calculate_hma(close_12h, 21)
+    hma_21_prev = np.roll(hma_21, 1)
+    hma_21_prev[0] = hma_21[0]
+    uptrend = hma_21 > hma_21_prev
+    downtrend = hma_21 < hma_21_prev
+    
+    # Align all data to 4h timeframe
+    high_max_aligned = align_htf_to_ltf(prices, df_4h, high_max)
+    low_min_aligned = align_htf_to_ltf(prices, df_4h, low_min)
+    uptrend_aligned = align_htf_to_ltf(prices, df_12h, uptrend.astype(float))
+    downtrend_aligned = align_htf_to_ltf(prices, df_12h, downtrend.astype(float))
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -70,17 +70,17 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(R3_1d_aligned[i]) or np.isnan(S3_1d_aligned[i]) or 
+        if (np.isnan(high_max_aligned[i]) or np.isnan(low_min_aligned[i]) or 
             np.isnan(uptrend_aligned[i]) or np.isnan(downtrend_aligned[i]) or
             np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Long: breakout above R3 in uptrend with volume expansion
-        long_condition = (high[i] > R3_1d_aligned[i]) and uptrend_aligned[i] > 0.5 and volume_expansion[i]
+        # Long: breakout above upper Donchian in uptrend with volume expansion
+        long_condition = (close[i] > high_max_aligned[i]) and uptrend_aligned[i] > 0.5 and volume_expansion[i]
         
-        # Short: breakdown below S3 in downtrend with volume expansion
-        short_condition = (low[i] < S3_1d_aligned[i]) and downtrend_aligned[i] > 0.5 and volume_expansion[i]
+        # Short: breakdown below lower Donchian in downtrend with volume expansion
+        short_condition = (close[i] < low_min_aligned[i]) and downtrend_aligned[i] > 0.5 and volume_expansion[i]
         
         if long_condition and position != 1:
             position = 1
@@ -105,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_Breakout_Trend_Filter"
-timeframe = "12h"
+name = "4h_12h_Combined_Trend_Breakout"
+timeframe = "4h"
 leverage = 1.0
