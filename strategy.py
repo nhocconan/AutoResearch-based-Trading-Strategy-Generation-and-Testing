@@ -8,31 +8,35 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and ATR-based sizing.
-    # Uses 1d Camarilla levels (H3/L3) as breakout thresholds, confirmed by 4h volume spike.
-    # ATR-based position sizing scales with volatility. Discrete sizes (0.0, ±0.25) minimize fee churn.
-    # Target: 75-200 trades over 4 years (19-50/year) with Sharpe > 0 on BTC/ETH/SOL.
+    # Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and ATR-based position sizing.
+    # Camarilla levels act as intraday support/resistance with statistical significance.
+    # Breakout above H3 or below L3 with volume confirmation captures institutional moves.
+    # Works in both bull and bear markets by trading breakouts in direction of trend.
+    # Uses discrete position sizes (0.0, ±0.25) to minimize fee churn.
+    # Target: 50-150 total trades over 4 years (12-37/year).
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and ATR (call ONCE before loop)
+    # Get 1d data for Camarilla pivot calculation (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla levels (H3, L3, H4, L4)
+    # Calculate 1d ATR(14) for volatility scaling and stoploss
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range for ATR
+    # True Range components
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = tr2[0] = tr3[0] = 0
+    tr1[0] = 0  # First period has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
     # ATR(14) using Wilder's smoothing
@@ -41,28 +45,38 @@ def generate_signals(prices):
     for i in range(14, len(tr)):
         atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # Camarilla levels: based on previous day's range
-    camarilla_h3 = np.zeros_like(close_1d)
-    camarilla_l3 = np.zeros_like(close_1d)
-    camarilla_h4 = np.zeros_like(close_1d)
-    camarilla_l4 = np.zeros_like(close_1d)
-    
-    for i in range(1, len(close_1d)):
-        # Previous day's range
-        range_ = high_1d[i-1] - low_1d[i-1]
-        camarilla_h3[i] = close_1d[i-1] + range_ * 1.1 / 4
-        camarilla_l3[i] = close_1d[i-1] - range_ * 1.1 / 4
-        camarilla_h4[i] = close_1d[i-1] + range_ * 1.1 / 2
-        camarilla_l4[i] = close_1d[i-1] - range_ * 1.1 / 2
-    
-    # Align 1d indicators to 4h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # Align 1d ATR to 12h timeframe
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate 4h volume MA(20) for confirmation
+    # Calculate 1d Camarilla pivot levels (based on previous day)
+    # Pivot = (H + L + C) / 3
+    # H3 = Pivot + 1.1 * (H - L) / 2
+    # L3 = Pivot - 1.1 * (H - L) / 2
+    # H4 = Pivot + 1.1 * (H - L)
+    # L4 = Pivot - 1.1 * (H - L)
+    
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    
+    # First day has no previous data
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
+    
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    camarilla_h3 = pivot + 1.1 * (prev_high - prev_low) / 2.0
+    camarilla_l3 = pivot - 1.1 * (prev_high - prev_low) / 2.0
+    camarilla_h4 = pivot + 1.1 * (prev_high - prev_low)
+    camarilla_l4 = pivot - 1.1 * (prev_high - prev_low)
+    
+    # Align Camarilla levels to 12h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    
+    # Calculate 12h volume MA(20) for confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -70,31 +84,32 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
             np.isnan(volume_ma[i]) or np.isnan(atr_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5 * 20-period MA
-        volume_filter = volume[i] > 1.5 * volume_ma[i]
+        # Volume filter: current volume > 1.3 * 20-period MA
+        volume_filter = volume[i] > 1.3 * volume_ma[i]
         
-        # Breakout conditions: price breaks Camarilla H3/L3 with volume
-        long_breakout = close[i] > camarilla_h3_aligned[i]
-        short_breakout = close[i] < camarilla_l3_aligned[i]
+        # Breakout conditions: price breaks above H3 or below L3
+        long_breakout = close[i] > h3_aligned[i]
+        short_breakout = close[i] < l3_aligned[i]
         
         # Dynamic position size based on volatility (ATR/price ratio)
+        # Normalize ATR ratio to target size 0.25, max 0.30
         atr_ratio = atr_1d_aligned[i] / close[i]
         base_size = 0.25
-        vol_scaled_size = base_size * (atr_ratio / 0.01)  # Normalize to 1% ATR/price
+        vol_scaled_size = base_size * (atr_ratio / 0.015)  # Normalize to 1.5% ATR/price
         position_size = np.clip(vol_scaled_size, 0.0, 0.30)
         
         # Entry conditions: breakout with volume confirmation
         long_entry = long_breakout and volume_filter
         short_entry = short_breakout and volume_filter
         
-        # Exit conditions: opposite breakout at H4/L4 levels (wider bands)
-        long_exit = close[i] < camarilla_l4_aligned[i]  # Reverse below L4
-        short_exit = close[i] > camarilla_h4_aligned[i]  # Reverse above H4
+        # Exit conditions: opposite breakout or price reaches H4/L4
+        long_exit = short_breakout or (close[i] >= h4_aligned[i])
+        short_exit = long_breakout or (close[i] <= l4_aligned[i])
         
         if long_entry and position != 1:
             position = 1
@@ -119,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_camarilla_breakout_volume_atr_size_v1"
-timeframe = "4h"
+name = "12h_1d_camarilla_breakout_volume_atr_size_v1"
+timeframe = "12h"
 leverage = 1.0
