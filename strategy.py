@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_1d_Camarilla_Breakout
-Hypothesis: Trade breakouts from 1d Camarilla pivot levels (R4/S4) on 6h timeframe with volume confirmation.
-Uses 1d Camarilla levels as strong support/resistance that institutions respect. Works in bull (breakouts above R4)
-and bear (breakdowns below S4) markets. Volume filter ensures institutional participation. Target: 15-25 trades/year.
+12h_1d_Camarilla_Breakout
+Hypothesis: Trade breakouts from 1d Camarilla pivot levels (H4/L4) on 12h timeframe with volume confirmation.
+Uses 1d Camarilla levels as strong support/resistance that institutions respect. Works in bull (breakouts above H4)
+and bear (breakdowns below L4) markets. Volume filter ensures institutional participation. Target: 20-30 trades/year.
 """
 
 import numpy as np
@@ -49,7 +49,7 @@ def generate_signals(prices):
     # Calculate 1d Camarilla levels
     R1_1d, R2_1d, R3_1d, R4_1d, S1_1d, S2_1d, S3_1d, S4_1d = calculate_camarilla(high_1d, low_1d, close_1d)
     
-    # Align all data to 6h timeframe
+    # Align all data to 12h timeframe
     R4_1d_aligned = align_htf_to_ltf(prices, df_1d, R4_1d)
     S4_1d_aligned = align_htf_to_ltf(prices, df_1d, S4_1d)
     
@@ -86,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Camarilla_Breakout"
-timeframe = "6h"
+name = "12h_1d_Camarilla_Breakout"
+timeframe = "12h"
 leverage = 1.0
