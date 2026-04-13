@@ -8,110 +8,126 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1h strategy using 4h/1d confluence for direction and 1h for timing.
-    # Long when: price > 4h EMA50 AND price > 1d EMA200 AND RSI(14) > 50 (bullish bias)
-    # Short when: price < 4h EMA50 AND price < 1d EMA200 AND RSI(14) < 50 (bearish bias)
-    # Exit: reverse signal or RSI extremes (RSI>70 for long exit, RSI<30 for short exit)
-    # Session filter: 08-20 UTC to reduce noise.
-    # Discrete sizing: 0.20 to limit drawdown and fee churn.
-    # Target: 15-37 trades/year (60-150 over 4 years) via strict HTF alignment.
+    # Hypothesis: 6h Donchian(20) breakout with 1w ADX regime filter and volume confirmation
+    # Long: price breaks above upper band AND 1w ADX > 25 (strong trend) AND volume > 2.0x avg
+    # Short: price breaks below lower band AND 1w ADX > 25 (strong trend) AND volume > 2.0x avg
+    # Exit: price retests breakout level (middle of channel) or opposite band touch
+    # Using 6h timeframe for optimal trade frequency (target 12-37/year), Donchian for structure,
+    # 1w ADX to filter ranging markets, and volume confirmation to avoid false breakouts.
+    # Discrete position sizing (0.25) to minimize fee churn.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly data for ADX regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Get 1d data for longer-term trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Calculate weekly ADX(14) for trend strength filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 4h EMA(50) for trend direction
-    close_4h = df_4h['close'].values
-    ema_4h_50 = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_50_aligned = align_htf_to_ltf(prices, df_4h, ema_4h_50)
+    # True Range
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Calculate 1d EMA(200) for long-term trend
-    close_1d = df_1d['close'].values
-    ema_1d_200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_1d_200_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_200)
+    # Directional Movement
+    up_move = high_1w[1:] - high_1w[:-1]
+    down_move = low_1w[:-1] - low_1w[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
     
-    # Calculate 1h RSI(14) for momentum and exit signals
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing for RSI
+    # Wilder's smoothing
     def wilders_smoothing(data, period):
         result = np.full_like(data, np.nan)
         if len(data) < period:
             return result
+        # First value is simple average
         result[period-1] = np.nanmean(data[1:period])
+        # Subsequent values: smoothed = (prev * (period-1) + current) / period
         for i in range(period, len(data)):
             if not np.isnan(result[i-1]) and not np.isnan(data[i]):
                 result[i] = (result[i-1] * (period-1) + data[i]) / period
         return result
     
-    avg_gain = wilders_smoothing(gain, 14)
-    avg_loss = wilders_smoothing(loss, 14)
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    tr14 = wilders_smoothing(tr, 14)
+    plus_dm14 = wilders_smoothing(plus_dm, 14)
+    minus_dm14 = wilders_smoothing(minus_dm, 14)
+    
+    # DI+ and DI-
+    plus_di14 = np.where(tr14 != 0, (plus_dm14 / tr14) * 100, 0)
+    minus_di14 = np.where(tr14 != 0, (minus_dm14 / tr14) * 100, 0)
+    
+    # DX and ADX
+    dx = np.where((plus_di14 + minus_di14) != 0, 
+                  np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14) * 100, 0)
+    adx = wilders_smoothing(dx, 14)
+    
+    # Align weekly ADX to 6h
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Calculate 6h Donchian channels (20-period)
+    # Upper band = highest high over past 20 periods
+    # Lower band = lowest low over past 20 periods
+    upper_band = np.full(n, np.nan)
+    lower_band = np.full(n, np.nan)
+    middle_band = np.full(n, np.nan)
+    
+    for i in range(20, n):
+        upper_band[i] = np.max(high[i-20:i])
+        lower_band[i] = np.min(low[i-20:i])
+        middle_band[i] = (upper_band[i] + lower_band[i]) / 2.0
+    
+    # Get 6h volume for confirmation (>2.0x 20-period average)
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Pre-compute session hours for efficiency
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    
     for i in range(100, n):
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            if position == 1:
-                signals[i] = 0.0
-                position = 0
-            elif position == -1:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Skip if HTF data not ready
-        if (np.isnan(ema_4h_50_aligned[i]) or np.isnan(ema_1d_200_aligned[i]) or 
-            np.isnan(rsi[i])):
+        # Skip if data not ready
+        if (np.isnan(adx_1w_aligned[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Trend alignment: both 4h and 1d EMAs must agree
-        bullish_align = (close[i] > ema_4h_50_aligned[i]) and (close[i] > ema_1d_200_aligned[i])
-        bearish_align = (close[i] < ema_4h_50_aligned[i]) and (close[i] < ema_1d_200_aligned[i])
+        # Regime filter: ADX > 25 indicates strong trending market
+        strong_trend = adx_1w_aligned[i] > 25
         
-        # RSI conditions
-        rsi_bullish = rsi[i] > 50
-        rsi_bearish = rsi[i] < 50
-        rsi_overbought = rsi[i] > 70  # Exit long
-        rsi_oversold = rsi[i] < 30    # Exit short
+        # Donchian breakout conditions
+        breakout_upper = close[i] > upper_band[i]
+        breakout_lower = close[i] < lower_band[i]
         
-        # Entry logic
-        long_entry = bullish_align and rsi_bullish
-        short_entry = bearish_align and rsi_bearish
+        # Exit conditions: retest middle band or touch opposite band
+        retest_middle = (abs(close[i] - middle_band[i]) < (upper_band[i] - lower_band[i]) * 0.1)  # within 10% of middle
+        touch_lower = close[i] < lower_band[i]  # Exit long on lower band touch
+        touch_upper = close[i] > upper_band[i]  # Exit short on upper band touch
         
-        # Exit logic
-        long_exit = not bullish_align or rsi_overbought
-        short_exit = not bearish_align or rsi_oversold
+        # Entry logic: Donchian breakout + strong trend + volume confirmation
+        long_entry = breakout_upper and strong_trend and volume_spike[i]
+        short_entry = breakout_lower and strong_trend and volume_spike[i]
+        
+        # Exit logic: middle band retest or opposite band touch
+        long_exit = retest_middle or touch_lower
+        short_exit = retest_middle or touch_upper
         
         if long_entry and position != 1:
             position = 1
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif short_entry and position != -1:
             position = -1
-            signals[i] = -0.20
+            signals[i] = -0.25
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -121,14 +137,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1h_4h_1d_ema_rsi_confluence_session_v1"
-timeframe = "1h"
+name = "6h_1w_donchian_breakout_adx_volume_v1"
+timeframe = "6h"
 leverage = 1.0
