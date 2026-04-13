@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h KAMA trend with RSI momentum filter and volume confirmation.
-# KAMA adapts to market efficiency, reducing whipsaws in ranging markets.
-# RSI ensures momentum alignment with trend direction.
-# Volume confirmation filters low-conviction moves.
-# Designed for 12h timeframe to capture multi-day trends in both bull and bear markets.
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+# Hypothesis: 4h Camarilla pivot levels with volume spike and ADX trend filter.
+# Camarilla levels provide precise support/resistance for reversals.
+# Volume spikes confirm participation at key levels.
+# ADX ensures trades align with prevailing trend to avoid chop.
+# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,118 +19,125 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for multi-timeframe analysis
+    # Daily data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate KAMA ( Kaufman Adaptive Moving Average ) - 12h
-    def kama(price, er_length=10, fast=2, slow=30):
-        change = np.abs(np.diff(price, n=10))  # 10-period net change
-        volatility = np.sum(np.abs(np.diff(price)), axis=1)  # 10-period volatility
-        er = np.where(volatility != 0, change / volatility, 0)
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        kama = np.full_like(price, np.nan)
-        kama[0] = price[0]
-        for i in range(1, len(price)):
-            kama[i] = kama[i-1] + sc[i] * (price[i] - kama[i-1])
-        return kama
+    # Calculate previous day's Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    kama_vals = kama(close, er_length=10, fast=2, slow=30)
+    camarilla_h4 = np.zeros(len(close_1d))  # Resistance level
+    camarilla_l4 = np.zeros(len(close_1d))  # Support level
     
-    # Calculate RSI (14-period) - 12h
-    def rsi(price, period=14):
-        delta = np.diff(price)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.zeros_like(price)
-        avg_loss = np.zeros_like(price)
-        avg_gain[period] = np.mean(gain[:period])
-        avg_loss[period] = np.mean(loss[:period])
-        for i in range(period+1, len(price)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+    for i in range(1, len(close_1d)):
+        range_1d = high_1d[i-1] - low_1d[i-1]
+        camarilla_h4[i] = close_1d[i-1] + range_1d * 1.1 / 2
+        camarilla_l4[i] = close_1d[i-1] - range_1d * 1.1 / 2
     
-    rsi_vals = rsi(close, period=14)
+    # Align Camarilla levels to 4h
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
-    # Calculate average volume (20-period) - 12h
+    # Calculate ADX (14-period) for trend strength
+    period = 14
+    tr = np.zeros(n)
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        plus_dm[i] = max(high[i] - high[i-1], 0)
+        minus_dm[i] = max(low[i-1] - low[i], 0)
+        if plus_dm[i] == minus_dm[i]:
+            plus_dm[i] = 0
+            minus_dm[i] = 0
+        elif plus_dm[i] < minus_dm[i]:
+            plus_dm[i] = 0
+        else:
+            minus_dm[i] = 0
+    
+    atr = np.zeros(n)
+    for i in range(period, n):
+        atr[i] = np.mean(tr[i-period+1:i+1])
+    
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
+    dx = np.zeros(n)
+    adx = np.zeros(n)
+    
+    for i in range(period*2, n):
+        plus_dm_ma = np.mean(plus_dm[i-period+1:i+1])
+        minus_dm_ma = np.mean(minus_dm[i-period+1:i+1])
+        atr_ma = atr[i]
+        if atr_ma > 0:
+            plus_di[i] = 100 * plus_dm_ma / atr_ma
+            minus_di[i] = 100 * minus_dm_ma / atr_ma
+            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+    
+    for i in range(period*3, n):
+        adx[i] = np.mean(dx[i-period+1:i+1])
+    
+    # Calculate average volume (20-period) for volume spike
     avg_volume = np.zeros(n)
     for i in range(20, n):
         avg_volume[i] = np.mean(volume[i-20:i])
-    
-    # Align daily RSI for trend filter
-    close_1d = df_1d['close'].values
-    def rsi_1d(price, period=14):
-        delta = np.diff(price)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.zeros_like(price)
-        avg_loss = np.zeros_like(price)
-        avg_gain[period] = np.mean(gain[:period])
-        avg_loss[period] = np.mean(loss[:period])
-        for i in range(period+1, len(price)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
-    
-    rsi_1d_vals = rsi_1d(close_1d, period=14)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d_vals)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(kama_vals[i]) or np.isnan(rsi_vals[i]) or 
-            np.isnan(avg_volume[i]) or np.isnan(rsi_1d_aligned[i])):
+        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
+            np.isnan(adx[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        kama_val = kama_vals[i]
-        rsi_val = rsi_vals[i]
-        daily_rsi = rsi_1d_aligned[i]
+        camarilla_h4_val = camarilla_h4_aligned[i]
+        camarilla_l4_val = camarilla_l4_aligned[i]
+        adx_val = adx[i]
         
-        # Volume confirmation: current volume > 1.3x average volume
-        volume_confirm = vol > 1.3 * avg_vol
+        # Volume spike: current volume > 2x average volume
+        volume_spike = vol > 2.0 * avg_vol
+        
+        # ADX filter: trend strength > 25
+        trend_filter = adx_val > 25
         
         if position == 0:
-            # Long: price above KAMA + RSI > 50 + daily RSI > 50 + volume confirmation
-            if (price > kama_val and 
-                rsi_val > 50 and 
-                daily_rsi > 50 and
-                volume_confirm):
+            # Long: price touches Camarilla L4 support + volume spike + uptrend
+            if (abs(price - camarilla_l4_val) < 0.001 * camarilla_l4_val and  # Within 0.1%
+                volume_spike and
+                trend_filter and
+                price > camarilla_h4_val):  # Price above resistance for confirmation
                 position = 1
                 signals[i] = position_size
-            # Short: price below KAMA + RSI < 50 + daily RSI < 50 + volume confirmation
-            elif (price < kama_val and 
-                  rsi_val < 50 and 
-                  daily_rsi < 50 and
-                  volume_confirm):
+            # Short: price touches Camarilla H4 resistance + volume spike + downtrend
+            elif (abs(price - camarilla_h4_val) < 0.001 * camarilla_h4_val and  # Within 0.1%
+                  volume_spike and
+                  trend_filter and
+                  price < camarilla_l4_val):  # Price below support for confirmation
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price below KAMA OR RSI < 40
-            if (price < kama_val or 
-                rsi_val < 40):
+            # Exit long: price reaches Camarilla H4 resistance or volume drops
+            if (price >= camarilla_h4_val or 
+                vol < 0.5 * avg_vol):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price above KAMA OR RSI > 60
-            if (price > kama_val or 
-                rsi_val > 60):
+            # Exit short: price reaches Camarilla L4 support or volume drops
+            if (price <= camarilla_l4_val or 
+                vol < 0.5 * avg_vol):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -139,6 +145,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_KAMA_RSI_Volume_Filter_v1"
-timeframe = "12h"
+name = "4h_1d_Camarilla_Pivot_Volume_Spike_Trend_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
