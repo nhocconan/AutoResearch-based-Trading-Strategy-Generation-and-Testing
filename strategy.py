@@ -3,110 +3,79 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h timeframe with 1d RSI momentum and volume confirmation.
-# Long: RSI(14) > 60 on 1d + price > 20-period SMA on 4h + volume > 1.5x average volume.
-# Short: RSI(14) < 40 on 1d + price < 20-period SMA on 4h + volume > 1.5x average volume.
-# Uses 1d RSI for momentum bias and 4h SMA for trend filter. Volume confirms strength.
-# Target: 50-150 total trades over 4 years (12-37/year) for 4h timeframe.
-# Works in bull (momentum continuation) and bear (mean reversion at extremes).
+# Hypothesis: 1d timeframe with 1week trend filter using weekly moving average.
+# Long: Price crosses above 10-day SMA + weekly close > weekly SMA(10) (bullish trend filter).
+# Short: Price crosses below 10-day SMA + weekly close < weekly SMA(10) (bearish trend filter).
+# Uses daily price action for entry with weekly trend filter to avoid counter-trend trades.
+# Position size: 0.25 (25%) to manage drawdown in volatile markets.
+# Target: 15-30 trades per year (60-120 over 4 years) for low frequency, high quality signals.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # 1d data for RSI
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # 10-day SMA for daily entry signal
+    sma_10 = np.full(n, np.nan)
+    for i in range(10, n):
+        sma_10[i] = np.mean(close[i-10:i])
+    
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    weekly_close = df_1w['close'].values
+    # Weekly SMA(10) for trend filter
+    weekly_sma_10 = np.full(len(weekly_close), np.nan)
+    for i in range(10, len(weekly_close)):
+        weekly_sma_10[i] = np.mean(weekly_close[i-10:i])
     
-    # Calculate RSI(14) on 1d
-    delta = np.diff(close_1d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.full(len(close_1d), np.nan)
-    avg_loss = np.full(len(close_1d), np.nan)
-    
-    # Initialize first average
-    if len(gain) >= 14:
-        avg_gain[13] = np.mean(gain[:14])
-        avg_loss[13] = np.mean(loss[:14])
-        
-        # Wilder smoothing
-        for i in range(14, len(close_1d)):
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
-    
-    rsi_1d = np.full(len(close_1d), np.nan)
-    for i in range(14, len(close_1d)):
-        if avg_loss[i] != 0:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi_1d[i] = 100 - (100 / (1 + rs))
-        else:
-            rsi_1d[i] = 100
-    
-    # 4h SMA(20) for trend filter
-    sma_20 = np.full(n, np.nan)
-    for i in range(20, n):
-        sma_20[i] = np.mean(close[i-20:i])
-    
-    # Average volume (20-period) for volume confirmation
-    avg_volume = np.full(n, np.nan)
-    for i in range(20, n):
-        avg_volume[i] = np.mean(volume[i-20:i])
-    
-    # Align 1d RSI to 4h
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Align weekly SMA to daily
+    weekly_sma_10_aligned = align_htf_to_ltf(prices, df_1w, weekly_sma_10)
+    weekly_close_aligned = align_htf_to_ltf(prices, df_1w, weekly_close)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(20, n):
+    for i in range(10, n):
         # Skip if any required data is not ready
-        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(sma_20[i]) or 
-            np.isnan(avg_volume[i])):
+        if (np.isnan(sma_10[i]) or np.isnan(weekly_sma_10_aligned[i]) or 
+            np.isnan(weekly_close_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol = volume[i]
-        sma = sma_20[i]
-        rsi = rsi_1d_aligned[i]
-        avg_vol = avg_volume[i]
-        
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirm = vol > 1.5 * avg_vol
+        sma = sma_10[i]
+        weekly_sma = weekly_sma_10_aligned[i]
+        weekly_price = weekly_close_aligned[i]
         
         if position == 0:
-            # Long: RSI > 60 (bullish momentum) + price > SMA + volume confirmation
-            if (rsi > 60 and price > sma and volume_confirm):
+            # Long: price crosses above daily SMA(10) + weekly close > weekly SMA(10)
+            if (price > sma and weekly_price > weekly_sma):
                 position = 1
                 signals[i] = position_size
-            # Short: RSI < 40 (bearish momentum) + price < SMA + volume confirmation
-            elif (rsi < 40 and price < sma and volume_confirm):
+            # Short: price crosses below daily SMA(10) + weekly close < weekly SMA(10)
+            elif (price < sma and weekly_price < weekly_sma):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI < 50 (momentum fading) or price < SMA
-            if (rsi < 50 or price < sma):
+            # Exit long: price closes below daily SMA(10)
+            if price < sma:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: RSI > 50 (momentum fading) or price > SMA
-            if (rsi > 50 or price > sma):
+            # Exit short: price closes above daily SMA(10)
+            if price > sma:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -114,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_RSI_Momentum_Volume"
-timeframe = "4h"
+name = "1d_1w_SMA10_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
