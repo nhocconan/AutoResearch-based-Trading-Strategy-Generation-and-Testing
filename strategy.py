@@ -8,7 +8,7 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h price breaking 1d Donchian channel (20) with volume spike (1.5x 20-bar mean) and ADX>25.
+    # Hypothesis: 4h price breaking 1d Donchian channel (20) with volume spike (2.0x 20-bar mean) and ADX>30.
     # Long on upper band breakout, short on lower band breakout. Exit on opposite band touch.
     # Uses discrete sizing (0.25) to minimize fee churn. Donchian provides objective structure,
     # volume confirms institutional participation, ADX filters choppy markets.
@@ -97,11 +97,11 @@ def generate_signals(prices):
         # Get current 1d volume (aligned)
         vol_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)
         
-        # Volume filter: current 1d volume > 1.5 * 20-period mean (volume spike)
-        volume_confirmation = vol_1d_aligned[i] > 1.5 * vol_ma_aligned[i]
+        # Volume filter: current 1d volume > 2.0 * 20-period mean (volume spike)
+        volume_confirmation = vol_1d_aligned[i] > 2.0 * vol_ma_aligned[i]
         
-        # ADX filter: trending market (ADX > 25)
-        trending_market = adx_aligned[i] > 25
+        # ADX filter: trending market (ADX > 30)
+        trending_market = adx_aligned[i] > 30
         
         # Entry conditions: price breaks Donchian bands with filters
         long_entry = (close[i] > donchian_upper_aligned[i] and 
@@ -138,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_breakout_volume_adx_v1"
+name = "4h_1d_donchian_breakout_volume_adx_v2"
 timeframe = "4h"
 leverage = 1.0
