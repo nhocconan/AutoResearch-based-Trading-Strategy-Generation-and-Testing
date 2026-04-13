@@ -8,13 +8,13 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d ADX trend filter and volume confirmation
-    # Long: Bull Power > 0 (close > EMA13) + ADX > 25 (trending) + volume > 1.5x 20-period average
-    # Short: Bear Power < 0 (close < EMA13) + ADX > 25 (trending) + volume > 1.5x 20-period average
-    # Exit: Elder Power crosses zero (mean reversion to EMA13)
+    # Hypothesis: 6h Williams %R with 1d ADX trend filter and volume confirmation
+    # Long: Williams %R < -80 (oversold) + ADX > 25 (trending) + volume > 1.5x 20-period average
+    # Short: Williams %R > -20 (overbought) + ADX > 25 (trending) + volume > 1.5x 20-period average
+    # Exit: Williams %R crosses back above -50 (for longs) or below -50 (for shorts)
     # Uses 6h primary timeframe for lower trade frequency vs 4h, suitable for 6h timeframe constraints
     # Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
-    # Elder Ray measures bull/bear power relative to EMA, effective in both bull and bear markets when combined with trend filter
+    # Williams %R is a momentum oscillator that works well in ranging markets when combined with trend filter
     
     close = prices['close'].values
     high = prices['high'].values
@@ -39,13 +39,13 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values if 'volume' in df_1d.columns else np.zeros(len(df_1d))
     
-    # Calculate EMA13 on 6h data for Elder Ray
-    close_series_6h = pd.Series(close_6h)
-    ema13 = close_series_6h.ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Calculate Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high_6h - ema13
-    bear_power = low_6h - ema13
+    # Calculate Williams %R on 6h data (14-period)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_6h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_6h).rolling(window=14, min_periods=14).min().values
+    williams_r = np.where((highest_high - lowest_low) != 0, 
+                          (highest_high - close_6h) / (highest_high - lowest_low) * -100, 
+                          -50)
     
     # Calculate 1d volume average (20-period)
     vol_avg_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
@@ -80,9 +80,7 @@ def generate_signals(prices):
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
     
     # Align all indicators to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_6h, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_6h, bear_power)
-    ema13_aligned = align_htf_to_ltf(prices, df_6h, ema13)
+    williams_r_aligned = align_htf_to_ltf(prices, df_6h, williams_r)
     vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
@@ -90,10 +88,10 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
     
-    for i in range(13, n):  # start from 13 to have enough data for EMA calculations
+    for i in range(14, n):  # start from 14 to have enough data for Williams %R calculations
         # Skip if data not ready
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(ema13_aligned[i]) or np.isnan(vol_avg_20_aligned[i]) or 
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(vol_avg_20_aligned[i]) or 
             np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
@@ -106,16 +104,16 @@ def generate_signals(prices):
         is_trending = adx_aligned[i] > 25
         
         # Entry conditions
-        enter_long = (bull_power_aligned[i] > 0 and 
+        enter_long = (williams_r_aligned[i] < -80 and 
                      volume_confirmed and 
                      is_trending)
-        enter_short = (bear_power_aligned[i] < 0 and 
+        enter_short = (williams_r_aligned[i] > -20 and 
                       volume_confirmed and 
                       is_trending)
         
-        # Exit conditions: Elder Power crosses zero (mean reversion to EMA13)
-        exit_long = position == 1 and bull_power_aligned[i] <= 0
-        exit_short = position == -1 and bear_power_aligned[i] >= 0
+        # Exit conditions: Williams %R crosses back above -50 (for longs) or below -50 (for shorts)
+        exit_long = position == 1 and williams_r_aligned[i] >= -50
+        exit_short = position == -1 and williams_r_aligned[i] <= -50
         
         # Execute signals
         if enter_long and position != 1:
@@ -141,6 +139,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_elder_ray_adx_volume_v1"
+name = "6h_1d_williams_r_adx_volume_v1"
 timeframe = "6h"
 leverage = 1.0
