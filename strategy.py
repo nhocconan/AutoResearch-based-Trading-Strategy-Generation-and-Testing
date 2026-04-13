@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-1h_4h_1d_Squeeze_Breakout_Volume
-Hypothesis: Combines Bollinger Band squeeze detection on 1d with breakout confirmation on 4h and precise entry on 1h.
-In low volatility (BB width < 20th percentile), waits for 4h close outside Bollinger Bands with volume > 1.5x 20-period average.
-Enters on 1h break of the 4h breakout candle's high/low with volume confirmation.
-Works in both bull and bear markets by trading volatility expansion after contraction.
-Target: 15-37 trades/year on 1h (60-150 total over 4 years).
+6h_1w_1d_Camarilla_Pivot_Breakout_Trend
+Hypothesis: Combines weekly trend bias from weekly close vs weekly open with Camarilla pivot breakouts on daily timeframe.
+In bullish weeks (weekly close > weekly open), we look for long breakouts above R3 on daily; in bearish weeks (weekly close < weekly open), we look for short breakdowns below S3.
+Uses volume confirmation to avoid false breakouts. Works in both bull and bear markets by adapting to weekly trend.
+Target: 12-37 trades/year on 6h (50-150 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,133 +21,94 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Bollinger Bands and squeeze detection
+    # Get weekly data for trend bias
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    weekly_open = df_1w['open'].values
+    weekly_close = df_1w['close'].values
+    weekly_bullish = weekly_close > weekly_open  # True for bullish week
+    
+    # Get daily data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    # Calculate Camarilla pivot levels from previous day
+    # Using typical price: (H + L + C) / 3
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    range_val = df_1d['high'] - df_1d['low']
     
-    # Calculate Bollinger Bands (20, 2.0) on daily
-    ma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean()
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std()
-    upper_bb = ma_20 + (2.0 * std_20)
-    lower_bb = ma_20 - (2.0 * std_20)
-    bb_width = upper_bb - lower_bb
+    # Camarilla levels
+    R3 = typical_price + 1.1 * range_val * 1.1 / 2
+    S3 = typical_price - 1.1 * range_val * 1.1 / 2
+    R4 = typical_price + 1.1 * range_val * 1.5
+    S4 = typical_price - 1.1 * range_val * 1.5
     
-    # Calculate 20-period percentile of BB width for squeeze detection (20th percentile)
-    bb_width_series = pd.Series(bb_width.values)
-    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
+    # Align weekly trend to 6h timeframe
+    weekly_bullish_aligned = align_ltf_to_htf(prices, df_1w, weekly_bullish)
     
-    # Squeeze condition: BB width < 20th percentile
-    squeeze = bb_width_percentile < 20.0
+    # Align daily Camarilla levels to 6h timeframe
+    R3_aligned = align_ltf_to_htf(prices, df_1d, R3.values)
+    S3_aligned = align_ltf_to_htf(prices, df_1d, S3.values)
+    R4_aligned = align_ltf_to_htf(prices, df_1d, R4.values)
+    S4_aligned = align_ltf_to_htf(prices, df_1d, S4.values)
     
-    # Get 4h data for breakout direction
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    volume_4h = df_4h['volume'].values
-    
-    # Calculate 4h Bollinger Bands (20, 2.0)
-    ma_20_4h = pd.Series(close_4h).rolling(window=20, min_periods=20).mean()
-    std_20_4h = pd.Series(close_4h).rolling(window=20, min_periods=20).std()
-    upper_bb_4h = ma_20_4h + (2.0 * std_20_4h)
-    lower_bb_4h = ma_20_4h - (2.0 * std_20_4h)
-    
-    # 4h breakout conditions: close outside BB with volume expansion
-    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean()
-    volume_expansion_4h = volume_4h > (vol_ma_20_4h * 1.5)
-    breakout_up = (close_4h > upper_bb_4h) & volume_expansion_4h
-    breakout_down = (close_4h < lower_bb_4h) & volume_expansion_4h
-    
-    # Align all signals to 1h timeframe
-    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze)
-    breakout_up_aligned = align_htf_to_ltf(prices, df_4h, breakout_up)
-    breakout_down_aligned = align_htf_to_ltf(prices, df_4h, breakout_down)
-    upper_bb_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_bb_4h.values)
-    lower_bb_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_bb_4h.values)
-    
-    # Session filter: 08:00-20:00 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_mask = (hours >= 8) & (hours <= 20)
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volume_expansion = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.20  # 20% of capital
-    
-    # Track breakout candle high/low for entry
-    breakout_high_level = np.zeros(n)
-    breakout_low_level = np.zeros(n)
+    position_size = 0.25  # 25% of capital
     
     for i in range(50, n):
-        # Skip if not in session or data not ready
-        if not session_mask[i] or \
-           np.isnan(squeeze_aligned[i]) or \
-           np.isnan(breakout_up_aligned[i]) or \
-           np.isnan(breakout_down_aligned[i]) or \
-           np.isnan(upper_bb_4h_aligned[i]) or \
-           np.isnan(lower_bb_4h_aligned[i]):
+        # Skip if data not ready
+        if (np.isnan(weekly_bullish_aligned[i]) or
+            np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or
+            np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Update breakout levels when new 4h breakout occurs
-        if breakout_up_aligned[i]:
-            breakout_high_level[i] = upper_bb_4h_aligned[i]
-            breakout_low_level[i] = breakout_low_level[i-1] if i > 0 else 0
-        elif breakout_down_aligned[i]:
-            breakout_low_level[i] = lower_bb_4h_aligned[i]
-            breakout_high_level[i] = breakout_high_level[i-1] if i > 0 else 0
-        else:
-            # Carry forward levels
-            breakout_high_level[i] = breakout_high_level[i-1] if i > 0 else 0
-            breakout_low_level[i] = breakout_low_level[i-1] if i > 0 else 0
+        # Weekly trend bias
+        is_bullish_week = weekly_bullish_aligned[i]
         
-        # Entry conditions: squeeze active and price breaks 4h breakout level with volume
-        if squeeze_aligned[i]:
-            # Volume confirmation on 1h
-            vol_ma_20_1h = pd.Series(volume[:i+1]).rolling(window=20, min_periods=20).mean().iloc[-1] if i >= 20 else 0
-            volume_expansion_1h = volume[i] > (vol_ma_20_1h * 1.5) if i >= 20 else False
-            
-            # Long entry: price breaks above 4h breakout high
-            if breakout_high_level[i] > 0 and close[i] > breakout_high_level[i] and volume_expansion_1h:
-                if position != 1:
-                    position = 1
-                    signals[i] = position_size
-                else:
-                    signals[i] = position_size
-            # Short entry: price breaks below 4h breakout low
-            elif breakout_low_level[i] > 0 and close[i] < breakout_low_level[i] and volume_expansion_1h:
-                if position != -1:
-                    position = -1
-                    signals[i] = -position_size
-                else:
-                    signals[i] = -position_size
-            # Hold or flat
-            elif position == 1:
-                signals[i] = position_size
-            elif position == -1:
-                signals[i] = -position_size
-            else:
-                signals[i] = 0.0
+        # Entry conditions
+        long_signal = False
+        short_signal = False
+        
+        if is_bullish_week:
+            # Bullish week: look for long breakouts above R3 with volume
+            if close[i] > R3_aligned[i] and volume_expansion[i]:
+                long_signal = True
         else:
-            # No squeeze - exit any position
-            if position != 0:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.0
+            # Bearish week: look for short breakdowns below S3 with volume
+            if close[i] < S3_aligned[i] and volume_expansion[i]:
+                short_signal = True
+        
+        # Exit conditions: reverse signal or loss of volume expansion
+        if position == 1 and (short_signal or not volume_expansion[i]):
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and (long_signal or not volume_expansion[i]):
+            position = 0
+            signals[i] = 0.0
+        elif position == 0 and long_signal:
+            position = 1
+            signals[i] = position_size
+        elif position == 0 and short_signal:
+            position = -1
+            signals[i] = -position_size
+        elif position == 1:
+            signals[i] = position_size
+        elif position == -1:
+            signals[i] = -position_size
+        else:
+            signals[i] = 0.0
     
     return signals
 
-name = "1h_4h_1d_Squeeze_Breakout_Volume"
-timeframe = "1h"
+name = "6h_1w_1d_Camarilla_Pivot_Breakout_Trend"
+timeframe = "6h"
 leverage = 1.0
