@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d CCI mean-reversion with weekly trend filter and volume confirmation.
-# CCI(14) identifies overbought/oversold conditions in ranging markets.
+# Hypothesis: 1d Williams %R mean-reversion with weekly trend filter and volume confirmation.
+# Williams %R identifies overbought/oversold conditions (-20 to -80 range).
 # Weekly trend filter ensures trades align with higher timeframe direction.
 # Volume confirmation avoids false signals in low liquidity.
-# Target: 10-25 trades per year (40-100 total over 4 years) for 1d timeframe.
+# Target: 15-30 trades per year (60-120 total over 4 years) for 1d timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,19 +24,18 @@ def generate_signals(prices):
     if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate daily CCI(14)
-    typical_price = (high + low + close) / 3.0
-    sma_tp = np.full(n, np.nan)
-    mad = np.full(n, np.nan)
+    # Calculate Williams %R(14)
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
     
     for i in range(14, n):
-        sma_tp[i] = np.mean(typical_price[i-14:i+1])
-        mad[i] = np.mean(np.abs(typical_price[i-14:i+1] - sma_tp[i]))
+        highest_high[i] = np.max(high[i-14:i+1])
+        lowest_low[i] = np.min(low[i-14:i+1])
     
-    cci = np.full(n, np.nan)
+    williams_r = np.full(n, np.nan)
     for i in range(14, n):
-        if mad[i] > 0:
-            cci[i] = (typical_price[i] - sma_tp[i]) / (0.015 * mad[i])
+        if highest_high[i] != lowest_low[i]:
+            williams_r[i] = (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i]) * -100
     
     # Calculate weekly EMA(20) for trend filter
     close_1w = df_1w['close'].values
@@ -59,28 +58,28 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is not ready
-        if (np.isnan(cci[i]) or np.isnan(ema_1w_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_1w_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        cci_val = cci[i]
+        wr = williams_r[i]
         weekly_ema = ema_1w_aligned[i]
         
         # Volume confirmation: current volume > 1.2x average volume
         volume_confirm = vol > 1.2 * avg_vol
         
         if position == 0:
-            # Long: CCI < -100 (oversold) + above weekly EMA + volume confirmation
-            if (cci_val < -100 and
+            # Long: Williams %R < -80 (oversold) + above weekly EMA + volume confirmation
+            if (wr < -80 and
                 price > weekly_ema and
                 volume_confirm):
                 position = 1
                 signals[i] = position_size
-            # Short: CCI > 100 (overbought) + below weekly EMA + volume confirmation
-            elif (cci_val > 100 and
+            # Short: Williams %R > -20 (overbought) + below weekly EMA + volume confirmation
+            elif (wr > -20 and
                   price < weekly_ema and
                   volume_confirm):
                 position = -1
@@ -88,17 +87,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: CCI > -100 (exit oversold) or CCI > 0 (return to neutral)
-            if (cci_val > -100 or
-                cci_val > 0):
+            # Exit long: Williams %R > -50 (return from oversold)
+            if wr > -50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: CCI < 100 (exit overbought) or CCI < 0 (return to neutral)
-            if (cci_val < 100 or
-                cci_val < 0):
+            # Exit short: Williams %R < -50 (return from overbought)
+            if wr < -50:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -106,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_CCI_MeanReversion_WeeklyTrend_Volume"
+name = "1d_WilliamsR_MeanReversion_WeeklyTrend_Volume"
 timeframe = "1d"
 leverage = 1.0
