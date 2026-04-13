@@ -8,13 +8,13 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with 1d volume spike (1.5x average) and ADX > 25 trend filter
-    # Long when price > upper Donchian + volume spike + ADX > 25
-    # Short when price < lower Donchian + volume spike + ADX > 25
-    # Exit when price crosses middle Donchian (mean) or ADX < 20
-    # Uses discrete position sizing (0.30) to minimize fee churn
-    # Target: 75-200 total trades over 4 years (~19-50/year)
-    # Donchian provides structure, volume confirms conviction, ADX filters ranging markets
+    # Hypothesis: 4h Donchian(20) breakout with 1d volume spike (2x average) and ADX > 30 trend filter
+    # Long when price > upper Donchian + volume spike + ADX > 30
+    # Short when price < lower Donchian + volume spike + ADX > 30
+    # Exit when price crosses middle Donchian (mean) or ADX < 25
+    # Uses discrete position sizing (0.25) to minimize fee churn
+    # Target: 75-150 total trades over 4 years (~19-38/year)
+    # Tighter volume (2x) and ADX (>30) filters reduce overtrading vs previous version
     
     close = prices['close'].values
     high = prices['high'].values
@@ -109,29 +109,29 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5 * 20-period average
+        # Volume confirmation: current 1d volume > 2.0 * 20-period average (tighter)
         vol_1d_current = df_1d['volume'].values
         vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d_current)
-        volume_confirm = vol_1d_aligned[i] > 1.5 * vol_ma_aligned[i]
+        volume_confirm = vol_1d_aligned[i] > 2.0 * vol_ma_aligned[i]
         
-        # ADX trend filter: strong trend (ADX > 25)
-        strong_trend = adx_aligned[i] > 25
+        # ADX trend filter: strong trend (ADX > 30 - tighter than 25)
+        strong_trend = adx_aligned[i] > 30
         
         # Breakout conditions
         bullish_breakout = close[i] > upper_aligned[i] and volume_confirm and strong_trend
         bearish_breakout = close[i] < lower_aligned[i] and volume_confirm and strong_trend
         
-        # Exit conditions: price returns to middle Donchian OR trend weakens (ADX < 20)
-        trend_weakening = adx_aligned[i] < 20
+        # Exit conditions: price returns to middle Donchian OR trend weakens (ADX < 25)
+        trend_weakening = adx_aligned[i] < 25
         long_exit = close[i] < middle_aligned[i] or trend_weakening or bearish_breakout
         short_exit = close[i] > middle_aligned[i] or trend_weakening or bullish_breakout
         
         if bullish_breakout and position != 1:
             position = 1
-            signals[i] = 0.30
+            signals[i] = 0.25
         elif bearish_breakout and position != -1:
             position = -1
-            signals[i] = -0.30
+            signals[i] = -0.25
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -141,14 +141,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_1d_donchian_breakout_volume_adx_v1"
+name = "4h_1d_donchian_breakout_volume_adx_v2"
 timeframe = "4h"
 leverage = 1.0
