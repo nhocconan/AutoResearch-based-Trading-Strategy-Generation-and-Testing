@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 250:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,12 +15,13 @@ def generate_signals(prices):
     
     # Get daily data for indicator calculations
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 100:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
     # Calculate daily ATR for volatility filtering
     tr_1d = np.maximum(
@@ -30,7 +31,7 @@ def generate_signals(prices):
             np.abs(low_1d - np.roll(close_1d, 1))
         )
     )
-    tr_1d[0] = high_1d[0] - low_1d[0]  # First value
+    tr_1d[0] = high_1d[0] - low_1d[0]
     atr_1d = np.zeros_like(tr_1d)
     for i in range(len(tr_1d)):
         if i < 14:
@@ -38,8 +39,8 @@ def generate_signals(prices):
         else:
             atr_1d[i] = 0.93 * atr_1d[i-1] + 0.07 * tr_1d[i]
     
-    # Calculate daily EMA200 for trend filter
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate daily EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Calculate daily RSI for momentum filter
     delta = np.diff(close_1d, prepend=close_1d[0])
@@ -57,14 +58,21 @@ def generate_signals(prices):
     rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
     rsi_1d = 100 - (100 / (1 + rs))
     
-    # Align indicators to daily timeframe (no additional shift needed)
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Calculate daily volume moving average
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align indicators to 12h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Calculate 20-day ATR multiple for volatility filter
-    atr_mult = 2.0
+    # Calculate volatility threshold
+    atr_mult = 1.5
     volatility_threshold = atr_1d_aligned * atr_mult
+    
+    # Calculate price change for volatility filter
+    price_change = np.abs(np.diff(close, prepend=close[0]))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -72,26 +80,29 @@ def generate_signals(prices):
     
     for i in range(200, n):
         # Skip if data not ready
-        if (np.isnan(ema_200_1d_aligned[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(rsi_1d_aligned[i]) or
-            np.isnan(volatility_threshold[i])):
+            np.isnan(volatility_threshold[i]) or
+            np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Price volatility filter: avoid choppy markets
-        price_change = np.abs(close[i] - close[i-1])
-        low_volatility = price_change < volatility_threshold[i]
+        low_volatility = price_change[i] < volatility_threshold[i]
         
         # Trend and momentum filters
-        uptrend = close[i] > ema_200_1d_aligned[i]
-        strong_momentum = rsi_1d_aligned[i] > 50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        strong_momentum = rsi_1d_aligned[i] > 55
         
-        downtrend = close[i] < ema_200_1d_aligned[i]
-        weak_momentum = rsi_1d_aligned[i] < 50
+        downtrend = close[i] < ema_50_1d_aligned[i]
+        weak_momentum = rsi_1d_aligned[i] < 45
+        
+        # Volume confirmation
+        volume_confirm = volume[i] > vol_ma_1d_aligned[i]
         
         # Entry conditions
-        long_entry = uptrend and strong_momentum and low_volatility
-        short_entry = downtrend and weak_momentum and low_volatility
+        long_entry = uptrend and strong_momentum and low_volatility and volume_confirm
+        short_entry = downtrend and weak_momentum and low_volatility and volume_confirm
         
         # Exit conditions: trend reversal
         exit_long = position == 1 and (not uptrend or not strong_momentum)
@@ -118,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_ema200_rsi_momentum_filter_v1"
-timeframe = "1d"
+name = "12h_ema50_rsi_vol_filter_v1"
+timeframe = "12h"
 leverage = 1.0
