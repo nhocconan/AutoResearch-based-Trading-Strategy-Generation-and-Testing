@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with volume confirmation and daily trend filter.
-# Uses breakouts of 4h Donchian channels (20-period) confirmed by volume > 1.5x average
-# and aligned with daily trend (price above/below daily SMA 50). Includes volatility filter
-# using ATR > 0.5 * ATR(50) to avoid low-volatility false breakouts.
-# Designed for 4h timeframe with target of 20-50 trades/year to minimize fee drag.
+# Hypothesis: 1d/1w Camarilla pivot bounce with volume confirmation and RSI filter.
+# Camarilla levels derived from prior day's range provide high-probability reversal points.
+# Weekly trend filter ensures alignment with higher timeframe momentum.
+# Volume confirmation avoids low-conviction bounces.
+# RSI filter avoids overbought/oversold extremes.
+# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,105 +20,121 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period) on 4h data
-    donch_period = 20
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    
-    for i in range(donch_period-1, n):
-        donchian_high[i] = np.max(high[i-donch_period+1:i+1])
-        donchian_low[i] = np.min(low[i-donch_period+1:i+1])
-    
-    # Calculate ATR (14-period) for volatility filter
-    atr_period = 14
-    tr = np.zeros(n)
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = np.zeros(n)
-    for i in range(atr_period, n):
-        atr[i] = np.mean(tr[i-atr_period+1:i+1])
-    
-    # ATR(50) for volatility regime filter
-    atr_long_period = 50
-    atr_long = np.zeros(n)
-    for i in range(atr_long_period, n):
-        atr_long[i] = np.mean(tr[i-atr_long_period+1:i+1])
-    
-    # Calculate average volume (20-period) for volume confirmation
-    vol_avg_period = 20
-    avg_volume = np.zeros(n)
-    for i in range(vol_avg_period, n):
-        avg_volume[i] = np.mean(volume[i-vol_avg_period:i])
-    
-    # Daily data for trend filter
+    # Daily data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    # Daily SMA 50 for trend filter
-    sma_1d = np.zeros(len(close_1d))
-    for i in range(50, len(close_1d)):
-        sma_1d[i] = np.mean(close_1d[i-50:i])
-    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d)
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    # Calculate weekly EMA(20) for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = np.zeros(len(close_1w))
+    for i in range(20, len(close_1w)):
+        ema_1w[i] = np.mean(close_1w[i-20:i])  # Simple average for clarity
+    ema_1w = pd.Series(ema_1w[~np.isnan(ema_1w)]).ewm(span=20, adjust=False).mean().values
+    ema_1w_full = np.full(len(close_1w), np.nan)
+    ema_1w_full[20:] = ema_1w
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_full)
+    
+    # Calculate RSI(14) for overbought/oversold filter
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    for i in range(14, n):
+        avg_gain[i] = np.mean(gain[i-14:i])
+        avg_loss[i] = np.mean(loss[i-14:i])
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Calculate average volume (20-period) for confirmation
+    avg_volume = np.zeros(n)
+    for i in range(20, n):
+        avg_volume[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(60, n):
+    for i in range(20, n):
         # Skip if any required data is not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(atr[i]) or np.isnan(atr_long[i]) or 
-            np.isnan(avg_volume[i]) or np.isnan(sma_1d_aligned[i])):
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        donch_high = donchian_high[i]
-        donch_low = donchian_low[i]
-        atr_val = atr[i]
-        atr_long_val = atr_long[i]
-        daily_sma = sma_1d_aligned[i]
+        rsi_val = rsi[i]
+        weekly_ema = ema_1w_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirm = vol > 1.5 * avg_vol
+        # Calculate Camarilla levels from previous day's data
+        if i < 1:
+            signals[i] = 0.0
+            continue
+            
+        # Get previous day's OHLC from daily data
+        prev_day_idx = len(df_1d) - 1
+        while prev_day_idx >= 0 and df_1d.iloc[prev_day_idx]['open_time'] >= prices.iloc[i]['open_time']:
+            prev_day_idx -= 1
         
-        # Volatility filter: ATR > 0.5 * ATR(50) to avoid low-volatility false breakouts
-        vol_filter = atr_val > 0.5 * atr_long_val
+        if prev_day_idx < 0:
+            signals[i] = 0.0
+            continue
+            
+        prev_high = df_1d.iloc[prev_day_idx]['high']
+        prev_low = df_1d.iloc[prev_day_idx]['low']
+        prev_close = df_1d.iloc[prev_day_idx]['close']
+        
+        # Camarilla levels
+        range_val = prev_high - prev_low
+        h4 = prev_close + range_val * 1.1 / 2
+        h3 = prev_close + range_val * 1.1 / 4
+        h2 = prev_close + range_val * 1.1 / 6
+        h1 = prev_close + range_val * 1.1 / 12
+        l1 = prev_close - range_val * 1.1 / 12
+        l2 = prev_close - range_val * 1.1 / 6
+        l3 = prev_close - range_val * 1.1 / 4
+        l4 = prev_close - range_val * 1.1 / 2
+        
+        # Volume confirmation: current volume > 1.2x average volume
+        volume_confirm = vol > 1.2 * avg_vol
         
         if position == 0:
-            # Long: price breaks above Donchian high + volume + price above daily SMA + vol filter
-            if (price > donch_high and 
+            # Long: price touches L3/L4 with rejection + volume + RSI not oversold + price above weekly EMA
+            if (price <= l3 and price > l4 and 
                 volume_confirm and 
-                vol_filter and
-                price > daily_sma):
+                rsi_val > 30 and 
+                price > weekly_ema):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below Donchian low + volume + price below daily SMA + vol filter
-            elif (price < donch_low and 
+            # Short: price touches H3/H4 with rejection + volume + RSI not overbought + price below weekly EMA
+            elif (price >= h3 and price < h4 and 
                   volume_confirm and 
-                  vol_filter and
-                  price < daily_sma):
+                  rsi_val < 70 and 
+                  price < weekly_ema):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below Donchian low OR volatility drops
-            if (price < donch_low or 
-                atr_val < 0.3 * atr_long_val):
+            # Exit long: price reaches H3 or RSI overbought
+            if (price >= h3 or 
+                rsi_val > 70):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above Donchian high OR volatility drops
-            if (price > donch_high or 
-                atr_val < 0.3 * atr_long_val):
+            # Exit short: price reaches L3 or RSI oversold
+            if (price <= l3 or 
+                rsi_val < 30):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -125,6 +142,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Donchian_Breakout_Volume_Volatility_Filter_v1"
-timeframe = "4h"
+name = "1d_1w_Camarilla_Pivot_Bounce_Volume_RSI_Filter_v1"
+timeframe = "1d"
 leverage = 1.0
