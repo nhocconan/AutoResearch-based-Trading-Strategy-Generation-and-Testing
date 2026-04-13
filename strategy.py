@@ -13,35 +13,33 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
+    # Daily data for Donchian channels and volume
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
     # Weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Daily data for support/resistance levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    # Calculate weekly EMA20 for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Calculate 10-day Donchian channel on daily for breakout levels
+    # Calculate 20-day Donchian channel on daily high/low
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    donchian_high = pd.Series(high_1d).rolling(window=10, min_periods=10).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=10, min_periods=10).min().values
+    # Calculate weekly EMA20 for trend filter
+    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate daily volume and its 20-period average for volume confirmation
+    # Calculate daily volume and its 20-period average
     volume_1d = df_1d['volume'].values
     volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all data to 12-hour timeframe
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Align all data to 4-hour timeframe
     donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
     signals = np.zeros(n)
@@ -50,15 +48,15 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is not ready
-        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(donchian_high_aligned[i]) or
-            np.isnan(donchian_low_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current 12h volume > 1.3x daily volume MA (adjusted for 12h)
-        # 2 12h periods per day, so daily MA/2 = approximate 12h period MA
-        volume_12h_approx_ma = volume_ma_20_1d_aligned[i] / 2
-        volume_condition = volume[i] > (volume_12h_approx_ma * 1.3)
+        # Volume condition: current 4h volume > 1.5x daily volume MA (adjusted for 4h)
+        # 6 4h periods per day, so daily MA/6 = approximate 4h period MA
+        volume_4h_approx_ma = volume_ma_20_1d_aligned[i] / 6
+        volume_condition = volume[i] > (volume_4h_approx_ma * 1.5)
         
         # Trend filter: weekly EMA20 direction
         # Long when price > weekly EMA20
@@ -98,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1w1d_Donchian_Breakout_Volume_Trend_Filter_v1"
-timeframe = "12h"
+name = "4h_1d1w_Donchian_Breakout_Volume_Trend_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
