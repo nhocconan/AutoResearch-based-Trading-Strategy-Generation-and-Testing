@@ -8,11 +8,12 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Donchian(20) breakout with 1w trend filter and volume confirmation
-    # Long: price breaks above 20-period high AND volume > 1.5x 20-period average AND price > 1w EMA200
-    # Short: price breaks below 20-period low AND volume > 1.5x 20-period average AND price < 1w EMA200
-    # Exit: price returns to 20-period midpoint (mean reversion in 6h timeframe)
-    # Using 1w for EMA200 trend filter (structure) and 6h only for Donchian breakout + volume confirmation
+    # Hypothesis: 12h Williams Alligator with 1d trend filter and volume confirmation
+    # Williams Alligator: Jaw (13-period SMMA, 8-bar offset), Teeth (8-period SMMA, 5-bar offset), Lips (5-period SMMA, 3-bar offset)
+    # Long: Lips > Teeth > Jaw AND price > 1d EMA50 AND volume > 1.5x 20-period average
+    # Short: Lips < Teeth < Jaw AND price < 1d EMA50 AND volume > 1.5x 20-period average
+    # Exit: Lips crosses Teeth (Alligator sleeping)
+    # Using 1d for EMA50 trend filter, 12h only for Alligator and entry timing
     # Discrete position sizing (0.25) to balance return and drawdown
     # Target: 12-37 trades/year (~50-150 over 4 years) to minimize fee drag
     
@@ -20,16 +21,40 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Get 1w data for EMA200 trend filter (call ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
+    # Get 1d data for EMA50 (call ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1w EMA200 for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Williams Alligator on 12h timeframe
+    # SMMA (Smoothed Moving Average) = EMA with alpha = 1/period
+    def smma(data, period):
+        if len(data) < period:
+            return np.full(len(data), np.nan)
+        result = np.full(len(data), np.nan)
+        # First value is SMA
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: SMMA(i) = (SMMA(i-1) * (period-1) + data[i]) / period
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    # Jaw: 13-period SMMA, 8-bar offset
+    jaw_raw = smma(close, 13)
+    jaw = np.roll(jaw_raw, 8)  # shift right by 8 (offset into future)
+    # Teeth: 8-period SMMA, 5-bar offset
+    teeth_raw = smma(close, 8)
+    teeth = np.roll(teeth_raw, 5)  # shift right by 5
+    # Lips: 5-period SMMA, 3-bar offset
+    lips_raw = smma(close, 5)
+    lips = np.roll(lips_raw, 3)  # shift right by 3
     
     # Volume confirmation: >1.5x 20-period average (to reduce false signals)
     vol_ma = np.full(n, np.nan)
@@ -37,41 +62,36 @@ def generate_signals(prices):
         vol_ma[i] = np.mean(volume[i-20:i])
     volume_spike = volume > (1.5 * vol_ma)
     
-    # 6h Donchian channels (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    donchian_mid = np.full(n, np.nan)
-    
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
-        donchian_mid[i] = (donchian_high[i] + donchian_low[i]) / 2
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(donchian_mid[i]) or np.isnan(ema_1w_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
         vol_confirm = volume_spike[i]
         
-        # Trend filter: only long if price > 1w EMA200, only short if price < 1w EMA200
-        long_trend_ok = close[i] > ema_1w_aligned[i]
-        short_trend_ok = close[i] < ema_1w_aligned[i]
+        # Trend filter: only long if price > 1d EMA50, only short if price < 1d EMA50
+        long_trend_ok = close[i] > ema_1d_aligned[i]
+        short_trend_ok = close[i] < ema_1d_aligned[i]
         
-        # Entry logic: Donchian breakout + volume + trend
-        long_entry = (close[i] > donchian_high[i]) and vol_confirm and long_trend_ok
-        short_entry = (close[i] < donchian_low[i]) and vol_confirm and short_trend_ok
+        # Alligator conditions
+        lips_above_teeth = lips[i] > teeth[i]
+        teeth_above_jaw = teeth[i] > jaw[i]
+        lips_below_teeth = lips[i] < teeth[i]
+        teeth_below_jaw = teeth[i] < jaw[i]
         
-        # Exit logic: return to midpoint (mean reversion)
-        long_exit = close[i] < donchian_mid[i]
-        short_exit = close[i] > donchian_mid[i]
+        # Entry logic: Alligator alignment + volume + trend
+        long_entry = lips_above_teeth and teeth_above_jaw and vol_confirm and long_trend_ok
+        short_entry = lips_below_teeth and teeth_below_jaw and vol_confirm and short_trend_ok
+        
+        # Exit logic: Alligator sleeping (Lips crosses Teeth)
+        long_exit = lips[i] < teeth[i]
+        short_exit = lips[i] > teeth[i]
         
         if long_entry and position != 1:
             position = 1
@@ -96,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_donchian_breakout_volume_trend_v1"
-timeframe = "6h"
+name = "12h_1d_williams_alligator_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
