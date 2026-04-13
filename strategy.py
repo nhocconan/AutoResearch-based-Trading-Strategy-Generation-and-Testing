@@ -8,19 +8,24 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Camarilla pivot breakout with 1d volume spike and chop regime filter.
-    # Long when price breaks above Camarilla H3 + 1d volume > 1.5x 20-period average + CHOP(14) > 61.8.
-    # Short when price breaks below Camarilla L3 + 1d volume > 1.5x 20-period average + CHOP(14) > 61.8.
-    # Exit when price crosses Camarilla pivot point (PP).
-    # Uses proven Camarilla structure with volume confirmation and range regime to avoid false breakouts.
-    # Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+    # Hypothesis: 4h Donchian(20) breakout with 1d ATR-based volume spike filter and 12h chop regime.
+    # Long when price breaks above Donchian(20) high + volume > 1.5x ATR-scaled average + CHOP_12h > 61.8 (range).
+    # Short when price breaks below Donchian(20) low + volume > 1.5x ATR-scaled average + CHOP_12h > 61.8 (range).
+    # Exit when price crosses Donchian(20) midpoint.
+    # Uses ATR-scaled volume filter to adapt to volatility and chop regime to avoid trend-following false breakouts.
+    # Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculations (call ONCE before loop)
+    # Calculate Donchian channels (20-period) on 4h
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
+    
+    # Get 1d data for ATR-scaled volume filter (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -28,19 +33,9 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla pivot levels for 1d
-    # Pivot Point (PP) = (High + Low + Close) / 3
-    pp = (high_1d + low_1d + close_1d) / 3
-    # Range = High - Low
-    range_1d = high_1d - low_1d
-    # Resistance levels: R4 = Close + Range * 1.5/2, R3 = Close + Range * 1.25/2, etc.
-    # Support levels: S4 = Close - Range * 1.5/2, S3 = Close - Range * 1.25/2, etc.
-    # We use H3 (R3) and L3 (S3) for breakouts, PP for exit
-    h3 = close_1d + (range_1d * 1.1 / 4)  # Camarilla R3
-    l3 = close_1d - (range_1d * 1.1 / 4)  # Camarilla S3
-    
-    # Calculate True Range (TR) on 1d for Chopiness Index
+    # Calculate True Range (TR) on 1d
     tr1 = np.abs(high_1d - low_1d)
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
@@ -50,56 +45,72 @@ def generate_signals(prices):
     # Calculate ATR(14) on 1d
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate highest high and lowest low over 14 periods on 1d
-    hh_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # Calculate ATR-scaled volume average (20-period) on 1d: volume / ATR
+    vol_atr_ratio_1d = volume_1d / np.maximum(atr_1d, 1e-10)
+    vol_atr_ma_1d = pd.Series(vol_atr_ratio_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate Chopiness Index (CHOP) on 1d
-    chop_denom = atr_1d * 14
-    chop_num = hh_1d - ll_1d
-    chop = np.where(chop_denom != 0, 100 * np.log10(chop_num / chop_denom) / np.log10(14), 50)
+    # Align HTF ATR-scaled volume MA to 4h timeframe
+    vol_atr_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_atr_ma_1d)
     
-    # Get 1d data for volume spike (call ONCE before loop)
-    volume_1d = df_1d['volume'].values
+    # Get 12h data for chop regime (call ONCE before loop)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
     
-    # Calculate volume average (20-period) on 1d
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Align HTF indicators to 12h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+    # Calculate True Range (TR) on 12h
+    tr1_12h = np.abs(high_12h - low_12h)
+    tr2_12h = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3_12h = np.abs(low_12h - np.roll(close_12h, 1))
+    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
+    tr_12h[0] = tr1_12h[0]  # First period
+    
+    # Calculate ATR(14) on 12h
+    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate highest high and lowest low over 14 periods on 12h
+    hh_12h = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    ll_12h = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    
+    # Calculate Chopiness Index (CHOP) on 12h
+    chop_denom = atr_12h * 14
+    chop_num = hh_12h - ll_12h
+    chop_12h = np.where(chop_denom != 0, 100 * np.log10(chop_num / chop_denom) / np.log10(14), 50)
+    
+    # Align HTF chop to 4h timeframe
+    chop_12h_aligned = align_htf_to_ltf(prices, df_12h, chop_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or np.isnan(pp_aligned[i]) or
-            np.isnan(chop_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or np.isnan(volume_1d_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(donchian_mid[i]) or
+            np.isnan(vol_atr_ma_1d_aligned[i]) or np.isnan(chop_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x 20-period average
-        volume_confirm = volume_1d_aligned[i] > 1.5 * vol_ma_1d_aligned[i]
+        # Volume confirmation: current 1d volume/ATR ratio > 1.5x 20-period average
+        vol_atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_atr_ratio_1d)
+        volume_confirm = vol_atr_ratio_1d_aligned[i] > 1.5 * vol_atr_ma_1d_aligned[i]
         
-        # Regime filter: CHOP > 61.8 indicates ranging market (good for breakout fade in range)
-        regime_filter = chop_aligned[i] > 61.8
+        # Regime filter: CHOP_12h > 61.8 indicates ranging market (good for breakout fade)
+        regime_filter = chop_12h_aligned[i] > 61.8
         
         # Breakout conditions
-        long_breakout = close[i] > h3_aligned[i]
-        short_breakout = close[i] < l3_aligned[i]
+        long_breakout = close[i] > donchian_high[i]
+        short_breakout = close[i] < donchian_low[i]
         
         # Entry conditions: breakout + volume + regime
         long_signal = long_breakout and volume_confirm and regime_filter
         short_signal = short_breakout and volume_confirm and regime_filter
         
-        # Exit conditions: price crosses Camarilla pivot point (PP)
-        long_exit = close[i] < pp_aligned[i]
-        short_exit = close[i] > pp_aligned[i]
+        # Exit conditions: price crosses Donchian midpoint
+        long_exit = close[i] < donchian_mid[i]
+        short_exit = close[i] > donchian_mid[i]
         
         # Fixed position size (discrete levels to minimize fee churn)
         position_size = 0.25
@@ -129,6 +140,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_camarilla_vol_chop_breakout_v1"
-timeframe = "12h"
+name = "4h_1d_12h_donchian_vol_atr_chop_v1"
+timeframe = "4h"
 leverage = 1.0
