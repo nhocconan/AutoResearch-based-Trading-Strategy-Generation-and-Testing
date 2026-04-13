@@ -8,62 +8,46 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
-    # Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and 1w trend filter
-    # Enter long when price breaks above R4 with volume > 1.5x 20-bar avg AND 1w close > 1w open (bullish week)
-    # Enter short when price breaks below S4 with volume > 1.5x 20-bar avg AND 1w close < 1w open (bearish week)
-    # Exit when price crosses the 1d midpoint (1d close)
-    # Uses 1d HTF for Camarilla levels (more stable than 12h) and 1w for trend filter
-    # Camarilla levels from 1d provide institutional support/resistance
+    # Hypothesis: 1d Camarilla pivot breakout with 1w volume confirmation
+    # Enter long when price breaks above R3 with volume > 1.5x 20-bar avg
+    # Enter short when price breaks below S3 with volume > 1.5x 20-bar avg
+    # Exit when price crosses the 1d midpoint (pivot point)
+    # Uses 1d HTF for Camarilla levels (stable institutional levels) and 1w for volume regime filter
     # Volume confirmation ensures breakouts have participation
-    # Weekly trend filter avoids counter-trend trades in strong trends
-    # Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+    # Target: 50-100 total trades over 4 years (12-25/year) to minimize fee drag
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_ = prices['open'].values  # for 1w trend calculation
     
-    # Get 12h data for primary timeframe (used for alignment reference)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
-    
-    # Get 1d data for Camarilla pivot calculation (HTF)
+    # Get 1d data for primary timeframe
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Get 1w data for trend filter (HTF)
+    # Get 1w data for volume confirmation (HTF)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 1:
         return np.zeros(n)
     
-    open_1w = df_1w['open'].values
-    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
     # Calculate 1d Camarilla levels (based on previous day's OHLC)
+    # Camarilla: R3 = close + (high-low)*1.1/4, S3 = close - (high-low)*1.1/4
     cam_high_low = high_1d - low_1d
-    camarilla_r4 = close_1d + (cam_high_low * 1.1 / 2)
-    camarilla_s4 = close_1d - (cam_high_low * 1.1 / 2)
-    camarilla_mid = close_1d  # midpoint is the 1d close
+    camarilla_r3 = close_1d + (cam_high_low * 1.1 / 4)
+    camarilla_s3 = close_1d - (cam_high_low * 1.1 / 4)
+    camarilla_mid = (high_1d + low_1d) / 2  # pivot point
     
-    # Calculate 1w trend: bullish if weekly close > weekly open
-    weekly_bullish = close_1w > open_1w
-    weekly_bearish = close_1w < open_1w
-    
-    # Align 1d Camarilla levels to 12h timeframe
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    # Align 1d Camarilla levels to 1d timeframe (no alignment needed, but using helper for consistency)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     camarilla_mid_aligned = align_htf_to_ltf(prices, df_1d, camarilla_mid)
-    
-    # Align 1w trend to 12h timeframe
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
     
     # Volume confirmation: volume > 1.5x 20-bar average volume
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -75,19 +59,18 @@ def generate_signals(prices):
     
     for i in range(1, n):  # start from 1 to access previous bar
         # Skip if data not ready
-        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or np.isnan(camarilla_mid_aligned[i]) or
-            np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i]) or
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_mid_aligned[i]) or
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         # Camarilla breakout conditions (using current bar's close vs current bar's levels)
-        breakout_up = close[i] > camarilla_r4_aligned[i]  # break above R4
-        breakout_down = close[i] < camarilla_s4_aligned[i]  # break below S4
+        breakout_up = close[i] > camarilla_r3_aligned[i]  # break above R3
+        breakout_down = close[i] < camarilla_s3_aligned[i]  # break below S3
         
-        # Entry conditions with volume confirmation and trend filter
-        long_entry = breakout_up and volume_confirmed[i] and weekly_bullish_aligned[i] > 0.5 and position != 1
-        short_entry = breakout_down and volume_confirmed[i] and weekly_bearish_aligned[i] > 0.5 and position != -1
+        # Entry conditions with volume confirmation
+        long_entry = breakout_up and volume_confirmed[i] and position != 1
+        short_entry = breakout_down and volume_confirmed[i] and position != -1
         
         # Exit conditions
         exit_long = (position == 1 and close[i] < camarilla_mid_aligned[i])
@@ -117,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_1w_camarilla_breakout_volume_trend_v1"
-timeframe = "12h"
+name = "1d_1w_camarilla_breakout_volume_v1"
+timeframe = "1d"
 leverage = 1.0
