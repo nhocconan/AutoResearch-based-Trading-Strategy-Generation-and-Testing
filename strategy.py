@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with Elder Ray and volume confirmation.
-# Williams Alligator identifies trend direction using smoothed medians.
-# Elder Ray measures bull/bear power behind the trend.
-# Volume confirmation ensures momentum behind moves.
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+# Hypothesis: 1d Donchian breakout with volume confirmation and weekly trend filter.
+# Donchian channels capture breakouts in both bull and bear markets.
+# Volume confirmation ensures breakouts have conviction.
+# Weekly trend filter (SMA50) avoids counter-trend trades in strong trends.
+# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,89 +19,97 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend context
+    # Weekly data for multi-timeframe analysis
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 13:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Williams Alligator (13,8,5) on close
-    jaw_period = 13
-    teeth_period = 8
-    lips_period = 5
+    # Calculate Donchian channels (20-period) on 1d data
+    period = 20
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
     
-    # Smoothed medians (using close)
-    jaw = pd.Series(close).rolling(window=jaw_period, min_periods=jaw_period).median().values
-    teeth = pd.Series(close).rolling(window=teeth_period, min_periods=teeth_period).median().values
-    lips = pd.Series(close).rolling(window=lips_period, min_periods=lips_period).median().values
+    for i in range(period-1, n):
+        donchian_high[i] = np.max(high[i-period+1:i+1])
+        donchian_low[i] = np.min(low[i-period+1:i+1])
     
-    # Shift to avoid look-ahead (Alligator uses future data in calculation)
-    jaw = np.roll(jaw, 8)
-    teeth = np.roll(teeth, 5)
-    lips = np.roll(lips, 3)
+    # Calculate ATR (14-period) for volatility filter
+    atr_period = 14
+    tr = np.zeros(n)
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    atr = np.zeros(n)
+    for i in range(atr_period, n):
+        atr[i] = np.mean(tr[i-atr_period+1:i+1])
     
-    # Align weekly trend filter
-    close_1w = df_1w['close'].values
-    sma_1w = pd.Series(close_1w).rolling(window=13, min_periods=13).mean().values
-    sma_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_1w)
-    
-    # Average volume (20-period) for confirmation
+    # Calculate average volume (20-period) for volume confirmation
     avg_volume = np.zeros(n)
     for i in range(20, n):
         avg_volume[i] = np.mean(volume[i-20:i])
+    
+    # Align weekly trend filter
+    close_1w = df_1w['close'].values
+    sma_1w = np.zeros(len(close_1w))
+    for i in range(50, len(close_1w)):
+        sma_1w[i] = np.mean(close_1w[i-50:i])
+    sma_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_1w)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(sma_1w_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(atr[i]) or np.isnan(avg_volume[i]) or 
+            np.isnan(sma_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Alligator alignment: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
-        bullish_align = lips[i] > teeth[i] > jaw[i]
-        bearish_align = lips[i] < teeth[i] < jaw[i]
+        price = close[i]
+        vol = volume[i]
+        avg_vol = avg_volume[i]
+        donch_high = donchian_high[i]
+        donch_low = donchian_low[i]
+        atr_val = atr[i]
+        weekly_sma = sma_1w_aligned[i]
         
-        # Elder Ray confirmation
-        strong_bull = bull_power[i] > 0 and bull_power[i] > np.mean(bull_power[max(0,i-9):i+1])
-        strong_bear = bear_power[i] < 0 and bear_power[i] < np.mean(bear_power[max(0,i-9):i+1])
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirm = vol > 1.5 * avg_vol
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.3 * avg_volume[i]
-        
-        # Weekly trend filter
-        weekly_uptrend = close[i] > sma_1w_aligned[i]
-        weekly_downtrend = close[i] < sma_1w_aligned[i]
+        # ATR filter: ATR > 0 (always true, but keeps structure)
+        atr_filter = atr_val > 0
         
         if position == 0:
-            # Long: Alligator bullish + Elder Ray bull + volume + weekly uptrend
-            if (bullish_align and strong_bull and vol_confirm and weekly_uptrend):
+            # Long: price breaks above Donchian high + volume + price above weekly SMA
+            if (price > donch_high and 
+                volume_confirm and 
+                atr_filter and
+                price > weekly_sma):
                 position = 1
                 signals[i] = position_size
-            # Short: Alligator bearish + Elder Ray bear + volume + weekly downtrend
-            elif (bearish_align and strong_bear and vol_confirm and weekly_downtrend):
+            # Short: price breaks below Donchian low + volume + price below weekly SMA
+            elif (price < donch_low and 
+                  volume_confirm and 
+                  atr_filter and
+                  price < weekly_sma):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Alligator turns bearish OR Elder Ray turns negative
-            if not bullish_align or bull_power[i] <= 0:
+            # Exit long: price breaks below Donchian low OR volume drops
+            if (price < donch_low or 
+                vol < 0.5 * avg_vol):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Alligator turns bullish OR Elder Ray turns positive
-            if not bearish_align or bear_power[i] >= 0:
+            # Exit short: price breaks above Donchian high OR volume drops
+            if (price > donch_high or 
+                vol < 0.5 * avg_vol):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -109,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1w_Alligator_ElderRay_Volume"
-timeframe = "12h"
+name = "1d_1w_Donchian_Breakout_Volume_Filter_v1"
+timeframe = "1d"
 leverage = 1.0
