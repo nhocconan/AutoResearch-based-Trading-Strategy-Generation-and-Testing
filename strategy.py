@@ -5,23 +5,21 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and chop filter
-    # Uses 1d Camarilla levels (proven edge) with 4h precision entry
-    # Volume confirmation avoids low-quality breakouts
-    # Chop regime filter (EHLERS) avoids whipsaws in ranging markets
-    # Target: 75-200 trades over 4 years (19-50/year) for optimal fee drag balance
+    # Hypothesis: 4h primary with 1d HTF - Camarilla pivot breakout with volume confirmation
+    # Designed to capture institutional order flow around key intraday levels with volume validation
+    # Target: 100-150 trades over 4 years (25-38/year) for low fee drag and good generalization
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values if 'volume' in prices.columns else np.ones(len(prices))
     
-    # Get 1d data for HTF Camarilla levels
+    # Get 1d data for HTF Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -29,80 +27,88 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values if 'volume' in df_1d.columns else np.ones(len(df_1d))
     
-    # Calculate 1d Camarilla levels (based on previous day)
-    # Camarilla: H4 = close + 1.5*(high-low), L4 = close - 1.5*(high-low)
-    # We use the prior day's range to calculate today's levels
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
+    # Calculate 1d Camarilla pivot levels (based on previous day)
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # L4 = C - Range * 1.1/2
+    # H4 = C + Range * 1.1/2
+    # L3 = C - Range * 1.1/4
+    # H3 = C + Range * 1.1/4
+    # L2 = C - Range * 1.1/6
+    # H2 = C + Range * 1.1/6
+    # L1 = C - Range * 1.1/12
+    # H1 = C + Range * 1.1/12
     
-    # First day will have NaN due to roll
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
-    prev_close_1d[0] = np.nan
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    camarilla_h4 = prev_close_1d + 1.5 * (prev_high_1d - prev_low_1d)
-    camarilla_l4 = prev_close_1d - 1.5 * (prev_high_1d - prev_low_1d)
+    h4 = close_1d + range_1d * 1.1 / 2
+    l4 = close_1d - range_1d * 1.1 / 2
+    h3 = close_1d + range_1d * 1.1 / 4
+    l3 = close_1d - range_1d * 1.1 / 4
+    h2 = close_1d + range_1d * 1.1 / 6
+    l2 = close_1d - range_1d * 1.1 / 6
+    h1 = close_1d + range_1d * 1.1 / 12
+    l1 = close_1d - range_1d * 1.1 / 12
     
-    # Calculate 1d EHLERS chop filter (34-period)
-    def hl2(high, low):
-        return (high + low) / 2
+    # Calculate 4h ATR (14-period) for volatility filter
+    def calculate_atr(high, low, close, window=14):
+        tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - np.roll(close, 1)[1:]))
+        tr1 = np.maximum(tr1, np.abs(low[1:] - np.roll(close, 1)[1:]))
+        tr = np.concatenate([[np.nan], tr1])
+        return pd.Series(tr).rolling(window=window, min_periods=window).mean().values
     
-    def true_range(high, low, close):
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        return np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_4h = calculate_atr(high, low, close, window=14)
+    atr_ma_10 = pd.Series(atr_4h).rolling(window=10, min_periods=10).mean().values
     
-    hl2_1d = hl2(high_1d, low_1d)
-    tr_1d = true_range(high_1d, low_1d, close_1d)
-    
-    # EHLERS chop: sum of TR / (sum of HL2 changes)
-    sum_tr = pd.Series(tr_1d).rolling(window=34, min_periods=34).sum().values
-    hl2_diff = np.abs(np.diff(hl2_1d, prepend=hl2_1d[0]))
-    sum_hl2_diff = pd.Series(hl2_diff).rolling(window=34, min_periods=34).sum().values
-    chop = 100 * np.log10(sum_tr / sum_hl2_diff) / np.log10(34)
-    
-    # Calculate 1d volume average (20-period)
-    vol_avg_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate 4h volume average (20-period)
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Align all HTF indicators to 4h primary timeframe
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    h2_aligned = align_htf_to_ltf(prices, df_1d, h2)
+    l2_aligned = align_htf_to_ltf(prices, df_1d, l2)
+    h1_aligned = align_htf_to_ltf(prices, df_1d, h1)
+    l1_aligned = align_htf_to_ltf(prices, df_1d, l1)
     vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    atr_ma_10_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_10)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h4_aligned[i]) or 
-            np.isnan(camarilla_l4_aligned[i]) or 
-            np.isnan(vol_avg_20_aligned[i]) or
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
+            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+            np.isnan(h2_aligned[i]) or np.isnan(l2_aligned[i]) or
+            np.isnan(h1_aligned[i]) or np.isnan(l1_aligned[i]) or
+            np.isnan(vol_avg_20_aligned[i]) or np.isnan(atr_ma_10_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x 20-day average
-        volume_confirmed = volume[i] > 1.5 * vol_avg_20_aligned[i]
+        # Volume confirmation: current volume > 1.3x 20-period average
+        volume_confirmed = volume[i] > 1.3 * vol_avg_20_aligned[i]
         
-        # Chop filter: avoid extreme ranging (chop > 61.8) or extreme trending (chop < 38.2)
-        # We prefer moderate chop (38.2 <= chop <= 61.8) for breakout reliability
-        chop_filter = (chop_aligned[i] >= 38.2) and (chop_aligned[i] <= 61.8)
+        # Volatility filter: avoid extremely low volatility (choppy markets)
+        vol_filter = atr_4h[i] > 0.2 * atr_ma_10_aligned[i]
         
-        # Breakout conditions using Camarilla H4/L4 levels
-        breakout_up = close[i] > camarilla_h4_aligned[i]
-        breakout_down = close[i] < camarilla_l4_aligned[i]
+        # Breakout conditions at Camarilla levels
+        breakout_h4 = close[i] > h4_aligned[i]
+        breakdown_l4 = close[i] < l4_aligned[i]
+        breakout_h3 = close[i] > h3_aligned[i]
+        breakdown_l3 = close[i] < l3_aligned[i]
         
-        # Entry conditions
-        enter_long = breakout_up and volume_confirmed and chop_filter
-        enter_short = breakout_down and volume_confirmed and chop_filter
+        # Entry conditions: breakout of H3/L3 with volume and volatility confirmation
+        enter_long = breakout_h3 and volume_confirmed and vol_filter
+        enter_short = breakdown_l3 and volume_confirmed and vol_filter
         
-        # Exit conditions: price returns to prior day's close (mean reversion)
-        exit_long = position == 1 and close[i] <= prev_close_1d[i]
-        exit_short = position == -1 and close[i] >= prev_close_1d[i]
+        # Exit conditions: return to H1/L1 levels or opposite H3/L3 break
+        exit_long = position == 1 and (close[i] <= h1_aligned[i] or close[i] >= h3_aligned[i])
+        exit_short = position == -1 and (close[i] >= l1_aligned[i] or close[i] <= l3_aligned[i])
         
         # Execute signals
         if enter_long and position != 1:
@@ -128,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_camarilla_breakout_volume_chop_v2"
+name = "4h_1d_camarilla_breakout_volume_v1"
 timeframe = "4h"
 leverage = 1.0
