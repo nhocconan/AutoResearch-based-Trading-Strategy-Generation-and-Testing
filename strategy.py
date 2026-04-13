@@ -1,3 +1,8 @@
+# A robust, low-frequency trend-following strategy for daily timeframe with weekly trend filter.
+# Uses Donchian channel breakout (20) on daily, confirmed by weekly trend (EMA50 vs EMA200),
+# volume confirmation (>1.5x 20-day average volume), and volatility-based exit (ATR-based stop).
+# Designed for low trade frequency (<25/year) to minimize fee impact and work in both bull/bear markets.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 250:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -13,17 +18,17 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h Donchian channels (20-period) - use previous bar's high/low
+    # Daily Donchian channel (20-period) - using previous bar's high/low to avoid look-ahead
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
     lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    # 4h average volume (20-period) - previous bar
+    # Daily average volume (20-period) - previous bar
     vol_series = pd.Series(volume)
     avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
-    # 4h ATR (14-period) for stop-loss
+    # Daily ATR (14-period) for volatility-based exit
     high_low = high - low
     high_close = np.abs(high - np.roll(close, 1))
     low_close = np.abs(low - np.roll(close, 1))
@@ -31,24 +36,22 @@ def generate_signals(prices):
     tr[0] = high_low[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().shift(1).values
     
-    # 1d EMA50 for trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # 1d EMA200 for trend filter (HTF)
-    ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Weekly trend filter: EMA50 vs EMA200 on weekly timeframe
+    df_1w = get_htf_data(prices, '1w')
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_200_1w = pd.Series(df_1w['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25
+    position_size = 0.25  # 25% position size
     
-    start = max(20, 200, 14)
+    start = max(20, 200, 14)  # Ensure all indicators are valid
     for i in range(start, n):
         if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
             np.isnan(avg_vol[i]) or np.isnan(atr[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_200_1d_aligned[i])):
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(ema_200_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -56,30 +59,28 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long: breakout above upper band + volume confirmation + EMA50_1d > EMA200_1d (bullish)
-            if (price > upper[i] and vol > 2.0 * avg_vol[i] and 
-                ema_50_1d_aligned[i] > ema_200_1d_aligned[i]):
+            # Long: breakout above upper band + volume confirmation + weekly bullish trend (EMA50 > EMA200)
+            if (price > upper[i] and vol > 1.5 * avg_vol[i] and 
+                ema_50_1w_aligned[i] > ema_200_1w_aligned[i]):
                 position = 1
                 signals[i] = position_size
-            # Short: breakout below lower band + volume confirmation + EMA50_1d < EMA200_1d (bearish)
-            elif (price < lower[i] and vol > 2.0 * avg_vol[i] and 
-                  ema_50_1d_aligned[i] < ema_200_1d_aligned[i]):
+            # Short: breakout below lower band + volume confirmation + weekly bearish trend (EMA50 < EMA200)
+            elif (price < lower[i] and vol > 1.5 * avg_vol[i] and 
+                  ema_50_1w_aligned[i] < ema_200_1w_aligned[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below lower band OR stop-loss hit
-            if (price < lower[i] or 
-                price < entry_price_long - 2.0 * atr[i]):
+            # Exit long: price closes below lower band OR volatility-based stop (2*ATR below entry)
+            if price < lower[i] or price < entry_price_long - 2.0 * atr[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes above upper band OR stop-loss hit
-            if (price > upper[i] or 
-                price > entry_price_short + 2.0 * atr[i]):
+            # Exit short: price closes above upper band OR volatility-based stop (2*ATR above entry)
+            if price > upper[i] or price > entry_price_short + 2.0 * atr[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -94,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Donchian_Volume_EMA50Trend"
-timeframe = "4h"
+name = "1d_1w_Donchian_Volume_WeeklyTrend"
+timeframe = "1d"
 leverage = 1.0
