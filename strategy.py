@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-4h Camarilla Pivot Breakout with Volume Spike and ADX Trend Filter.
-Trades breakouts above/below Camarilla levels (1-day) confirmed by volume spikes,
-only in trending markets (1-day ADX > 25) to avoid false breakouts in ranging conditions.
-Designed for 4h timeframe to target 75-200 total trades over 4 years (19-50/year).
-Works in both bull and bear markets by following the trend direction.
+12h CAMARILLA PIVOT BREAKOUT WITH VOLUME AND TREND FILTER
+Uses daily CAMARILLA pivot levels from prior day for breakout signals.
+Only takes longs above H3 and shorts below L3 when:
+1. Price breaks pivot level with close
+2. Volume > 1.5x 20-period average (volume confirmation)
+3. 1-day ADX > 25 (trending market filter)
+Position size: 0.25. Designed for 12h timeframe targeting 50-150 total trades.
+Works in bull/bear by following trend direction via ADX filter.
 """
 
 import numpy as np
@@ -13,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,7 +24,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation
+    # Get daily data for CAMARILLA pivots and filters
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -29,35 +32,35 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Camarilla Pivot Levels (based on previous day)
+    # Calculate CAMARILLA pivot levels from prior day
+    # Typical price = (H + L + C) / 3
+    typical_price = (high_1d + low_1d + close_1d) / 3
+    # Range = H - L
     range_1d = high_1d - low_1d
-    close_prev = np.roll(close_1d, 1)
-    close_prev[0] = close_1d[0]  # first day
     
-    # Calculate Camarilla levels
-    H4 = close_prev + 1.1 * range_1d / 2
-    H3 = close_prev + 1.1 * range_1d / 4
-    H2 = close_prev + 1.1 * range_1d / 6
-    H1 = close_prev + 1.1 * range_1d / 12
-    L1 = close_prev - 1.1 * range_1d / 12
-    L2 = close_prev - 1.1 * range_1d / 6
-    L3 = close_prev - 1.1 * range_1d / 4
-    L4 = close_prev - 1.1 * range_1d / 2
+    # CAMARILLA levels (based on prior day)
+    # H4 = C + 1.1 * (H - L)
+    # H3 = C + 1.1 * (H - L) / 2
+    # H2 = C + 1.1 * (H - L) / 4
+    # H1 = C + 1.1 * (H - L) / 6
+    # L1 = C - 1.1 * (H - L) / 6
+    # L2 = C - 1.1 * (H - L) / 4
+    # L3 = C - 1.1 * (H - L) / 2
+    # L4 = C - 1.1 * (H - L)
     
-    # Align to 4h timeframe (use previous day's levels)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    H2_aligned = align_htf_to_ltf(prices, df_1d, H2)
-    H1_aligned = align_htf_to_ltf(prices, df_1d, H1)
-    L1_aligned = align_htf_to_ltf(prices, df_1d, L1)
-    L2_aligned = align_htf_to_ltf(prices, df_1d, L2)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    # We use H3 for long entries, L3 for short entries
+    h3 = close_1d + 1.1 * range_1d / 2
+    l3 = close_1d - 1.1 * range_1d / 2
     
-    # Volume spike: volume > 1.8x 20-period average
+    # Align CAMARILLA levels to 12h timeframe (use prior day's levels)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    
+    # Volume spike: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_1d > (vol_ma_20 * 1.8)
+    vol_spike = volume_1d > (vol_ma_20 * 1.5)
     vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
     
     # 1-day ADX (14-period) for trend filter
@@ -99,24 +102,28 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% of capital
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or 
-            np.isnan(vol_spike_aligned[i]) or np.isnan(trending_aligned[i])):
+        if (np.isnan(h3_aligned[i]) or 
+            np.isnan(l3_aligned[i]) or 
+            np.isnan(vol_spike_aligned[i]) or 
+            np.isnan(trending_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: Camarilla breakout + volume spike + trending market
-        long_entry = (close[i] > H4_aligned[i] and 
+        # Entry conditions: CAMARILLA breakout + volume spike + trending market
+        long_entry = (close[i] > h3_aligned[i] and 
                       vol_spike_aligned[i] > 0.5 and 
                       trending_aligned[i] > 0.5)
-        short_entry = (close[i] < L4_aligned[i] and 
+        short_entry = (close[i] < l3_aligned[i] and 
                        vol_spike_aligned[i] > 0.5 and 
                        trending_aligned[i] > 0.5)
         
-        # Exit when price returns to H3/L3 levels (strong support/resistance)
-        exit_long = position == 1 and close[i] <= H3_aligned[i]
-        exit_short = position == -1 and close[i] >= L3_aligned[i]
+        # Exit when price returns to opposite H3/L3 level or close touches pivot
+        # For long: exit if price drops back below H3
+        # For short: exit if price rises back above L3
+        exit_long = position == 1 and close[i] <= h3_aligned[i]
+        exit_short = position == -1 and close[i] >= l3_aligned[i]
         
         # Execute signals
         if long_entry and position != 1:
@@ -139,6 +146,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_camarilla_breakout_volume_trend"
-timeframe = "4h"
+name = "12h_camarilla_pivot_breakout_volume_trend"
+timeframe = "12h"
 leverage = 1.0
