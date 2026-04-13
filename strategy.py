@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d timeframe with 1w Donchian channel breakout and volume confirmation.
-# Long: Price closes above 20-period weekly Donchian high + volume > 1.5x average daily volume (20-day).
-# Short: Price closes below 20-period weekly Donchian low + volume > 1.5x average daily volume.
-# Exit: Price crosses back below/above the weekly Donchian midpoint.
-# Uses weekly structure for trend context, daily for execution with volume filter.
-# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe.
-# Works in bull (breakouts) and bear (mean reversion from extremes via exits).
+# Hypothesis: 12h timeframe with 1d Donchian breakout and volume confirmation.
+# Long: Price breaks above 1d Donchian upper channel (20-period high) + volume > 1.5x average volume.
+# Short: Price breaks below 1d Donchian lower channel (20-period low) + volume > 1.5x average volume.
+# Uses 1d Donchian channels for trend structure, 12h for execution with volume confirmation.
+# Exit when price crosses the middle of the Donchian channel (mean of upper/lower).
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,33 +20,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for Donchian channels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # 1d data for Donchian channels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 20-period Donchian channel (weekly)
-    donchian_high = np.full(len(close_1w), np.nan)
-    donchian_low = np.full(len(close_1w), np.nan)
-    donchian_mid = np.full(len(close_1w), np.nan)
-    for i in range(20, len(close_1w)):
-        donchian_high[i] = np.max(high_1w[i-20:i])
-        donchian_low[i] = np.min(low_1w[i-20:i])
-        donchian_mid[i] = (donchian_high[i] + donchian_low[i]) / 2
+    # Calculate Donchian channels (20-period high/low) using previous day's data
+    donchian_high = np.full(len(close_1d), np.nan)
+    donchian_low = np.full(len(close_1d), np.nan)
+    donchian_mid = np.full(len(close_1d), np.nan)
+    for i in range(20, len(close_1d)):
+        hh = np.max(high_1d[i-20:i])
+        ll = np.min(low_1d[i-20:i])
+        donchian_high[i] = hh
+        donchian_low[i] = ll
+        donchian_mid[i] = (hh + ll) / 2.0
     
-    # Average volume (20-period daily) for volume confirmation
+    # Average volume (20-period) for volume confirmation
     avg_volume = np.full(n, np.nan)
     for i in range(20, n):
         avg_volume[i] = np.mean(volume[i-20:i])
     
-    # Align weekly Donchian levels to daily
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid)
+    # Align 1d Donchian levels to 12h
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -63,34 +64,34 @@ def generate_signals(prices):
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        dh = donchian_high_aligned[i]
-        dl = donchian_low_aligned[i]
-        dm = donchian_mid_aligned[i]
+        upper = donchian_high_aligned[i]
+        lower = donchian_low_aligned[i]
+        middle = donchian_mid_aligned[i]
         
         # Volume confirmation: current volume > 1.5x average volume
         volume_confirm = vol > 1.5 * avg_vol
         
         if position == 0:
-            # Long: price closes above weekly Donchian high + volume confirmation
-            if (price > dh and volume_confirm):
+            # Long: price breaks above upper channel + volume confirmation
+            if (price > upper and volume_confirm):
                 position = 1
                 signals[i] = position_size
-            # Short: price closes below weekly Donchian low + volume confirmation
-            elif (price < dl and volume_confirm):
+            # Short: price breaks below lower channel + volume confirmation
+            elif (price < lower and volume_confirm):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below weekly Donchian midpoint
-            if price < dm:
+            # Exit long: price crosses below middle channel
+            if price < middle:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes above weekly Donchian midpoint
-            if price > dm:
+            # Exit short: price crosses above middle channel
+            if price > middle:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -98,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_Donchian_Breakout_Volume"
-timeframe = "1d"
+name = "12h_1d_Donchian_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
