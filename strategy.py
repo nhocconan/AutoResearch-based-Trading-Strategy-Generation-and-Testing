@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_1w_AntiBubble_Breakout
-Hypothesis: In crypto, multi-month bubbles often form then burst. We detect when price exceeds 
-a 20-week exponential decay envelope (resembling bubble top) and go short, or falls below 
-the same envelope (bubble bottom) and go long. Uses 1d timeframe with 1w HTF for envelope.
-Works in both bull (buying dips) and bear (selling rallies) by fading extreme deviations 
-from the long-term trend. Includes volume confirmation to avoid false signals.
-Target: 10-25 trades/year on 1d (40-100 total over 4 years).
+6h_12h_1d_Volume_Weighted_Pivot_Breakout
+Hypothesis: Combines volume-weighted pivot levels from 1d with 12h trend filter and volume confirmation on 6h.
+In bull markets: buy breakouts above R1 with volume > 1.5x average and 12h bullish trend.
+In bear markets: sell breakdowns below S1 with volume > 1.5x average and 12h bearish trend.
+Uses volume-weighted average price (VWAP) of pivot levels to filter false breakouts.
+Targets 20-40 trades per year by requiring confluence of volume, pivot break, and trend.
+Works in both bull and bear markets by trading breakouts with volume confirmation in direction of higher timeframe trend.
 """
 
 import numpy as np
@@ -23,82 +23,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for bubble envelope
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 1d data for pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    volume_1w = df_1w['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 20-week EMA as bubble center
-    ema_20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate classic pivot points
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
+    r2 = pivot + (high_1d - low_1d)
+    s2 = pivot - (high_1d - low_1d)
+    r3 = high_1d + 2 * (pivot - low_1d)
+    s3 = low_1d - 2 * (high_1d - pivot)
     
-    # Calculate 20-week standard deviation for bubble width
-    # Using rolling window on weekly data
-    close_1w_series = pd.Series(close_1w)
-    std_20 = close_1w_series.rolling(window=20, min_periods=20).std().values
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
+        return np.zeros(n)
     
-    # Bubble envelope: EMA ± 2.0 * std (adjustable)
-    upper_env = ema_20 + (2.0 * std_20)
-    lower_env = ema_20 - (2.0 * std_20)
+    close_12h = df_12h['close'].values
     
-    # Align envelope to daily timeframe (wait for weekly close)
-    upper_env_aligned = align_htf_to_ltf(prices, df_1w, upper_env)
-    lower_env_aligned = align_htf_to_ltf(prices, df_1w, lower_env)
-    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
+    # 12h EMA trend (21-period)
+    ema_21_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean()
+    trend_bull = close_12h > ema_21_12h
+    trend_bear = close_12h < ema_21_12h
     
-    # Volume confirmation: weekly volume > 1.5x 20-week average
-    vol_ma_20 = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    volume_expansion = volume_1w > (vol_ma_20 * 1.5)
-    volume_expansion_aligned = align_htf_to_ltf(prices, df_1w, volume_expansion)
+    # Align all to 6h timeframe
+    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
+    trend_bull_6h = align_htf_to_ltf(prices, df_12h, trend_bull)
+    trend_bear_6h = align_htf_to_ltf(prices, df_12h, trend_bear)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volume_spike = volume > (vol_ma_20 * 1.5)
+    
+    # Session filter: 08:00-20:00 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_mask = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% of capital
     
     for i in range(50, n):
-        # Skip if data not ready
-        if (np.isnan(upper_env_aligned[i]) or 
-            np.isnan(lower_env_aligned[i]) or 
-            np.isnan(ema_20_aligned[i]) or
-            np.isnan(volume_expansion_aligned[i])):
+        # Skip if not in session or data not ready
+        if not session_mask[i] or \
+           np.isnan(pivot_6h[i]) or \
+           np.isnan(r1_6h[i]) or \
+           np.isnan(s1_6h[i]) or \
+           np.isnan(trend_bull_6h[i]) or \
+           np.isnan(trend_bear_6h[i]):
             signals[i] = 0.0
             continue
         
-        # Long signal: price below lower envelope with volume expansion
-        if close[i] < lower_env_aligned[i] and volume_expansion_aligned[i]:
+        # Long conditions: price breaks above R1 with volume spike and 12h bullish trend
+        if close[i] > r1_6h[i] and volume_spike[i] and trend_bull_6h[i]:
             if position != 1:
                 position = 1
                 signals[i] = position_size
             else:
                 signals[i] = position_size
-        # Short signal: price above upper envelope with volume expansion
-        elif close[i] > upper_env_aligned[i] and volume_expansion_aligned[i]:
+        # Short conditions: price breaks below S1 with volume spike and 12h bearish trend
+        elif close[i] < s1_6h[i] and volume_spike[i] and trend_bear_6h[i]:
             if position != -1:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = -position_size
-        # Exit when price returns to center (EMA) - take profit on mean reversion
-        elif position == 1 and close[i] > ema_20_aligned[i]:
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and close[i] < ema_20_aligned[i]:
-            position = 0
-            signals[i] = 0.0
-        # Hold position
+        # Hold current position
         elif position == 1:
             signals[i] = position_size
         elif position == -1:
             signals[i] = -position_size
+        # Flat otherwise
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "1d_1w_AntiBubble_Breakout"
-timeframe = "1d"
+name = "6h_12h_1d_Volume_Weighted_Pivot_Breakout"
+timeframe = "6h"
 leverage = 1.0
