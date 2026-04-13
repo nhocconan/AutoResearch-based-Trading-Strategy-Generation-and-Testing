@@ -8,107 +8,84 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and chop regime filter
-    # Long: price breaks above H3 (1d) AND volume > 1.5x 20-period average AND chop < 61.8 (trending)
-    # Short: price breaks below L3 (1d) AND volume > 1.5x 20-period average AND chop < 61.8 (trending)
-    # Exit: price returns to pivot point (PP) or chop > 61.8 (choppy regime)
-    # Using 12h timeframe for low trade frequency, Camarilla from 1d for structure,
-    # volume for confirmation, chop regime to avoid whipsaws.
-    # Discrete position sizing (0.25) to minimize fee churn.
+    # Hypothesis: 1d Camarilla pivot breakout with 1w volume regime filter
+    # Long: Close breaks above H3 Camarilla level AND 1w volume > 1.5x 20-period average
+    # Short: Close breaks below L3 Camarilla level AND 1w volume > 1.5x 20-period average
+    # Exit: Close returns to Camarilla pivot level (P) or opposite breakout
+    # Using 1d timeframe for low trade frequency, Camarilla for intraday structure,
+    # 1w volume for regime filter (avoid low-volume false breakouts), discrete sizing (0.25).
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and chop regime
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for volume regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate daily Camarilla levels (based on previous day's OHLC)
-    # PP = (H + L + C) / 3
-    # H3 = PP + (H - L) * 1.1 / 2
-    # L3 = PP - (H - L) * 1.1 / 2
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly volume average (20-period)
+    vol_1w = df_1w['volume'].values
+    vol_ma_1w = np.full(len(vol_1w), np.nan)
+    for i in range(20, len(vol_1w)):
+        vol_ma_1w[i] = np.mean(vol_1w[i-20:i])
+    volume_regime = vol_1w > (1.5 * vol_ma_1w)
     
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    r = high_1d - low_1d
-    h3 = pp + (r * 1.1 / 2.0)
-    l3 = pp - (r * 1.1 / 2.0)
+    # Align weekly volume regime to 1d
+    volume_regime_aligned = align_htf_to_ltf(prices, df_1w, volume_regime)
     
-    # Align daily Camarilla levels to 12h
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    # Calculate daily Camarilla pivot levels (based on previous day)
+    camarilla_p = np.full(n, np.nan)   # Pivot
+    camarilla_h3 = np.full(n, np.nan)  # High 3
+    camarilla_l3 = np.full(n, np.nan)  # Low 3
+    camarilla_h4 = np.full(n, np.nan)  # High 4 (stoploss)
+    camarilla_l4 = np.full(n, np.nan)  # Low 4 (stoploss)
     
-    # Calculate 12h chop regime (Ehler's Chop Index)
-    # Chop = 100 * log10(sum(ATR(14)) / log10((max(high,n) - min(low,n)) * sqrt(n)))
-    # We'll use a simplified version: Chop = 100 * (true_range_sum / (max_high - min_low) * sqrt(period))
-    period = 14
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = tr2[0] = tr3[0] = 0  # first period
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # True range sum over period
-    tr_sum = np.full(n, np.nan)
-    for i in range(period, n):
-        tr_sum[i] = np.sum(tr[i-period+1:i+1])
-    
-    # Max high and min low over period
-    max_high = np.full(n, np.nan)
-    min_low = np.full(n, np.nan)
-    for i in range(period-1, n):
-        max_high[i] = np.max(high[i-period+1:i+1])
-        min_low[i] = np.min(low[i-period+1:i+1])
-    
-    # Chop index
-    chop = np.full(n, np.nan)
-    for i in range(period, n):
-        if max_high[i] > min_low[i] and tr_sum[i] > 0:
-            chop[i] = 100 * np.log10(tr_sum[i] / (np.log10((max_high[i] - min_low[i]) * np.sqrt(period))))
-        else:
-            chop[i] = 50.0  # neutral
-    
-    # Volume confirmation (>1.5x 20-period average)
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (1.5 * vol_ma)
+    for i in range(1, n):
+        # Use previous day's OHLC to calculate today's Camarilla levels
+        phigh = high[i-1]
+        plow = low[i-1]
+        pclose = close[i-1]
+        
+        pivot = (phigh + plow + pclose) / 3
+        range_ = phigh - plow
+        
+        camarilla_p[i] = pivot
+        camarilla_h3[i] = pivot + (range_ * 1.1 / 4)
+        camarilla_l3[i] = pivot - (range_ * 1.1 / 4)
+        camarilla_h4[i] = pivot + (range_ * 1.1 / 2)
+        camarilla_l4[i] = pivot - (range_ * 1.1 / 2)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(pp_aligned[i]) or np.isnan(chop[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(camarilla_p[i]) or np.isnan(camarilla_h3[i]) or 
+            np.isnan(camarilla_l3[i]) or np.isnan(volume_regime_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: chop < 61.8 = trending (favor breakouts)
-        trending_regime = chop[i] < 61.8
+        # Volume regime filter: 1 = high volume (favorable), 0 = low volume (avoid)
+        vol_regime = volume_regime_aligned[i] == 1
         
-        # Volume confirmation
-        vol_confirm = volume_spike[i]
+        # Breakout conditions
+        long_breakout = close[i] > camarilla_h3[i] and vol_regime
+        short_breakout = close[i] < camarilla_l3[i] and vol_regime
         
-        # Entry logic: Camarilla breakout + volume + regime
-        long_entry = (close[i] > h3_aligned[i]) and vol_confirm and trending_regime
-        short_entry = (close[i] < l3_aligned[i]) and vol_confirm and trending_regime
+        # Exit conditions: return to pivot or opposite breakout
+        long_exit = close[i] < camarilla_p[i] or (close[i] < camarilla_l3[i] and vol_regime)
+        short_exit = close[i] > camarilla_p[i] or (close[i] > camarilla_h3[i] and vol_regime)
         
-        # Exit logic: return to pivot or choppy regime
-        long_exit = (close[i] < pp_aligned[i]) or (chop[i] >= 61.8)
-        short_exit = (close[i] > pp_aligned[i]) or (chop[i] >= 61.8)
+        # Stoploss: H4/L4 breach
+        long_stop = close[i] > camarilla_h4[i]
+        short_stop = close[i] < camarilla_l4[i]
         
-        if long_entry and position != 1:
+        if (long_breakout or long_stop) and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_entry and position != -1:
+        elif (short_breakout or short_stop) and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
@@ -128,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_camarilla_breakout_volume_chop_v1"
-timeframe = "12h"
+name = "1d_1w_camarilla_breakout_volume_regime_v1"
+timeframe = "1d"
 leverage = 1.0
