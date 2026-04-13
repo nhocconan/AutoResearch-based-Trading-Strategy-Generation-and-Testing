@@ -8,11 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Elder Ray Index with 1w trend filter and volume confirmation.
-    # Long when 1w close > 1w SMA50 (bullish trend) AND Bull Power > 0 AND 6h volume > 1.5x 20-period MA.
-    # Short when 1w close < 1w SMA50 (bearish trend) AND Bear Power < 0 AND 6h volume > 1.5x 20-period MA.
-    # Exit when power crosses zero (mean reversion).
-    # Uses Elder Ray for momentum, weekly SMA for trend filter, volume for confirmation.
+    # Hypothesis: 6h Ichimoku Cloud with 1w trend filter and volume confirmation.
+    # Long when price > 1w Ichimoku Cloud (bullish trend) AND TK Cross bullish AND 6h volume > 1.5x 20-period MA.
+    # Short when price < 1w Ichimoku Cloud (bearish trend) AND TK Cross bearish AND 6h volume > 1.5x 20-period MA.
+    # Exit when price re-enters the cloud (mean reversion).
+    # Uses Ichimoku for trend structure, TK Cross for momentum, volume for confirmation.
     # Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
     
     close = prices['close'].values
@@ -20,35 +20,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
+    # Get weekly data for Ichimoku Cloud calculation
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 52:
         return np.zeros(n)
     
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    sma_50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
-    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
     
-    # Get daily data for Elder Ray calculation (13-period EMA)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
-        return np.zeros(n)
+    # Ichimoku parameters: tenkan=9, kijun=26, senkou_span_b=52, displacement=26
+    period_tenkan = 9
+    period_kijun = 26
+    period_senkou_b = 52
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan_sen = (pd.Series(high_1w).rolling(window=period_tenkan, min_periods=period_tenkan).max() + 
+                  pd.Series(low_1w).rolling(window=period_tenkan, min_periods=period_tenkan).min()) / 2
     
-    # 13-period EMA for Elder Ray
-    ema_13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun_sen = (pd.Series(high_1w).rolling(window=period_kijun, min_periods=period_kijun).max() + 
+                 pd.Series(low_1w).rolling(window=period_kijun, min_periods=period_kijun).min()) / 2
     
-    # Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high_1d - ema_13
-    bear_power = low_1d - ema_13
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
     
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
+    senkou_span_b = (pd.Series(high_1w).rolling(window=period_senkou_b, min_periods=period_senkou_b).max() + 
+                     pd.Series(low_1w).rolling(window=period_senkou_b, min_periods=period_senkou_b).min()) / 2
     
-    # Get 6h data for volume confirmation
+    # Align Ichimoku components to 6h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1w, tenkan_sen.values)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1w, kijun_sen.values)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_a.values)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_b.values)
+    
+    # Get 6h data for volume confirmation and price
     df_6h = get_htf_data(prices, '6h')
     if len(df_6h) < 20:
         return np.zeros(n)
@@ -57,14 +64,18 @@ def generate_signals(prices):
     vol_ma_6h = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
     vol_ma_6h_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_6h)
     
+    # Align 6h close for cloud comparison
+    close_6h_aligned = align_htf_to_ltf(prices, df_6h, close)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(sma_50_1w_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or np.isnan(vol_ma_6h_aligned[i])):
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or 
+            np.isnan(vol_ma_6h_aligned[i]) or np.isnan(close_6h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -72,26 +83,35 @@ def generate_signals(prices):
         volume_6h_aligned = align_htf_to_ltf(prices, df_6h, volume_6h)
         volume_spike = volume_6h_aligned[i] > 1.5 * vol_ma_6h_aligned[i]
         
-        # Trend filter: weekly close relative to weekly SMA50
-        close_1w_aligned = align_htf_to_ltf(prices, df_1w, df_1w['close'].values)
-        weekly_uptrend = close_1w_aligned[i] > sma_50_1w_aligned[i]
-        weekly_downtrend = close_1w_aligned[i] < sma_50_1w_aligned[i]
+        # Ichimoku Cloud boundaries (using Senkou Span A and B)
+        upper_cloud = np.maximum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        lower_cloud = np.minimum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
         
-        # Elder Ray conditions
-        bullish_momentum = bull_power_aligned[i] > 0
-        bearish_momentum = bear_power_aligned[i] < 0
-        exit_signal = (bull_power_aligned[i] * bull_power_aligned[i-1] <= 0) or \
-                      (bear_power_aligned[i] * bear_power_aligned[i-1] <= 0)
+        # Price relative to cloud
+        price_above_cloud = close_6h_aligned[i] > upper_cloud
+        price_below_cloud = close_6h_aligned[i] < lower_cloud
+        price_in_cloud = (close_6h_aligned[i] >= lower_cloud) & (close_6h_aligned[i] <= upper_cloud)
+        
+        # TK Cross (Tenkan-sen/Kijun-sen cross)
+        tk_cross_bullish = tenkan_sen_aligned[i] > kijun_sen_aligned[i]
+        tk_cross_bearish = tenkan_sen_aligned[i] < kijun_sen_aligned[i]
+        tk_cross_previous_bullish = tenkan_sen_aligned[i-1] > kijun_sen_aligned[i-1]
+        tk_cross_previous_bearish = tenkan_sen_aligned[i-1] < kijun_sen_aligned[i-1]
+        
+        # Bullish TK Cross: Tenkan crosses above Kijun
+        bullish_tk_cross = tk_cross_bullish and not tk_cross_previous_bullish
+        # Bearish TK Cross: Tenkan crosses below Kijun
+        bearish_tk_cross = tk_cross_bearish and not tk_cross_previous_bearish
         
         # Entry conditions
-        if weekly_uptrend and bullish_momentum and volume_spike and position != 1:
+        if price_above_cloud and bullish_tk_cross and volume_spike and position != 1:
             position = 1
             signals[i] = position_size
-        elif weekly_downtrend and bearish_momentum and volume_spike and position != -1:
+        elif price_below_cloud and bearish_tk_cross and volume_spike and position != -1:
             position = -1
             signals[i] = -position_size
-        # Exit conditions
-        elif exit_signal and position != 0:
+        # Exit conditions: price re-enters the cloud
+        elif price_in_cloud and position != 0:
             position = 0
             signals[i] = 0.0
         # Hold current position
@@ -105,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_1d_elder_ray_trend_volume_v1"
+name = "6h_1w_ichimoku_cloud_tk_cross_volume_v1"
 timeframe = "6h"
 leverage = 1.0
