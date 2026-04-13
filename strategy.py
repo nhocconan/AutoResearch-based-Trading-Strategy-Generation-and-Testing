@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_1w_MultiFactor_Position_Sizing
-Hypothesis: Combines weekly trend filter (EMA50), 6h momentum (RSI divergence), and volatility expansion (ATR ratio) for high-probability entries. 
-Weekly EMA50 defines structural trend, RSI divergence identifies exhaustion points, ATR ratio >1.5 confirms momentum breakout. 
-Works in bull markets via trend continuation and in bear markets via counter-trend reversals at key levels. 
-Target: 15-25 trades/year per symbol with disciplined position sizing.
+12h_1d_Camarilla_Pivot_Breakout_With_Volume_Confirmation
+Hypothesis: Buy when price breaks above Camarilla H4 level with volume > 1.5x 20-period average,
+sell when price breaks below L4 level with volume confirmation, using 1d EMA trend filter.
+Camarilla levels provide intraday support/resistance; breakouts capture momentum in trending markets.
+Volume confirms institutional participation. Works in bull markets via upside breakouts and
+in bear markets via downside breaks. Target: 20-30 trades/year per symbol.
 """
 
 import numpy as np
@@ -13,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,58 +22,65 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 60-period ATR for volatility measurement
+    # Calculate True Range and ATR for volatility
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[0], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=60, min_periods=60).mean().values
-    atr_ma = pd.Series(atr).rolling(window=30, min_periods=30).mean().values
-    atr_ratio = atr / atr_ma  # Current volatility vs recent average
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 6-period RSI for momentum exhaustion
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    gain_ma = pd.Series(gain).ewm(alpha=1/6, adjust=False, min_periods=6).mean().values
-    loss_ma = pd.Series(loss).ewm(alpha=1/6, adjust=False, min_periods=6).mean().values
-    rs = gain_ma / (loss_ma + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volume_expansion = volume > (vol_ma_20 * 1.5)
     
-    # Weekly EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        ema50_1w = np.full(len(prices), np.nan)
+    # Previous period's high/low for Camarilla calculation
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    # Calculate Camarilla levels for current period using previous period's range
+    # H4 = close + 1.1 * (high - low) / 2
+    # L4 = close - 1.1 * (high - low) / 2
+    camarilla_h4 = prev_close + 1.1 * (prev_high - prev_low) / 2
+    camarilla_l4 = prev_close - 1.1 * (prev_high - prev_low) / 2
+    
+    # 1d EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        ema50_1d = np.full(len(prices), np.nan)
     else:
-        close_1w = df_1w['close'].values
-        ema50_1w_raw = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema50_1w = align_htf_to_ltf(prices, df_1w, ema50_1w_raw)
+        close_1d = df_1d['close'].values
+        ema50_1d_raw = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema50_1d = align_htf_to_ltf(prices, df_1d, ema50_1d_raw)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(100, n):  # warmup period
+    for i in range(50, n):  # warmup period
         # Skip if any required data is not ready
-        if (np.isnan(ema50_1w[i]) or np.isnan(rsi[i]) or 
-            np.isnan(atr_ratio[i])):
+        if (np.isnan(camarilla_h4[i]) or np.isnan(camarilla_l4[i]) or 
+            np.isnan(ema50_1d[i]) or np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions: weekly uptrend + RSI oversold + volatility expansion
-        long_condition = (close[i] > ema50_1w[i] and 
-                         rsi[i] < 30 and 
-                         atr_ratio[i] > 1.5)
+        # Long signal: break above Camarilla H4 with volume expansion and 1d uptrend
+        long_signal = (close[i] > camarilla_h4[i] and 
+                      volume_expansion[i] and 
+                      close[i] > ema50_1d[i])
         
-        # Short conditions: weekly downtrend + RSI overbought + volatility expansion
-        short_condition = (close[i] < ema50_1w[i] and 
-                          rsi[i] > 70 and 
-                          atr_ratio[i] > 1.5)
+        # Short signal: break below Camarilla L4 with volume expansion and 1d downtrend
+        short_signal = (close[i] < camarilla_l4[i] and 
+                       volume_expansion[i] and 
+                       close[i] < ema50_1d[i])
         
-        if long_condition and position != 1:
+        if long_signal and position != 1:
             position = 1
             signals[i] = position_size
-        elif short_condition and position != -1:
+        elif short_signal and position != -1:
             position = -1
             signals[i] = -position_size
         else:
@@ -81,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_MultiFactor_Position_Sizing"
-timeframe = "6h"
+name = "12h_1d_Camarilla_Pivot_Breakout_With_Volume_Confirmation"
+timeframe = "12h"
 leverage = 1.0
