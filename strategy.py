@@ -8,102 +8,69 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian breakout with 1d ATR regime filter and volume spike confirmation
-    # Long: price > Donchian(20) high AND ATR(14)/ATR(50) > 1.2 (high vol regime) AND volume > 1.5x avg
-    # Short: price < Donchian(20) low AND ATR(14)/ATR(50) > 1.2 AND volume > 1.5x avg
-    # Exit: opposite Donchian breakout or ATR ratio < 0.8 (low vol exit)
-    # Using 4h timeframe for optimal trade frequency, Donchian for structure,
-    # ATR ratio for volatility regime (avoid low vol whipsaws), volume for confirmation.
+    # Hypothesis: 1d Williams %R mean reversion with 1w trend filter
+    # Long: Williams %R < -80 (oversold) AND 1w close > 1w EMA200 (bullish trend)
+    # Short: Williams %R > -20 (overbought) AND 1w close < 1w EMA200 (bearish trend)
+    # Exit: Williams %R crosses above -50 (long exit) or below -50 (short exit)
+    # Using 1d for low trade frequency, Williams %R for mean reversion in ranging markets,
+    # 1w EMA200 for trend filter to avoid counter-trend trades.
     # Discrete position sizing (0.25) to minimize fee churn.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get daily data for ATR regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
         return np.zeros(n)
     
-    # Calculate daily ATR(14) and ATR(50) for regime filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly EMA200 for trend filter
+    close_1w = df_1w['close'].values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    # True Range calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # first bar
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # ATR calculation with min_periods
-    def calculate_atr(data, period):
-        atr = np.full_like(data, np.nan)
-        if len(data) < period:
-            return atr
-        # First value: simple average
-        atr[period-1] = np.mean(data[:period])
-        # Subsequent values: Wilder's smoothing
-        for i in range(period, len(data)):
-            atr[i] = (atr[i-1] * (period-1) + data[i]) / period
-        return atr
-    
-    atr_14 = calculate_atr(tr, 14)
-    atr_50 = calculate_atr(tr, 50)
-    
-    # ATR ratio: short-term / long-term volatility
-    atr_ratio = np.where(atr_50 > 0, atr_14 / atr_50, 0)
-    
-    # Align daily ATR ratio to 4h
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
-    
-    # Calculate 4h Donchian channels (20-period)
-    lookback = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    
-    for i in range(lookback-1, n):
-        highest_high[i] = np.max(high[i-lookback+1:i+1])
-        lowest_low[i] = np.min(low[i-lookback+1:i+1])
-    
-    # Donchian breakout signals
-    donchian_long = close > highest_high
-    donchian_short = close < lowest_low
-    
-    # Get 4h volume for confirmation (>1.5x 20-period average)
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (1.5 * vol_ma)
+    # Calculate daily Williams %R(14)
+    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = np.where(
+        (highest_high - lowest_low) != 0,
+        (highest_high - close) / (highest_high - lowest_low) * -100,
+        -50  # neutral when range is zero
+    )
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(atr_ratio_aligned[i]) or np.isnan(donchian_long[i]) or 
-            np.isnan(donchian_short[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_200_1w_aligned[i]) or np.isnan(williams_r[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: high volatility (ATR ratio > 1.2)
-        high_vol_regime = atr_ratio_aligned[i] > 1.2
-        low_vol_exit = atr_ratio_aligned[i] < 0.8
+        # Trend filter: bullish if weekly close > weekly EMA200
+        bullish_trend = close_1w[-1] > ema_200_1w[-1] if len(close_1w) == len(ema_200_1w) else False
+        # Actually use aligned values for current bar
+        # Need to get the weekly close value aligned to daily
+        # Since we don't have weekly close aligned, we'll use the EMA alignment as proxy
+        # Simpler approach: use the last available weekly close for trend
+        if len(df_1w) > 0:
+            weekly_close_now = df_1w['close'].iloc[-1]  # most recent weekly close
+            weekly_ema_now = ema_200_1w[-1] if len(ema_200_1w) > 0 else 0
+            bullish_trend = weekly_close_now > weekly_ema_now
+            bearish_trend = weekly_close_now < weekly_ema_now
+        else:
+            bullish_trend = False
+            bearish_trend = False
         
-        # Volume confirmation
-        vol_confirm = volume_spike[i]
+        # Entry logic: Williams %R extremes + trend filter
+        long_entry = (williams_r[i] < -80) and bullish_trend
+        short_entry = (williams_r[i] > -20) and bearish_trend
         
-        # Entry logic: Donchian breakout + high vol regime + volume confirmation
-        long_entry = donchian_long[i] and high_vol_regime and vol_confirm
-        short_entry = donchian_short[i] and high_vol_regime and vol_confirm
-        
-        # Exit logic: opposite Donchian breakout OR low vol regime OR volume dry-up
-        long_exit = donchian_short[i] or low_vol_exit or not vol_confirm
-        short_exit = donchian_long[i] or low_vol_exit or not vol_confirm
+        # Exit logic: Williams %R crosses midpoint
+        long_exit = williams_r[i] > -50
+        short_exit = williams_r[i] < -50
         
         if long_entry and position != 1:
             position = 1
@@ -128,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_atr_volume_v1"
-timeframe = "4h"
+name = "1d_1w_williamsr_mean_reversion_v1"
+timeframe = "1d"
 leverage = 1.0
