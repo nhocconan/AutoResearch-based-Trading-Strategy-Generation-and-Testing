@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe with 1-day Donchian breakout (20-period) + volume confirmation + ADX trend filter
-# Long when price breaks above 20-period Donchian high AND volume > 1.5x average volume AND ADX > 25
-# Short when price breaks below 20-period Donchian low AND volume > 1.5x average volume AND ADX > 25
-# Exit when price crosses back through the Donchian middle (10-period average of high/low) OR ADX < 20
-# Uses daily timeframe for Donchian channels and ADX to capture major trend breaks
-# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
+# Hypothesis: 4h timeframe with 1-day Bollinger Bands (20,2) + RSI(14) mean reversion
+# Long when price touches lower Bollinger Band AND RSI < 30 (oversold)
+# Short when price touches upper Bollinger Band AND RSI > 70 (overbought)
+# Exit when price crosses middle Bollinger Band (20-period SMA)
+# Uses daily timeframe for mean reversion structure to avoid whipsaws in trending markets
+# Target: 75-200 total trades over 4 years (19-50/year) with strict entry conditions
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,9 +18,8 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels and ADX
+    # Get 1d data for Bollinger Bands and RSI
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -28,51 +27,28 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 20-period Donchian channels
-    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2
+    # Calculate Bollinger Bands (20-period SMA, 2 standard deviations)
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + (2 * std_20)
+    lower_bb = sma_20 - (2 * std_20)
+    middle_bb = sma_20  # 20-period SMA
     
-    # Calculate ADX (14-period)
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], 
-                        np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate RSI (14-period)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = avg_gain / np.where(avg_loss == 0, 1e-10, avg_loss)  # Avoid division by zero
+    rsi = 100 - (100 / (1 + rs))
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smoothed TR, DM+
-    tr_smooth = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / tr_smooth
-    di_minus = 100 * dm_minus_smooth / tr_smooth
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate average volume for confirmation
-    avg_volume = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align 1d indicators to 12h timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
-    donch_mid_aligned = align_htf_to_ltf(prices, df_1d, donch_mid)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    avg_volume_aligned = align_htf_to_ltf(prices, df_1d, avg_volume)
+    # Align 1d indicators to 4h timeframe
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    middle_bb_aligned = align_htf_to_ltf(prices, df_1d, middle_bb)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -80,31 +56,25 @@ def generate_signals(prices):
     
     for i in range(30, n):
         # Skip if data not ready
-        if (np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or 
-            np.isnan(donch_mid_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or 
-            np.isnan(avg_volume_aligned[i])):
+        if (np.isnan(upper_bb_aligned[i]) or 
+            np.isnan(lower_bb_aligned[i]) or 
+            np.isnan(middle_bb_aligned[i]) or 
+            np.isnan(rsi_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirm = volume[i] > 1.5 * avg_volume_aligned[i]
+        # Entry conditions: price at Bollinger Bands + RSI extreme
+        at_lower_bb = close[i] <= lower_bb_aligned[i]
+        at_upper_bb = close[i] >= upper_bb_aligned[i]
+        rsi_oversold = rsi_aligned[i] < 30
+        rsi_overbought = rsi_aligned[i] > 70
         
-        # ADX trend filter
-        strong_trend = adx_aligned[i] > 25
+        long_entry = at_lower_bb and rsi_oversold
+        short_entry = at_upper_bb and rsi_overbought
         
-        # Breakout conditions
-        long_breakout = close[i] > donch_high_aligned[i]
-        short_breakout = close[i] < donch_low_aligned[i]
-        
-        # Entry conditions
-        long_entry = long_breakout and volume_confirm and strong_trend
-        short_entry = short_breakout and volume_confirm and strong_trend
-        
-        # Exit conditions: price crosses mid-line OR ADX weakens
-        exit_long = position == 1 and (close[i] < donch_mid_aligned[i] or adx_aligned[i] < 20)
-        exit_short = position == -1 and (close[i] > donch_mid_aligned[i] or adx_aligned[i] < 20)
+        # Exit conditions: price crosses middle Bollinger Band
+        exit_long = position == 1 and close[i] >= middle_bb_aligned[i]
+        exit_short = position == -1 and close[i] <= middle_bb_aligned[i]
         
         # Execute signals
         if long_entry and position != 1:
@@ -127,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_donchian_breakout_volume_adx"
-timeframe = "12h"
+name = "4h_1d_bollinger_rsi_mean_reversion"
+timeframe = "4h"
 leverage = 1.0
