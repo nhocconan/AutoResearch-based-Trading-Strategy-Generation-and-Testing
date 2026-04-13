@@ -8,11 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Donchian(20) breakout with weekly Camarilla pivot filter + volume confirmation
-    # Long: price > Donchian(20) high AND price > weekly S3 pivot AND volume > 2.0x 20-period average
-    # Short: price < Donchian(20) low AND price < weekly R3 pivot AND volume > 2.0x 20-period average
-    # Exit: opposite Donchian breakout OR price crosses weekly H3/L3 pivot
-    # Using 6h timeframe for optimal trade frequency (target 12-37/year), weekly Camarilla pivots for strong structure,
+    # Hypothesis: 4h Donchian(20) breakout with daily ATR regime filter + volume confirmation
+    # Long: price > Donchian(20) high AND ATR(14) > ATR(50) AND volume > 1.5x 20-period average
+    # Short: price < Donchian(20) low AND ATR(14) > ATR(50) AND volume > 1.5x 20-period average
+    # Exit: opposite Donchian breakout
+    # Using 4h timeframe for optimal trade frequency (target 19-50/year), ATR regime to filter choppy markets,
     # and volume spike confirmation to avoid false breakouts. Discrete position sizing (0.25) to minimize fee churn.
     
     close = prices['close'].values
@@ -20,36 +20,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # ATR calculation with min_periods
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_14 = np.full(n, np.nan)
+    atr_50 = np.full(n, np.nan)
     
-    # Calculate weekly Camarilla pivot levels (H3, L3, S3, R3)
-    # Formula based on previous weekly candle: H4 = close + 1.1*(high-low)*1.1/2, L4 = close - 1.1*(high-low)*1.1/2
-    # Then: H3 = H4 - (H4-L4)/2, L3 = L4 + (H4-L4)/2, S3 = L4 - (H4-L4)*1.1/6, R3 = H4 + (H4-L4)*1.1/6
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    for i in range(14, n):
+        atr_14[i] = np.nanmean(tr[i-13:i+1])
+    for i in range(50, n):
+        atr_50[i] = np.nanmean(tr[i-49:i+1])
     
-    # Calculate weekly Camarilla levels with proper seeding
-    H4 = np.full(len(close_1w), np.nan)
-    L4 = np.full(len(close_1w), np.nan)
-    for i in range(1, len(close_1w)):
-        H4[i] = close_1w[i-1] + 1.1 * (high_1w[i-1] - low_1w[i-1]) * 1.1 / 2
-        L4[i] = close_1w[i-1] - 1.1 * (high_1w[i-1] - low_1w[i-1]) * 1.1 / 2
+    atr_regime = atr_14 > atr_50  # Trending regime when short ATR > long ATR
     
-    H3 = np.full(len(close_1w), np.nan)
-    L3 = np.full(len(close_1w), np.nan)
-    S3 = np.full(len(close_1w), np.nan)
-    R3 = np.full(len(close_1w), np.nan)
-    for i in range(1, len(close_1w)):
-        H3[i] = H4[i] - (H4[i] - L4[i]) / 2
-        L3[i] = L4[i] + (H4[i] - L4[i]) / 2
-        S3[i] = L4[i] - (H4[i] - L4[i]) * 1.1 / 6
-        R3[i] = H4[i] + (H4[i] - L4[i]) * 1.1 / 6
-    
-    # Get 6h Donchian(20) for breakout with min_periods
+    # Get 4h Donchian(20) for breakout with min_periods
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     
@@ -57,27 +43,19 @@ def generate_signals(prices):
         donchian_high[i] = np.max(high[i-20:i])
         donchian_low[i] = np.min(low[i-20:i])
     
-    # Get 6h volume for confirmation (>2.0x 20-period average)
+    # Get 4h volume for confirmation (>1.5x 20-period average)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (2.0 * vol_ma)
-    
-    # Align weekly Camarilla levels to 6h
-    H3_aligned = align_htf_to_ltf(prices, df_1w, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1w, L3)
-    S3_aligned = align_htf_to_ltf(prices, df_1w, S3)
-    R3_aligned = align_htf_to_ltf(prices, df_1w, R3)
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or 
-            np.isnan(S3_aligned[i]) or np.isnan(R3_aligned[i]) or
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(atr_regime[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
@@ -85,17 +63,13 @@ def generate_signals(prices):
         long_breakout = close[i] > donchian_high[i]
         short_breakout = close[i] < donchian_low[i]
         
-        # Pivot filter conditions
-        bullish_pivot = close[i] > S3_aligned[i]  # Above S3 = bullish bias
-        bearish_pivot = close[i] < R3_aligned[i]  # Below R3 = bearish bias
+        # Entry logic: Breakout + ATR regime + volume confirmation
+        long_entry = long_breakout and atr_regime[i] and volume_spike[i]
+        short_entry = short_breakout and atr_regime[i] and volume_spike[i]
         
-        # Entry logic: Breakout + pivot alignment + volume confirmation
-        long_entry = long_breakout and bullish_pivot and volume_spike[i]
-        short_entry = short_breakout and bearish_pivot and volume_spike[i]
-        
-        # Exit logic: opposite breakout or price crosses H3/L3 (more significant levels)
-        long_exit = short_breakout or (close[i] < L3_aligned[i])
-        short_exit = long_breakout or (close[i] > H3_aligned[i])
+        # Exit logic: opposite breakout
+        long_exit = short_breakout
+        short_exit = long_breakout
         
         if long_entry and position != 1:
             position = 1
@@ -120,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_donchian_breakout_camarilla_pivot_volume_v1"
-timeframe = "6h"
+name = "4h_donchian_breakout_atr_regime_volume_v1"
+timeframe = "4h"
 leverage = 1.0
