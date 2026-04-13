@@ -8,12 +8,12 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Williams %R extreme + 1d EMA200 trend filter + volume confirmation
-    # Long: Williams %R < -80 (oversold) + price > 1d EMA200 + volume > 1.5x 20-period average
-    # Short: Williams %R > -20 (overbought) + price < 1d EMA200 + volume > 1.5x 20-period average
-    # Exit: Williams %R crosses above -50 (long) or below -50 (short)
-    # Using 6h timeframe to reduce trade frequency, Williams %R for mean reversion in extremes,
-    # 1d EMA200 for strong trend filter, and volume confirmation to avoid false signals.
+    # Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter + volume confirmation
+    # Long: price > Donchian(20) high + price > 1d EMA50 + volume > 2.0x 20-period average
+    # Short: price < Donchian(20) low + price < 1d EMA50 + volume > 2.0x 20-period average
+    # Exit: opposite Donchian breakout OR price crosses 1d EMA50
+    # Using 12h timeframe to reduce trade frequency (12-37 trades/year target), 
+    # 1d EMA50 for strong trend filter, and volume spike confirmation to avoid false breakouts.
     # Discrete position sizing (0.25) to minimize fee churn.
     
     close = prices['close'].values
@@ -21,38 +21,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA200 trend filter
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA200 with min_periods
+    # Calculate 1d EMA50 with min_periods
     ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 200:
-        ema_1d[199] = np.mean(close_1d[:200])  # SMA200 as seed
-        multiplier = 2 / (200 + 1)
-        for i in range(200, len(close_1d)):
+    if len(close_1d) >= 50:
+        ema_1d[49] = np.mean(close_1d[:50])  # SMA50 as seed
+        multiplier = 2 / (50 + 1)
+        for i in range(50, len(close_1d)):
             ema_1d[i] = (close_1d[i] * multiplier) + (ema_1d[i-1] * (1 - multiplier))
     
-    # Calculate 6h Williams %R(14) with min_periods
-    williams_r = np.full(n, np.nan)
-    for i in range(14, n):
-        highest_high = np.max(high[i-14:i+1])
-        lowest_low = np.min(low[i-14:i+1])
-        if highest_high != lowest_low:
-            williams_r[i] = ((highest_high - close[i]) / (highest_high - lowest_low)) * -100
-        else:
-            williams_r[i] = -50  # neutral when range is zero
+    # Get 12h Donchian(20) for breakout with min_periods
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
     
-    # Get 6h volume for confirmation (>1.5x 20-period average)
+    for i in range(20, n):
+        donchian_high[i] = np.max(high[i-20:i])
+        donchian_low[i] = np.min(low[i-20:i])
+    
+    # Get 12h volume for confirmation (>2.0x 20-period average)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
-    # Align 1d EMA200 to 6h
+    # Align 1d EMA50 to 12h
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     signals = np.zeros(n)
@@ -60,28 +58,26 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(williams_r[i]) or np.isnan(ema_1d_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Williams %R conditions
-        oversold = williams_r[i] < -80
-        overbought = williams_r[i] > -20
-        exit_long = williams_r[i] > -50  # exit long when crosses above -50
-        exit_short = williams_r[i] < -50  # exit short when crosses below -50
+        # Breakout conditions
+        long_breakout = close[i] > donchian_high[i]
+        short_breakout = close[i] < donchian_low[i]
         
-        # Trend filter from 1d EMA200
+        # Trend filter from 1d EMA50
         bullish_trend = close[i] > ema_1d_aligned[i]
         bearish_trend = close[i] < ema_1d_aligned[i]
         
-        # Entry logic: Extreme + trend alignment + volume confirmation
-        long_entry = oversold and bullish_trend and volume_spike[i]
-        short_entry = overbought and bearish_trend and volume_spike[i]
+        # Entry logic: Breakout + trend alignment + volume confirmation
+        long_entry = long_breakout and bullish_trend and volume_spike[i]
+        short_entry = short_breakout and bearish_trend and volume_spike[i]
         
-        # Exit logic: Williams %R crosses -50 or trend reversal
-        long_exit = exit_long or (close[i] < ema_1d_aligned[i])
-        short_exit = exit_short or (close[i] > ema_1d_aligned[i])
+        # Exit logic: opposite breakout or trend reversal
+        long_exit = short_breakout or (close[i] < ema_1d_aligned[i])
+        short_exit = long_breakout or (close[i] > ema_1d_aligned[i])
         
         if long_entry and position != 1:
             position = 1
@@ -106,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_williamsr_extreme_ema200_volume_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_breakout_ema50_volume_v1"
+timeframe = "12h"
 leverage = 1.0
