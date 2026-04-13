@@ -8,10 +8,10 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1h mean reversion at 4h Camarilla H3/L3 with 4h volume spike and 1d trend filter
-    # Designed for low trade frequency (15-37/year) to minimize fee drag on 1h timeframe
-    # Uses 4h/1d for signal direction, 1h only for entry timing precision
-    # Works in both bull and bear: mean reversion in range, trend filter avoids counter-trend trades
+    # Hypothesis: 1h Camarilla mean reversion with 4h volume spike and 1d trend filter.
+    # Uses 4h/1d for signal direction, 1h only for entry timing.
+    # Target: 15-37 trades/year (60-150 total over 4 years) to minimize fee drag.
+    # Works in bull/bear: mean reversion in range, trend filter avoids counter-trend trades.
     
     close = prices['close'].values
     high = prices['high'].values
@@ -32,6 +32,9 @@ def generate_signals(prices):
     prev_high_4h = np.roll(high_4h, 1)
     prev_low_4h = np.roll(low_4h, 1)
     prev_close_4h = np.roll(close_4h, 1)
+    prev_high_4h[0] = np.nan
+    prev_low_4h[0] = np.nan
+    prev_close_4h[0] = np.nan
     
     # Camarilla levels (H3/L3 are the key mean reversion levels)
     camarilla_h3 = prev_close_4h + 1.125 * (prev_high_4h - prev_low_4h)
@@ -56,21 +59,25 @@ def generate_signals(prices):
     vol_avg_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_avg_20_4h)
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
+    # Pre-compute session filter (08-20 UTC)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.20  # 20% position size
     
     for i in range(50, n):
-        # Skip if data not ready
-        if (np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(vol_avg_20_4h_aligned[i]) or
-            np.isnan(ema50_1d_aligned[i])):
+        # Skip if outside session or data not ready
+        if not in_session[i] or \
+           np.isnan(camarilla_h3_aligned[i]) or \
+           np.isnan(camarilla_l3_aligned[i]) or \
+           np.isnan(vol_avg_20_4h_aligned[i]) or \
+           np.isnan(ema50_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current 4h volume > 1.5x 20-period average
-        # Get the 4h bar index for current 1h bar (each 4h bar = 4 1h bars)
         idx_4h = i // 4
         if idx_4h >= len(volume_4h):
             signals[i] = 0.0
@@ -93,6 +100,8 @@ def generate_signals(prices):
         # Exit conditions: price returns to Camarilla H4/L4 levels (stronger levels)
         camarilla_h4 = prev_close_4h + 1.5 * (prev_high_4h - prev_low_4h)
         camarilla_l4 = prev_close_4h - 1.5 * (prev_high_4h - prev_low_4h)
+        camarilla_h4[0] = np.nan
+        camarilla_l4[0] = np.nan
         camarilla_h4_aligned = align_htf_to_ltf(prices, df_4h, camarilla_h4)
         camarilla_l4_aligned = align_htf_to_ltf(prices, df_4h, camarilla_l4)
         
@@ -123,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4h_1d_camarilla_meanreversion_volume_trend_v1"
+name = "1h_4h_1d_camarilla_meanreversion_volume_trend_v2"
 timeframe = "1h"
 leverage = 1.0
