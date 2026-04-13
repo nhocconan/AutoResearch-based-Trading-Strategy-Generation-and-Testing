@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 300:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,68 +21,81 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    vol_1d = df_1d['volume'].values
     
-    # Calculate ATR(14) on 1d
-    high_low = high_1d - low_1d
-    high_close = np.abs(high_1d - np.roll(close_1d, 1))
-    low_close = np.abs(low_1d - np.roll(close_1d, 1))
-    high_close[0] = high_low[0]
-    low_close[0] = high_low[0]
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    # Calculate 30-period SMA on 1d (trend filter)
+    close_1d_series = pd.Series(close_1d)
+    sma_30_1d = close_1d_series.rolling(window=30, min_periods=30).mean().values
+    
+    # Calculate RSI(14) on 1d
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_14 = 100 - (100 / (1 + rs))
+    
+    # Calculate ATR(14) on 1d for volatility filter
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]
+    tr2[0] = np.abs(high_1d[0] - close_1d[0])
+    tr3[0] = np.abs(low_1d[0] - close_1d[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Calculate Donchian Channel (20) on 1d
-    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Get 1w data for trend confirmation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # Calculate ATR(14) on 12h
-    high_12h = high
-    low_12h = low
-    close_12h = close
-    high_low_12h = high_12h - low_12h
-    high_close_12h = np.abs(high_12h - np.roll(close_12h, 1))
-    low_close_12h = np.abs(low_12h - np.roll(close_12h, 1))
-    high_close_12h[0] = high_low_12h[0]
-    low_close_12h[0] = high_low_12h[0]
-    tr_12h = np.maximum(high_low_12h, np.maximum(high_close_12h, low_close_12h))
-    atr_14_12h = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    close_1w = df_1w['close'].values
+    # Calculate 20-period SMA on 1w
+    sma_20_1w = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
     
-    # Align indicators to 12h timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    # Align indicators to 4h timeframe
+    sma_30_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_30_1d)
+    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    sma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_20_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25
     
-    for i in range(200, n):
+    for i in range(300, n):
         # Skip if data not ready
-        if (np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or
+        if (np.isnan(sma_30_1d_aligned[i]) or 
+            np.isnan(rsi_14_aligned[i]) or
             np.isnan(atr_14_aligned[i]) or
-            np.isnan(atr_14_12h[i])):
+            np.isnan(sma_20_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5 * average volume
-        vol_ma = np.mean(volume[max(0, i-20):i+1]) if i >= 20 else volume[i]
-        vol_filter = volume[i] > 1.5 * vol_ma
+        # Trend filter: price above/below SMA30 (1d)
+        above_sma = close[i] > sma_30_1d_aligned[i]
+        below_sma = close[i] < sma_30_1d_aligned[i]
         
-        # Breakout conditions
-        breakout_up = close[i] > donch_high_aligned[i]
-        breakout_down = close[i] < donch_low_aligned[i]
+        # RSI conditions: not overbought/oversold
+        rsi_not_overbought = rsi_14_aligned[i] < 70
+        rsi_not_oversold = rsi_14_aligned[i] > 30
         
-        # ATR filter: volatility not too low
-        vol_ok = atr_14_12h[i] > 0.01 * close[i]  # Avoid low volatility periods
+        # Volatility filter: current volatility above average
+        vol_filter = atr_14_aligned[i] > np.nanmedian(atr_14_aligned[max(0, i-50):i])
         
-        # Entry conditions
-        long_entry = breakout_up and vol_filter and vol_ok
-        short_entry = breakout_down and vol_filter and vol_ok
+        # Weekly trend filter: price above/below weekly SMA20
+        above_weekly_sma = close[i] > sma_20_1w_aligned[i]
+        below_weekly_sma = close[i] < sma_20_1w_aligned[i]
         
-        # Exit conditions: opposite breakout or volatility collapse
-        exit_long = position == 1 and (breakout_down or atr_14_12h[i] < 0.005 * close[i])
-        exit_short = position == -1 and (breakout_up or atr_14_12h[i] < 0.005 * close[i])
+        # Entry conditions - require trend alignment + volatility
+        long_entry = above_sma and rsi_not_overbought and vol_filter and above_weekly_sma
+        short_entry = below_sma and rsi_not_oversold and vol_filter and below_weekly_sma
+        
+        # Exit conditions: opposite signal or volatility drop
+        exit_long = position == 1 and (below_sma or not vol_filter)
+        exit_short = position == -1 and (above_sma or not vol_filter)
         
         # Execute signals
         if long_entry and position != 1:
@@ -105,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_donchian_breakout_volume_filter"
-timeframe = "12h"
+name = "4h_1d_1w_sma_rsi_vol_filter"
+timeframe = "4h"
 leverage = 1.0
