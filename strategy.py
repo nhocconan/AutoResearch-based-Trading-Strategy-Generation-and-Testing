@@ -8,20 +8,19 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1d Camarilla pivot breakout with volume confirmation and weekly trend filter
-    # Long: price breaks above H3 (resistance) AND volume > 1.5x 20-period average AND weekly close > weekly open
-    # Short: price breaks below L3 (support) AND volume > 1.5x 20-period average AND weekly close < weekly open
-    # Exit: price returns to PIVOT point
-    # Using 1d for signal generation, 1w for trend filter to reduce counter-trend trades
-    # Discrete position sizing (0.25) to balance return and risk
+    # Hypothesis: 12h Camarilla pivot breakout with volume confirmation and 1d trend filter
+    # Long: price breaks above H3 (resistance) AND volume > 1.5x 20-period average AND price > 1d EMA50
+    # Short: price breaks below L3 (support) AND volume > 1.5x 20-period average AND price < 1d EMA50
+    # Exit: price returns to PIVOT point or volume drops below average
+    # Using 1d for Camarilla pivots and trend (more stable than 4h), 12h only for execution
+    # Discrete position sizing (0.25) to balance return and drawdown
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Get 1d data for Camarilla pivots (call ONCE before loop)
+    # Get 1d data for Camarilla pivots and trend (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -42,26 +41,17 @@ def generate_signals(prices):
     h3_1d = close_1d + range_1d * 1.1 / 4
     l3_1d = close_1d - range_1d * 1.1 / 4
     
-    # Align 1d Camarilla levels to lower timeframe (wait for completed 1d bar)
+    # Align 1d Camarilla levels to 12h (wait for completed 1d bar)
     h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
     l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     
-    # Get 1w data for trend filter (weekly bull/bear)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        # Fallback to neutral if 1w not enough data
-        weekly_bull = np.full(n, True)  # neutral - no filter
-        weekly_bear = np.full(n, True)  # neutral - no filter
+    # Get 1d EMA50 for trend filter
+    if len(df_1d) >= 50:
+        ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     else:
-        open_1w = df_1w['open'].values
-        close_1w = df_1w['close'].values
-        # Weekly bull = close > open, Weekly bear = close < open
-        weekly_bull_raw = close_1w > open_1w
-        weekly_bear_raw = close_1w < open_1w
-        # Align to lower timeframe (wait for completed 1w bar)
-        weekly_bull = align_htf_to_ltf(prices, df_1w, weekly_bull_raw.astype(float)) > 0.5
-        weekly_bear = align_htf_to_ltf(prices, df_1w, weekly_bear_raw.astype(float)) > 0.5
+        ema_1d_aligned = np.full(n, np.nan)
     
     # Volume confirmation: >1.5x 20-period average
     vol_ma = np.full(n, np.nan)
@@ -82,17 +72,20 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirm = volume_spike[i]
         
-        # Weekly trend filter
-        long_trend_ok = weekly_bull[i] if i < len(weekly_bull) else True
-        short_trend_ok = weekly_bear[i] if i < len(weekly_bear) else True
+        # Trend filter: only long if price > 1d EMA50, only short if price < 1d EMA50
+        long_trend_ok = True
+        short_trend_ok = True
+        if not np.isnan(ema_1d_aligned[i]):
+            long_trend_ok = close[i] > ema_1d_aligned[i]
+            short_trend_ok = close[i] < ema_1d_aligned[i]
         
-        # Entry logic: Camarilla breakout + volume + weekly trend
+        # Entry logic: Camarilla breakout + volume + trend
         long_entry = (close[i] > h3_1d_aligned[i]) and vol_confirm and long_trend_ok
         short_entry = (close[i] < l3_1d_aligned[i]) and vol_confirm and short_trend_ok
         
-        # Exit logic: return to pivot
-        long_exit = close[i] < pivot_1d_aligned[i]
-        short_exit = close[i] > pivot_1d_aligned[i]
+        # Exit logic: return to pivot or volume dry-up
+        long_exit = (close[i] < pivot_1d_aligned[i]) or not vol_confirm
+        short_exit = (close[i] > pivot_1d_aligned[i]) or not vol_confirm
         
         if long_entry and position != 1:
             position = 1
@@ -117,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_camarilla_breakout_volume_weekly_trend_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_breakout_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
