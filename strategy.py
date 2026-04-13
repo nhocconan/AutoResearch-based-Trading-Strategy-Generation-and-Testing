@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index (Bull Power/Bear Power) with 1d trend filter and volume confirmation.
-# Elder Ray measures bull/bear power via EMA(13): Bull Power = High - EMA13, Bear Power = Low - EMA13.
-# In strong uptrends: Bull Power > 0 and rising. In strong downtrends: Bear Power < 0 and falling.
-# Combined with 1d EMA trend filter (avoid counter-trend trades) and volume spikes (confirm conviction).
-# Works in both bull and bear markets by using 1d trend filter to align with higher timeframe direction.
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
+# Hypothesis: 12h Bollinger Band squeeze breakout with weekly trend filter and volume confirmation.
+# Bollinger Band squeeze identifies low volatility periods that precede explosive moves.
+# Uses weekly EMA50 for trend filter (avoid counter-trend trades) and volume spike for confirmation.
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+# Works in both bull and bear markets by using weekly trend filter to align with higher timeframe trend.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,91 +19,108 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-day data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    # EMA(20) for 1d trend filter
-    ema20_1d = np.zeros(len(close_1d))
-    ema_multiplier = 2 / (20 + 1)
-    ema20_1d[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        ema20_1d[i] = (close_1d[i] - ema20_1d[i-1]) * ema_multiplier + ema20_1d[i-1]
+    close_1w = df_1w['close'].values
+    # EMA(50) for weekly trend filter
+    ema50_1w = np.zeros(len(close_1w))
+    ema_multiplier = 2 / (50 + 1)
+    ema50_1w[0] = close_1w[0]
+    for i in range(1, len(close_1w)):
+        ema50_1w[i] = (close_1w[i] - ema50_1w[i-1]) * ema_multiplier + ema50_1w[i-1]
     
-    # Align 1d EMA to 6h timeframe
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    # Align weekly EMA to 12h timeframe
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Elder Ray on 6h timeframe: EMA(13) for smoothing
-    ema13 = np.full(n, np.nan)
-    if n >= 13:
-        ema_multiplier_13 = 2 / (13 + 1)
-        ema13[0] = close[0]
-        for i in range(1, n):
-            ema13[i] = (close[i] - ema13[i-1]) * ema_multiplier_13 + ema13[i-1]
+    # Bollinger Bands on 12h timeframe
+    bb_period = 20
+    bb_std = 2.0
     
-    # Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Calculate Bollinger Bands using vectorized operations where possible
+    sma = np.full(n, np.nan)
+    std_dev = np.full(n, np.nan)
+    upper_band = np.full(n, np.nan)
+    lower_band = np.full(n, np.nan)
+    bb_width = np.full(n, np.nan)
     
-    # Average volume (20-period) for volume confirmation
+    for i in range(bb_period - 1, n):
+        sma[i] = np.mean(close[i - bb_period + 1:i + 1])
+        std_dev[i] = np.std(close[i - bb_period + 1:i + 1])
+        upper_band[i] = sma[i] + bb_std * std_dev[i]
+        lower_band[i] = sma[i] - bb_std * std_dev[i]
+        bb_width[i] = (upper_band[i] - lower_band[i]) / sma[i] if sma[i] != 0 else 0
+    
+    # Bollinger Band squeeze detection: BB width below 20-period percentile
+    bb_width_percentile = np.full(n, np.nan)
+    lookback = 50
+    for i in range(lookback, n):
+        window = bb_width[i - lookback:i]
+        if not np.all(np.isnan(window)):
+            bb_width_percentile[i] = np.percentile(window[~np.isnan(window)], 20)
+    
+    # Volume confirmation: volume above 30-period average
     avg_volume = np.full(n, np.nan)
-    for i in range(20, n):
-        avg_volume[i] = np.mean(volume[i-20:i])
+    vol_period = 30
+    for i in range(vol_period, n):
+        avg_volume[i] = np.mean(volume[i - vol_period:i])
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(20, n):
+    for i in range(max(bb_period, lookback, vol_period) + 1, n):
         # Skip if any required data is not ready
-        if (np.isnan(ema13[i]) or np.isnan(ema20_1d_aligned[i]) or 
-            np.isnan(avg_volume[i])):
+        if (np.isnan(sma[i]) or np.isnan(std_dev[i]) or np.isnan(upper_band[i]) or 
+            np.isnan(lower_band[i]) or np.isnan(bb_width[i]) or 
+            np.isnan(bb_width_percentile[i]) or np.isnan(avg_volume[i]) or
+            np.isnan(ema50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        ema_trend = ema20_1d_aligned[i]
+        bb_w = bb_width[i]
+        bb_w_percentile = bb_width_percentile[i]
+        sma_val = sma[i]
+        upper = upper_band[i]
+        lower = lower_band[i]
+        ema_trend = ema50_1w_aligned[i]
         
-        # Elder Ray values
-        bp = bull_power[i]
-        br = bear_power[i]
+        # Bollinger Band squeeze condition: current width below 20th percentile of lookback period
+        squeeze_condition = bb_w < bb_w_percentile
         
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirm = vol > 1.5 * avg_vol
+        # Breakout conditions
+        breakout_up = price > upper
+        breakout_down = price < lower
+        
+        # Volume confirmation: current volume > 2.0 x average volume
+        volume_confirm = vol > 2.0 * avg_vol
         
         if position == 0:
-            # Long: Bull Power > 0 and rising + above 1d EMA20 + volume confirmation
-            if (bp > 0 and 
-                i > 20 and bp > bull_power[i-1] and
-                price > ema_trend and
-                volume_confirm):
+            # Long: squeeze breakout upward + above weekly EMA50 + volume confirmation
+            if squeeze_condition and breakout_up and price > ema_trend and volume_confirm:
                 position = 1
                 signals[i] = position_size
-            # Short: Bear Power < 0 and falling + below 1d EMA20 + volume confirmation
-            elif (br < 0 and 
-                  i > 20 and br < bear_power[i-1] and
-                  price < ema_trend and
-                  volume_confirm):
+            # Short: squeeze breakout downward + below weekly EMA50 + volume confirmation
+            elif squeeze_condition and breakout_down and price < ema_trend and volume_confirm:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Bull Power turns negative or price breaks below 1d EMA
-            if (bp <= 0 or
-                price < ema_trend):
+            # Exit long: price returns to middle Bollinger Band (SMA) or squeeze ends
+            if price <= sma_val or not squeeze_condition:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Bear Power turns positive or price breaks above 1d EMA
-            if (br >= 0 or
-                price > ema_trend):
+            # Exit short: price returns to middle Bollinger Band (SMA) or squeeze ends
+            if price >= sma_val or not squeeze_condition:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -112,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_ElderRay_Trend_Volume"
-timeframe = "6h"
+name = "12h_1w_BollingerSqueeze_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
