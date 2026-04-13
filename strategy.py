@@ -8,11 +8,9 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with 4h volume spike and 12h ADX > 25 trend filter.
-    # Long when price breaks above 4h Donchian upper channel with volume confirmation and 12h ADX > 25.
-    # Short when price breaks below 4h Donchian lower channel with volume confirmation and 12h ADX > 25.
-    # Exit when price returns to 4h Donchian middle channel.
-    # Uses discrete size 0.25 to minimize fee churn. Target: 75-200 total trades over 4 years.
+    # Hypothesis: 4h Donchian(20) breakout with volume spike and 12h ADX > 25 trend filter.
+    # Works in both bull and bear markets by only taking trades in the direction of the 12h trend.
+    # Uses discrete position size 0.25 to minimize fee churn. Target: 75-200 total trades over 4 years.
     
     close = prices['close'].values
     high = prices['high'].values
