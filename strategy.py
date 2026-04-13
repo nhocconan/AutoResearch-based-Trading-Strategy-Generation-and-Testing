@@ -13,20 +13,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily and weekly data
+    # Get daily data for indicator calculations
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 50 or len(df_1w) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    vol_1d = df_1d['volume'].values
     
-    close_1w = df_1w['close'].values
-    
-    # Calculate daily ATR (14-period)
+    # Calculate daily ATR for volatility filter
     tr_1d = np.maximum(
         high_1d - low_1d,
         np.maximum(
@@ -42,35 +39,37 @@ def generate_signals(prices):
         else:
             atr_1d[i] = 0.93 * atr_1d[i-1] + 0.07 * tr_1d[i]
     
-    # Calculate 50-day ATR for volatility regime
-    atr_50d = np.zeros_like(atr_1d)
-    for i in range(len(atr_1d)):
-        if i < 50:
-            atr_50d[i] = np.mean(atr_1d[:i+1]) if i > 0 else atr_1d[i]
+    # Calculate daily EMA200 for trend filter
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Calculate daily RSI for momentum filter
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    for i in range(len(gain)):
+        if i < 14:
+            avg_gain[i] = np.mean(gain[:i+1]) if i > 0 else gain[i]
+            avg_loss[i] = np.mean(loss[:i+1]) if i > 0 else loss[i]
         else:
-            atr_50d[i] = 0.98 * atr_50d[i-1] + 0.02 * atr_1d[i]
+            avg_gain[i] = 0.92 * avg_gain[i-1] + 0.08 * gain[i]
+            avg_loss[i] = 0.92 * avg_loss[i-1] + 0.08 * loss[i]
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi_1d = 100 - (100 / (1 + rs))
     
-    # Volatility regime: ATR(14) > 1.5 * ATR(50) indicates volatility expansion
-    vol_regime = atr_1d > (1.5 * atr_50d)
+    # Calculate daily volume SMA for volume filter
+    vol_sma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align indicators to 4h timeframe
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    vol_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma_20_1d)
     
-    # Daily volume average (20-period)
-    vol_avg_20d = np.zeros_like(volume_1d)
-    for i in range(len(volume_1d)):
-        if i < 20:
-            vol_avg_20d[i] = np.mean(volume_1d[:i+1]) if i > 0 else volume_1d[i]
-        else:
-            vol_avg_20d[i] = 0.95 * vol_avg_20d[i-1] + 0.05 * volume_1d[i]
-    
-    # Volume spike: current volume > 2.0 * 20-day average
-    vol_spike = volume_1d > (2.0 * vol_avg_20d)
-    
-    # Align indicators to 12h timeframe
-    vol_regime_aligned = align_htf_to_ltf(prices, df_1d, vol_regime)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
+    # Calculate 20-day ATR multiple for volatility filter
+    atr_mult = 2.0
+    volatility_threshold = atr_1d_aligned * atr_mult
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -78,29 +77,34 @@ def generate_signals(prices):
     
     for i in range(200, n):
         # Skip if data not ready
-        if (np.isnan(vol_regime_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or
-            np.isnan(vol_spike_aligned[i])):
+        if (np.isnan(ema_200_1d_aligned[i]) or 
+            np.isnan(rsi_1d_aligned[i]) or
+            np.isnan(volatility_threshold[i]) or
+            np.isnan(vol_sma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility expansion regime
-        high_vol = vol_regime_aligned[i]
+        # Price volatility filter: avoid choppy markets
+        price_change = np.abs(close[i] - close[i-1])
+        low_volatility = price_change < volatility_threshold[i]
         
-        # Weekly trend filter
-        above_weekly_ema = close[i] > ema_50_1w_aligned[i]
-        below_weekly_ema = close[i] < ema_50_1w_aligned[i]
+        # Volume filter: above average volume
+        high_volume = volume[i] > vol_sma_20_1d_aligned[i]
         
-        # Volume confirmation
-        high_volume = vol_spike_aligned[i]
+        # Trend and momentum filters
+        uptrend = close[i] > ema_200_1d_aligned[i]
+        strong_momentum = rsi_1d_aligned[i] > 50
+        
+        downtrend = close[i] < ema_200_1d_aligned[i]
+        weak_momentum = rsi_1d_aligned[i] < 50
         
         # Entry conditions
-        long_entry = high_vol and above_weekly_ema and high_volume
-        short_entry = high_vol and below_weekly_ema and high_volume
+        long_entry = uptrend and strong_momentum and low_volatility and high_volume
+        short_entry = downtrend and weak_momentum and low_volatility and high_volume
         
-        # Exit conditions: volatility contraction or volume drop
-        exit_long = position == 1 and (not high_vol or not high_volume)
-        exit_short = position == -1 and (not high_vol or not high_volume)
+        # Exit conditions: trend reversal
+        exit_long = position == 1 and (not uptrend or not strong_momentum)
+        exit_short = position == -1 and (not downtrend or not weak_momentum)
         
         # Execute signals
         if long_entry and position != 1:
@@ -123,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_1w_vol_regime_trend_volume"
-timeframe = "12h"
+name = "4h_1d_ema200_rsi_volume_filter_v1"
+timeframe = "4h"
 leverage = 1.0
