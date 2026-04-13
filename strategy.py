@@ -8,44 +8,41 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout + 1d Camarilla H3/L3 + volume confirmation
-    # Long when: price breaks above Donchian(20) high AND price > Camarilla H3 (1d) AND volume > 1.5x avg volume
-    # Short when: price breaks below Donchian(20) low AND price < Camarilla L3 (1d) AND volume > 1.5x avg volume
+    # Hypothesis: 4h Donchian(20) breakout + 1d Williams %R + volume confirmation
+    # Long when: price breaks above Donchian(20) high AND Williams %R < -80 (oversold) AND volume > 1.5x avg
+    # Short when: price breaks below Donchian(20) low AND Williams %R > -20 (overbought) AND volume > 1.5x avg
     # Exit when: price crosses Donchian midpoint OR volume drops below average
-    # Uses discrete sizing (0.25) targeting 75-200 total trades over 4 years (19-50/year).
-    # Camarilla pivot structure provides dynamic support/resistance that adapts to bull/bear regimes.
+    # Uses discrete sizing (0.25) targeting 75-200 trades over 4 years.
+    # Williams %R provides mean-reversion edge in bear markets while Donchian captures trends.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots
+    # Get 1d data for Williams %R
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Camarilla pivots (using previous day's range)
-    range_1d = high_1d - low_1d
-    h3_1d = close_1d + 1.125 * range_1d
-    l3_1d = close_1d - 1.125 * range_1d
-    h4_1d = close_1d + 1.5 * range_1d
-    l4_1d = close_1d - 1.5 * range_1d
+    # Calculate Williams %R(14) on 1d
+    lookback_williams = 14
+    highest_high = pd.Series(high_1d).rolling(window=lookback_williams, min_periods=lookback_williams).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=lookback_williams, min_periods=lookback_williams).min().values
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid division by zero
     
-    # Align 1d Camarilla levels to 4h timeframe
-    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
-    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
-    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    # Align 1d Williams %R to 4h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
     # Calculate Donchian(20) channels on 4h
-    lookback = 20
-    donchian_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    donchian_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    lookback_donchian = 20
+    donchian_high = pd.Series(high).rolling(window=lookback_donchian, min_periods=lookback_donchian).max().values
+    donchian_low = pd.Series(low).rolling(window=lookback_donchian, min_periods=lookback_donchian).min().values
     donchian_mid = (donchian_high + donchian_low) / 2
     
     # Volume confirmation: volume > 1.5x 20-period average
@@ -59,8 +56,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if data not ready
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
-            np.isnan(vol_threshold[i])):
+            np.isnan(williams_r_aligned[i]) or np.isnan(vol_threshold[i])):
             signals[i] = 0.0
             continue
         
@@ -71,9 +67,9 @@ def generate_signals(prices):
         long_breakout = close[i] > donchian_high[i]
         short_breakout = close[i] < donchian_low[i]
         
-        # Camarilla filters
-        long_filter = close[i] > h3_1d_aligned[i]
-        short_filter = close[i] < l3_1d_aligned[i]
+        # Williams %R filters (extreme readings for mean reversion)
+        long_filter = williams_r_aligned[i] < -80  # oversold
+        short_filter = williams_r_aligned[i] > -20  # overbought
         
         # Entry conditions
         long_entry = long_breakout and long_filter and vol_ok and position != 1
@@ -107,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_camarilla_volume_v1"
+name = "4h_1d_donchian_williamsr_volume_v1"
 timeframe = "4h"
 leverage = 1.0
