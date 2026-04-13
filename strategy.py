@@ -1,10 +1,13 @@
-# [Experiment 40787] 6h_1d_1w_Triple_Timeframe_Confluence
-# Hypothesis: Uses weekly trend direction (EMA crossover), daily momentum (RSI divergence), and 6h breakout (Donchian breakout) for high-probability entries.
-# Weekly EMA(50) above EMA(200) defines bullish trend, below defines bearish.
-# Daily RSI(14) divergence with price (bullish: higher low in RSI with lower low in price) signals reversal in trend direction.
-# 6h Donchian(20) breakout in direction of weekly trend with daily RSI confirmation.
-# Works in bull markets via trend continuation and bear markets via counter-trend reversals at extremes.
-# Target: 20-40 trades/year on 6h (80-160 total over 4 years).
+#!/usr/bin/env python3
+"""
+12h_1d_1w_Camarilla_Pivot_Trend
+Hypothesis: Uses weekly trend (EMA21) to filter 12h Camarilla pivot long/short signals.
+Only takes longs when price > weekly EMA21 and shorts when price < weekly EMA21.
+Enters at 12h close beyond Camarilla H3/L3 levels with volume > 1.5x 20-period average.
+Exits when price returns to Camarilla H4/L4 or on opposite signal.
+Designed for 12h timeframe to capture multi-day trends with low frequency (target: 15-35 trades/year).
+Works in bull/bear via trend filter and volatility-based pivot levels.
+"""
 
 import numpy as np
 import pandas as pd
@@ -12,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,53 +23,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend direction
+    # Get daily data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels (based on prior day)
+    # H4 = close + 1.5 * (high - low)
+    # H3 = close + 1.0 * (high - low)
+    # L3 = close - 1.0 * (high - low)
+    # L4 = close - 1.5 * (high - low)
+    daily_range = high_1d - low_1d
+    H4 = close_1d + 1.5 * daily_range
+    H3 = close_1d + 1.0 * daily_range
+    L3 = close_1d - 1.0 * daily_range
+    L4 = close_1d - 1.5 * daily_range
+    
+    # Get weekly trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 21:
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
+    weekly_ema21 = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Weekly EMA(50) and EMA(200) for trend direction
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    weekly_bullish = ema_50_1w > ema_200_1w  # True for bullish trend
+    # Align all to 12h timeframe
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    weekly_ema21_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema21)
     
-    # Get daily data for RSI divergence
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    
-    # Daily RSI(14)
-    delta = pd.Series(close_1d).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d = rsi_1d.values
-    
-    # Get 6h data for Donchian breakout
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 30:
-        return np.zeros(n)
-    
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
-    
-    # Donchian(20) channels
-    donch_high_20 = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
-    donch_low_20 = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
-    
-    # Align all signals to 6h timeframe
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    donch_high_20_aligned = align_htf_to_ltf(prices, df_6h, donch_high_20)
-    donch_low_20_aligned = align_htf_to_ltf(prices, df_6h, donch_low_20)
+    # Volume confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volume_ok = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -74,78 +68,47 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if np.isnan(weekly_bullish_aligned[i]) or \
-           np.isnan(rsi_1d_aligned[i]) or \
-           np.isnan(donch_high_20_aligned[i]) or \
-           np.isnan(donch_low_20_aligned[i]):
+        if np.isnan(H4_aligned[i]) or np.isnan(H3_aligned[i]) or \
+           np.isnan(L3_aligned[i]) or np.isnan(L4_aligned[i]) or \
+           np.isnan(weekly_ema21_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Calculate daily RSI divergence (requires lookback)
-        if i >= 10:  # Need at least 10 days of data for divergence
-            # Get indices for daily lookback
-            lookback = 10
-            rsi_slice = rsi_1d_aligned[max(0, i-lookback):i+1]
-            price_slice = close[max(0, i-lookback):i+1]
-            
-            if len(rsi_slice) >= lookback and len(price_slice) >= lookback:
-                # Find local minima in price and RSI
-                price_min_idx = np.argmin(price_slice)
-                rsi_min_idx = np.argmin(rsi_slice)
-                
-                # Bullish divergence: price makes lower low, RSI makes higher low
-                bullish_div = (price_min_idx == len(price_slice)-1 and  # Recent low
-                              rsi_slice[-1] > rsi_slice[0] and        # RSI higher than period start
-                              price_slice[-1] < price_slice[0])       # Price lower than period start
-                
-                # Bearish divergence: price makes higher high, RSI makes lower high
-                price_max_idx = np.argmax(price_slice)
-                rsi_max_idx = np.argmax(rsi_slice)
-                bearish_div = (price_max_idx == len(price_slice)-1 and   # Recent high
-                              rsi_slice[-1] < rsi_slice[0] and          # RSI lower than period start
-                              price_slice[-1] > price_slice[0])         # Price higher than period start
-            else:
-                bullish_div = False
-                bearish_div = False
-        else:
-            bullish_div = False
-            bearish_div = False
+        # Check trend condition
+        uptrend = close[i] > weekly_ema21_aligned[i]
+        downtrend = close[i] < weekly_ema21_aligned[i]
         
-        # Entry logic
-        weekly_trend = weekly_bullish_aligned[i]  # True = bullish, False = bearish
-        price = close[i]
-        
-        # Long conditions: weekly bullish AND (price breaks above Donchian high OR bullish divergence)
-        if weekly_trend:
-            if price > donch_high_20_aligned[i] or bullish_div:
-                if position != 1:
-                    position = 1
-                    signals[i] = position_size
-                else:
-                    signals[i] = position_size
-            # Exit long: price breaks below Donchian low in bullish trend
-            elif price < donch_low_20_aligned[i]:
-                position = 0
-                signals[i] = 0.0
+        # Long conditions: uptrend + price closes above H3 with volume
+        if uptrend and close[i] > H3_aligned[i] and volume_ok[i]:
+            if position != 1:
+                position = 1
+                signals[i] = position_size
             else:
-                signals[i] = position_size if position == 1 else 0.0
-        # Short conditions: weekly bearish AND (price breaks below Donchian low OR bearish divergence)
+                signals[i] = position_size
+        # Short conditions: downtrend + price closes below L3 with volume
+        elif downtrend and close[i] < L3_aligned[i] and volume_ok[i]:
+            if position != -1:
+                position = -1
+                signals[i] = -position_size
+            else:
+                signals[i] = -position_size
+        # Exit conditions: price reaches H4/L4 or trend reverses
+        elif position == 1 and (close[i] >= H4_aligned[i] or not uptrend):
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and (close[i] <= L4_aligned[i] or not downtrend):
+            position = 0
+            signals[i] = 0.0
+        # Hold current position
+        elif position == 1:
+            signals[i] = position_size
+        elif position == -1:
+            signals[i] = -position_size
         else:
-            if price < donch_low_20_aligned[i] or bearish_div:
-                if position != -1:
-                    position = -1
-                    signals[i] = -position_size
-                else:
-                    signals[i] = -position_size
-            # Exit short: price breaks above Donchian high in bearish trend
-            elif price > donch_high_20_aligned[i]:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = -position_size if position == -1 else 0.0
+            signals[i] = 0.0
     
     return signals
 
-name = "6h_1d_1w_Triple_Timeframe_Confluence"
-timeframe = "6h"
+name = "12h_1d_1w_Camarilla_Pivot_Trend"
+timeframe = "12h"
 leverage = 1.0
