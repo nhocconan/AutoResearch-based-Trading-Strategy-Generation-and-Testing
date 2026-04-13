@@ -1,3 +1,9 @@
+# 6h_1w_cam_pivot_reversion_v1
+# Fade at weekly pivot extremes (S3/R3) with mean reversion, continue at S4/R4 breakouts.
+# Uses weekly Camarilla pivot levels as dynamic support/resistance.
+# Works in both bull and bear markets: mean reversion in ranges, breakout continuation in trends.
+# Target: 50-150 total trades over 4 years (12-37/year). Size: 0.25.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,93 +11,90 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for calculations
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for Camarilla pivots
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly Camarilla pivot levels
+    high_w = df_1w['high'].values
+    low_w = df_1w['low'].values
+    close_w = df_1w['close'].values
     
-    # Calculate daily ATR(14)
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Pivot point and ranges
+    pivot_w = (high_w + low_w + close_w) / 3
+    range_w = high_w - low_w
     
-    # Calculate 20-period EMA on 1d (trend filter)
-    close_1d_series = pd.Series(close_1d)
-    ema_20_1d = close_1d_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Camarilla levels
+    r4_w = close_w + range_w * 1.1 / 2
+    r3_w = close_w + range_w * 1.1 / 4
+    r2_w = close_w + range_w * 1.1 / 6
+    r1_w = close_w + range_w * 1.1 / 12
+    s1_w = close_w - range_w * 1.1 / 12
+    s2_w = close_w - range_w * 1.1 / 6
+    s3_w = close_w - range_w * 1.1 / 4
+    s4_w = close_w - range_w * 1.1 / 2
     
-    # Calculate 14-period RSI on 1d
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14 = 100 - (100 / (1 + rs))
+    # Align weekly levels to 6h timeframe
+    r4_w_aligned = align_htf_to_ltf(prices, df_1w, r4_w)
+    r3_w_aligned = align_htf_to_ltf(prices, df_1w, r3_w)
+    s3_w_aligned = align_htf_to_ltf(prices, df_1w, s3_w)
+    s4_w_aligned = align_htf_to_ltf(prices, df_1w, s4_w)
     
-    # Align indicators to 1h timeframe
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
-    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean()
+    vol_ok = prices['volume'].values > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.20  # 20% of capital
+    position_size = 0.25
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(atr_14_aligned[i]) or 
-            np.isnan(ema_20_aligned[i]) or
-            np.isnan(rsi_14_aligned[i])):
+        if (np.isnan(r4_w_aligned[i]) or np.isnan(r3_w_aligned[i]) or
+            np.isnan(s3_w_aligned[i]) or np.isnan(s4_w_aligned[i]) or
+            np.isnan(vol_ok[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below EMA20
-        above_ema = close[i] > ema_20_aligned[i]
-        below_ema = close[i] < ema_20_aligned[i]
+        # Mean reversion at S3/R3 with volume
+        long_reversion = (close[i] <= s3_w_aligned[i]) and vol_ok[i]
+        short_reversion = (close[i] >= r3_w_aligned[i]) and vol_ok[i]
         
-        # RSI conditions: avoid extreme levels
-        rsi_not_overbought = rsi_14_aligned[i] < 75
-        rsi_not_oversold = rsi_14_aligned[i] > 25
+        # Breakout continuation at S4/R4 with volume
+        long_breakout = (close[i] >= s4_w_aligned[i]) and vol_ok[i]
+        short_breakout = (close[i] <= r4_w_aligned[i]) and vol_ok[i]
         
-        # Volatility filter: require sufficient ATR
-        vol_ok = atr_14_aligned[i] > 0
+        # Exit conditions: opposite S3/R3 level or volume fails
+        exit_long = position == 1 and (
+            (close[i] >= r3_w_aligned[i]) or 
+            (not vol_ok[i])
+        )
+        exit_short = position == -1 and (
+            (close[i] <= s3_w_aligned[i]) or 
+            (not vol_ok[i])
+        )
         
-        # Entry conditions
-        long_entry = above_ema and rsi_not_overbought and vol_ok
-        short_entry = below_ema and rsi_not_oversold and vol_ok
-        
-        # Exit conditions: opposite signal or RSI extreme
-        exit_long = position == 1 and (below_ema or rsi_14_aligned[i] > 80)
-        exit_short = position == -1 and (above_ema or rsi_14_aligned[i] < 20)
-        
-        # Execute signals
-        if long_entry and position != 1:
+        # Enter long on mean reversion or breakout
+        if (long_reversion or long_breakout) and position != 1:
             position = 1
             signals[i] = position_size
-        elif short_entry and position != -1:
+        # Enter short on mean reversion or breakout
+        elif (short_reversion or short_breakout) and position != -1:
             position = -1
             signals[i] = -position_size
+        # Exit
         elif exit_long or exit_short:
             position = 0
             signals[i] = 0.0
-        # Hold current position
+        # Hold position
         else:
             if position == 1:
                 signals[i] = position_size
@@ -102,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_ema20_rsi14_atr14_filter"
-timeframe = "1h"
+name = "6h_1w_cam_pivot_reversion_v1"
+timeframe = "6h"
 leverage = 1.0
