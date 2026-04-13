@@ -8,11 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Williams %R mean reversion + 1d volume spike + 1w chop regime filter
-    # Long: Williams %R(14) < -80 AND 1d volume > 2.0 * 20-period avg volume AND 1w Chop > 61.8 (ranging market)
-    # Short: Williams %R(14) > -20 AND 1d volume > 2.0 * 20-period avg volume AND 1w Chop > 61.8 (ranging market)
-    # Exit: Williams %R crosses -50 OR Chop < 38.2 (trending market begins)
-    # Uses 12h for Williams %R, 1d for volume confirmation, 1w for chop regime
+    # Hypothesis: 12h Donchian breakout + 1d volume spike + 1w chop regime filter
+    # Long: price > Donchian(20) high AND 1d volume > 2.0 * 20-period avg volume AND 1w Chop > 61.8 (ranging market)
+    # Short: price < Donchian(20) low AND 1d volume > 2.0 * 20-period avg volume AND 1w Chop > 61.8 (ranging market)
+    # Exit: price crosses Donchian midpoint OR Chop < 38.2 (trending market begins)
+    # Uses 12h for Donchian breakout, 1d for volume confirmation, 1w for chop regime
     # Discrete position sizing (0.25) to minimize fee churn
     # Target: 50-150 total trades over 4 years (~12-37/year) to stay within limits
     
@@ -21,7 +21,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Williams %R (call ONCE before loop)
+    # Get 12h data for Donchian channels (call ONCE before loop)
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) < 30:
         return np.zeros(n)
@@ -36,12 +36,10 @@ def generate_signals(prices):
     if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 12h Williams %R (14-period)
+    # Calculate 12h Donchian channels (20-period)
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
     
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
     def rolling_max(arr, window):
         result = np.full_like(arr, np.nan)
         for i in range(len(arr)):
@@ -56,14 +54,16 @@ def generate_signals(prices):
                 result[i] = np.min(arr[i-window+1:i+1])
         return result
     
-    highest_high = rolling_max(high_12h, 14)
-    lowest_low = rolling_min(low_12h, 14)
-    williams_r = np.where((highest_high - lowest_low) != 0,
-                          (highest_high - close_12h) / (highest_high - lowest_low) * -100,
-                          np.nan)
+    highest_high = rolling_max(high_12h, 20)
+    lowest_low = rolling_min(low_12h, 20)
+    donchian_high = highest_high
+    donchian_low = lowest_low
+    donchian_mid = (donchian_high + donchian_low) / 2.0
     
-    # Align 12h Williams %R to 12h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r)
+    # Align 12h Donchian to 12h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_12h, donchian_mid)
     
     # Calculate 1d volume average (20-period)
     volume_1d = df_1d['volume'].values
@@ -125,7 +125,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(vol_ma_aligned[i]) or 
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(donchian_mid_aligned[i]) or np.isnan(vol_ma_aligned[i]) or 
             np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
@@ -141,17 +142,17 @@ def generate_signals(prices):
         vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d_current)
         volume_confirm = vol_1d_aligned[i] > 2.0 * vol_ma_aligned[i]
         
-        # Williams %R signals
-        oversold = williams_r_aligned[i] < -80
-        overbought = williams_r_aligned[i] > -20
+        # Donchian breakout signals
+        long_breakout = close[i] > donchian_high_aligned[i]
+        short_breakout = close[i] < donchian_low_aligned[i]
         
-        # Entry logic: Williams %R extreme + volume confirmation + ranging market
-        long_entry = oversold and volume_confirm and ranging_market
-        short_entry = overbought and volume_confirm and ranging_market
+        # Entry logic: Donchian breakout + volume confirmation + ranging market
+        long_entry = long_breakout and volume_confirm and ranging_market
+        short_entry = short_breakout and volume_confirm and ranging_market
         
-        # Exit logic: Williams %R crosses -50 OR market becomes trending
-        long_exit = williams_r_aligned[i] > -50 or trending_market
-        short_exit = williams_r_aligned[i] < -50 or trending_market
+        # Exit logic: price crosses Donchian midpoint OR market becomes trending
+        long_exit = close[i] < donchian_mid_aligned[i] or trending_market
+        short_exit = close[i] > donchian_mid_aligned[i] or trending_market
         
         if long_entry and position != 1:
             position = 1
@@ -176,6 +177,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_1w_williamsr_volume_chop_v1"
+name = "12h_1d_1w_donchian_volume_chop_v1"
 timeframe = "12h"
 leverage = 1.0
