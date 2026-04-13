@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,49 +21,78 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 12-period Donchian channels on daily
-    high_12 = np.full(len(close_1d), np.nan)
-    low_12 = np.full(len(close_1d), np.nan)
-    for i in range(12, len(close_1d)):
-        high_12[i] = np.max(high_1d[i-12:i])
-        low_12[i] = np.min(low_1d[i-12:i])
+    # Calculate 14-period RSI on daily
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate 50-period EMA on daily (trend filter)
-    close_1d_series = pd.Series(close_1d)
-    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    avg_gain = np.zeros_like(close_1d)
+    avg_loss = np.zeros_like(close_1d)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
     
-    # Align indicators to 12h timeframe
-    high_12_aligned = align_htf_to_ltf(prices, df_1d, high_12)
-    low_12_aligned = align_htf_to_ltf(prices, df_1d, low_12)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    for i in range(14, len(close_1d)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi_14 = 100 - (100 / (1 + rs))
+    
+    # Calculate 20-period ATR on daily for volatility filter
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    atr_20 = np.full(len(tr), np.nan)
+    for i in range(20, len(tr)):
+        atr_20[i] = np.mean(tr[i-19:i+1])
+    
+    # Align indicators to 6h timeframe
+    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
+    atr_20_aligned = align_htf_to_ltf(prices, df_1d, atr_20)
+    
+    # Calculate 6-period RSI on 6h for entry timing
+    delta_6h = np.diff(close, prepend=close[0])
+    gain_6h = np.where(delta_6h > 0, delta_6h, 0)
+    loss_6h = np.where(delta_6h < 0, -delta_6h, 0)
+    
+    avg_gain_6h = np.zeros_like(close)
+    avg_loss_6h = np.zeros_like(close)
+    for i in range(6, len(close)):
+        if i == 5:
+            avg_gain_6h[i] = np.mean(gain_6h[1:6])
+            avg_loss_6h[i] = np.mean(loss_6h[1:6])
+        else:
+            avg_gain_6h[i] = (avg_gain_6h[i-1] * 5 + gain_6h[i]) / 6
+            avg_loss_6h[i] = (avg_loss_6h[i-1] * 5 + loss_6h[i]) / 6
+    
+    rs_6h = np.divide(avg_gain_6h, avg_loss_6h, out=np.full_like(avg_gain_6h, np.nan), where=avg_loss_6h!=0)
+    rsi_6h = 100 - (100 / (1 + rs_6h))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% of capital
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(high_12_aligned[i]) or 
-            np.isnan(low_12_aligned[i]) or 
-            np.isnan(ema_50_aligned[i])):
+        if (np.isnan(rsi_14_aligned[i]) or 
+            np.isnan(atr_20_aligned[i]) or 
+            np.isnan(rsi_6h[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below EMA50
-        above_ema = close[i] > ema_50_aligned[i]
-        below_ema = close[i] < ema_50_aligned[i]
+        # HTF conditions: RSI extreme + low volatility
+        rsi_extreme = (rsi_14_aligned[i] < 30) or (rsi_14_aligned[i] > 70)
+        low_vol = atr_20_aligned[i] < np.nanmedian(atr_20_aligned[max(0, i-50):i+1]) if not np.isnan(np.nanmedian(atr_20_aligned[max(0, i-50):i+1])) else False
         
-        # Donchian breakout conditions
-        long_breakout = close[i] > high_12_aligned[i]
-        short_breakout = close[i] < low_12_aligned[i]
+        # LTF entry: RSI mean reversion
+        long_entry = rsi_6h[i] < 35 and rsi_extreme and rsi_14_aligned[i] < 30 and low_vol
+        short_entry = rsi_6h[i] > 65 and rsi_extreme and rsi_14_aligned[i] > 70 and low_vol
         
-        # Entry conditions: breakout in direction of trend
-        long_entry = long_breakout and above_ema
-        short_entry = short_breakout and below_ema
-        
-        # Exit conditions: opposite breakout or trend reversal
-        exit_long = position == 1 and (short_breakout or below_ema)
-        exit_short = position == -1 and (long_breakout or above_ema)
+        # Exit: RSI returns to neutral
+        exit_long = position == 1 and rsi_6h[i] > 50
+        exit_short = position == -1 and rsi_6h[i] < 50
         
         # Execute signals
         if long_entry and position != 1:
@@ -86,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_donchian_ema50_breakout"
-timeframe = "12h"
+name = "6h_1d_rsi_extreme_mean_reversion"
+timeframe = "6h"
 leverage = 1.0
