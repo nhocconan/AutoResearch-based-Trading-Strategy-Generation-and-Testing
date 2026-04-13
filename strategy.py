@@ -8,61 +8,39 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian(20) breakout + 1d/1w Camarilla pivot alignment + volume confirmation (>1.8x 20-period MA).
-    # Uses higher timeframe pivot structure to filter breakout direction: long when price > 1d pivot and > 1w pivot,
-    # short when price < 1d pivot and < 1w pivot. Weekly pivot confirms longer-term bias.
+    # Hypothesis: 4h Donchian(20) breakout with 1d Camarilla pivot direction filter and volume confirmation (>1.5x 20-period MA).
+    # Uses 1d pivot structure to filter breakout direction: long only when price > 1d pivot, short only when price < 1d pivot.
     # Volume filter ensures institutional participation. Discrete sizing (0.0, ±0.25) minimizes fee churn.
-    # Target: 50-150 total trades over 4 years (12-37/year) to stay within fee drag limits.
+    # Target: 75-150 total trades over 4 years (19-38/year) to stay within fee drag limits.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d and 1w data for pivot calculations (call ONCE before loop)
+    # Get 1d data for pivot calculations (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 30 or len(df_1w) < 10:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
     
     # Calculate Camarilla pivot levels for 1d
     pivot_1d = (high_1d + low_1d + close_1d) / 3
     range_1d = high_1d - low_1d
     r3_1d = pivot_1d + range_1d * 1.1
     s3_1d = pivot_1d - range_1d * 1.1
-    r4_1d = pivot_1d + range_1d * 1.5
-    s4_1d = pivot_1d - range_1d * 1.5
     
-    # Calculate Camarilla pivot levels for 1w
-    pivot_1w = (high_1w + low_1w + close_1w) / 3
-    range_1w = high_1w - low_1w
-    r3_1w = pivot_1w + range_1w * 1.1
-    s3_1w = pivot_1w - range_1w * 1.1
-    r4_1w = pivot_1w + range_1w * 1.5
-    s4_1w = pivot_1w - range_1w * 1.5
-    
-    # Align HTF pivot levels to 12h timeframe
+    # Align HTF pivot levels to 4h timeframe
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
-    r4_1w_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
-    s4_1w_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
     
-    # Calculate 20-period volume MA for confirmation
+    # Calculate volume MA for confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate Donchian(20) channels on primary timeframe (12h)
+    # Calculate Donchian(20) channels on primary timeframe (4h)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -72,20 +50,19 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if data not ready
         if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(pivot_1w_aligned[i]) or np.isnan(r3_1w_aligned[i]) or 
-            np.isnan(s3_1w_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(volume_ma[i])):
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.8 * 20-period MA (balanced to avoid overtrading)
-        volume_filter = volume[i] > 1.8 * volume_ma[i]
+        # Volume filter: current volume > 1.5 * 20-period MA (balanced to reduce trades)
+        volume_filter = volume[i] > 1.5 * volume_ma[i]
         
-        # Pivot direction filters: price relative to 1d S3/R3 and 1w pivot
-        # Long bias: price > 1d S3 and price > 1w pivot
-        long_bias = (close[i] > s3_1d_aligned[i]) and (close[i] > pivot_1w_aligned[i])
-        # Short bias: price < 1d R3 and price < 1w pivot
-        short_bias = (close[i] < r3_1d_aligned[i]) and (close[i] < pivot_1w_aligned[i])
+        # Pivot direction filters: price relative to 1d S3/R3
+        # Long bias: price > 1d S3
+        long_bias = close[i] > s3_1d_aligned[i]
+        # Short bias: price < 1d R3
+        short_bias = close[i] < r3_1d_aligned[i]
         
         # Donchian breakout conditions with pivot filters
         long_breakout = (close[i] > highest_high[i-1]) and volume_filter and long_bias
@@ -124,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_1w_camarilla_pivot_donchian_breakout_volume_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_pivot_donchian_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
