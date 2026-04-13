@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Weekly Trend + Daily Pullback Strategy
-# Uses weekly EMA trend filter to capture major trends, entering on daily pullbacks
-# with volume confirmation. Works in both bull and bear markets by following the
-# weekly trend. Weekly timeframe reduces noise and false signals, while daily
-# entries provide better timing. Target: 10-20 trades per year.
+# Hypothesis: 6h Elder Ray with 1d trend filter and volume confirmation
+# Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13) measures bull/bear strength.
+# Combined with 1d EMA trend filter to avoid counter-trend trades and volume confirmation.
+# Works in bull markets (buy strength) and bear markets (sell weakness).
+# Target: 12-37 trades per year (50-150 total over 4 years) for 6h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,50 +19,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    # Daily data for entry signals and volume
+    # Daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Weekly EMA(21) trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = np.zeros(len(close_1w))
-    ema_multiplier = 2 / (21 + 1)
-    ema_1w[0] = close_1w[0]
-    for i in range(1, len(close_1w)):
-        ema_1w[i] = (close_1w[i] - ema_1w[i-1]) * ema_multiplier + ema_1w[i-1]
+    # Calculate EMA13 for Elder Ray (13-period EMA)
+    def calculate_ema(data, period):
+        ema = np.full(len(data), np.nan)
+        if len(data) < period:
+            return ema
+        multiplier = 2 / (period + 1)
+        ema[period-1] = np.mean(data[:period])
+        for i in range(period, len(data)):
+            ema[i] = (data[i] - ema[i-1]) * multiplier + ema[i-1]
+        return ema
     
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    ema13 = calculate_ema(close, 13)
     
-    # Daily RSI(14) for pullback identification
+    # Elder Ray components
+    bull_power = high - ema13  # Bull Power = High - EMA13
+    bear_power = low - ema13   # Bear Power = Low - EMA13
+    
+    # Calculate daily EMA21 trend filter
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros(len(close_1d))
-    avg_loss = np.zeros(len(close_1d))
-    avg_gain[0] = np.mean(gain[:14]) if len(gain) >= 14 else np.mean(gain) if len(gain) > 0 else 0
-    avg_loss[0] = np.mean(loss[:14]) if len(loss) >= 14 else np.mean(loss) if len(loss) > 0 else 0
-    
+    ema21_1d = np.zeros(len(close_1d))
+    ema_multiplier = 2 / (21 + 1)
+    ema21_1d[0] = close_1d[0]
     for i in range(1, len(close_1d)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+        ema21_1d[i] = (close_1d[i] - ema21_1d[i-1]) * ema_multiplier + ema21_1d[i-1]
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    ema21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema21_1d)
     
-    # Daily average volume (20-period)
-    avg_volume_1d = np.zeros(len(close_1d))
-    for i in range(20, len(close_1d)):
-        avg_volume_1d[i] = np.mean(volume[i-20:i])
-    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
+    # Calculate average volume (20-period) for volume confirmation
+    avg_volume = np.full(n, np.nan)
+    for i in range(20, n):
+        avg_volume[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -70,47 +62,41 @@ def generate_signals(prices):
     
     for i in range(30, n):
         # Skip if any required data is not ready
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(avg_volume_1d_aligned[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema21_1d_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
+        bp = bull_power[i]
+        br = bear_power[i]
         vol = volume[i]
-        weekly_ema = ema_1w_aligned[i]
-        daily_rsi = rsi_1d_aligned[i]
-        avg_vol = avg_volume_1d_aligned[i]
+        avg_vol = avg_volume[i]
+        daily_ema = ema21_1d_aligned[i]
         
         # Volume confirmation: current volume > 1.5x average volume
         volume_confirm = vol > 1.5 * avg_vol
         
         if position == 0:
-            # Long: weekly uptrend + daily pullback (RSI < 40) + volume
-            if (price > weekly_ema and  # Above weekly EMA = uptrend
-                daily_rsi < 40 and      # Oversold on daily
-                volume_confirm):
+            # Long: Bull Power > 0 (strength) + above daily EMA + volume
+            if bp > 0 and close[i] > daily_ema and volume_confirm:
                 position = 1
                 signals[i] = position_size
-            # Short: weekly downtrend + daily bounce (RSI > 60) + volume
-            elif (price < weekly_ema and   # Below weekly EMA = downtrend
-                  daily_rsi > 60 and       # Overbought on daily
-                  volume_confirm):
+            # Short: Bear Power < 0 (weakness) + below daily EMA + volume
+            elif br < 0 and close[i] < daily_ema and volume_confirm:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below weekly EMA or RSI overbought
-            if (price < weekly_ema or
-                daily_rsi > 70):
+            # Exit long: Bull Power turns negative or price crosses below daily EMA
+            if bp <= 0 or close[i] < daily_ema:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above weekly EMA or RSI oversold
-            if (price > weekly_ema or
-                daily_rsi < 30):
+            # Exit short: Bear Power turns positive or price crosses above daily EMA
+            if br >= 0 or close[i] > daily_ema:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -118,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "weekly_trend_daily_pullback_v1"
-timeframe = "1d"
+name = "6h_1d_elder_ray_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
