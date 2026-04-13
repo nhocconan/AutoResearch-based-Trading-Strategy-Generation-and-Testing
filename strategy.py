@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -13,7 +13,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for volatility filter
+    # Daily data for pivot levels and volume
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -23,87 +23,92 @@ def generate_signals(prices):
     if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 6h Bollinger Bands (20, 2)
-    close_series = pd.Series(close)
-    sma_20 = close_series.rolling(window=20, min_periods=20).mean()
-    std_20 = close_series.rolling(window=20, min_periods=20).std()
-    upper_bb = sma_20 + (std_20 * 2)
-    lower_bb = sma_20 - (std_20 * 2)
+    # Calculate daily Camarilla pivot levels (using previous day's data)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Calculate weekly ATR for volatility filter
-    high_1w = pd.Series(df_1w['high'].values)
-    low_1w = pd.Series(df_1w['low'].values)
-    close_1w = pd.Series(df_1w['close'].values)
-    tr1 = high_1w - low_1w
-    tr2 = abs(high_1w - close_1w.shift(1))
-    tr3 = abs(low_1w - close_1w.shift(1))
-    tr_1w = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1w = tr_1w.rolling(window=14, min_periods=14).mean()
+    # Pivot and range
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
     
-    # Calculate weekly EMA for trend filter
-    ema_50_1w = close_1w.ewm(span=50, adjust=False, min_periods=50).mean()
+    # Resistance levels
+    r1 = pivot + (range_hl * 1.1 / 12)
+    r2 = pivot + (range_hl * 1.1 / 6)
+    r3 = pivot + (range_hl * 1.1 / 4)
+    r4 = pivot + (range_hl * 1.1 / 2)
     
-    # Align all data to 6h timeframe
-    upper_bb_aligned = align_htf_to_ltf(prices, prices, upper_bb.values)
-    lower_bb_aligned = align_htf_to_ltf(prices, prices, lower_bb.values)
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w.values)
+    # Support levels
+    s1 = pivot - (range_hl * 1.1 / 12)
+    s2 = pivot - (range_hl * 1.1 / 6)
+    s3 = pivot - (range_hl * 1.1 / 4)
+    s4 = pivot - (range_hl * 1.1 / 2)
+    
+    # Weekly EMA for trend filter
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean()
+    
+    # Align all data to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w.values)
     
-    # Calculate 6-day ATR for volatility threshold (approximate)
-    high_6d = pd.Series(high)
-    low_6d = pd.Series(low)
-    close_6d = pd.Series(close)
-    tr1_6d = high_6d - low_6d
-    tr2_6d = abs(high_6d - close_6d.shift(1))
-    tr3_6d = abs(low_6d - close_6d.shift(1))
-    tr_6d = pd.concat([tr1_6d, tr2_6d, tr3_6d], axis=1).max(axis=1)
-    atr_6d = tr_6d.rolling(window=6, min_periods=6).mean()
-    atr_6d_aligned = align_htf_to_ltf(prices, prices, atr_6d.values)
+    # Daily volume and its 20-period average
+    volume_1d = df_1d['volume'].values
+    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean()
+    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d.values)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or
-            np.isnan(atr_1w_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or
-            np.isnan(atr_6d_aligned[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or
+            np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(s2_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when 6d ATR > 1.5x weekly ATR
-        volatility_filter = atr_6d_aligned[i] > (atr_1w_aligned[i] * 1.5)
+        # Volume condition: current 12h volume > 1.5x 20-period average
+        volume_12h_approx = volume[i]
+        volume_ma_20_12h = volume_ma_20_1d_aligned[i] / 2
+        volume_condition = volume_12h_approx > (volume_ma_20_12h * 1.5)
         
         # Trend filter: only long when price > weekly EMA50, short when price < weekly EMA50
         long_trend = close[i] > ema_50_1w_aligned[i]
         short_trend = close[i] < ema_50_1w_aligned[i]
         
-        # Entry conditions: Bollinger Band breakouts with volatility and trend confirmation
+        # Entry conditions: price near Camarilla levels with volume and trend confirmation
+        near_support = (close[i] <= s1_aligned[i] * 1.002) or (close[i] <= s2_aligned[i] * 1.002)
+        near_resistance = (close[i] >= r1_aligned[i] * 0.998) or (close[i] >= r2_aligned[i] * 0.998)
+        
         if position == 0:
-            # Long when price breaks above upper BB with volatility and uptrend
-            if close[i] > upper_bb_aligned[i] and volatility_filter and long_trend:
+            if near_support and volume_condition and long_trend:
                 position = 1
                 signals[i] = position_size
-            # Short when price breaks below lower BB with volatility and downtrend
-            elif close[i] < lower_bb_aligned[i] and volatility_filter and short_trend:
+            elif near_resistance and volume_condition and short_trend:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit when price returns to middle (SMA20) or shows reversal
-            # Approximate SMA20 from recent closes
-            sma_20_current = close[max(0, i-19):i+1].mean()
-            if close[i] < sma_20_current:
+            # Exit when price reaches pivot or shows reversal signs
+            if close[i] >= pivot_aligned[i] * 0.998:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit when price returns to middle (SMA20) or shows reversal
-            sma_20_current = close[max(0, i-19):i+1].mean()
-            if close[i] > sma_20_current:
+            # Exit when price reaches pivot or shows reversal signs
+            if close[i] <= pivot_aligned[i] * 1.002:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -111,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_Bollinger_Breakout_Volatility_Filter"
-timeframe = "6h"
+name = "12h_1d1w_Camarilla_Pivot_Breakout_With_Volume_Confirmation_v3"
+timeframe = "12h"
 leverage = 1.0
