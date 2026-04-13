@@ -8,12 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: Daily Camarilla pivot breakout with volume confirmation and weekly trend filter.
-    # Long when price breaks above H3 with volume spike and weekly close > weekly open.
-    # Short when price breaks below L3 with volume spike and weekly close < weekly open.
-    # Exit when price returns to daily pivot point (mean reversion).
-    # Uses 1d Camarilla levels and 1w trend aligned to daily bars. Discrete size 0.25.
-    # Target: 30-100 total trades over 4 years (7-25/year).
+    # Hypothesis: 12h Camarilla H4/L4 breakout with 1d volume spike and ADX regime filter.
+    # Long when price breaks above H4 with volume spike and ADX > 25 (trending).
+    # Short when price breaks below L4 with volume spike and ADX > 25.
+    # Exit when price returns to Camarilla pivot (mean reversion in range, stop in trend).
+    # Uses discrete size 0.25 to minimize fee churn. Target: 50-150 trades over 4 years.
     
     close = prices['close'].values
     high = prices['high'].values
@@ -25,23 +24,19 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d OHLC for Camarilla pivots (based on previous day)
+    # Calculate 1d OHLC for Camarilla pivots
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    open_1d = df_1d['open'].values
     
     # Camarilla pivot levels (based on previous day)
-    # Pivot = (High + Low + Close) / 3
-    # Range = High - Low
-    # H3 = Close + Range * 1.1 / 4
-    # L3 = Close - Range * 1.1 / 4
-    
     pivot = (high_1d + low_1d + close_1d) / 3.0
     rng = high_1d - low_1d
     
-    # H3 and L3 are the key breakout levels
-    camarilla_h3 = close_1d + rng * 1.1 / 4.0
-    camarilla_l3 = close_1d - rng * 1.1 / 4.0
+    # H4 and L4 are stronger breakout levels (more reliable than H3/L3)
+    camarilla_h4 = close_1d + rng * 1.1 / 2.0
+    camarilla_l4 = close_1d - rng * 1.1 / 2.0
     camarilla_pivot = pivot  # Exit level
     
     # Calculate 1d volume mean (20-period) with min_periods
@@ -49,33 +44,55 @@ def generate_signals(prices):
     volume_series = pd.Series(volume_1d)
     vol_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     
-    # Get weekly data for trend filter (call ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
+    # Calculate 1d ADX (14-period) for regime filter
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(0, high[i] - high[i-1])
+            minus_dm[i] = max(0, low[i-1] - low[i])
+            if plus_dm[i] == minus_dm[i]:
+                plus_dm[i] = 0
+                minus_dm[i] = 0
+            elif plus_dm[i] < minus_dm[i]:
+                plus_dm[i] = 0
+            else:
+                minus_dm[i] = 0
+            
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Wilder's smoothing
+        atr = np.zeros_like(tr)
+        atr[period] = np.nansum(tr[1:period+1]) if period < len(tr) else 0
+        for i in range(period+1, len(tr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        plus_di = 100 * (pd.Series(plus_dm).ewm(alpha=1/period, adjust=False).mean().values / atr)
+        minus_di = 100 * (pd.Series(minus_dm).ewm(alpha=1/period, adjust=False).mean().values / atr)
+        dx = np.zeros_like(close)
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+        adx = pd.Series(dx).ewm(alpha=1/period, adjust=False).mean().values
+        return adx
     
-    # Weekly trend: bullish if weekly close > weekly open, bearish if weekly close < weekly open
-    weekly_open = df_1w['open'].values
-    weekly_close = df_1w['close'].values
-    weekly_bullish = weekly_close > weekly_open
-    weekly_bearish = weekly_close < weekly_open
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    # Align HTF indicators to 1d timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Align HTF indicators to 12h timeframe
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
     vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1d, weekly_bullish.astype(float))
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1d, weekly_bearish.astype(float))
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or
             np.isnan(camarilla_pivot_aligned[i]) or np.isnan(vol_ma_aligned[i]) or
-            np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i])):
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -85,13 +102,12 @@ def generate_signals(prices):
         # Volume filter: current 1d volume > 1.5 * 20-period mean (volume spike)
         volume_confirmation = vol_1d_aligned[i] > 1.5 * vol_ma_aligned[i]
         
-        # Entry conditions: price breaks Camarilla H3/L3 levels with volume confirmation and weekly trend
-        long_entry = (close[i] > camarilla_h3_aligned[i] and 
-                      volume_confirmation and 
-                      weekly_bullish_aligned[i] > 0.5)
-        short_entry = (close[i] < camarilla_l3_aligned[i] and 
-                       volume_confirmation and 
-                       weekly_bearish_aligned[i] > 0.5)
+        # Regime filter: ADX > 25 indicates trending market (avoid ranging)
+        regime_filter = adx_aligned[i] > 25
+        
+        # Entry conditions: price breaks Camarilla H4/L4 levels with volume confirmation and trend regime
+        long_entry = (close[i] > camarilla_h4_aligned[i] and volume_confirmation and regime_filter)
+        short_entry = (close[i] < camarilla_l4_aligned[i] and volume_confirmation and regime_filter)
         
         # Exit conditions: price returns to Camarilla pivot point (mean reversion)
         long_exit = close[i] < camarilla_pivot_aligned[i]
@@ -120,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_camarilla_breakout_volume_trend_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_h4l4_volume_adx_v1"
+timeframe = "12h"
 leverage = 1.0
