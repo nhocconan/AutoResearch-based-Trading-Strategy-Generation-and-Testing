@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Price Channel Breakout (Donchian 10) with 12h ADX trend filter and volume confirmation.
-# Uses Donchian channel breakouts for entry, filtered by 12h ADX > 25 to ensure trending markets,
-# and volume > 1.5x average for confirmation. Exits when price crosses the opposite Donchian band.
-# Designed to work in both bull and bear markets by only trading strong trends.
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+# Hypothesis: 1h momentum with 4h trend filter and 1d volatility filter.
+# Uses 1h RSI(14) for momentum entry/exit, 4h EMA(50) for trend direction,
+# and 1d ATR(14) normalized by price for volatility regime filtering.
+# Only trades during 08-20 UTC to avoid low-liquidity hours.
+# Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
+# Designed to work in both bull (momentum continuation) and bear (mean reversion in low volatility).
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,137 +20,117 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12-hour data for ADX trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 15:
+    # Pre-calculate session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # 1h RSI(14) for momentum
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    avg_gain[0] = gain[0]
+    avg_loss[0] = loss[0]
+    for i in range(1, n):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # 4h EMA(50) for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    close_4h = df_4h['close'].values
+    ema50_4h = np.zeros(len(close_4h))
+    ema_multiplier = 2 / (50 + 1)
+    ema50_4h[0] = close_4h[0]
+    for i in range(1, len(close_4h)):
+        ema50_4h[i] = (close_4h[i] - ema50_4h[i-1]) * ema_multiplier + ema50_4h[i-1]
     
-    # True Range for ADX calculation
-    tr1 = high_12h[1:] - low_12h[1:]
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # Directional Movement
-    dm_plus = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
-                       np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
-    dm_minus = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
-                        np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
+    # 1d ATR(14) normalized by price for volatility regime
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
     
-    # Smooth TR, DM+, DM- using Wilder's smoothing (alpha = 1/period)
-    def wilder_smooth(arr, period):
-        """Wilder's smoothing (equivalent to EMA with alpha=1/period)"""
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        result = np.full(len(arr), np.nan)
-        # First value is simple average
-        valid_start = ~np.isnan(arr)
-        if not np.any(valid_start):
-            return result
-        first_valid = np.where(valid_start)[0][0]
-        if first_valid + period >= len(arr):
-            return result
-        result[first_valid + period - 1] = np.nanmean(arr[first_valid:first_valid + period])
-        # Subsequent values: smoothed = prev * (1 - 1/period) + current * (1/period)
-        alpha = 1.0 / period
-        for i in range(first_valid + period, len(arr)):
-            if np.isnan(arr[i]):
-                result[i] = result[i-1]
-            else:
-                result[i] = result[i-1] * (1 - alpha) + arr[i] * alpha
-        return result
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    period = 10
-    atr = wilder_smooth(tr, period)
-    dm_plus_smooth = wilder_smooth(dm_plus, period)
-    dm_minus_smooth = wilder_smooth(dm_minus, period)
+    tr1 = np.zeros(len(close_1d))
+    tr1[0] = high_1d[0] - low_1d[0]
+    for i in range(1, len(close_1d)):
+        tr1[i] = max(high_1d[i] - low_1d[i], 
+                     abs(high_1d[i] - close_1d[i-1]),
+                     abs(low_1d[i] - close_1d[i-1]))
     
-    # DI+ and DI-
-    di_plus = np.where(atr > 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr > 0, 100 * dm_minus_smooth / atr, 0)
+    atr14 = np.zeros(len(close_1d))
+    atr14[0] = tr1[0]
+    for i in range(1, len(atr14)):
+        atr14[i] = (atr14[i-1] * 13 + tr1[i]) / 14
     
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilder_smooth(dx, period)
-    
-    # Align 12h ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
-    
-    # Donchian Channel (10-period) on 4h timeframe
-    def rolling_max(arr, window):
-        result = np.full(len(arr), np.nan)
-        for i in range(window - 1, len(arr)):
-            result[i] = np.max(arr[i - window + 1:i + 1])
-        return result
-    
-    def rolling_min(arr, window):
-        result = np.full(len(arr), np.nan)
-        for i in range(window - 1, len(arr)):
-            result[i] = np.min(arr[i - window + 1:i + 1])
-        return result
-    
-    upper_channel = rolling_max(high, 10)
-    lower_channel = rolling_min(low, 10)
-    
-    # Average volume (20-period = 20*4h = 10 days) for volume confirmation
-    avg_volume = np.full(n, np.nan)
-    for i in range(20, n):
-        avg_volume[i] = np.mean(volume[i-20:i])
+    # Normalize ATR by price to get volatility regime
+    atr_norm = atr14 / close_1d
+    atr_norm_aligned = align_htf_to_ltf(prices, df_1d, atr_norm)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.25  # 25% position size
+    position_size = 0.20  # 20% position size
     
-    for i in range(20, n):
+    for i in range(50, n):
+        # Skip if not in trading session
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
+            
         # Skip if any required data is not ready
-        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema50_4h_aligned[i]) or 
+            np.isnan(atr_norm_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol = volume[i]
-        avg_vol = avg_volume[i]
-        adx_val = adx_aligned[i]
+        rsi_val = rsi[i]
+        ema_trend = ema50_4h_aligned[i]
+        vol_regime = atr_norm_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirm = vol > 1.5 * avg_vol
-        
-        # Trend filter: ADX > 25 indicates strong trend
-        trend_filter = adx_val > 25
+        # Volatility filter: only trade when volatility is normalized (not too high)
+        # Avoid trading during extreme volatility spikes
+        vol_filter = vol_regime < 0.05  # 5% daily ATR as threshold
         
         if position == 0:
-            # Long: price breaks above upper Donchian channel + trend + volume
-            if (price > upper_channel[i] and 
-                trend_filter and
-                volume_confirm):
+            # Long: RSI > 55 (bullish momentum) + above 4h EMA50 + vol filter
+            if (rsi_val > 55 and 
+                price > ema_trend and
+                vol_filter):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below lower Donchian channel + trend + volume
-            elif (price < lower_channel[i] and 
-                  trend_filter and
-                  volume_confirm):
+            # Short: RSI < 45 (bearish momentum) + below 4h EMA50 + vol filter
+            elif (rsi_val < 45 and 
+                  price < ema_trend and
+                  vol_filter):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below lower Donchian channel
-            if price < lower_channel[i]:
+            # Exit long: RSI < 40 (momentum fade) or price below 4h EMA
+            if (rsi_val < 40 or
+                price < ema_trend):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above upper Donchian channel
-            if price > upper_channel[i]:
+            # Exit short: RSI > 60 (momentum fade) or price above 4h EMA
+            if (rsi_val > 60 or
+                price > ema_trend):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -157,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_Donchian_ADX_Volume"
-timeframe = "4h"
+name = "1h_4h_1d_RSI_EMA_Volatility_Filter"
+timeframe = "1h"
 leverage = 1.0
