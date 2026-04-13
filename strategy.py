@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation
-Hypothesis: Daily Camarilla pivot levels (S3/R3) provide strong support/resistance on 12h chart.
-Breakouts above R3 or below S3 with volume expansion capture institutional moves. Works in both bull and bear markets by trading breakouts regardless of direction. Target: 15-30 trades/year per symbol.
+1h_4d_Camarilla_Pivot_Breakout_Volume_Confirmation
+Hypothesis: Daily Camarilla pivot levels (S3/R3) provide strong support/resistance.
+Breakouts above R3 or below S3 on 4h chart with volume expansion capture institutional moves.
+Trades only during 08-20 UTC to reduce noise. Target: 15-37 trades/year per symbol.
 """
 
 import numpy as np
@@ -11,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -41,7 +42,7 @@ def generate_signals(prices):
     # Support levels (S3 used)
     S3 = close_prev - (range_1d * 1.2500 / 4)
     
-    # Align levels to 12h timeframe
+    # Align levels to 4h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
@@ -49,14 +50,23 @@ def generate_signals(prices):
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     volume_expansion = volume > (vol_ma_20 * 1.5)
     
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.25
+    position_size = 0.20
     
-    for i in range(50, n):
+    for i in range(200, n):
         # Skip if any required data is not ready
         if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
             np.isnan(volume_expansion[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Skip if outside session
+        if not in_session[i]:
             signals[i] = 0.0
             continue
         
@@ -78,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation"
-timeframe = "12h"
+name = "1h_4d_Camarilla_Pivot_Breakout_Volume_Confirmation"
+timeframe = "1h"
 leverage = 1.0
