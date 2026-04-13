@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with daily volume confirmation and ADX trend filter.
-# Uses daily Donchian channels and ADX to filter breakouts in trending markets while avoiding whipsaws.
-# Timeframe 4h balances signal frequency and noise reduction. Volume ensures breakout conviction.
-# ADX > 25 filters for trending conditions, reducing false breakouts in chop.
-# Target: 75-200 total trades over 4 years (19-50/year) for optimal fee-to-alpha ratio.
+# Hypothesis: 6h Elder Ray with weekly trend filter and daily volume confirmation.
+# Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13) identifies institutional buying/selling pressure.
+# Weekly trend filter ensures we only take trades in the direction of the higher timeframe trend.
+# Daily volume confirmation ensures institutional participation.
+# Target: 50-150 total trades over 4 years (12-37/year) to stay within profitable range.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,49 +19,41 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for multi-timeframe analysis
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
+    # Daily data for volume confirmation and EMA calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 20-day Donchian channel on daily
+    # Calculate weekly EMA13 for trend filter
+    close_1w = df_1w['close'].values
+    ema13_1w = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Calculate daily EMA13 for Elder Ray
+    close_1d = df_1d['close'].values
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Calculate daily high and low for Elder Ray
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate daily ADX for trend strength
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - np.concatenate([[0], close_1d[:-1]]))
-    tr3 = np.abs(low_1d[1:] - np.concatenate([[0], close_1d[:-1]]))
-    tr = np.maximum.reduce([tr1, tr2, tr3])
-    tr = np.concatenate([[np.nan], tr])  # align with original index
-    
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    
-    # Smooth TR and DM
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high_1d - ema13_1d
+    bear_power = low_1d - ema13_1d
     
     # Calculate daily volume and its 20-period average
     volume_1d = df_1d['volume'].values
     volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all data to 4-hour timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align all data to 6-hour timeframe
+    ema13_1w_aligned = align_htf_to_ltf(prices, df_1w, ema13_1w)
+    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
     signals = np.zeros(n)
@@ -70,44 +62,46 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
+        if (np.isnan(ema13_1w_aligned[i]) or np.isnan(ema13_1d_aligned[i]) or
+            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
+            np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current 4h volume > 1.5x daily volume MA (adjusted for 4h)
-        # 6 4h periods per day, so daily MA/6 = approximate 4h period MA
-        volume_4h_approx_ma = volume_ma_20_1d_aligned[i] / 6
-        volume_condition = volume[i] > (volume_4h_approx_ma * 1.5)
+        # Weekly trend: price above/below weekly EMA13
+        weekly_uptrend = close[i] > ema13_1w_aligned[i]
+        weekly_downtrend = close[i] < ema13_1w_aligned[i]
         
-        # ADX condition: trending market
-        adx_condition = adx_aligned[i] > 25
+        # Daily Elder Ray signals
+        strong_bull_power = bull_power_aligned[i] > 0
+        strong_bear_power = bear_power_aligned[i] < 0
         
-        # Entry conditions: Donchian breakout with volume and ADX filter
-        # Long when price breaks above Donchian high with volume and trending
-        # Short when price breaks below Donchian low with volume and trending
-        breakout_long = close[i] > donchian_high_aligned[i]
-        breakout_short = close[i] < donchian_low_aligned[i]
+        # Volume condition: current 6h volume > 1.5x daily volume MA (adjusted for 6h)
+        # 4 6h periods per day, so daily MA/4 = approximate 6h period MA
+        volume_6h_approx_ma = volume_ma_20_1d_aligned[i] / 4
+        volume_condition = volume[i] > (volume_6h_approx_ma * 1.5)
         
         if position == 0:
-            if breakout_long and volume_condition and adx_condition:
+            # Long: weekly uptrend + strong bull power + volume confirmation
+            if weekly_uptrend and strong_bull_power and volume_condition:
                 position = 1
                 signals[i] = position_size
-            elif breakout_short and volume_condition and adx_condition:
+            # Short: weekly downtrend + strong bear power + volume confirmation
+            elif weekly_downtrend and strong_bear_power and volume_condition:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit when price breaks below Donchian low or ADX drops (trend weakening)
-            if close[i] < donchian_low_aligned[i] or adx_aligned[i] < 20:
+            # Exit when weekly trend turns down or bull power weakens
+            if not weekly_uptrend or bull_power_aligned[i] <= 0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit when price breaks above Donchian high or ADX drops (trend weakening)
-            if close[i] > donchian_high_aligned[i] or adx_aligned[i] < 20:
+            # Exit when weekly trend turns up or bear power weakens
+            if not weekly_downtrend or bear_power_aligned[i] >= 0:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -115,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Donchian_Breakout_Volume_ADX_Filter_v1"
-timeframe = "4h"
+name = "6h_1w_1d_Elder_Ray_Weekly_Trend_Volume_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
