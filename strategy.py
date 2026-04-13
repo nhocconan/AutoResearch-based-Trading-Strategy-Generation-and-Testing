@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h timeframe with 12h trend filter and Bollinger Band mean reversion
-# Strategy: In strong trends (price > 12h EMA50), look for mean reversion to Bollinger Band middle (20 SMA)
-# In ranging markets (price near Bollinger middle), follow 12h trend direction
-# This adapts to both bull/bear markets by using trend-aware mean reversion
+# Hypothesis: 12h timeframe with 1d trend filter and Williams %R mean reversion
+# Strategy: In strong trends (price above/below 1d EMA50), look for mean reversion to Williams %R oversold/overbought levels
+# This adapts to both bull/bear markets by using trend-aware mean reversion with momentum oscillator
 # Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag
+# Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,30 +18,27 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get 12h data for trend and Bollinger Bands
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 1d data for trend and Williams %R
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h_series = pd.Series(close_12h)
-    ema_50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d EMA50 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 12h Bollinger Bands (20, 2)
-    sma_20_12h = pd.Series(close_12h).rolling(window=20, min_periods=20).mean().values
-    std_20_12h = pd.Series(close_12h).rolling(window=20, min_periods=20).std().values
-    upper_bb_12h = sma_20_12h + 2 * std_20_12h
-    lower_bb_12h = sma_20_12h - 2 * std_20_12h
+    # Calculate 1d Williams %R (14 period)
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14 + 1e-10)
     
-    # Align 12h indicators to 6h timeframe
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    sma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, sma_20_12h)
-    upper_bb_12h_aligned = align_htf_to_ltf(prices, df_12h, upper_bb_12h)
-    lower_bb_12h_aligned = align_htf_to_ltf(prices, df_12h, lower_bb_12h)
+    # Align 1d indicators to 12h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -49,46 +46,33 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(sma_20_12h_aligned[i]) or 
-            np.isnan(upper_bb_12h_aligned[i]) or 
-            np.isnan(lower_bb_12h_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(williams_r_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Determine market regime based on price vs Bollinger Bands
-        price_vs_upper = (close[i] - upper_bb_12h_aligned[i]) / (upper_bb_12h_aligned[i] - sma_20_12h_aligned[i] + 1e-10)
-        price_vs_lower = (close[i] - lower_bb_12h_aligned[i]) / (sma_20_12h_aligned[i] - lower_bb_12h_aligned[i] + 1e-10)
+        # Williams %R levels
+        oversold = williams_r_aligned[i] <= -80  # Oversold condition
+        overbought = williams_r_aligned[i] >= -20  # Overbought condition
         
-        # Strong trend: price outside Bollinger Bands
-        strong_uptrend = price_vs_upper > 0 and close[i] > ema_50_12h_aligned[i]
-        strong_downtrend = price_vs_lower < 0 and close[i] < ema_50_12h_aligned[i]
+        # Trend direction from 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Ranging: price near Bollinger middle (within 0.5 bands)
-        near_middle = abs(close[i] - sma_20_12h_aligned[i]) < 0.5 * (upper_bb_12h_aligned[i] - lower_bb_12h_aligned[i])
-        
-        # Entry logic
+        # Entry logic: trend-following mean reversion
         long_entry = False
         short_entry = False
         
-        if strong_uptrend:
-            # In strong uptrend, look for pullbacks to middle (mean reversion)
-            if near_middle and close[i] > sma_20_12h_aligned[i]:
-                long_entry = True
-        elif strong_downtrend:
-            # In strong downtrend, look for bounces to middle
-            if near_middle and close[i] < sma_20_12h_aligned[i]:
-                short_entry = True
-        elif near_middle:
-            # In ranging market, follow 12h trend
-            if close[i] > ema_50_12h_aligned[i]:
-                long_entry = True
-            elif close[i] < ema_50_12h_aligned[i]:
-                short_entry = True
+        if uptrend and oversold:
+            # In uptrend, look for oversold bounces
+            long_entry = True
+        elif downtrend and overbought:
+            # In downtrend, look for overbought pullbacks
+            short_entry = True
         
-        # Exit conditions: opposite signal or break of Bollinger Band
-        exit_long = position == 1 and (close[i] < lower_bb_12h_aligned[i] or short_entry)
-        exit_short = position == -1 and (close[i] > upper_bb_12h_aligned[i] or long_entry)
+        # Exit conditions: opposite signal or Williams %R reverts to middle
+        exit_long = position == 1 and (williams_r_aligned[i] >= -50 or short_entry)
+        exit_short = position == -1 and (williams_r_aligned[i] <= -50 or long_entry)
         
         # Execute signals
         if long_entry and position != 1:
@@ -111,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_bollinger_trend_mean_reversion_v1"
-timeframe = "6h"
+name = "12h_1d_williamsr_trend_mean_reversion_v1"
+timeframe = "12h"
 leverage = 1.0
