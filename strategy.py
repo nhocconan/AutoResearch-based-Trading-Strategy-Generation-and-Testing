@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-4h_1d_keltner_breakout_volume
-Hypothesis: Uses 1-day Keltner Channel breakout with volume confirmation to capture strong momentum moves.
-Works in bull markets (breakout continuation) and bear markets (mean reversion after sharp moves).
+4h_1d_camarilla_pivot_volume
+Hypothesis: Uses 1-day Camarilla pivot levels with volume confirmation to capture reversals at key support/resistance.
+Works in bull markets (bounce from support) and bear markets (rejection at resistance).
 Targets 20-30 trades/year to minimize fee drag. Long and short positions for symmetry.
 """
 
@@ -22,51 +22,28 @@ def generate_signals(prices):
     
     # Get 1d data
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Keltner Channel (20, 2.0) on 1d
-    typical_price = (high_1d + low_1d + close_1d) / 3
-    atr_period = 20
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = np.nan
-    
-    def wilders_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        result[period-1] = np.nanmean(data[:period])
-        for i in range(period, len(data)):
-            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-            else:
-                result[i] = np.nan
-        return result
-    
-    atr = wilders_smooth(tr, atr_period)
-    ema_atr = pd.Series(typical_price).ewm(span=20, min_periods=20, adjust=False).mean().values
-    
-    upper_keltner = ema_atr + (2.0 * atr)
-    lower_keltner = ema_atr - (2.0 * atr)
-    
-    # Breakout signals
-    breakout_up = close_1d > upper_keltner
-    breakout_down = close_1d < lower_keltner
+    # Calculate Camarilla pivot levels for previous day
+    # Using formula: H4 = Close + 1.5*(High-Low), L4 = Close - 1.5*(High-Low)
+    # H3 = Close + 1.125*(High-Low), L3 = Close - 1.125*(High-Low)
+    # We'll use H3/L3 as entry levels
+    hl_range = high_1d - low_1d
+    H3 = close_1d + 1.125 * hl_range
+    L3 = close_1d - 1.125 * hl_range
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
     volume_expansion = df_1d['volume'].values > (vol_ma_20 * 1.5)
     
     # Align all signals to 4h timeframe
-    breakout_up_aligned = align_htf_to_ltf(prices, df_1d, breakout_up.astype(float))
-    breakout_down_aligned = align_htf_to_ltf(prices, df_1d, breakout_down.astype(float))
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
     volume_expansion_aligned = align_htf_to_ltf(prices, df_1d, volume_expansion.astype(float))
     
     signals = np.zeros(n)
@@ -75,20 +52,20 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(breakout_up_aligned[i]) or 
-            np.isnan(breakout_down_aligned[i]) or 
+        if (np.isnan(H3_aligned[i]) or 
+            np.isnan(L3_aligned[i]) or 
             np.isnan(volume_expansion_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions
-        long_entry = breakout_up_aligned[i] > 0.5 and volume_expansion_aligned[i] > 0.5
-        short_entry = breakout_down_aligned[i] > 0.5 and volume_expansion_aligned[i] > 0.5
+        # Entry conditions: price touches H3/L3 with volume expansion
+        long_entry = (low[i] <= L3_aligned[i]) and volume_expansion_aligned[i] > 0.5
+        short_entry = (high[i] >= H3_aligned[i]) and volume_expansion_aligned[i] > 0.5
         
-        # Exit conditions: return to middle of Keltner Channel
-        ema_aligned = align_htf_to_ltf(prices, df_1d, ema_atr)
-        exit_long = position == 1 and close[i] >= ema_aligned[i]
-        exit_short = position == -1 and close[i] <= ema_aligned[i]
+        # Exit conditions: return to previous day's close
+        prev_close_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+        exit_long = position == 1 and close[i] >= prev_close_aligned[i]
+        exit_short = position == -1 and close[i] <= prev_close_aligned[i]
         
         # Execute signals
         if long_entry and position != 1:
@@ -111,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_keltner_breakout_volume"
+name = "4h_1d_camarilla_pivot_volume"
 timeframe = "4h"
 leverage = 1.0
