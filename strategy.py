@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d ADX trend strength combined with 1-week ATR-based breakout for trend following.
-# Uses weekly ATR to set breakout levels and daily ADX to confirm trend strength.
-# This strategy aims to capture strong trends while avoiding choppy markets.
-# Weekly timeframe reduces noise and false breakouts, while daily ADX ensures we only trade in strong trends.
-# Target: 30-100 total trades over 4 years (7-25/year) to stay within profitable range.
+# Hypothesis: 4h Camarilla pivot reversal with daily volume confirmation and weekly trend filter.
+# Uses Camarilla pivot levels from daily data for mean reversion entries, volume confirmation to
+# ensure conviction, and weekly trend filter to avoid counter-trend trades. Targets 80-150
+# total trades over 4 years (20-37/year) to balance opportunity and cost. Works in both bull
+# and bear markets by fading extremes in ranging markets and following trends when strong.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,74 +19,54 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for multi-timeframe analysis
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    # Calculate weekly ATR for volatility measurement
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # True Range calculation
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr1[0] = 0  # First period has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # ATR(14) calculation
-    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Weekly breakout levels: ±1.5 * ATR from weekly open
-    open_1w = df_1w['open'].values
-    upper_breakout = open_1w + (1.5 * atr_1w)
-    lower_breakout = open_1w - (1.5 * atr_1w)
-    
-    # Daily data for trend confirmation
+    # Daily data for Camarilla pivots and volume
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily ADX for trend strength
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    # Calculate daily Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    up_move[0] = 0
-    down_move[0] = 0
+    # Pivot point and support/resistance levels
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Camarilla levels
+    camarilla_h4 = close_1d + range_1d * 1.1 / 2
+    camarilla_l4 = close_1d - range_1d * 1.1 / 2
+    camarilla_h3 = close_1d + range_1d * 1.1 / 4
+    camarilla_l3 = close_1d - range_1d * 1.1 / 4
+    camarilla_h2 = close_1d + range_1d * 1.1 / 6
+    camarilla_l2 = close_1d - range_1d * 1.1 / 6
+    camarilla_h1 = close_1d + range_1d * 1.1 / 12
+    camarilla_l1 = close_1d - range_1d * 1.1 / 12
     
-    # True Range for daily
-    tr1_d = high_1d - low_1d
-    tr2_d = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3_d = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1_d[0] = 0
-    tr2_d[0] = 0
-    tr3_d[0] = 0
-    tr_d = np.maximum(tr1_d, np.maximum(tr2_d, tr3_d))
+    # Calculate weekly EMA for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Smoothed values
-    atr_1d = pd.Series(tr_d).rolling(window=14, min_periods=14).mean()
-    plus_di = 100 * (pd.Series(plus_dm).rolling(window=14, min_periods=14).mean() / atr_1d)
-    minus_di = 100 * (pd.Series(minus_dm).rolling(window=14, min_periods=14).mean() / atr_1d)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean()
+    # Calculate daily volume and its 20-period average
+    volume_1d = df_1d['volume'].values
+    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    adx_values = adx.values
-    
-    # Align all data to daily timeframe
-    upper_breakout_aligned = align_htf_to_ltf(prices, df_1w, upper_breakout)
-    lower_breakout_aligned = align_htf_to_ltf(prices, df_1w, lower_breakout)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
+    # Align all data to 4-hour timeframe
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_h2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h2)
+    camarilla_l2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l2)
+    camarilla_h1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h1)
+    camarilla_l1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l1)
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -94,37 +74,48 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is not ready
-        if (np.isnan(upper_breakout_aligned[i]) or np.isnan(lower_breakout_aligned[i]) or
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or
+            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(camarilla_h2_aligned[i]) or np.isnan(camarilla_l2_aligned[i]) or
+            np.isnan(camarilla_h1_aligned[i]) or np.isnan(camarilla_l1_aligned[i]) or
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # ADX condition: trend strength > 25
-        strong_trend = adx_aligned[i] > 25
+        # Volume condition: current 4h volume > 1.5x daily volume MA (adjusted for 4h)
+        # 6 4h periods per day, so daily MA/6 = approximate 4h period MA
+        volume_4h_approx_ma = volume_ma_20_1d_aligned[i] / 6
+        volume_condition = volume[i] > (volume_4h_approx_ma * 1.5)
         
-        # Entry conditions: Weekly breakout with ADX trend filter
-        breakout_long = close[i] > upper_breakout_aligned[i]
-        breakout_short = close[i] < lower_breakout_aligned[i]
+        # Trend filter: price above/below weekly EMA
+        price_above_weekly_ema = close[i] > ema_20_1w_aligned[i]
+        price_below_weekly_ema = close[i] < ema_20_1w_aligned[i]
+        
+        # Entry conditions: Camarilla reversal with volume and trend filter
+        # Long when price touches L3 with volume and above weekly EMA (in uptrend)
+        # Short when price touches H3 with volume and below weekly EMA (in downtrend)
+        touch_l3 = low[i] <= camarilla_l3_aligned[i]
+        touch_h3 = high[i] >= camarilla_h3_aligned[i]
         
         if position == 0:
-            if breakout_long and strong_trend:
+            if touch_l3 and volume_condition and price_above_weekly_ema:
                 position = 1
                 signals[i] = position_size
-            elif breakout_short and strong_trend:
+            elif touch_h3 and volume_condition and price_below_weekly_ema:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit when price breaks below weekly lower breakout or ADX weakens
-            if close[i] < lower_breakout_aligned[i] or adx_aligned[i] < 20:
+            # Exit when price reaches H3 or L1 (profit target or reversal)
+            if high[i] >= camarilla_h3_aligned[i] or low[i] <= camarilla_l1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit when price breaks above weekly upper breakout or ADX weakens
-            if close[i] > upper_breakout_aligned[i] or adx_aligned[i] < 20:
+            # Exit when price reaches L3 or H1 (profit target or reversal)
+            if low[i] <= camarilla_l3_aligned[i] or high[i] >= camarilla_h1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -132,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_ADX_Trend_Breakout_ATR_v1"
-timeframe = "1d"
+name = "4h_1d1w_Camarilla_Pivot_Reversal_Volume_Trend_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
