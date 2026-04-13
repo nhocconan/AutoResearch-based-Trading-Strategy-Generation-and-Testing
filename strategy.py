@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot levels from 1d with volume confirmation.
-# Camarilla pivots provide precise support/resistance levels for mean reversion and breakouts.
-# Fade at R3/S3 (mean reversion), breakout continuation at R4/S4.
-# Volume confirmation ensures institutional participation.
-# Works in both bull and bear markets by adapting to price action at key levels.
+# Hypothesis: 12h Williams Alligator with Elder Ray and volume confirmation.
+# Williams Alligator identifies trend direction using smoothed medians.
+# Elder Ray measures bull/bear power behind the trend.
+# Volume confirmation ensures momentum behind moves.
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,40 +19,37 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Weekly data for trend context
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 13:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    # PP = (H + L + C) / 3
-    # R4 = PP + (H - L) * 1.1/2
-    # R3 = PP + (H - L) * 1.1/4
-    # R2 = PP + (H - L) * 1.1/6
-    # R1 = PP + (H - L) * 1.1/12
-    # S1 = PP - (H - L) * 1.1/12
-    # S2 = PP - (H - L) * 1.1/6
-    # S3 = PP - (H - L) * 1.1/4
-    # S4 = PP - (H - L) * 1.1/2
+    # Williams Alligator (13,8,5) on close
+    jaw_period = 13
+    teeth_period = 8
+    lips_period = 5
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Smoothed medians (using close)
+    jaw = pd.Series(close).rolling(window=jaw_period, min_periods=jaw_period).median().values
+    teeth = pd.Series(close).rolling(window=teeth_period, min_periods=teeth_period).median().values
+    lips = pd.Series(close).rolling(window=lips_period, min_periods=lips_period).median().values
     
-    # Calculate pivots for each day
-    pp = (high_1d + low_1d + close_1d) / 3
-    r4 = pp + (high_1d - low_1d) * 1.1 / 2
-    r3 = pp + (high_1d - low_1d) * 1.1 / 4
-    s3 = pp - (high_1d - low_1d) * 1.1 / 4
-    s4 = pp - (high_1d - low_1d) * 1.1 / 2
+    # Shift to avoid look-ahead (Alligator uses future data in calculation)
+    jaw = np.roll(jaw, 8)
+    teeth = np.roll(teeth, 5)
+    lips = np.roll(lips, 3)
     
-    # Align daily Camarilla levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # Volume confirmation: 20-period average
+    # Align weekly trend filter
+    close_1w = df_1w['close'].values
+    sma_1w = pd.Series(close_1w).rolling(window=13, min_periods=13).mean().values
+    sma_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_1w)
+    
+    # Average volume (20-period) for confirmation
     avg_volume = np.zeros(n)
     for i in range(20, n):
         avg_volume[i] = np.mean(volume[i-20:i])
@@ -61,60 +58,50 @@ def generate_signals(prices):
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if any required data is not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(avg_volume[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(sma_1w_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        vol = volume[i]
-        avg_vol = avg_volume[i]
-        r3_level = r3_aligned[i]
-        r4_level = r4_aligned[i]
-        s3_level = s3_aligned[i]
-        s4_level = s4_aligned[i]
+        # Alligator alignment: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
+        bullish_align = lips[i] > teeth[i] > jaw[i]
+        bearish_align = lips[i] < teeth[i] < jaw[i]
         
-        # Volume confirmation: current volume > 1.3x average volume
-        volume_confirm = vol > 1.3 * avg_vol
+        # Elder Ray confirmation
+        strong_bull = bull_power[i] > 0 and bull_power[i] > np.mean(bull_power[max(0,i-9):i+1])
+        strong_bear = bear_power[i] < 0 and bear_power[i] < np.mean(bear_power[max(0,i-9):i+1])
+        
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.3 * avg_volume[i]
+        
+        # Weekly trend filter
+        weekly_uptrend = close[i] > sma_1w_aligned[i]
+        weekly_downtrend = close[i] < sma_1w_aligned[i]
         
         if position == 0:
-            # Mean reversion long at S3 (fade)
-            if (price <= s3_level and 
-                volume_confirm):
+            # Long: Alligator bullish + Elder Ray bull + volume + weekly uptrend
+            if (bullish_align and strong_bull and vol_confirm and weekly_uptrend):
                 position = 1
                 signals[i] = position_size
-            # Mean reversion short at R3 (fade)
-            elif (price >= r3_level and 
-                  volume_confirm):
-                position = -1
-                signals[i] = -position_size
-            # Breakout long at R4 (continuation)
-            elif (price >= r4_level and 
-                  volume_confirm):
-                position = 1
-                signals[i] = position_size
-            # Breakout short at S4 (continuation)
-            elif (price <= s4_level and 
-                  volume_confirm):
+            # Short: Alligator bearish + Elder Ray bear + volume + weekly downtrend
+            elif (bearish_align and strong_bear and vol_confirm and weekly_downtrend):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price reaches R3 (take profit) or breaks below S4 (stop)
-            if (price >= r3_level or 
-                price < s4_level):
+            # Exit long: Alligator turns bearish OR Elder Ray turns negative
+            if not bullish_align or bull_power[i] <= 0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price reaches S3 (take profit) or breaks above R4 (stop)
-            if (price <= s3_level or 
-                price > r4_level):
+            # Exit short: Alligator turns bullish OR Elder Ray turns positive
+            if not bearish_align or bear_power[i] >= 0:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -122,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Camarilla_Pivot_Volume_FadeBreakout_v1"
-timeframe = "6h"
+name = "12h_1w_Alligator_ElderRay_Volume"
+timeframe = "12h"
 leverage = 1.0
