@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_1d_Combined_Pivot_Breakout
-Hypothesis: Combine 1d Camarilla (H4/L4) and Woodie pivot (R2/S2) levels for stronger breakouts.
-Only trade when price breaks BOTH pivot systems with volume expansion. Works in bull (breakouts above pivots) 
-and bear (breakdowns below pivots) markets. Volume filter ensures institutional participation. 
-Target: 20-30 trades/year to avoid fee drag.
+6h_1d_Camarilla_Breakout
+Hypothesis: Trade breakouts from 1d Camarilla pivot levels (R4/S4) on 6h timeframe with volume confirmation.
+Uses 1d Camarilla levels as strong support/resistance that institutions respect. Works in bull (breakouts above R4)
+and bear (breakdowns below S4) markets. Volume filter ensures institutional participation. Target: 15-25 trades/year.
 """
 
 import numpy as np
@@ -28,15 +27,6 @@ def calculate_camarilla(high, low, close):
     S4 = C - ((H - L) * 1.5000)
     return R1, R2, R3, R4, S1, S2, S3, S4
 
-def calculate_woodie(high, low, close):
-    """Calculate Woodie pivot levels."""
-    PP = (high + low + 2 * close) / 4
-    R1 = 2 * PP - low
-    R2 = PP + high - low
-    S1 = 2 * PP - high
-    S2 = PP - high + low
-    return PP, R1, R2, S1, S2
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -47,7 +37,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for pivot levels
+    # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -56,21 +46,16 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d pivot levels
-    camarilla = calculate_camarilla(high_1d, low_1d, close_1d)
-    woodie = calculate_woodie(high_1d, low_1d, close_1d)
-    R1_c, R2_c, R3_c, R4_c, S1_c, S2_c, S3_c, S4_c = camarilla
-    PP_w, R1_w, R2_w, S1_w, S2_w = woodie
+    # Calculate 1d Camarilla levels
+    R1_1d, R2_1d, R3_1d, R4_1d, S1_1d, S2_1d, S3_1d, S4_1d = calculate_camarilla(high_1d, low_1d, close_1d)
     
-    # Align all data to 4h timeframe
-    R4_c_aligned = align_htf_to_ltf(prices, df_1d, R4_c)
-    R2_w_aligned = align_htf_to_ltf(prices, df_1d, R2_w)
-    S4_c_aligned = align_htf_to_ltf(prices, df_1d, S4_c)
-    S2_w_aligned = align_htf_to_ltf(prices, df_1d, S2_w)
+    # Align all data to 6h timeframe
+    R4_1d_aligned = align_htf_to_ltf(prices, df_1d, R4_1d)
+    S4_1d_aligned = align_htf_to_ltf(prices, df_1d, S4_1d)
     
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Volume confirmation: current volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 2.0)
+    volume_expansion = volume > (vol_ma_20 * 1.8)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -78,17 +63,16 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(R4_c_aligned[i]) or np.isnan(R2_w_aligned[i]) or 
-            np.isnan(S4_c_aligned[i]) or np.isnan(S2_w_aligned[i]) or 
+        if (np.isnan(R4_1d_aligned[i]) or np.isnan(S4_1d_aligned[i]) or 
             np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Long: breakout above BOTH R4 (Camarilla) and R2 (Woodie) with volume expansion
-        long_condition = (close[i] > R4_c_aligned[i]) and (close[i] > R2_w_aligned[i]) and volume_expansion[i]
+        # Long: breakout above R4 with volume expansion
+        long_condition = (close[i] > R4_1d_aligned[i]) and volume_expansion[i]
         
-        # Short: breakdown below BOTH S4 (Camarilla) and S2 (Woodie) with volume expansion
-        short_condition = (close[i] < S4_c_aligned[i]) and (close[i] < S2_w_aligned[i]) and volume_expansion[i]
+        # Short: breakdown below S4 with volume expansion
+        short_condition = (close[i] < S4_1d_aligned[i]) and volume_expansion[i]
         
         if long_condition and position != 1:
             position = 1
@@ -102,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Combined_Pivot_Breakout"
-timeframe = "4h"
+name = "6h_1d_Camarilla_Breakout"
+timeframe = "6h"
 leverage = 1.0
