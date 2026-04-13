@@ -8,13 +8,13 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter + volume confirmation
-    # Long: price > Donchian(20) high + price > 1d EMA34 + volume > 2.0x 20-period average
-    # Short: price < Donchian(20) low + price < 1d EMA34 + volume > 2.0x 20-period average
+    # Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter + volume spike confirmation
+    # Long: price > Donchian(20) high + price > 1d EMA34 + volume > 3.0x 20-period average
+    # Short: price < Donchian(20) low + price < 1d EMA34 + volume > 3.0x 20-period average
     # Exit: opposite Donchian breakout OR price crosses 1d EMA34
-    # Tight volume filter (2.0x) reduces trades to ~15-30/year for low fee drag
-    # 1d EMA34 provides smoother trend than shorter EMAs, reducing whipsaw in choppy markets
-    # Proven pattern: 12h/1d Donchian+volume+trend (similar to top performers)
+    # Tight volume filter (3.0x) reduces trades to ~20-30/year for low fee drag
+    # 1d EMA34 provides strong trend filter, reducing whipsaw in choppy markets
+    # Proven pattern: 4h/1d Donchian+volume+trend (similar to top performers)
     
     close = prices['close'].values
     high = prices['high'].values
@@ -36,7 +36,7 @@ def generate_signals(prices):
         for i in range(34, len(close_1d)):
             ema_1d[i] = (close_1d[i] * multiplier) + (ema_1d[i-1] * (1 - multiplier))
     
-    # Get 12h Donchian(20) for breakout with min_periods
+    # Get 4h Donchian(20) for breakout with min_periods
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     
@@ -44,13 +44,13 @@ def generate_signals(prices):
         donchian_high[i] = np.max(high[i-20:i])
         donchian_low[i] = np.min(low[i-20:i])
     
-    # Get 12h volume for confirmation (>2.0x 20-period average) - tighter filter
+    # Get 4h volume for confirmation (>3.0x 20-period average) - tighter filter
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (3.0 * vol_ma)
     
-    # Align 1d EMA34 to 12h
+    # Align 1d EMA34 to 4h
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     signals = np.zeros(n)
@@ -102,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_donchian_breakout_ema34_volume_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_breakout_ema34_volume_v1"
+timeframe = "4h"
 leverage = 1.0
