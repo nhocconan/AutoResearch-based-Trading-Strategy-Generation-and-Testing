@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_12h_cci_volume_momentum_v2
-Hypothesis: Uses 12h CCI extremes (>150 or <-150) with volume expansion to capture momentum bursts. 
-Long on CCI oversold (<-150) with volume expansion; short on CCI overbought (>150) with volume expansion.
-Uses 12h ADX>25 to filter for trending conditions only. Position size 0.25. Target: 20-40 trades/year.
-Works in bull markets (continuation) and bear markets (reversal from extremes).
+6h_1w_pullback_reversion
+Hypothesis: In strong weekly uptrends (price > weekly 200-EMA), buy pullbacks to the 6-hour 20-EMA with volume confirmation. In strong weekly downtrends (price < weekly 200-EMA), sell rallies to the 6-hour 20-EMA with volume confirmation. Uses weekly trend filter to avoid counter-trend trades, targeting 15-30 trades/year. Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
 """
 
 import numpy as np
@@ -13,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,100 +18,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # Calculate CCI (20-period) on 12h
-    typical_price = (high_12h + low_12h + close_12h) / 3
-    sma_tp = pd.Series(typical_price).rolling(window=20, min_periods=20).mean()
-    mean_deviation = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(
-        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
-    )
-    cci = (typical_price - sma_tp) / (0.015 * mean_deviation)
-    cci = cci.values
+    # Weekly 200 EMA for trend filter
+    close_1w_series = pd.Series(close_1w)
+    ema200_1w = close_1w_series.ewm(span=200, adjust=False, min_periods=200).mean().values
+    weekly_uptrend = close_1w > ema200_1w
+    weekly_downtrend = close_1w < ema200_1w
     
-    # Extreme levels
-    cci_overbought = cci > 150
-    cci_oversold = cci < -150
+    # 6-hour 20 EMA for entry
+    close_series = pd.Series(close)
+    ema20_6h = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # 12h volume expansion: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    volume_expansion = volume_12h > (vol_ma_20 * 1.5)
+    # 6-hour volume confirmation: current volume > 1.3x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (vol_ma_20 * 1.3)
     
-    # Calculate ADX (14-period) for trend strength
-    tr1 = np.abs(high_12h - low_12h)
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = np.nan
-    
-    up_move = np.where(high_12h - np.roll(high_12h, 1) > 0, high_12h - np.roll(high_12h, 1), 0)
-    down_move = np.where(np.roll(low_12h, 1) - low_12h > 0, np.roll(low_12h, 1) - low_12h, 0)
-    up_move[0] = 0
-    down_move[0] = 0
-    
-    def wilders_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        result[period-1] = np.nanmean(data[:period])
-        for i in range(period, len(data)):
-            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-            else:
-                result[i] = np.nan
-        return result
-    
-    period = 14
-    atr = wilders_smooth(tr, period)
-    plus_dm = wilders_smooth(up_move, period)
-    minus_dm = wilders_smooth(down_move, period)
-    
-    plus_di = 100 * plus_dm / atr
-    minus_di = 100 * minus_dm / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilders_smooth(dx, period)
-    strong_trend = adx > 25
-    
-    # Align all signals to 4h timeframe
-    cci_overbought_aligned = align_htf_to_ltf(prices, df_12h, cci_overbought.astype(float))
-    cci_oversold_aligned = align_htf_to_ltf(prices, df_12h, cci_oversold.astype(float))
-    volume_expansion_aligned = align_htf_to_ltf(prices, df_12h, volume_expansion.astype(float))
-    strong_trend_aligned = align_htf_to_ltf(prices, df_12h, strong_trend.astype(float))
-    cci_aligned = align_htf_to_ltf(prices, df_12h, cci)
+    # Align weekly signals to 6h timeframe
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
+    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend.astype(float))
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% of capital
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(cci_overbought_aligned[i]) or 
-            np.isnan(cci_oversold_aligned[i]) or 
-            np.isnan(volume_expansion_aligned[i]) or 
-            np.isnan(strong_trend_aligned[i]) or
-            np.isnan(cci_aligned[i])):
+        if (np.isnan(weekly_uptrend_aligned[i]) or 
+            np.isnan(weekly_downtrend_aligned[i]) or 
+            np.isnan(ema20_6h[i]) or 
+            np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions
-        long_entry = (cci_oversold_aligned[i] > 0.5 and 
-                     volume_expansion_aligned[i] > 0.5 and 
-                     strong_trend_aligned[i] > 0.5)
-        short_entry = (cci_overbought_aligned[i] > 0.5 and 
-                      volume_expansion_aligned[i] > 0.5 and 
-                      strong_trend_aligned[i] > 0.5)
+        # Long entry: weekly uptrend + price at 6h 20-EMA + volume
+        long_entry = (weekly_uptrend_aligned[i] > 0.5 and 
+                     close[i] >= ema20_6h[i] * 0.998 and  # Allow small tolerance
+                     close[i] <= ema20_6h[i] * 1.002 and
+                     volume_confirm[i] > 0.5)
         
-        # Exit conditions
-        exit_long = position == 1 and (cci_aligned[i] >= -50)
-        exit_short = position == -1 and (cci_aligned[i] <= 50)
+        # Short entry: weekly downtrend + price at 6h 20-EMA + volume
+        short_entry = (weekly_downtrend_aligned[i] > 0.5 and 
+                      close[i] >= ema20_6h[i] * 0.998 and
+                      close[i] <= ema20_6h[i] * 1.002 and
+                      volume_confirm[i] > 0.5)
+        
+        # Exit: reverse signal or weekly trend change
+        exit_long = (position == 1 and 
+                    (weekly_downtrend_aligned[i] > 0.5 or  # Weekly trend turned down
+                     short_entry))  # Opposite signal
+        
+        exit_short = (position == -1 and 
+                     (weekly_uptrend_aligned[i] > 0.5 or  # Weekly trend turned up
+                      long_entry))  # Opposite signal
         
         # Execute signals
         if long_entry and position != 1:
@@ -123,7 +85,10 @@ def generate_signals(prices):
         elif short_entry and position != -1:
             position = -1
             signals[i] = -position_size
-        elif exit_long or exit_short:
+        elif exit_long:
+            position = 0
+            signals[i] = 0.0
+        elif exit_short:
             position = 0
             signals[i] = 0.0
         # Hold current position
@@ -132,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_cci_volume_momentum_v2"
-timeframe = "4h"
+name = "6h_1w_pullback_reversion"
+timeframe = "6h"
 leverage = 1.0
