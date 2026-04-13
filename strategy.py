@@ -8,13 +8,13 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with 1d volume spike (1.5x) and ADX > 25
-    # Uses tighter volume filter and moderate ADX to reduce trades while maintaining edge
-    # Long when price > upper Donchian + volume spike + ADX > 25
-    # Short when price < lower Donchian + volume spike + ADX > 25
-    # Exit when price crosses middle Donchian OR ADX < 20
+    # Hypothesis: 4h Donchian(20) breakout with 1d volume spike and ADX filter
+    # Uses tighter volume threshold (2.0x) and higher ADX (30) to reduce trades
+    # Long when price > upper Donchian + volume spike (2.0x) + ADX > 30
+    # Short when price < lower Donchian + volume spike (2.0x) + ADX > 30
+    # Exit when price crosses middle Donchian OR ADX < 25
     # Discrete position sizing: 0.25
-    # Target: 75-150 total trades over 4 years (~19-37/year)
+    # Target: 50-100 total trades over 4 years (~12-25/year) to avoid fee drag
     
     close = prices['close'].values
     high = prices['high'].values
@@ -109,20 +109,20 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5 * 20-period average
+        # Volume confirmation: current 1d volume > 2.0 * 20-period average (tighter)
         vol_1d_current = df_1d['volume'].values
         vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d_current)
-        volume_confirm = vol_1d_aligned[i] > 1.5 * vol_ma_aligned[i]
+        volume_confirm = vol_1d_aligned[i] > 2.0 * vol_ma_aligned[i]
         
-        # ADX trend filter: strong trend (ADX > 25)
-        strong_trend = adx_aligned[i] > 25
+        # ADX trend filter: strong trend (ADX > 30 - tighter)
+        strong_trend = adx_aligned[i] > 30
         
         # Breakout conditions
         bullish_breakout = close[i] > upper_aligned[i] and volume_confirm and strong_trend
         bearish_breakout = close[i] < lower_aligned[i] and volume_confirm and strong_trend
         
-        # Exit conditions: price returns to middle Donchian OR trend weakens (ADX < 20)
-        trend_weakening = adx_aligned[i] < 20
+        # Exit conditions: price returns to middle Donchian OR trend weakens (ADX < 25)
+        trend_weakening = adx_aligned[i] < 25
         long_exit = close[i] < middle_aligned[i] or trend_weakening or bearish_breakout
         short_exit = close[i] > middle_aligned[i] or trend_weakening or bullish_breakout
         
@@ -149,6 +149,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_breakout_volume_adx_v7"
+name = "4h_1d_donchian_breakout_volume_adx_v8"
 timeframe = "4h"
 leverage = 1.0
