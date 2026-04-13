@@ -13,13 +13,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian channels
+    # Get 12h data for Donchian calculation
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) < 30:
         return np.zeros(n)
     
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
+    vol_12h = df_12h['volume'].values
     
     # Calculate 20-period Donchian channels on 12h
     donchian_high = np.full(len(high_12h), np.nan)
@@ -29,7 +30,6 @@ def generate_signals(prices):
         donchian_low[i] = np.min(low_12h[i-20:i])
     
     # Calculate 20-period average volume on 12h
-    vol_12h = df_12h['volume'].values
     avg_volume_12h = np.full(len(vol_12h), np.nan)
     for i in range(20, len(vol_12h)):
         avg_volume_12h[i] = np.mean(vol_12h[i-20:i])
@@ -64,7 +64,7 @@ def generate_signals(prices):
             r3[i] = week_high[i] + 2 * (pivot[i] - week_low[i])
             s3[i] = week_low[i] - 2 * (week_high[i] - pivot[i])
     
-    # Align all indicators to 12h timeframe
+    # Align all indicators to 6h timeframe
     donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
     avg_volume_12h_aligned = align_htf_to_ltf(prices, df_12h, avg_volume_12h)
@@ -127,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_1w_donchian_pivot_volume_confluence"
-timeframe = "12h"
+name = "6h_12h_1d_donchian_pivot_volume_confluence"
+timeframe = "6h"
 leverage = 1.0
