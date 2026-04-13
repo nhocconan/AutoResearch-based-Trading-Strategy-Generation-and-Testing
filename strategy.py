@@ -8,19 +8,20 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h primary timeframe with 1d/1w HTF filters
-    # Long: price breaks above 1d Donchian(20) high + 1w EMA50 > EMA200 (bull trend) + volume > 1.5x 20-period avg
-    # Short: price breaks below 1d Donchian(20) low + 1w EMA50 < EMA200 (bear trend) + volume > 1.5x 20-period avg
+    # Hypothesis: 12h primary timeframe with 1d HTF filter
+    # Long: price breaks above 1d Donchian(20) high + volume > 1.3x 20-period avg + chop < 61.8
+    # Short: price breaks below 1d Donchian(20) low + volume > 1.3x 20-period avg + chop < 61.8
     # Exit: price returns to 1d Donchian middle
-    # Target: 75-200 total trades over 4 years (19-50/year) to balance signal quality and fee drag
-    # Uses weekly trend filter to avoid counter-trend trades in both bull/bear markets
+    # Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+    # 12h timeframe captures major swings while avoiding excessive trade frequency
+    # Donchian breakouts with volume/regime confirmation work in both bull/bear markets
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values if 'volume' in prices.columns else np.ones(len(prices))
     
-    # Get 1d data for primary timeframe (Donchian channels and volume)
+    # Get 1d data for primary timeframe (Donchian channels, volume, chop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -30,34 +31,45 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values if 'volume' in df_1d.columns else np.ones(len(df_1d))
     
-    # Get 1w data for trend filter (EMA crossover)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    
     # Calculate Donchian channels on 1d data (20-period)
     donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Calculate EMAs on 1w data for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, min_periods=200, adjust=False).mean().values
-    weekly_bull = ema_50_1w > ema_200_1w  # Bullish weekly trend
-    weekly_bear = ema_50_1w < ema_200_1w  # Bearish weekly trend
+    # Calculate Chopiness Index on 1d data (14-period)
+    def calculate_chop(high, low, close, window=14):
+        # True Range
+        tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - np.roll(close, 1)[1:]))
+        tr1 = np.maximum(tr1, np.abs(low[1:] - np.roll(close, 1)[1:]))
+        tr = np.concatenate([[np.nan], tr1])
+        
+        # Sum of True Range over window
+        atr_sum = pd.Series(tr).rolling(window=window, min_periods=window).sum().values
+        
+        # Highest high and lowest low over window
+        highest_high = pd.Series(high).rolling(window=window, min_periods=window).max().values
+        lowest_low = pd.Series(low).rolling(window=window, min_periods=window).min().values
+        
+        # Chop = log10(atr_sum / (highest_high - lowest_low)) / log10(window) * 100
+        highest_low_diff = highest_high - lowest_low
+        chop = np.where(
+            (highest_low_diff > 0) & (~np.isnan(atr_sum)),
+            np.log10(atr_sum / highest_low_diff) / np.log10(window) * 100,
+            50  # default to middle when invalid
+        )
+        return chop
     
-    # Volume average on 1d data (20-period)
-    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    chop = calculate_chop(high_1d, low_1d, close_1d, window=14)
     
-    # Align all indicators to 4h timeframe (primary)
+    # Volume averages on 1d data (20-period)
+    vol_avg_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all indicators to 12h timeframe (primary)
     donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid)
-    weekly_bull_aligned = align_htf_to_ltf(prices, df_1w, weekly_bull)
-    weekly_bear_aligned = align_htf_to_ltf(prices, df_1w, weekly_bear)
-    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -68,22 +80,24 @@ def generate_signals(prices):
         if (np.isnan(donchian_high_aligned[i]) or 
             np.isnan(donchian_low_aligned[i]) or 
             np.isnan(donchian_mid_aligned[i]) or 
-            np.isnan(weekly_bull_aligned[i]) or 
-            np.isnan(weekly_bear_aligned[i]) or 
-            np.isnan(vol_avg_20_1d_aligned[i])):
+            np.isnan(chop_aligned[i]) or 
+            np.isnan(vol_avg_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x 20-period average (aligned from 1d)
-        volume_confirmed = volume[i] > 1.5 * vol_avg_20_1d_aligned[i]
+        # Chop regime filter: chop < 61.8 indicates trending market (good for breakouts)
+        is_trending_regime = chop_aligned[i] < 61.8
+        
+        # Volume confirmation: current 12h volume > 1.3x 20-period average
+        volume_confirmed = volume[i] > 1.3 * vol_avg_20_aligned[i]
         
         # Breakout conditions
         breakout_up = close[i] > donchian_high_aligned[i]
         breakout_down = close[i] < donchian_low_aligned[i]
         
-        # Entry conditions: breakout + volume + weekly trend alignment
-        enter_long = breakout_up and volume_confirmed and weekly_bull_aligned[i]
-        enter_short = breakout_down and volume_confirmed and weekly_bear_aligned[i]
+        # Entry conditions
+        enter_long = is_trending_regime and breakout_up and volume_confirmed
+        enter_short = is_trending_regime and breakout_down and volume_confirmed
         
         # Exit conditions: price returns to 1d Donchian middle
         exit_long = position == 1 and close[i] <= donchian_mid_aligned[i]
@@ -113,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_1w_donchian_breakout_volume_trend_v1"
-timeframe = "4h"
+name = "12h_1d_donchian_breakout_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
