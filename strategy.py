@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe with 1d Donchian channel breakout and volume confirmation.
-# Long: Price breaks above 1d Donchian high (20-period) + volume > 1.8x average volume (20-period).
-# Short: Price breaks below 1d Donchian low (20-period) + volume > 1.8x average volume.
-# Uses 1d Donchian levels for structural breakouts, 12h for execution with volume confirmation.
-# Position size: 0.25 (25%) to balance risk and return. Target: 50-150 total trades over 4 years.
+# Hypothesis: 4h timeframe with 12h Supertrend trend filter and Donchian breakout.
+# Long: Price breaks above Donchian(20) upper band + 12h Supertrend = bullish + volume > 1.5x average.
+# Short: Price breaks below Donchian(20) lower band + 12h Supertrend = bearish + volume > 1.5x average.
+# Uses Donchian channels for breakouts, Supertrend for trend filtering, volume for confirmation.
+# Time filter: 00-23 UTC (all hours).
+# Target: 80-180 total trades over 4 years (20-45/year) for 4h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,29 +20,91 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for Donchian channel
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Calculate 1d Donchian channel (20-period high/low)
-    donchian_high = np.full(len(high_1d), np.nan)
-    donchian_low = np.full(len(low_1d), np.nan)
-    for i in range(20, len(high_1d)):
-        donchian_high[i] = np.max(high_1d[i-20:i])
-        donchian_low[i] = np.min(low_1d[i-20:i])
+    # Donchian Channel (20-period)
+    donchian_up = np.full(n, np.nan)
+    donchian_down = np.full(n, np.nan)
+    for i in range(20, n):
+        donchian_up[i] = np.max(high[i-20:i])
+        donchian_down[i] = np.min(low[i-20:i])
     
     # Average volume (20-period) for volume confirmation
     avg_volume = np.full(n, np.nan)
     for i in range(20, n):
         avg_volume[i] = np.mean(volume[i-20:i])
     
-    # Align 1d Donchian levels to 12h
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # 12h data for Supertrend
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
+    
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # Supertrend parameters
+    atr_period = 10
+    multiplier = 3.0
+    
+    # Calculate ATR for 12h
+    tr_12h = np.maximum(
+        high_12h[1:] - low_12h[1:],
+        np.maximum(
+            np.abs(high_12h[1:] - close_12h[:-1]),
+            np.abs(low_12h[1:] - close_12h[:-1])
+        )
+    )
+    tr_12h = np.concatenate([[np.nan], tr_12h])
+    
+    atr_12h = np.full(len(close_12h), np.nan)
+    for i in range(atr_period, len(close_12h)):
+        atr_12h[i] = np.nanmean(tr_12h[i-atr_period+1:i+1])
+    
+    # Supertrend calculation
+    supertrend_12h = np.full(len(close_12h), np.nan)
+    direction_12h = np.full(len(close_12h), np.nan)  # 1 for up, -1 for down
+    
+    # Initialize
+    if not np.isnan(atr_12h[atr_period]):
+        hl2_12h = (high_12h[atr_period] + low_12h[atr_period]) / 2
+        upper_band_12h = hl2_12h + multiplier * atr_12h[atr_period]
+        lower_band_12h = hl2_12h - multiplier * atr_12h[atr_period]
+        supertrend_12h[atr_period] = upper_band_12h
+        direction_12h[atr_period] = -1  # start with down
+    
+    for i in range(atr_period + 1, len(close_12h)):
+        hl2 = (high_12h[i] + low_12h[i]) / 2
+        
+        upper_band = hl2 + multiplier * atr_12h[i]
+        lower_band = hl2 - multiplier * atr_12h[i]
+        
+        if i == atr_period + 1:
+            prev_supertrend = supertrend_12h[i-1]
+            prev_direction = direction_12h[i-1]
+        else:
+            prev_supertrend = supertrend_12h[i-1]
+            prev_direction = direction_12h[i-1]
+        
+        if not np.isnan(prev_supertrend):
+            if prev_direction == 1:  # was uptrend
+                supertrend_12h[i] = max(lower_band, prev_supertrend)
+                if close_12h[i] > supertrend_12h[i]:
+                    direction_12h[i] = 1
+                else:
+                    direction_12h[i] = -1
+                    supertrend_12h[i] = upper_band
+            else:  # was downtrend
+                supertrend_12h[i] = min(upper_band, prev_supertrend)
+                if close_12h[i] < supertrend_12h[i]:
+                    direction_12h[i] = -1
+                else:
+                    direction_12h[i] = 1
+                    supertrend_12h[i] = lower_band
+        else:
+            supertrend_12h[i] = np.nan
+            direction_12h[i] = np.nan
+    
+    # Align 12h Supertrend direction to 4h
+    direction_12h_aligned = align_htf_to_ltf(prices, df_12h, direction_12h)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -49,41 +112,40 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(avg_volume[i])):
+        if (np.isnan(donchian_up[i]) or np.isnan(donchian_down[i]) or 
+            np.isnan(avg_volume[i]) or np.isnan(direction_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        upper = donchian_high_aligned[i]
-        lower = donchian_low_aligned[i]
+        trend = direction_12h_aligned[i]
         
-        # Volume confirmation: current volume > 1.8x average volume
-        volume_confirm = vol > 1.8 * avg_vol
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirm = vol > 1.5 * avg_vol
         
         if position == 0:
-            # Long: price breaks above Donchian high + volume confirmation
-            if (price > upper and volume_confirm):
+            # Long: price breaks above Donchian up + bullish trend + volume
+            if (price > donchian_up[i] and trend == 1 and volume_confirm):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below Donchian low + volume confirmation
-            elif (price < lower and volume_confirm):
+            # Short: price breaks below Donchian down + bearish trend + volume
+            elif (price < donchian_down[i] and trend == -1 and volume_confirm):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below Donchian low (opposite side)
-            if price < lower:
+            # Exit long: price closes below Donchian down
+            if price < donchian_down[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes above Donchian high (opposite side)
-            if price > upper:
+            # Exit short: price closes above Donchian up
+            if price > donchian_up[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -91,6 +153,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Donchian_Breakout_Volume"
-timeframe = "12h"
+name = "4h_12h_Supertrend_Donchian_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
