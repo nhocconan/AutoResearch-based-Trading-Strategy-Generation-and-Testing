@@ -8,94 +8,93 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with daily Camarilla pivot filter + volume confirmation
-    # Long: price > Donchian(20) high AND price > daily S3 pivot AND volume > 2.0x 20-period average
-    # Short: price < Donchian(20) low AND price < daily R3 pivot AND volume > 2.0x 20-period average
-    # Exit: opposite Donchian breakout OR price crosses daily H3/L3 pivot
-    # Using 4h timeframe for optimal trade frequency (target 20-50/year), daily Camarilla pivots for strong structure,
-    # and volume spike confirmation to avoid false breakouts. Discrete position sizing (0.25) to minimize fee churn.
+    # Hypothesis: 1d KAMA trend filter with 1w Donchian(20) breakout + volume confirmation
+    # Long: price > 1w Donchian high AND KAMA rising AND volume > 1.5x 20-period average
+    # Short: price < 1w Donchian low AND KAMA falling AND volume > 1.5x 20-period average
+    # Exit: opposite Donchian breakout OR KAMA flips direction
+    # Using 1d timeframe for low trade frequency (target 7-25/year), 1w Donchian for major structure,
+    # and KAMA for adaptive trend filtering. Discrete position sizing (0.25) to minimize fee churn.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1w data for Donchian(20) breakout levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels (H3, L3, S3, R3)
-    # Formula based on previous daily candle: H4 = close + 1.1*(high-low)*1.1/2, L4 = close - 1.1*(high-low)*1.1/2
-    # Then: H3 = H4 - (H4-L4)/2, L3 = L4 + (H4-L4)/2, S3 = L4 - (H4-L4)*1.1/6, R3 = H4 + (H4-L4)*1.1/6
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Calculate daily Camarilla levels with proper seeding
-    H4 = np.full(len(close_1d), np.nan)
-    L4 = np.full(len(close_1d), np.nan)
-    for i in range(1, len(close_1d)):
-        H4[i] = close_1d[i-1] + 1.1 * (high_1d[i-1] - low_1d[i-1]) * 1.1 / 2
-        L4[i] = close_1d[i-1] - 1.1 * (high_1d[i-1] - low_1d[i-1]) * 1.1 / 2
+    # Calculate 1w Donchian(20) with min_periods
+    donchian_high_1w = np.full(len(high_1w), np.nan)
+    donchian_low_1w = np.full(len(low_1w), np.nan)
     
-    H3 = np.full(len(close_1d), np.nan)
-    L3 = np.full(len(close_1d), np.nan)
-    S3 = np.full(len(close_1d), np.nan)
-    R3 = np.full(len(close_1d), np.nan)
-    for i in range(1, len(close_1d)):
-        H3[i] = H4[i] - (H4[i] - L4[i]) / 2
-        L3[i] = L4[i] + (H4[i] - L4[i]) / 2
-        S3[i] = L4[i] - (H4[i] - L4[i]) * 1.1 / 6
-        R3[i] = H4[i] + (H4[i] - L4[i]) * 1.1 / 6
+    for i in range(20, len(high_1w)):
+        donchian_high_1w[i] = np.max(high_1w[i-20:i])
+        donchian_low_1w[i] = np.min(low_1w[i-20:i])
     
-    # Get 4h Donchian(20) for breakout with min_periods
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
+    # Align 1w Donchian levels to 1d
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high_1w)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low_1w)
     
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
+    # Calculate KAMA on 1d close prices
+    def calculate_kama(close_vals, er_len=10, fast_ema=2, slow_ema=30):
+        n = len(close_vals)
+        if n < er_len:
+            return np.full(n, np.nan)
+        
+        # Efficiency Ratio
+        change = np.abs(np.diff(close_vals, n=er_len))
+        volatility = np.sum(np.abs(np.diff(close_vals)), axis=1)
+        er = np.full(n, np.nan)
+        er[er_len:] = change[er_len-1:] / np.maximum(volatility[er_len-1:], 1e-10)
+        
+        # Smoothing Constants
+        sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
+        
+        # KAMA calculation
+        kama = np.full(n, np.nan)
+        kama[er_len-1] = close_vals[er_len-1]
+        for i in range(er_len, n):
+            kama[i] = kama[i-1] + sc[i] * (close_vals[i] - kama[i-1])
+        return kama
     
-    # Get 4h volume for confirmation (>2.0x 20-period average)
+    kama_1d = calculate_kama(close, er_len=10, fast_ema=2, slow_ema=30)
+    
+    # Get 1d volume for confirmation (>1.5x 20-period average)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (2.0 * vol_ma)
-    
-    # Align daily Camarilla levels to 4h
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or 
-            np.isnan(S3_aligned[i]) or np.isnan(R3_aligned[i]) or
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(kama_1d[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         # Breakout conditions
-        long_breakout = close[i] > donchian_high[i]
-        short_breakout = close[i] < donchian_low[i]
+        long_breakout = close[i] > donchian_high_aligned[i]
+        short_breakout = close[i] < donchian_low_aligned[i]
         
-        # Pivot filter conditions
-        bullish_pivot = close[i] > S3_aligned[i]  # Above S3 = bullish bias
-        bearish_pivot = close[i] < R3_aligned[i]  # Below R3 = bearish bias
+        # KAMA trend conditions (rising/falling)
+        kama_rising = kama_1d[i] > kama_1d[i-1]
+        kama_falling = kama_1d[i] < kama_1d[i-1]
         
-        # Entry logic: Breakout + pivot alignment + volume confirmation
-        long_entry = long_breakout and bullish_pivot and volume_spike[i]
-        short_entry = short_breakout and bearish_pivot and volume_spike[i]
+        # Entry logic: Breakout + KAMA alignment + volume confirmation
+        long_entry = long_breakout and kama_rising and volume_spike[i]
+        short_entry = short_breakout and kama_falling and volume_spike[i]
         
-        # Exit logic: opposite breakout or price crosses H3/L3 (more significant levels)
-        long_exit = short_breakout or (close[i] < L3_aligned[i])
-        short_exit = long_breakout or (close[i] > H3_aligned[i])
+        # Exit logic: opposite breakout or KAMA flips direction
+        long_exit = short_breakout or not kama_rising
+        short_exit = long_breakout or not kama_falling
         
         if long_entry and position != 1:
             position = 1
@@ -120,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_breakout_camarilla_pivot_volume_v1"
-timeframe = "4h"
+name = "1d_1w_kama_donchian_breakout_volume_v1"
+timeframe = "1d"
 leverage = 1.0
