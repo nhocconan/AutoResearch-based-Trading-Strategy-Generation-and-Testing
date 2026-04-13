@@ -8,53 +8,36 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with 12h volume confirmation and 1d trend filter (EMA50)
-    # Long: price breaks above Donchian upper + volume > 1.5x 20-period 4h avg + 1d close > 1d EMA50
-    # Short: price breaks below Donchian lower + volume > 1.5x 20-period 4h avg + 1d close < 1d EMA50
-    # Uses ATR-based stoploss and discrete sizing (0.25) to control drawdown and fee drag
-    # Target: 20-50 trades/year to stay within 4h optimal range (75-200 total over 4 years)
+    # Hypothesis: 1d Donchian(20) breakout with 1w trend filter and volume confirmation
+    # Long: price breaks above 20-day high + volume > 1.5x 20-day avg + 1w close > 1w EMA21
+    # Short: price breaks below 20-day low + volume > 1.5x 20-day avg + 1w close < 1w EMA21
+    # Uses discrete sizing (0.25) to minimize fee drag and ATR-based stoploss
+    # Target: 20-50 trades/year to stay within 1d optimal range (80-200 total over 4 years)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 21:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1w EMA21 for trend filter
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Calculate 12h data for volume confirmation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    volume_12h = df_12h['volume'].values
-    vol_avg_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_avg_20_12h)
-    
-    # Calculate Donchian channels (20-period) on 4h data
+    # Calculate 20-period Donchian channels on 1d data
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate ATR for stoploss (using true range)
-    atr_4h = np.zeros(n)
-    for i in range(1, n):
-        tr = max(
-            high[i] - low[i],
-            abs(high[i] - close[i-1]),
-            abs(low[i] - close[i-1])
-        )
-        if i < 14:
-            atr_4h[i] = tr  # Simple average for warmup
-        else:
-            atr_4h[i] = 0.93 * atr_4h[i-1] + 0.07 * tr  # Wilder's smoothing
+    # Calculate 20-period volume average for confirmation
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all indicators to 1d timeframe
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -63,29 +46,42 @@ def generate_signals(prices):
     # Track entry price for stoploss
     entry_price = np.full(n, np.nan)
     
+    # Calculate ATR using true range approximation for 1d timeframe
+    atr_1d = np.zeros(n)
+    for i in range(1, n):
+        tr = max(
+            high[i] - low[i],
+            abs(high[i] - close[i-1]),
+            abs(low[i] - close[i-1])
+        )
+        if i < 14:
+            atr_1d[i] = tr  # Simple average for warmup
+        else:
+            atr_1d[i] = 0.93 * atr_1d[i-1] + 0.07 * tr  # Wilder's smoothing
+    
     for i in range(20, n):
         # Skip if data not ready
         if (np.isnan(highest_20[i]) or 
             np.isnan(lowest_20[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(vol_avg_20_12h_aligned[i])):
+            np.isnan(ema_21_1w_aligned[i]) or
+            np.isnan(vol_avg_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x 20-period average
-        volume_confirmed = volume_12h_aligned[i] > 1.5 * vol_avg_20_12h_aligned[i]
+        # Volume confirmation: current 1d volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * vol_avg_20[i]
         
-        # Trend filter: 4h close above/below 1d EMA50
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Trend filter: 1d close above/below EMA21 (from 1w)
+        uptrend = close[i] > ema_21_1w_aligned[i]
+        downtrend = close[i] < ema_21_1w_aligned[i]
         
         # Breakout conditions: price breaks Donchian levels with volume and trend
         breakout_long = (close[i] > highest_20[i]) and volume_confirmed and uptrend
         breakout_short = (close[i] < lowest_20[i]) and volume_confirmed and downtrend
         
-        # Stoploss: 2.5x ATR below/above entry
-        exit_long = position == 1 and not np.isnan(entry_price[i-1]) and close[i] < entry_price[i-1] - 2.5 * atr_4h[i]
-        exit_short = position == -1 and not np.isnan(entry_price[i-1]) and close[i] > entry_price[i-1] + 2.5 * atr_4h[i]
+        # Stoploss: 2x ATR below/above entry
+        exit_long = position == 1 and not np.isnan(entry_price[i-1]) and close[i] < entry_price[i-1] - 2.0 * atr_1d[i]
+        exit_short = position == -1 and not np.isnan(entry_price[i-1]) and close[i] > entry_price[i-1] + 2.0 * atr_1d[i]
         
         # Execute signals
         if breakout_long and position != 1:
@@ -118,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_1d_donchian_volume_trend_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_volume_trend_v1"
+timeframe = "1d"
 leverage = 1.0
