@@ -13,41 +13,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter and momentum
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Daily data for trend and levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly RSI(14) for momentum
-    close_1w = df_1w['close'].values
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1w = 100 - (100 / (1 + rs))
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Calculate weekly ATR(14) for volatility filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr1[0] = high_1w[0] - low_1w[0]
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate 20-day Donchian channel on daily
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 6-hour Donchian channel (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align weekly data to 6-hour timeframe
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    # Calculate weekly EMA20 for trend filter
+    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Calculate daily volume and its 20-period average
+    volume_1d = df_1d['volume'].values
+    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all data to 12-hour timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -55,41 +49,47 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(rsi_1w_aligned[i]) or np.isnan(atr_1w_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Momentum filter: weekly RSI > 50 for long, < 50 for short
-        long_momentum = rsi_1w_aligned[i] > 50
-        short_momentum = rsi_1w_aligned[i] < 50
+        # Volume condition: current 12h volume > 2x daily volume MA (adjusted for 12h)
+        # 2x 12h periods per day, so daily MA/2 = approximate 12h period MA
+        volume_12h_approx_ma = volume_ma_20_1d_aligned[i] / 2
+        volume_condition = volume[i] > (volume_12h_approx_ma * 2.0)
         
-        # Volatility filter: avoid low volatility periods
-        vol_filter = atr_1w_aligned[i] > 0  # Always true if ATR calculated
+        # Trend filter: weekly EMA20 direction
+        # Long when price > weekly EMA20
+        # Short when price < weekly EMA20
+        long_trend = close[i] > ema_20_1w_aligned[i]
+        short_trend = close[i] < ema_20_1w_aligned[i]
         
-        # Entry conditions: Donchian breakout with momentum filter
-        breakout_long = close[i] > donchian_high[i]
-        breakout_short = close[i] < donchian_low[i]
+        # Entry conditions: Donchian breakout with volume and trend confirmation
+        # Long when price breaks above Donchian high with volume and uptrend
+        # Short when price breaks below Donchian low with volume and downtrend
+        breakout_long = close[i] > donchian_high_aligned[i]
+        breakout_short = close[i] < donchian_low_aligned[i]
         
         if position == 0:
-            if breakout_long and long_momentum and vol_filter:
+            if breakout_long and volume_condition and long_trend:
                 position = 1
                 signals[i] = position_size
-            elif breakout_short and short_momentum and vol_filter:
+            elif breakout_short and volume_condition and short_trend:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit when price breaks below Donchian low
-            if close[i] < donchian_low[i]:
+            # Exit when price breaks below Donchian low or shows reversal
+            if close[i] < donchian_low_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit when price breaks above Donchian high
-            if close[i] > donchian_high[i]:
+            # Exit when price breaks above Donchian high or shows reversal
+            if close[i] > donchian_high_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -97,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_RSI_Momentum_Donchian_Breakout_v1"
-timeframe = "6h"
+name = "12h_1d1w_Donchian_Breakout_Volume_Trend_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
