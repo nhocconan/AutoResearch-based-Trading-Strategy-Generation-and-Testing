@@ -8,99 +8,116 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1h Camarilla H3/L3 breakout with 4h EMA200 trend filter and volume confirmation (>2.0x average)
-    # Camarilla pivot levels provide high-probability reversal/continuation points from intraday structure
-    # 4h EMA200 filters for long-term trend alignment to avoid counter-trend whipsaws
-    # Volume spike >2.0x 20-period average confirms institutional participation
-    # Exits on H3/L3 retest or trend reversal
-    # Target: 15-37 trades/year (60-150 total over 4 years) for low fee drag
-    # Session filter: 08-20 UTC to reduce noise trades
+    # Hypothesis: 6h Donchian(20) breakout with 1w/1d pivot direction filter and volume confirmation
+    # Donchian breakouts capture momentum bursts; 1w pivot defines major trend bias; 1d pivot refines entry timing
+    # Volume >1.5x 20-period average confirms institutional participation
+    # Target: 12-30 trades/year (50-120 total over 4 years) for low fee drag
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session hours (08-20 UTC)
-    hours = prices.index.hour
-    
-    # Get 4h data for Camarilla calculation and EMA200 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 200:
+    # Get 1w data for pivot trend bias
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate previous 4h bar's Camarilla levels (H3, L3)
-    camarilla_h3 = np.full(len(high_4h), np.nan)
-    camarilla_l3 = np.full(len(low_4h), np.nan)
+    # Get 1d data for pivot entry levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    for i in range(1, len(high_4h)):
-        # Use previous bar's high/low/close for Camarilla calculation
-        ph = high_4h[i-1]
-        pl = low_4h[i-1]
-        pc = close_4h[i-1]
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate 1w Camarilla H3/L3 for trend bias (based on previous 1w bar)
+    camarilla_h3_1w = np.full(len(high_1w), np.nan)
+    camarilla_l3_1w = np.full(len(low_1w), np.nan)
+    
+    for i in range(1, len(high_1w)):
+        ph = high_1w[i-1]
+        pl = low_1w[i-1]
+        pc = close_1w[i-1]
         rang = ph - pl
         
-        camarilla_h3[i] = pc + rang * 1.1 / 4  # H3 level
-        camarilla_l3[i] = pc - rang * 1.1 / 4  # L3 level
+        camarilla_h3_1w[i] = pc + rang * 1.1 / 4  # H3 level
+        camarilla_l3_1w[i] = pc - rang * 1.1 / 4  # L3 level
     
-    # Get 4h EMA200 for trend filter
-    ema200_4h = pd.Series(close_4h).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate 1d Camarilla H3/L3 for entry levels (based on previous 1d bar)
+    camarilla_h3_1d = np.full(len(high_1d), np.nan)
+    camarilla_l3_1d = np.full(len(low_1d), np.nan)
     
-    # Get 4h volume for confirmation (>2.0x 20-period average)
-    vol_ma_4h = np.full(len(volume_4h), np.nan)
-    for i in range(20, len(volume_4h)):
-        vol_ma_4h[i] = np.mean(volume_4h[i-20:i])
-    volume_spike_4h = volume_4h > (2.0 * vol_ma_4h)
+    for i in range(1, len(high_1d)):
+        ph = high_1d[i-1]
+        pl = low_1d[i-1]
+        pc = close_1d[i-1]
+        rang = ph - pl
+        
+        camarilla_h3_1d[i] = pc + rang * 1.1 / 4  # H3 level
+        camarilla_l3_1d[i] = pc - rang * 1.1 / 4  # L3 level
     
-    # Align all indicators to LTF (1h)
-    h3_4h_aligned = align_htf_to_ltf(prices, df_4h, camarilla_h3)
-    l3_4h_aligned = align_htf_to_ltf(prices, df_4h, camarilla_l3)
-    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
-    volume_spike_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_spike_4h.astype(float))
+    # Get 6h Donchian(20) channels
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    
+    for i in range(20, n):
+        donchian_high[i] = np.max(high[i-20:i])
+        donchian_low[i] = np.min(low[i-20:i])
+    
+    # Get 6h volume for confirmation (>1.5x 20-period average)
+    vol_ma_6h = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma_6h[i] = np.mean(volume[i-20:i])
+    volume_spike_6h = volume > (1.5 * vol_ma_6h)
+    
+    # Align all indicators to LTF (6h)
+    h3_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3_1w)
+    l3_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3_1w)
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3_1d)
+    donchian_high_aligned = donchian_high  # already LTF
+    donchian_low_aligned = donchian_low    # already LTF
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
-        
         # Skip if data not ready
-        if (np.isnan(h3_4h_aligned[i]) or np.isnan(l3_4h_aligned[i]) or 
-            np.isnan(ema200_4h_aligned[i]) or np.isnan(volume_spike_4h_aligned[i])):
+        if (np.isnan(h3_1w_aligned[i]) or np.isnan(l3_1w_aligned[i]) or 
+            np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
+            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(volume_spike_6h[i])):
             signals[i] = 0.0
             continue
         
-        # Breakout conditions
-        long_breakout = close[i] > h3_4h_aligned[i]
-        short_breakout = close[i] < l3_4h_aligned[i]
+        # Determine 1w pivot bias: price above H3 = bullish bias, below L3 = bearish bias
+        bullish_bias = close[i] > h3_1w_aligned[i]
+        bearish_bias = close[i] < l3_1w_aligned[i]
         
-        # 4h trend filter (EMA200)
-        bullish_trend = close[i] > ema200_4h_aligned[i]
-        bearish_trend = close[i] < ema200_4h_aligned[i]
+        # Donchian breakout conditions
+        long_breakout = close[i] > donchian_high_aligned[i]
+        short_breakout = close[i] < donchian_low_aligned[i]
         
-        # Entry logic: Breakout + trend alignment + volume confirmation
-        long_entry = long_breakout and bullish_trend and (volume_spike_4h_aligned[i] > 0.5)
-        short_entry = short_breakout and bearish_trend and (volume_spike_4h_aligned[i] > 0.5)
+        # Entry logic: Breakout in direction of 1w bias + 1d pivot confirmation + volume
+        long_entry = long_breakout and bullish_bias and (close[i] > h3_1d_aligned[i]) and volume_spike_6h[i]
+        short_entry = short_breakout and bearish_bias and (close[i] < l3_1d_aligned[i]) and volume_spike_6h[i]
         
-        # Exit logic: price retests H3/L3 or trend reversal
-        long_exit = (close[i] <= h3_4h_aligned[i] * 1.001) or not bullish_trend  # Retest H3 or trend change
-        short_exit = (close[i] >= l3_4h_aligned[i] * 0.999) or not bearish_trend  # Retest L3 or trend change
+        # Exit logic: price retests opposite Donchian channel or 1w bias reversal
+        long_exit = (close[i] <= donchian_low_aligned[i]) or (not bullish_bias)
+        short_exit = (close[i] >= donchian_high_aligned[i]) or (not bearish_bias)
         
         if long_entry and position != 1:
             position = 1
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif short_entry and position != -1:
             position = -1
-            signals[i] = -0.20
+            signals[i] = -0.25
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -110,14 +127,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1h_4h_camarilla_h3l3_ema200_volume_v1"
-timeframe = "1h"
+name = "6h_1w_1d_donchian_breakout_pamir_v1"
+timeframe = "6h"
 leverage = 1.0
