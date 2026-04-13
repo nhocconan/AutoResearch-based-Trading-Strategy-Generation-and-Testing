@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator (Jaw/Teeth/Lips) with 1d trend filter and volume confirmation.
-# Alligator uses SMAs: Jaw=13, Teeth=8, Lips=5. In trends, lines are ordered (Lips > Teeth > Jaw for uptrend).
-# Combined with 1d EMA trend filter and volume spikes, it filters false signals and captures trends.
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+# Hypothesis: 6h Elder Ray Index (Bull/Bear Power) with 1d trend filter and volume confirmation.
+# Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13).
+# In uptrends, Bull Power positive and rising; in downtrends, Bear Power negative and falling.
+# Combined with 1d EMA trend filter and volume spikes to avoid whipsaws in choppy markets.
+# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -31,28 +32,22 @@ def generate_signals(prices):
     for i in range(1, len(close_1d)):
         ema20_1d[i] = (close_1d[i] - ema20_1d[i-1]) * ema_multiplier + ema20_1d[i-1]
     
-    # Align 1d EMA to 4h timeframe
+    # Align 1d EMA to 6h timeframe
     ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
-    # Williams Alligator on 4h timeframe
-    # Jaw (13-period SMMA), Teeth (8-period SMMA), Lips (5-period SMMA)
-    def smoothed_mma(arr, period):
-        """Smoothed Moving Average (SMMA) - similar to Wilder's smoothing"""
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        result = np.full(len(arr), np.nan)
-        # First value is simple average
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: SMMA = (prev * (period-1) + current) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # Elder Ray on 6h timeframe: Bull Power and Bear Power
+    # EMA(13) for power calculation
+    ema13 = np.full(n, np.nan)
+    if n >= 13:
+        ema_multiplier_13 = 2 / (13 + 1)
+        ema13[0] = close[0]
+        for i in range(1, n):
+            ema13[i] = (close[i] - ema13[i-1]) * ema_multiplier_13 + ema13[i-1]
     
-    jaw = smoothed_mma(close, 13)  # Jaw: 13-period SMMA
-    teeth = smoothed_mma(close, 8)  # Teeth: 8-period SMMA
-    lips = smoothed_mma(close, 5)   # Lips: 5-period SMMA
+    bull_power = high - ema13  # Bull Power = High - EMA(13)
+    bear_power = low - ema13   # Bear Power = Low - EMA(13)
     
-    # Average volume (20-period = 20*4h = 10 days) for volume confirmation
+    # Average volume (20-period = 20*6h = 5 days) for volume confirmation
     avg_volume = np.full(n, np.nan)
     for i in range(20, n):
         avg_volume[i] = np.mean(volume[i-20:i])
@@ -63,8 +58,8 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is not ready
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema20_1d_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(ema13[i]) or np.isnan(ema20_1d_aligned[i]) or 
+            np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
@@ -73,25 +68,24 @@ def generate_signals(prices):
         avg_vol = avg_volume[i]
         ema_trend = ema20_1d_aligned[i]
         
-        # Alligator values
-        jaw_val = jaw[i]
-        teeth_val = teeth[i]
-        lips_val = lips[i]
+        # Elder Ray values
+        bull_val = bull_power[i]
+        bear_val = bear_power[i]
         
         # Volume confirmation: current volume > 1.5x average volume
         volume_confirm = vol > 1.5 * avg_vol
         
         if position == 0:
-            # Long: Lips > Teeth > Jaw (aligned up) + above 1d EMA20 + volume confirmation
-            if (lips_val > teeth_val and 
-                teeth_val > jaw_val and
+            # Long: Bull Power > 0 and rising (bullish momentum) + above 1d EMA20 + volume confirmation
+            if (bull_val > 0 and 
+                i > 20 and bull_val > bull_power[i-1] and
                 price > ema_trend and
                 volume_confirm):
                 position = 1
                 signals[i] = position_size
-            # Short: Lips < Teeth < Jaw (aligned down) + below 1d EMA20 + volume confirmation
-            elif (lips_val < teeth_val and 
-                  teeth_val < jaw_val and
+            # Short: Bear Power < 0 and falling (bearish momentum) + below 1d EMA20 + volume confirmation
+            elif (bear_val < 0 and 
+                  i > 20 and bear_val < bear_power[i-1] and
                   price < ema_trend and
                   volume_confirm):
                 position = -1
@@ -99,16 +93,16 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Alligator lines cross or price breaks below 1d EMA
-            if (lips_val <= teeth_val or
+            # Exit long: Bull Power turns negative or price breaks below 1d EMA
+            if (bull_val <= 0 or
                 price < ema_trend):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Alligator lines cross or price breaks above 1d EMA
-            if (lips_val >= teeth_val or
+            # Exit short: Bear Power turns positive or price breaks above 1d EMA
+            if (bear_val >= 0 or
                 price > ema_trend):
                 position = 0
                 signals[i] = 0.0
@@ -117,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_WilliamsAlligator_Trend_Volume"
-timeframe = "4h"
+name = "6h_1d_ElderRay_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
