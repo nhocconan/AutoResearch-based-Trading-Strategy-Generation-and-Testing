@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 250:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,67 +13,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for calculations
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for calculations
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    vol_1d = df_1d['volume'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    vol_12h = df_12h['volume'].values
     
-    # Calculate 20-period EMA on 1d (trend filter)
-    close_1d_series = pd.Series(close_1d)
-    ema_20_1d = close_1d_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate 20-period EMA on 12h (trend filter)
+    close_12h_series = pd.Series(close_12h)
+    ema_20_12h = close_12h_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate RSI(14) on 1d
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14 = 100 - (100 / (1 + rs))
+    # Calculate Donchian channel (20) on 12h
+    highest_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Bollinger Bands (20, 2) on 1d
-    sma_20 = close_1d_series.rolling(window=20, min_periods=20).mean().values
-    std_20 = close_1d_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = sma_20 + 2 * std_20
-    bb_lower = sma_20 - 2 * std_20
+    # Calculate ATR (14) on 12h for volatility filter
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Get 1w data for trend confirmation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    # Calculate 20-period SMA on 1w
-    sma_20_1w = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
-    
-    # Align indicators to 4h timeframe
-    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
-    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
-    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
-    sma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_20_1w)
-    
-    # Volume filter: volume above 10-period average
-    vol_ma = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
-    volume_filter = volume > vol_ma
+    # Align indicators to primary timeframe (4h)
+    ema_20_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
+    highest_high_aligned = align_htf_to_ltf(prices, df_12h, highest_high)
+    lowest_low_aligned = align_htf_to_ltf(prices, df_12h, lowest_low)
+    atr_14_aligned = align_htf_to_ltf(prices, df_12h, atr_14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25
     
-    for i in range(250, n):
+    for i in range(100, n):
         # Skip if data not ready
         if (np.isnan(ema_20_aligned[i]) or 
-            np.isnan(rsi_14_aligned[i]) or
-            np.isnan(bb_upper_aligned[i]) or
-            np.isnan(bb_lower_aligned[i]) or
-            np.isnan(sma_20_1w_aligned[i]) or
-            np.isnan(vol_ma[i])):
+            np.isnan(highest_high_aligned[i]) or
+            np.isnan(lowest_low_aligned[i]) or
+            np.isnan(atr_14_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -81,25 +63,20 @@ def generate_signals(prices):
         above_ema = close[i] > ema_20_aligned[i]
         below_ema = close[i] < ema_20_aligned[i]
         
-        # RSI conditions: not overbought/oversold
-        rsi_not_overbought = rsi_14_aligned[i] < 70
-        rsi_not_oversold = rsi_14_aligned[i] > 30
+        # Donchian breakout conditions
+        breakout_up = close[i] > highest_high_aligned[i]
+        breakout_down = close[i] < lowest_low_aligned[i]
         
-        # Bollinger Band conditions: price near bands
-        near_upper_band = close[i] > bb_upper_aligned[i] * 0.98
-        near_lower_band = close[i] < bb_lower_aligned[i] * 1.02
+        # Volatility filter: avoid low volatility periods
+        vol_filter = atr_14_aligned[i] > np.nanmedian(atr_14_aligned[max(0, i-50):i+1])
         
-        # Weekly trend filter: price above/below weekly SMA20
-        above_weekly_sma = close[i] > sma_20_1w_aligned[i]
-        below_weekly_sma = close[i] < sma_20_1w_aligned[i]
+        # Entry conditions
+        long_entry = breakout_up and above_ema and vol_filter
+        short_entry = breakout_down and below_ema and vol_filter
         
-        # Entry conditions with volume filter
-        long_entry = above_ema and rsi_not_overbought and near_lower_band and above_weekly_sma and volume_filter[i]
-        short_entry = below_ema and rsi_not_oversold and near_upper_band and below_weekly_sma and volume_filter[i]
-        
-        # Exit conditions: opposite signal or RSI extreme
-        exit_long = position == 1 and (below_ema or rsi_14_aligned[i] > 75)
-        exit_short = position == -1 and (above_ema or rsi_14_aligned[i] < 25)
+        # Exit conditions: opposite breakout or volatility collapse
+        exit_long = position == 1 and (breakout_down or atr_14_aligned[i] < 0.5 * np.nanmedian(atr_14_aligned[max(0, i-50):i+1]))
+        exit_short = position == -1 and (breakout_up or atr_14_aligned[i] < 0.5 * np.nanmedian(atr_14_aligned[max(0, i-50):i+1]))
         
         # Execute signals
         if long_entry and position != 1:
@@ -122,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_1w_ema_rsi_bb_volume_filter"
+name = "4h_12h_donchian_ema_vol_filter"
 timeframe = "4h"
 leverage = 1.0
