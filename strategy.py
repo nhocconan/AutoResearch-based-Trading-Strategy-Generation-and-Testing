@@ -8,13 +8,13 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian breakout with 12h volume confirmation and 1d ADX regime filter
-    # Long when price breaks above 20-period Donchian high + 12h volume > 1.8 * 20-period mean + 1d ADX > 20
-    # Short when price breaks below 20-period Donchian low + same filters
-    # Exit when price returns to 20-period Donchian midpoint
+    # Hypothesis: 4h Camarilla pivot breakout with 12h volume confirmation and 1d ADX regime filter
+    # Long when price breaks above Camarilla H3 level + 12h volume > 1.8 * 20-period mean + 1d ADX > 20
+    # Short when price breaks below Camarilla L3 level + same filters
+    # Exit when price returns to Camarilla pivot point (PP)
     # Uses discrete position sizing (0.25) to balance return and drawdown
     # Target: 100-150 total trades over 4 years (~25-38/year) to avoid excessive fee drag
-    # Donchian channels provide robust trend-following structure
+    # Camarilla pivots provide precise intraday support/resistance levels
     # Volume confirmation ensures breakouts have institutional participation
     # Daily ADX filter ensures we only trade when higher timeframe is trending
     
@@ -29,12 +29,23 @@ def generate_signals(prices):
     if len(df_12h) < 20 or len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 4h Donchian channels (20-period) from primary timeframe
+    # Calculate 4h Camarilla pivot levels from primary timeframe
+    # Using 4h high/low/close to calculate daily Camarilla levels
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2.0
+    close_series = pd.Series(close)
+    
+    # Calculate pivot point (PP) and support/resistance levels
+    # Using 4h bar's high/low/close to calculate intraday Camarilla levels
+    PP = (high_series + low_series + close_series) / 3.0
+    R1 = PP + (high_series - low_series) * 1.1 / 12
+    S1 = PP - (high_series - low_series) * 1.1 / 12
+    R2 = PP + (high_series - low_series) * 1.1 / 6
+    S2 = PP - (high_series - low_series) * 1.1 / 6
+    R3 = PP + (high_series - low_series) * 1.1 / 4
+    S3 = PP - (high_series - low_series) * 1.1 / 4
+    R4 = PP + (high_series - low_series) * 1.1 / 2
+    S4 = PP - (high_series - low_series) * 1.1 / 2
     
     # Calculate 12h volume mean (20-period) with min_periods
     volume_12h = df_12h['volume'].values
@@ -91,9 +102,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(donchian_mid[i]) or np.isnan(vol_ma_aligned[i]) or
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(PP[i]) or np.isnan(R3[i]) or np.isnan(S3[i]) or
+            np.isnan(vol_ma_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -108,16 +118,16 @@ def generate_signals(prices):
         trending_market = adx_aligned[i] > 20
         
         # Breakout conditions with filters
-        bullish_breakout = (close[i] > donchian_high[i] and 
+        bullish_breakout = (close[i] > R3[i] and 
                            volume_confirmation and 
                            trending_market)
-        bearish_breakout = (close[i] < donchian_low[i] and 
+        bearish_breakout = (close[i] < S3[i] and 
                            volume_confirmation and 
                            trending_market)
         
-        # Exit conditions: return to Donchian midpoint
-        long_exit = close[i] < donchian_mid[i]
-        short_exit = close[i] > donchian_mid[i]
+        # Exit conditions: return to pivot point (PP)
+        long_exit = close[i] < PP[i]
+        short_exit = close[i] > PP[i]
         
         if bullish_breakout and position != 1:
             position = 1
@@ -142,6 +152,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_1d_donchian_breakout_volume_adx_v1"
+name = "4h_12h_1d_camarilla_breakout_volume_adx_v1"
 timeframe = "4h"
 leverage = 1.0
