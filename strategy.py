@@ -8,40 +8,50 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
-    # Hypothesis: 1d Camarilla pivot breakout with 1w volume confirmation
+    # Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation
     # Enter long when price breaks above R4 with volume > 2x 20-bar avg
     # Enter short when price breaks below S4 with volume > 2x 20-bar avg
-    # Exit when price crosses the 1w close (midpoint)
-    # Uses 1w HTF for Camarilla levels (more stable than 1d) and 1d for entry timing
-    # Camarilla levels from 1w provide institutional support/resistance
+    # Exit when price crosses the 1d close (midpoint)
+    # Uses 1d HTF for Camarilla levels (more stable than 12h) and 12h for entry timing
+    # Camarilla levels from 1d provide institutional support/resistance
     # Volume confirmation ensures breakouts have participation
     # Works in bull (continuation breaks) and bear (reversal breaks at extremes)
-    # Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag
+    # Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for Camarilla pivot calculation (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 12h data for primary timeframe
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 1w Camarilla levels (based on previous week's OHLC)
-    cam_high_low = high_1w - low_1w
-    camarilla_r4 = close_1w + (cam_high_low * 1.1 / 2)
-    camarilla_s4 = close_1w - (cam_high_low * 1.1 / 2)
-    camarilla_mid = close_1w  # midpoint is the 1w close
+    # Get 1d data for Camarilla pivot calculation (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
+        return np.zeros(n)
     
-    # Align 1w Camarilla levels to 1d timeframe
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
-    camarilla_mid_aligned = align_htf_to_ltf(prices, df_1w, camarilla_mid)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate 1d Camarilla levels (based on previous day's OHLC)
+    # Camarilla: R4 = close + (high-low)*1.1/2, S4 = close - (high-low)*1.1/2
+    cam_high_low = high_1d - low_1d
+    camarilla_r4 = close_1d + (cam_high_low * 1.1 / 2)
+    camarilla_s4 = close_1d - (cam_high_low * 1.1 / 2)
+    camarilla_mid = close_1d  # midpoint is the 1d close
+    
+    # Align 1d Camarilla levels to 12h timeframe
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    camarilla_mid_aligned = align_htf_to_ltf(prices, df_1d, camarilla_mid)
     
     # Volume confirmation: volume > 2x 20-bar average volume
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -94,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_camarilla_breakout_volume_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
