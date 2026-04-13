@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-12h_1d_1w_CamarillaPivot_Breakout_TrendFilter_v1
-Hypothesis: Price breaking above Camarilla H3 resistance or below L3 support on 12h timeframe with daily volume expansion and weekly ADX trend filter captures institutional breakout moves. Camarilla levels derived from previous day's range provide institutional-grade support/resistance. Volume confirms breakout strength, ADX filters for trending conditions. Designed for 15-25 trades/year to avoid fee drag.
+4h_1d_camarilla_breakout_vol_trend_v1
+Hypothesis: On 4h timeframe, price breaking above Camarilla H3 or below L3 with daily volume expansion and daily ADX trend filter captures institutional breakout moves. Works in bull markets (breakouts continue) and bear markets (mean-reversion fails, so breakouts are rarer but stronger when they occur). Target: 20-40 trades/year to avoid fee drag.
 """
 
 import numpy as np
@@ -26,6 +26,7 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
     # Calculate Camarilla levels from previous day's range
     # H3 = Close + 1.1 * (High - Low) / 4
@@ -34,29 +35,19 @@ def generate_signals(prices):
     camarilla_h3 = close_1d + 1.1 * range_1d / 4
     camarilla_l3 = close_1d - 1.1 * range_1d / 4
     
-    # Get weekly data for volume and ADX
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
+    # Daily volume expansion: current volume > 1.5x 10-period average
+    vol_ma_10 = pd.Series(volume_1d).rolling(window=10, min_periods=10).mean().values
+    volume_expansion = volume_1d > (vol_ma_10 * 1.5)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
-    
-    # Weekly volume expansion: current volume > 1.5x 8-period average
-    vol_ma_8 = pd.Series(volume_1w).rolling(window=8, min_periods=8).mean().values
-    volume_expansion = volume_1w > (vol_ma_8 * 1.5)
-    
-    # Calculate ADX (10-period) for trend strength
-    tr1 = np.abs(high_1w - low_1w)
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    # Calculate ADX (14-period) for trend strength
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = np.nan
     
-    up_move = np.where(high_1w - np.roll(high_1w, 1) > 0, high_1w - np.roll(high_1w, 1), 0)
-    down_move = np.where(np.roll(low_1w, 1) - low_1w > 0, np.roll(low_1w, 1) - low_1w, 0)
+    up_move = np.where(high_1d - np.roll(high_1d, 1) > 0, high_1d - np.roll(high_1d, 1), 0)
+    down_move = np.where(np.roll(low_1d, 1) - low_1d > 0, np.roll(low_1d, 1) - low_1d, 0)
     up_move[0] = 0
     down_move[0] = 0
     
@@ -72,7 +63,7 @@ def generate_signals(prices):
                 result[i] = np.nan
         return result
     
-    period = 10
+    period = 14
     atr = wilders_smooth(tr, period)
     plus_dm = wilders_smooth(up_move, period)
     minus_dm = wilders_smooth(down_move, period)
@@ -81,13 +72,13 @@ def generate_signals(prices):
     minus_di = 100 * minus_dm / atr
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = wilders_smooth(dx, period)
-    strong_trend = adx > 25  # Strong trend filter
+    strong_trend = adx > 20  # Moderate trend filter
     
-    # Align all signals to 12h timeframe
+    # Align all signals to 4h timeframe
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    volume_expansion_aligned = align_htf_to_ltf(prices, df_1w, volume_expansion.astype(float))
-    strong_trend_aligned = align_htf_to_ltf(prices, df_1w, strong_trend.astype(float))
+    volume_expansion_aligned = align_htf_to_ltf(prices, df_1d, volume_expansion.astype(float))
+    strong_trend_aligned = align_htf_to_ltf(prices, df_1d, strong_trend.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -135,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_1w_CamarillaPivot_Breakout_TrendFilter_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_vol_trend_v1"
+timeframe = "4h"
 leverage = 1.0
