@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_1d_1w_WeeklyPivot_Reversal
-Hypothesis: Weekly pivot levels (S1/S2, R1/R2) act as strong support/resistance on 6h timeframe.
-Price tends to reverse at these levels with confluence from daily RSI extremes.
-Works in both bull and bear markets by trading mean reversion at key weekly levels.
-Target: 15-25 trades/year to minimize fee drag.
+12h_1w_1d_Camarilla_Breakout_Volume
+Hypothesis: Uses weekly (1w) and daily (1d) timeframes to identify high-probability breakouts on 12h chart.
+- Uses weekly ADX (14) as trend filter to avoid choppy markets.
+- Uses daily Camarilla pivot levels (H3/L3) as breakout levels.
+- Requires volume expansion on 12h candle for confirmation.
+- Trades in direction of higher timeframe trend.
+- Designed to work in both bull and bear markets by capturing breakouts with strong momentum.
+- Target: 12-37 trades per year (50-150 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
@@ -19,59 +22,90 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get daily data for RSI
+    # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily RSI(14)
-    def calculate_rsi(close, period=14):
-        delta = np.diff(close, prepend=close[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.zeros_like(close)
-        avg_loss = np.zeros_like(close)
-        
-        avg_gain[period] = np.mean(gain[1:period+1])
-        avg_loss[period] = np.mean(loss[1:period+1])
-        
-        for i in range(period+1, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+    # Calculate Camarilla pivot levels for previous day
+    hl_range = high_1d - low_1d
+    H3 = close_1d + 1.125 * hl_range
+    L3 = close_1d - 1.125 * hl_range
     
-    rsi_1d = calculate_rsi(close_1d, 14)
-    
-    # Get weekly data for pivot points
+    # Get 1w data for ADX trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    if len(df_1w) < 14:
         return np.zeros(n)
     
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate weekly pivot points (standard formula)
-    pivot = (high_1w + low_1w + close_1w) / 3
-    r1 = 2 * pivot - low_1w
-    s1 = 2 * pivot - high_1w
-    r2 = pivot + (high_1w - low_1w)
-    s2 = pivot - (high_1w - low_1w)
+    # Calculate ADX (14) on weekly data
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(high[i] - high[i-1], 0)
+            minus_dm[i] = max(low[i-1] - low[i], 0)
+            if plus_dm[i] < minus_dm[i]:
+                plus_dm[i] = 0
+            if minus_dm[i] < plus_dm[i]:
+                minus_dm[i] = 0
+                
+            tr[i] = max(high[i] - low[i], 
+                       abs(high[i] - close[i-1]), 
+                       abs(low[i] - close[i-1]))
+        
+        # Smooth with Wilder's smoothing (alpha = 1/period)
+        atr = np.zeros_like(high)
+        plus_di = np.zeros_like(high)
+        minus_di = np.zeros_like(high)
+        dx = np.zeros_like(high)
+        
+        atr[period-1] = np.mean(tr[1:period]) if period > 1 else tr[1]
+        plus_dm_smooth = np.zeros_like(high)
+        minus_dm_smooth = np.zeros_like(high)
+        
+        plus_dm_smooth[period-1] = np.mean(plus_dm[1:period]) if period > 1 else plus_dm[1]
+        minus_dm_smooth[period-1] = np.mean(minus_dm[1:period]) if period > 1 else minus_dm[1]
+        
+        for i in range(period, len(high)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+            plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
+            minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
+            
+            if atr[i] != 0:
+                plus_di[i] = 100 * plus_dm_smooth[i] / atr[i]
+                minus_di[i] = 100 * minus_dm_smooth[i] / atr[i]
+                dx[i] = (abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])) * 100
+        
+        # Calculate ADX as smoothed DX
+        adx = np.zeros_like(high)
+        adx[2*period-2] = np.mean(dx[period-1:2*period-1]) if (2*period-1) < len(dx) else 0
+        for i in range(2*period-1, len(high)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+            
+        return adx
     
-    # Align all signals to 6h timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
+    
+    # Align all signals to 12h timeframe
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average on 12h
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_expansion = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -79,22 +113,23 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(r2_aligned[i]) or 
-            np.isnan(s2_aligned[i])):
+        if (np.isnan(H3_aligned[i]) or 
+            np.isnan(L3_aligned[i]) or 
+            np.isnan(adx_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: price at weekly S1/S2 with RSI oversold, or at R1/R2 with RSI overbought
-        long_entry = ((low[i] <= s1_aligned[i]) or (low[i] <= s2_aligned[i])) and (rsi_1d_aligned[i] < 30)
-        short_entry = ((high[i] >= r1_aligned[i]) or (high[i] >= r2_aligned[i])) and (rsi_1d_aligned[i] > 70)
+        # Trend filter: only trade when ADX > 25 (trending market)
+        strong_trend = adx_1w_aligned[i] > 25
         
-        # Exit conditions: price returns to weekly pivot
-        exit_long = position == 1 and close[i] >= pivot_aligned[i]
-        exit_short = position == -1 and close[i] <= pivot_aligned[i]
+        # Entry conditions: price breaks H3/L3 with volume expansion and trend filter
+        long_entry = (high[i] > H3_aligned[i]) and volume_expansion[i] and strong_trend
+        short_entry = (low[i] < L3_aligned[i]) and volume_expansion[i] and strong_trend
+        
+        # Exit conditions: return to previous day's close
+        prev_close_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+        exit_long = position == 1 and close[i] <= prev_close_aligned[i]
+        exit_short = position == -1 and close[i] >= prev_close_aligned[i]
         
         # Execute signals
         if long_entry and position != 1:
@@ -117,6 +152,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_1w_WeeklyPivot_Reversal"
-timeframe = "6h"
+name = "12h_1w_1d_Camarilla_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
