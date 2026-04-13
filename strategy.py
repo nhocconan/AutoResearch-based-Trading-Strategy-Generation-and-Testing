@@ -8,22 +8,22 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian(20) breakout + 1d volume spike + 1d chop regime filter
+    # Hypothesis: 4h Donchian(20) breakout + 1d volume spike + 1d chop regime filter
     # Long: price breaks above Donchian(20) high AND 1d volume > 1.5 * 20-period average AND chop > 61.8 (range)
     # Short: price breaks below Donchian(20) low AND 1d volume > 1.5 * 20-period average AND chop > 61.8 (range)
     # Exit: price reverts to Donchian(20) midpoint OR chop < 38.2 (trending)
-    # Using 12h for price action and 1d for volume/chop to avoid look-ahead
+    # Using 1d for volume and chop to avoid look-ahead, 4h for price action
     # Discrete position sizing (0.25) to minimize fee churn
-    # Target: 12-37 trades/year (~50-150 over 4 years) to stay within fee drag limits
+    # Target: 20-50 trades/year (~80-200 over 4 years) to stay within fee drag limits
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian channels (call ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 4h data for Donchian channels (call ONCE before loop)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
     # Get 1d data for volume and chop (call ONCE before loop)
@@ -31,21 +31,21 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 12h Donchian channels (20-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Calculate 4h Donchian channels (20-period)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
     # Donchian high: rolling max of high
-    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
     # Donchian low: rolling min of low
-    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     # Donchian midpoint: average of high and low
     donchian_mid = (donchian_high + donchian_low) / 2.0
     
-    # Align 12h Donchian to 12h timeframe (no additional delay needed for price channels)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_12h, donchian_mid)
+    # Align 4h Donchian to 4h timeframe (no additional delay needed for price channels)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_4h, donchian_mid)
     
     # Calculate 1d volume spike filter: volume > 1.5 * 20-period average
     volume_1d = df_1d['volume'].values
@@ -53,6 +53,7 @@ def generate_signals(prices):
     volume_spike = volume_1d > (1.5 * vol_ma_20)
     
     # Calculate 1d Choppiness Index (CHOP) - range/trend regime filter
+    # CHOP = 100 * log10(sum(ATR(14)) / (log10(n) * (max(high) - min(low)))) over period
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -98,7 +99,7 @@ def generate_signals(prices):
     mask = (range_1d > 0) & ~np.isnan(sum_atr)
     chop[mask] = 100 * np.log10(sum_atr[mask] / (np.log10(chop_period) * range_1d[mask]))
     
-    # Align 1d indicators to 12h (wait for completed 1d bar)
+    # Align 1d indicators to 4h (wait for completed 1d bar)
     volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
     chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
@@ -156,6 +157,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_donchian_volume_chop_regime_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_volume_chop_regime_v1"
+timeframe = "4h"
 leverage = 1.0
