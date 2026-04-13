@@ -9,14 +9,13 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation
-    # Enter long when price breaks above R4 with volume > 2x 20-bar avg
-    # Enter short when price breaks below S4 with volume > 2x 20-bar avg
-    # Exit when price crosses the 1d close (midpoint)
-    # Uses 1d HTF for Camarilla levels (more stable than 12h) and 12h for entry timing
+    # Enter long when price breaks above R4 with volume > 1.5x 20-bar avg
+    # Enter short when price breaks below S4 with volume > 1.5x 20-bar avg
+    # Exit when price crosses the 1d midpoint (close)
+    # Uses 12h primary timeframe to reduce trade frequency (target: 12-37/year)
     # Camarilla levels from 1d provide institutional support/resistance
     # Volume confirmation ensures breakouts have participation
     # Works in bull (continuation breaks) and bear (reversal breaks at extremes)
-    # Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
     
     close = prices['close'].values
     high = prices['high'].values
@@ -53,9 +52,9 @@ def generate_signals(prices):
     camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     camarilla_mid_aligned = align_htf_to_ltf(prices, df_1d, camarilla_mid)
     
-    # Volume confirmation: volume > 2x 20-bar average volume
+    # Volume confirmation: volume > 1.5x 20-bar average volume
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (2.0 * avg_volume)
+    volume_confirmed = volume > (1.5 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
