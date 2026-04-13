@@ -3,11 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe with 1d RSI-based mean reversion and volume confirmation.
-# Long: RSI(14) < 30 on 1d + price > VWAP(20) on 12h + volume > 1.5x average volume.
-# Short: RSI(14) > 70 on 1d + price < VWAP(20) on 12h + volume > 1.5x average volume.
-# Uses 1d RSI for overbought/oversold conditions, 12h for execution with VWAP and volume confirmation.
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+# Hypothesis: 4h timeframe with 1d Williams Fractal breakout and volume confirmation.
+# Williams Fractal identifies potential reversal points. A bullish fractal is a low with two higher lows on each side.
+# A bearish fractal is a high with two lower highs on each side.
+# Long: Price breaks above the highest bearish fractal high of the last 20 days + volume > 1.3x average volume (20-period).
+# Short: Price breaks below the lowest bullish fractal low of the last 20 days + volume > 1.3x average volume.
+# Uses 1d Williams Fractals for swing structure, 4h for execution with volume confirmation.
+# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,61 +21,51 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for RSI calculation
+    # 1d data for Williams Fractals
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate RSI(14) on 1d
-    delta = np.diff(close_1d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate Williams Fractals
+    bearish_fractal = np.full(len(high_1d), np.nan)  # stores fractal high values
+    bullish_fractal = np.full(len(low_1d), np.nan)   # stores fractal low values
     
-    avg_gain = np.full(len(close_1d), np.nan)
-    avg_loss = np.full(len(close_1d), np.nan)
-    
-    # Initial average
-    if len(gain) >= 14:
-        avg_gain[13] = np.mean(gain[:14])
-        avg_loss[13] = np.mean(loss[:14])
+    for i in range(2, len(high_1d) - 2):
+        # Bearish fractal: high with two lower highs on each side
+        if (high_1d[i] > high_1d[i-1] and high_1d[i] > high_1d[i-2] and
+            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
+            bearish_fractal[i] = high_1d[i]
         
-        # Wilder's smoothing
-        for i in range(14, len(close_1d)):
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
+        # Bullish fractal: low with two higher lows on each side
+        if (low_1d[i] < low_1d[i-1] and low_1d[i] < low_1d[i-2] and
+            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
+            bullish_fractal[i] = low_1d[i]
     
-    rs = np.full(len(close_1d), np.nan)
-    rsi = np.full(len(close_1d), np.nan)
-    for i in range(13, len(close_1d)):
-        if avg_loss[i] != 0:
-            rs[i] = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs[i]))
-        else:
-            rsi[i] = 100  # Avoid division by zero
+    # Calculate rolling highest bearish fractal and lowest bullish fractal (20-period)
+    highest_bearish = np.full(len(high_1d), np.nan)
+    lowest_bullish = np.full(len(low_1d), np.nan)
     
-    # VWAP(20) on 12h
-    typical_price = (high + low + close) / 3
-    vwap_num = np.full(n, np.nan)
-    vwap_den = np.full(n, np.nan)
-    
-    for i in range(20, n):
-        vwap_num[i] = np.sum(typical_price[i-20:i] * volume[i-20:i])
-        vwap_den[i] = np.sum(volume[i-20:i])
-    
-    vwap = np.full(n, np.nan)
-    for i in range(20, n):
-        if vwap_den[i] != 0:
-            vwap[i] = vwap_num[i] / vwap_den[i]
+    for i in range(20, len(high_1d)):
+        window_bearish = bearish_fractal[i-20:i]
+        window_bullish = bullish_fractal[i-20:i]
+        valid_bearish = window_bearish[~np.isnan(window_bearish)]
+        valid_bullish = window_bullish[~np.isnan(window_bullish)]
+        if len(valid_bearish) > 0:
+            highest_bearish[i] = np.max(valid_bearish)
+        if len(valid_bullish) > 0:
+            lowest_bullish[i] = np.min(valid_bullish)
     
     # Average volume (20-period) for volume confirmation
     avg_volume = np.full(n, np.nan)
     for i in range(20, n):
         avg_volume[i] = np.mean(volume[i-20:i])
     
-    # Align 1d RSI to 12h
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Align 1d fractal levels to 4h (need 2-bar confirmation delay for fractals)
+    highest_bearish_aligned = align_htf_to_ltf(prices, df_1d, highest_bearish, additional_delay_bars=2)
+    lowest_bullish_aligned = align_htf_to_ltf(prices, df_1d, lowest_bullish, additional_delay_bars=2)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -81,7 +73,7 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is not ready
-        if (np.isnan(rsi_aligned[i]) or np.isnan(vwap[i]) or 
+        if (np.isnan(highest_bearish_aligned[i]) or np.isnan(lowest_bullish_aligned[i]) or 
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
@@ -89,33 +81,33 @@ def generate_signals(prices):
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        rsi_val = rsi_aligned[i]
-        vwap_val = vwap[i]
+        highest_bear = highest_bearish_aligned[i]
+        lowest_bull = lowest_bullish_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirm = vol > 1.5 * avg_vol
+        # Volume confirmation: current volume > 1.3x average volume
+        volume_confirm = vol > 1.3 * avg_vol
         
         if position == 0:
-            # Long: RSI < 30 (oversold) + price > VWAP + volume confirmation
-            if (rsi_val < 30 and price > vwap_val and volume_confirm):
+            # Long: price breaks above highest bearish fractal + volume confirmation
+            if (price > highest_bear and volume_confirm):
                 position = 1
                 signals[i] = position_size
-            # Short: RSI > 70 (overbought) + price < VWAP + volume confirmation
-            elif (rsi_val > 70 and price < vwap_val and volume_confirm):
+            # Short: price breaks below lowest bullish fractal + volume confirmation
+            elif (price < lowest_bull and volume_confirm):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI > 50 (neutral) or price < VWAP
-            if (rsi_val > 50 or price < vwap_val):
+            # Exit long: price breaks below lowest bullish fractal
+            if price < lowest_bull:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: RSI < 50 (neutral) or price > VWAP
-            if (rsi_val < 50 or price > vwap_val):
+            # Exit short: price breaks above highest bearish fractal
+            if price > highest_bear:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -123,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_RSI_MeanReversion_VWAP_Volume"
-timeframe = "12h"
+name = "4h_1d_Williams_Fractal_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
