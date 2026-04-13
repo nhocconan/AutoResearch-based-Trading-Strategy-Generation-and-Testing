@@ -8,69 +8,111 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1d Williams %R mean reversion with 1w trend filter
-    # Long: Williams %R < -80 (oversold) AND 1w close > 1w EMA200 (bullish trend)
-    # Short: Williams %R > -20 (overbought) AND 1w close < 1w EMA200 (bearish trend)
-    # Exit: Williams %R crosses above -50 (long exit) or below -50 (short exit)
-    # Using 1d for low trade frequency, Williams %R for mean reversion in ranging markets,
-    # 1w EMA200 for trend filter to avoid counter-trend trades.
-    # Discrete position sizing (0.25) to minimize fee churn.
+    # Hypothesis: 6h Elder Ray + 1d ADX regime filter
+    # Elder Ray: Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
+    # Trend filter: ADX(14) > 25 on 1d timeframe
+    # Entry: Long when Bull Power > 0 AND ADX > 25 AND Bull Power rising
+    #        Short when Bear Power > 0 AND ADX > 25 AND Bear Power rising
+    # Exit: Opposite power signal or ADX < 20 (regime change)
+    # Discrete sizing 0.25 to minimize fee churn. Works in bull/bear via ADX regime.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
+    # Get 1d data for ADX regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA200 for trend filter
-    close_1w = df_1w['close'].values
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # Calculate 1d ADX(14)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate daily Williams %R(14)
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = np.where(
-        (highest_high - lowest_low) != 0,
-        (highest_high - close) / (highest_high - lowest_low) * -100,
-        -50  # neutral when range is zero
-    )
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.nan], tr])  # align with index
+    
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
+    
+    # Smoothed TR, +DM, -DM (Wilder's smoothing = EMA with alpha=1/period)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value: simple average
+        result[period-1] = np.nanmean(data[1:period])
+        # Subsequent: smoothed = (prev * (period-1) + current) / period
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    atr = wilders_smoothing(tr, 14)
+    plus_dm_smooth = wilders_smoothing(plus_dm, 14)
+    minus_dm_smooth = wilders_smoothing(minus_dm, 14)
+    
+    # DI+ and DI-
+    plus_di = 100 * plus_dm_smooth / atr
+    minus_di = 100 * minus_dm_smooth / atr
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilders_smoothing(dx, 14)
+    
+    # Align 1d ADX to 6h
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate 6h EMA(13) for Elder Ray
+    ema_13 = np.full(n, np.nan)
+    if n >= 13:
+        ema_13[12] = np.mean(close[:13])
+        multiplier = 2 / (13 + 1)
+        for i in range(13, n):
+            ema_13[i] = (close[i] - ema_13[i-1]) * multiplier + ema_13[i-1]
+    
+    # Elder Ray: Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
+    bull_power = high - ema_13
+    bear_power = ema_13 - low
+    
+    # Power rising/falling (1-bar momentum)
+    bull_power_rising = bull_power > np.roll(bull_power, 1)
+    bear_power_rising = bear_power > np.roll(bear_power, 1)
+    # Handle first bar
+    bull_power_rising[0] = False
+    bear_power_rising[0] = False
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema_200_1w_aligned[i]) or np.isnan(williams_r[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(ema_13[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: bullish if weekly close > weekly EMA200
-        bullish_trend = close_1w[-1] > ema_200_1w[-1] if len(close_1w) == len(ema_200_1w) else False
-        # Actually use aligned values for current bar
-        # Need to get the weekly close value aligned to daily
-        # Since we don't have weekly close aligned, we'll use the EMA alignment as proxy
-        # Simpler approach: use the last available weekly close for trend
-        if len(df_1w) > 0:
-            weekly_close_now = df_1w['close'].iloc[-1]  # most recent weekly close
-            weekly_ema_now = ema_200_1w[-1] if len(ema_200_1w) > 0 else 0
-            bullish_trend = weekly_close_now > weekly_ema_now
-            bearish_trend = weekly_close_now < weekly_ema_now
-        else:
-            bullish_trend = False
-            bearish_trend = False
+        # Regime filter: ADX > 25 = trending market
+        trending = adx_aligned[i] > 25
+        ranging = adx_aligned[i] < 20  # exit regime
         
-        # Entry logic: Williams %R extremes + trend filter
-        long_entry = (williams_r[i] < -80) and bullish_trend
-        short_entry = (williams_r[i] > -20) and bearish_trend
+        # Entry conditions
+        long_entry = (bull_power[i] > 0) and trending and bull_power_rising[i]
+        short_entry = (bear_power[i] > 0) and trending and bear_power_rising[i]
         
-        # Exit logic: Williams %R crosses midpoint
-        long_exit = williams_r[i] > -50
-        short_exit = williams_r[i] < -50
+        # Exit conditions
+        long_exit = (bull_power[i] <= 0) or ranging
+        short_exit = (bear_power[i] <= 0) or ranging
         
         if long_entry and position != 1:
             position = 1
@@ -95,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_williamsr_mean_reversion_v1"
-timeframe = "1d"
+name = "6h_1d_elder_ray_adx_v1"
+timeframe = "6h"
 leverage = 1.0
