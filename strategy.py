@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_1w_1d_Price_Channel_Retest_With_Volume_Confirmation
-Hypothesis: On 6h timeframe, price tends to retest prior weekly highs/lows (from 1w) and daily support/resistance (from 1d) before continuing trend. Enter on retest with volume confirmation.
-- Long when: price retraces to weekly low + bounces (close > open) + 6h volume > 1.5x 20-period average
-- Short when: price retraces to weekly high + rejects (close < open) + 6h volume > 1.5x 20-period average
-- Use daily high/loose as additional filters: avoid longs near daily high, avoid shorts near daily low
-- Exit on opposite retest or volume drought
-Designed for 6h to capture swing points in both bull/bear markets with low trade frequency.
+4h_1D_Camarilla_Pivot_Breakout_Volume_Confirmation_v10
+Hypothesis: Camarilla pivot levels from daily timeframe provide strong support/resistance.
+Breakout above/below key levels (H3/L3) with volume confirmation (1d volume > 1.5x 20-day avg) 
+and trend filter (ADX > 25 on 1d) captures institutional interest. 
+Exit on reversal to pivot point (H4/L4) or trend weakness (ADX < 20).
+Designed for 4h timeframe to target 20-35 trades/year, effective in both trending and ranging markets.
 """
 
 import numpy as np
@@ -15,103 +14,139 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    open_ = prices['open'].values
-    volume = prices['volume'].values
     
-    # Get weekly data for key levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # Weekly high and low (from completed weekly candles)
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    
-    # Align weekly levels to 6h (they update only on weekly close)
-    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
-    
-    # Get daily data for filter levels
+    # Get daily data for Camarilla pivots and volume/ADX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # Calculate Camarilla pivot levels from previous day
+    # Formula: Based on previous day's high, low, close
+    phigh = df_1d['high'].values
+    plow = df_1d['low'].values
+    pclose = df_1d['close'].values
     
-    # Align daily levels to 6h
-    daily_high_aligned = align_htf_to_ltf(prices, df_1d, daily_high)
-    daily_low_aligned = align_htf_to_ltf(prices, df_1d, daily_low)
-    daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close)
+    # Calculate pivot and levels
+    pivot = (phigh + plow + pclose) / 3
+    range_val = phigh - plow
     
-    # 6h volume average for confirmation
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_condition = volume > (vol_ma_20 * 1.5)
+    # Camarilla levels
+    H4 = pclose + range_val * 1.1 / 2
+    H3 = pclose + range_val * 1.1 / 4
+    H2 = pclose + range_val * 1.1 / 6
+    H1 = pclose + range_val * 1.1 / 12
+    L1 = pclose - range_val * 1.1 / 12
+    L2 = pclose - range_val * 1.1 / 6
+    L3 = pclose - range_val * 1.1 / 4
+    L4 = pclose - range_val * 1.1 / 2
     
-    # Price action filters
-    bullish_candle = close > open_
-    bearish_candle = close < open_
+    # Align daily levels to 4h timeframe
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
     
-    # Proximity to weekly levels (within 0.5%)
-    proximity_to_weekly_low = (low <= weekly_low_aligned * 1.005) & (low >= weekly_low_aligned * 0.995)
-    proximity_to_weekly_high = (high >= weekly_high_aligned * 0.995) & (high <= weekly_high_aligned * 1.005)
+    # Daily volume and average
+    vol_1d = df_1d['volume'].values
+    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean()
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20.values)
     
-    # Avoid trading near daily extremes
-    near_daily_high = (high >= daily_high_aligned * 0.995)  # within 0.5% of daily high
-    near_daily_low = (low <= daily_low_aligned * 1.005)    # within 0.5% of daily low
+    # Daily ADX calculation (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Wilder's smoothing function
+    def wilder_smooth(arr, period):
+        result = np.full_like(arr, np.nan, dtype=float)
+        if len(arr) < period:
+            return result
+        result[period-1] = np.nansum(arr[:period])
+        for i in range(period, len(arr)):
+            result[i] = result[i-1] - (result[i-1]/period) + arr[i]
+        return result
+    
+    tr_14 = wilder_smooth(tr, 14)
+    dm_plus_14 = wilder_smooth(dm_plus, 14)
+    dm_minus_14 = wilder_smooth(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = np.where(tr_14 != 0, 100 * dm_plus_14 / tr_14, 0)
+    di_minus = np.where(tr_14 != 0, 100 * dm_minus_14 / tr_14, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilder_smooth(dx, 14)
+    
+    # Align daily volume and ADX to 4h
+    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.25  # 25% position
+    position_size = 0.25  # 25% position size
     
-    for i in range(100, n):
-        # Skip if weekly/daily data not ready
-        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or
-            np.isnan(daily_high_aligned[i]) or np.isnan(daily_low_aligned[i])):
+    for i in range(50, n):
+        # Skip if any required data is not ready
+        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or 
+            np.isnan(vol_1d_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or 
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long setup: retest of weekly low with bounce
-        long_setup = (proximity_to_weekly_low[i] and 
-                     bullish_candle[i] and 
-                     vol_condition[i] and 
-                     not near_daily_high[i])  # avoid buying near daily high
+        # Volume condition: current 1d volume > 1.5x 20-day average
+        vol_condition = vol_1d_aligned[i] > (vol_ma_20_aligned[i] * 1.5)
         
-        # Short setup: retest of weekly high with rejection
-        short_setup = (proximity_to_weekly_high[i] and 
-                      bearish_candle[i] and 
-                      vol_condition[i] and 
-                      not near_daily_low[i])  # avoid selling near daily low
+        # ADX condition: trending market
+        adx_condition = adx_aligned[i] > 25
         
-        # Exit conditions: opposite retest or volume drought
-        vol_drought = volume[i] < (vol_ma_20[i] * 0.5)  # volume < 50% of average
+        # Breakout conditions
+        long_breakout = close[i] > H3_aligned[i]
+        short_breakout = close[i] < L3_aligned[i]
+        
+        # Exit conditions
+        long_exit = close[i] < L4_aligned[i]  # Exit at L4 (strong support)
+        short_exit = close[i] > H4_aligned[i]  # Exit at H4 (strong resistance)
+        trend_weak = adx_aligned[i] < 20
         
         if position == 0:
-            if long_setup:
+            if long_breakout and vol_condition and adx_condition:
                 position = 1
                 signals[i] = position_size
-            elif short_setup:
+            elif short_breakout and vol_condition and adx_condition:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: retest of weekly high or volume drought
-            if proximity_to_weekly_high[i] or vol_drought:
+            if long_exit or trend_weak:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: retest of weekly low or volume drought
-            if proximity_to_weekly_low[i] or vol_drought:
+            if short_exit or trend_weak:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -119,6 +154,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_1d_Price_Channel_Retest_With_Volume_Confirmation"
-timeframe = "6h"
+name = "4h_1D_Camarilla_Pivot_Breakout_Volume_Confirmation_v10"
+timeframe = "4h"
 leverage = 1.0
