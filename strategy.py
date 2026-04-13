@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_1w_Range_Breakout_With_Volume
-Hypothesis: Trade breakouts from weekly range on daily timeframe with volume confirmation.
-Weekly range (high-low) acts as strong support/resistance. Breakouts above weekly high 
-signal institutional buying; breakdowns below weekly low signal distribution.
-Volume expansion confirms participation. Designed to work in both bull and bear markets
-by capturing institutional moves. Target: 10-20 trades/year to minimize fee drag.
+6h_1d_Camarilla_PriceAction
+Hypothesis: Trade reversals at Camarilla pivot levels (R3/S3, R4/S4) on 6h timeframe with 1d trend filter and volume confirmation.
+Camarilla levels from daily timeframe act as intraday support/resistance. Price rejection at these levels with volume divergence
+indicates exhaustion. 1d EMA50 ensures trades align with intermediate trend to avoid counter-trend whipsaws.
+Target: 15-25 trades/year to minimize fee drag while capturing high-probability reversals.
+Works in both bull/bear markets as reversals occur at all market phases.
 """
 
 import numpy as np
@@ -22,21 +22,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for range
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 10:
+    # Get daily data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align weekly high/low to daily
-    weekly_high_aligned = align_htf_to_ltf(prices, df_weekly, high_weekly)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_weekly, low_weekly)
+    # Calculate Camarilla levels for previous day
+    # Camarilla: H-L range, levels at specific fractions
+    camarilla_S3 = np.zeros(len(df_1d))
+    camarilla_S4 = np.zeros(len(df_1d))
+    camarilla_R3 = np.zeros(len(df_1d))
+    camarilla_R4 = np.zeros(len(df_1d))
     
-    # Volume confirmation: current volume > 2.0x 20-period average (strict to reduce trades)
+    for i in range(len(df_1d)):
+        if i == 0:
+            camarilla_S3[i] = camarilla_S4[i] = camarilla_R3[i] = camarilla_R4[i] = np.nan
+        else:
+            H = high_1d[i-1]
+            L = low_1d[i-1]
+            C = close_1d[i-1]
+            range_val = H - L
+            camarilla_S4[i] = C - ((H - L) * 1.1 / 2)
+            camarilla_S3[i] = C - ((H - L) * 1.1 / 4)
+            camarilla_R3[i] = C + ((H - L) * 1.1 / 4)
+            camarilla_R4[i] = C + ((H - L) * 1.1 / 2)
+    
+    # Align Camarilla levels to 6h
+    S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S4)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
+    R4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R4)
+    
+    # Get daily EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume confirmation: current volume < 0.5x 20-period average (low volume on rejection)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 2.0)
+    low_volume = volume < (vol_ma_20 * 0.5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -44,16 +71,21 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is not ready
-        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or 
-            np.isnan(volume_expansion[i])):
+        if (np.isnan(S3_aligned[i]) or np.isnan(S4_aligned[i]) or 
+            np.isnan(R3_aligned[i]) or np.isnan(R4_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(low_volume[i])):
             signals[i] = 0.0
             continue
         
-        # Long: breakout above weekly high with volume expansion
-        long_condition = (close[i] > weekly_high_aligned[i]) and volume_expansion[i]
+        # Long: rejection at S3/S4 with low volume and price above daily EMA50
+        long_reject_S3 = (low[i] <= S3_aligned[i] * 1.001) and (close[i] > S3_aligned[i])  # touched S3, closed above
+        long_reject_S4 = (low[i] <= S4_aligned[i] * 1.001) and (close[i] > S4_aligned[i])  # touched S4, closed above
+        long_condition = (long_reject_S3 or long_reject_S4) and low_volume[i] and (close[i] > ema_50_aligned[i])
         
-        # Short: breakdown below weekly low with volume expansion
-        short_condition = (close[i] < weekly_low_aligned[i]) and volume_expansion[i]
+        # Short: rejection at R3/R4 with low volume and price below daily EMA50
+        short_reject_R3 = (high[i] >= R3_aligned[i] * 0.999) and (close[i] < R3_aligned[i])  # touched R3, closed below
+        short_reject_R4 = (high[i] >= R4_aligned[i] * 0.999) and (close[i] < R4_aligned[i])  # touched R4, closed below
+        short_condition = (short_reject_R3 or short_reject_R4) and low_volume[i] and (close[i] < ema_50_aligned[i])
         
         if long_condition and position != 1:
             position = 1
@@ -67,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_Range_Breakout_With_Volume"
-timeframe = "1d"
+name = "6h_1d_Camarilla_PriceAction"
+timeframe = "6h"
 leverage = 1.0
