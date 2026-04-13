@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_1D_Turtle_Soup_Reversal_v1
-Hypothesis: Buy when price fails to break below previous day's low (bull trap) with bullish engulfing candle and volume > 1.5x average. Sell when price fails to break above previous day's high (bear trap) with bearish engulfing candle and volume confirmation. Uses 4h timeframe with 1-day trend filter (price > EMA50 for longs, < EMA50 for shorts). Designed to work in both bull and bear markets by trapping false breakouts at key daily levels. Low frequency (~25-35 trades/year) with clear entry/exit rules.
+6h_1D_1W_Pivot_Squeeze_Breakout
+Hypothesis: Buy when price breaks above weekly R3 level with daily pivot support and volume expansion, sell when breaks below weekly S3 with daily resistance and volume expansion. Uses 6h timeframe with 1d/1w pivot confluence to capture institutional breakouts. Works in bull/bear markets by filtering false breakouts with multi-timeframe pivot structure and volume confirmation.
 """
 
 import numpy as np
@@ -10,20 +10,19 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_price = prices['open'].values
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 1.5)
+    # Volume expansion: current volume > 1.8x 30-period average
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean()
+    volume_expansion = volume > (vol_ma_30 * 1.8)
     
-    # Previous day's high/low/close
+    # Daily data for pivot points
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -32,69 +31,82 @@ def generate_signals(prices):
     prev_low_1d = df_1d['low'].values
     prev_close_1d = df_1d['close'].values
     
-    # Align daily levels to 4h timeframe (wait for daily close)
-    prev_high_aligned = align_htf_to_ltf(prices, df_1d, prev_high_1d)
-    prev_low_aligned = align_htf_to_ltf(prices, df_1d, prev_low_1d)
-    prev_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close_1d)
+    # Calculate daily pivot points
+    pivot_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
+    r1_1d = 2 * pivot_1d - prev_low_1d
+    s1_1d = 2 * pivot_1d - prev_high_1d
+    r2_1d = pivot_1d + (prev_high_1d - prev_low_1d)
+    s2_1d = pivot_1d - (prev_high_1d - prev_low_1d)
     
-    # Daily EMA50 trend filter
-    ema50_1d_raw = pd.Series(prev_close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d_raw)
+    # Weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    # Candlestick patterns
-    bullish_engulfing = (close[i] > open_price[i]) & (open_price[i] < close[i-1]) & (close[i] > close[i-1])
-    bearish_engulfing = (close[i] < open_price[i]) & (open_price[i] > close[i-1]) & (close[i] < close[i-1])
-    # Compute arrays for patterns
-    bullish_engulfing_arr = np.zeros(n, dtype=bool)
-    bearish_engulfing_arr = np.zeros(n, dtype=bool)
-    for i in range(1, n):
-        bullish_engulfing_arr[i] = (close[i] > open_price[i]) and (open_price[i] < close[i-1]) and (close[i] > close[i-1])
-        bearish_engulfing_arr[i] = (close[i] < open_price[i]) and (open_price[i] > close[i-1]) and (close[i] < close[i-1])
+    prev_high_1w = df_1w['high'].values
+    prev_low_1w = df_1w['low'].values
+    prev_close_1w = df_1w['close'].values
+    
+    # Calculate weekly pivot points
+    pivot_1w = (prev_high_1w + prev_low_1w + prev_close_1w) / 3
+    r2_1w = pivot_1w + (prev_high_1w - prev_low_1w)
+    s2_1w = pivot_1w - (prev_high_1w - prev_low_1w)
+    r3_1w = prev_high_1w + 2 * (pivot_1w - prev_low_1w)
+    s3_1w = prev_low_1w - 2 * (prev_high_1w - pivot_1w)
+    
+    # Align weekly levels to 6h timeframe
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
+    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
+    
+    # Align daily levels to 6h timeframe
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     bars_since_entry = 0  # Track holding period
     
-    for i in range(60, n):  # warmup period
+    for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(prev_high_aligned[i]) or np.isnan(prev_low_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_expansion[i])):
+        if (np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or
+            np.isnan(r2_1w_aligned[i]) or np.isnan(s2_1w_aligned[i]) or
+            np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
+            np.isnan(pivot_1d_aligned[i]) or np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             bars_since_entry = 0
             continue
         
         bars_since_entry += 1
         
-        # Long signal: bull trap - price closes back above prev day's low after probing below
-        long_signal = (low[i] < prev_low_aligned[i] and  # probed below low
-                      close[i] > prev_low_aligned[i] and  # closed back above
-                      bullish_engulfing_arr[i] and
-                      volume_expansion[i] and
-                      close[i] > ema50_1d_aligned[i])  # above daily EMA50
+        # Long setup: price above weekly R3, above daily R1, with volume expansion
+        long_setup = (close[i] > r3_1w_aligned[i] and 
+                     close[i] > r1_1d_aligned[i] and
+                     volume_expansion[i])
         
-        # Short signal: bear trap - price closes back below prev day's high after probing above
-        short_signal = (high[i] > prev_high_aligned[i] and  # probed above high
-                       close[i] < prev_high_aligned[i] and  # closed back below
-                       bearish_engulfing_arr[i] and
-                       volume_expansion[i] and
-                       close[i] < ema50_1d_aligned[i])  # below daily EMA50
+        # Short setup: price below weekly S3, below daily S1, with volume expansion
+        short_setup = (close[i] < s3_1w_aligned[i] and 
+                      close[i] < s1_1d_aligned[i] and
+                      volume_expansion[i])
         
-        # Exit conditions: minimum holding period reached and opposite signal
-        if position == 1 and bars_since_entry >= 12 and short_signal:
+        # Exit conditions: minimum holding period reached or opposite setup
+        if position == 1 and bars_since_entry >= 8 and short_setup:
             position = -1
             signals[i] = -position_size
             bars_since_entry = 0
-        elif position == -1 and bars_since_entry >= 12 and long_signal:
+        elif position == -1 and bars_since_entry >= 8 and long_setup:
             position = 1
             signals[i] = position_size
             bars_since_entry = 0
         elif position == 0:
-            if long_signal:
+            if long_setup:
                 position = 1
                 signals[i] = position_size
                 bars_since_entry = 0
-            elif short_signal:
+            elif short_setup:
                 position = -1
                 signals[i] = -position_size
                 bars_since_entry = 0
@@ -106,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1D_Turtle_Soup_Reversal_v1"
-timeframe = "4h"
+name = "6h_1D_1W_Pivot_Squeeze_Breakout"
+timeframe = "6h"
 leverage = 1.0
