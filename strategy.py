@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 300:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,63 +13,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot calculation
+    # Get 1d data for ATR and price channel
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points
-    week_high = np.full(len(high_1d), np.nan)
-    week_low = np.full(len(high_1d), np.nan)
-    week_close = np.full(len(close_1d), np.nan)
+    # Calculate 20-period ATR on 1d
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
+    tr2 = np.maximum(low_1d[1:] - close_1d[:-1], np.abs(low_1d[1:] - high_1d[:-1]))
+    tr = np.concatenate([[np.inf], np.maximum(tr1, tr2)])
+    atr = np.zeros_like(high_1d)
+    atr[0] = tr[0]
+    for i in range(1, len(tr)):
+        atr[i] = (atr[i-1] * 19 + tr[i]) / 20 if i >= 20 else np.nan
     
-    for i in range(7, len(high_1d)):
-        week_high[i] = np.max(high_1d[i-7:i])
-        week_low[i] = np.min(low_1d[i-7:i])
-        week_close[i] = close_1d[i-1]
+    # Calculate 20-period Donchian channel on 1d
+    donchian_high = np.full(len(high_1d), np.nan)
+    donchian_low = np.full(len(low_1d), np.nan)
+    for i in range(20, len(high_1d)):
+        donchian_high[i] = np.max(high_1d[i-20:i])
+        donchian_low[i] = np.min(low_1d[i-20:i])
     
-    # Calculate pivot points and S3/R3 levels
-    pivot = np.full(len(high_1d), np.nan)
-    r3 = np.full(len(high_1d), np.nan)
-    s3 = np.full(len(high_1d), np.nan)
+    # Align ATR and Donchian to 4h
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    for i in range(7, len(high_1d)):
-        if not (np.isnan(week_high[i]) or np.isnan(week_low[i]) or np.isnan(week_close[i])):
-            pivot[i] = (week_high[i] + week_low[i] + week_close[i]) / 3.0
-            r3[i] = week_high[i] + 2 * (pivot[i] - week_low[i])
-            s3[i] = week_low[i] - 2 * (week_high[i] - pivot[i])
-    
-    # Align to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Calculate RSI on 4h close
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    for i in range(1, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25
     
-    for i in range(200, n):
-        if (np.isnan(pivot_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i])):
-            signals[i] = 0.0
+    for i in range(100, n):
+        if (np.isnan(atr_aligned[i]) or 
+            np.isnan(donchian_high_aligned[i]) or
+            np.isnan(donchian_low_aligned[i]) or
+            np.isnan(rsi[i])):
             continue
         
-        # Check volume condition
-        vol_ma = np.mean(volume[max(0, i-10):i+1]) if i >= 10 else np.mean(volume[:i+1])
-        vol_confirm = volume[i] > vol_ma
+        # Breakout with volume and RSI filter
+        breakout_long = close[i] > donchian_high_aligned[i]
+        breakout_short = close[i] < donchian_low_aligned[i]
+        vol_filter = volume[i] > np.mean(volume[max(0, i-19):i+1])
+        rsi_filter = (rsi[i] > 30) & (rsi[i] < 70)
         
-        # Entry conditions
-        long_entry = close[i] > r3_aligned[i] and vol_confirm
-        short_entry = close[i] < s3_aligned[i] and vol_confirm
+        long_entry = breakout_long and vol_filter and rsi_filter
+        short_entry = breakout_short and vol_filter and rsi_filter
         
-        # Exit conditions
-        exit_long = position == 1 and close[i] < pivot_aligned[i]
-        exit_short = position == -1 and close[i] > pivot_aligned[i]
+        # Exit: opposite breakout or ATR stop
+        if position == 1:
+            exit_condition = (breakout_short or 
+                            close[i] < donchian_high_aligned[i] - 1.5 * atr_aligned[i])
+        elif position == -1:
+            exit_condition = (breakout_long or 
+                            close[i] > donchian_low_aligned[i] + 1.5 * atr_aligned[i])
+        else:
+            exit_condition = False
         
         if long_entry and position != 1:
             position = 1
@@ -77,19 +91,14 @@ def generate_signals(prices):
         elif short_entry and position != -1:
             position = -1
             signals[i] = -position_size
-        elif exit_long or exit_short:
+        elif exit_condition:
             position = 0
             signals[i] = 0.0
         else:
-            if position == 1:
-                signals[i] = position_size
-            elif position == -1:
-                signals[i] = -position_size
-            else:
-                signals[i] = 0.0
+            signals[i] = position_size * position
     
     return signals
 
-name = "12h_1d_pivot_breakout_volume"
-timeframe = "12h"
+name = "4h_1d_donchian_atr_rsi_filter"
+timeframe = "4h"
 leverage = 1.0
