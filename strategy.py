@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,7 +6,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,80 +14,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # EMA200 on 4h close
-    close_4h = df_4h['close'].values
-    ema200_4h = np.full(len(close_4h), np.nan)
-    for i in range(200, len(close_4h)):
-        ema200_4h[i] = np.mean(close_4h[i-200:i])
-    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
-    
-    # Get 1d data for RSI
+    # Get 1d data for Donchian calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    # Calculate RSI(14) on 1d
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    avg_gain = np.full(len(close_1d), np.nan)
-    avg_loss = np.full(len(close_1d), np.nan)
-    for i in range(14, len(close_1d)):
-        if i == 14:
-            avg_gain[i] = np.mean(gain[1:i+1])
-            avg_loss[i] = np.mean(loss[1:i+1])
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Calculate 20-period Donchian channels on 1d
+    donchian_high = np.full(len(high_1d), np.nan)
+    donchian_low = np.full(len(low_1d), np.nan)
+    for i in range(20, len(high_1d)):
+        donchian_high[i] = np.max(high_1d[i-20:i])
+        donchian_low[i] = np.min(low_1d[i-20:i])
     
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Calculate 20-period average volume on 1d
+    avg_volume_1d = np.full(len(volume_1d), np.nan)
+    for i in range(20, len(volume_1d)):
+        avg_volume_1d[i] = np.mean(volume_1d[i-20:i])
     
-    # Session filter: 8-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # Get 1w data for EMA trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    
+    # Calculate 50-period EMA on 1w
+    ema_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 50:
+        ema_1w[49] = np.mean(close_1w[:50])
+        for i in range(50, len(close_1w)):
+            ema_1w[i] = (close_1w[i] * 2 / (50 + 1)) + (ema_1w[i-1] * (49 / (50 + 1)))
+    
+    # Align all indicators to 4h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     signals = np.zeros(n)
-    position = 0
-    position_size = 0.20
+    position = 0  # 0: flat, 1: long, -1: short
+    position_size = 0.25
     
-    for i in range(100, n):
-        if hours[i] < 8 or hours[i] > 20:
+    for i in range(200, n):
+        # Skip if data not ready
+        if (np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or
+            np.isnan(avg_volume_1d_aligned[i]) or
+            np.isnan(ema_1w_aligned[i])):
             signals[i] = 0.0
             continue
-            
-        if np.isnan(ema200_4h_aligned[i]) or np.isnan(rsi_1d_aligned[i]):
-            signals[i] = 0.0
-            continue
-            
-        # Trend filter: price above/below EMA200 on 4h
-        uptrend = close[i] > ema200_4h_aligned[i]
-        downtrend = close[i] < ema200_4h_aligned[i]
         
-        # RSI conditions
-        rsi_oversold = rsi_1d_aligned[i] < 30
-        rsi_overbought = rsi_1d_aligned[i] > 70
+        # Volume confirmation: current volume > average volume
+        vol_confirm = volume[i] > avg_volume_1d_aligned[i]
         
-        # Entry logic
-        if uptrend and rsi_oversold and position != 1:
+        # Donchian breakout conditions
+        donchian_breakout_long = close[i] > donchian_high_aligned[i]
+        donchian_breakout_short = close[i] < donchian_low_aligned[i]
+        
+        # Trend filter: price above/below weekly EMA
+        uptrend = close[i] > ema_1w_aligned[i]
+        downtrend = close[i] < ema_1w_aligned[i]
+        
+        # Entry conditions with confluence
+        long_entry = donchian_breakout_long and vol_confirm and uptrend
+        short_entry = donchian_breakout_short and vol_confirm and downtrend
+        
+        # Exit conditions: opposite Donchian breakout
+        exit_long = position == 1 and donchian_breakout_short
+        exit_short = position == -1 and donchian_breakout_long
+        
+        # Execute signals
+        if long_entry and position != 1:
             position = 1
             signals[i] = position_size
-        elif downtrend and rsi_overbought and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -position_size
-        elif position == 1 and (not uptrend or rsi_1d_aligned[i] > 50):
+        elif exit_long or exit_short:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (not downtrend or rsi_1d_aligned[i] < 50):
-            position = 0
-            signals[i] = 0.0
+        # Hold current position
         else:
             if position == 1:
                 signals[i] = position_size
@@ -97,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4h_1d_ema200_rsi_filter"
-timeframe = "1h"
+name = "4h_1d_1w_donchian_volume_ema_trend"
+timeframe = "4h"
 leverage = 1.0
