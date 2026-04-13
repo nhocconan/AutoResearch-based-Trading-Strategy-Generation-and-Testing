@@ -1,35 +1,19 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Range_Breakout_Volume
-Hypothesis: Price breaking above R4 or below S4 on the 1d chart with volume expansion signals institutional breakout.
-Works in bull markets (breakouts above R4) and bear markets (breakdowns below S4). Uses 1d trend filter to avoid false breakouts.
-Target: 20-40 trades/year.
+6h_1d_Donchian_Weekly_Direction
+Hypothesis: Use 1-day Donchian breakout with weekly directional filter (price above/below weekly 200 EMA).
+In bull markets, buy breakouts above 1-day high; in bear markets, sell breakdowns below 1-day low.
+Volume confirmation filters weak breakouts. Weekly trend ensures alignment with higher timeframe momentum.
+Target: 15-30 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels."""
-    range_val = high - low
-    range_val = np.where(range_val == 0, 1e-10, range_val)
-    C = close
-    H = high
-    L = low
-    R1 = C + ((H - L) * 1.0833)
-    R2 = C + ((H - L) * 1.1666)
-    R3 = C + ((H - L) * 1.2500)
-    R4 = C + ((H - L) * 1.5000)
-    S1 = C - ((H - L) * 1.0833)
-    S2 = C - ((H - L) * 1.1666)
-    S3 = C - ((H - L) * 1.2500)
-    S4 = C - ((H - L) * 1.5000)
-    return R1, R2, R3, R4, S1, S2, S3, S4
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -37,7 +21,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and Camarilla levels
+    # Get daily data for Donchian levels and volume
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -45,42 +29,50 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # 1d trend filter: price above/below 50 EMA to avoid counter-trend breakouts
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend = close_1d > ema_50
-    downtrend = close_1d < ema_50
+    # 1-day Donchian channels (20-period)
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Camarilla levels on daily
-    R1_1d, R2_1d, R3_1d, R4_1d, S1_1d, S2_1d, S3_1d, S4_1d = calculate_camarilla(high_1d, low_1d, close_1d)
+    # Weekly trend filter: price above/below weekly 200 EMA
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Align all data to 4h timeframe
-    R4_1d_aligned = align_htf_to_ltf(prices, df_1d, R4_1d)
-    S4_1d_aligned = align_htf_to_ltf(prices, df_1d, S4_1d)
-    uptrend_aligned = align_htf_to_ltf(prices, df_1d, uptrend.astype(float))
-    downtrend_aligned = align_htf_to_ltf(prices, df_1d, downtrend.astype(float))
+    close_1w = df_1w['close'].values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    weekly_uptrend = close_1w > ema_200_1w
+    weekly_downtrend = close_1w < ema_200_1w
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 1.5)
+    # Volume confirmation: current 1d volume > 1.5x 20-period average
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_expansion = volume_1d > (vol_ma_20_1d * 1.5)
+    
+    # Align all data to 6h timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
+    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend.astype(float))
+    volume_expansion_aligned = align_htf_to_ltf(prices, df_1d, volume_expansion.astype(float))
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is not ready
-        if (np.isnan(R4_1d_aligned[i]) or np.isnan(S4_1d_aligned[i]) or 
-            np.isnan(uptrend_aligned[i]) or np.isnan(downtrend_aligned[i]) or
-            np.isnan(volume_expansion[i])):
+        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or
+            np.isnan(weekly_uptrend_aligned[i]) or np.isnan(weekly_downtrend_aligned[i]) or
+            np.isnan(volume_expansion_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long: break above R4 in uptrend with volume expansion
-        long_condition = (close[i] > R4_1d_aligned[i]) and uptrend_aligned[i] > 0.5 and volume_expansion[i]
+        # Long: breakout above 1-day high in weekly uptrend with volume expansion
+        long_condition = (close[i] > high_20_aligned[i]) and weekly_uptrend_aligned[i] > 0.5 and volume_expansion_aligned[i]
         
-        # Short: break below S4 in downtrend with volume expansion
-        short_condition = (close[i] < S4_1d_aligned[i]) and downtrend_aligned[i] > 0.5 and volume_expansion[i]
+        # Short: breakdown below 1-day low in weekly downtrend with volume expansion
+        short_condition = (close[i] < low_20_aligned[i]) and weekly_downtrend_aligned[i] > 0.5 and volume_expansion_aligned[i]
         
         if long_condition and position != 1:
             position = 1
@@ -94,10 +86,10 @@ def generate_signals(prices):
             signals[i] = -position_size
         else:
             # Exit conditions: reverse signal or loss of trend/volume
-            if position == 1 and (not uptrend_aligned[i] > 0.5 or not volume_expansion[i]):
+            if position == 1 and (not weekly_uptrend_aligned[i] > 0.5 or not volume_expansion_aligned[i]):
                 position = 0
                 signals[i] = 0.0
-            elif position == -1 and (not downtrend_aligned[i] > 0.5 or not volume_expansion[i]):
+            elif position == -1 and (not weekly_downtrend_aligned[i] > 0.5 or not volume_expansion_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -105,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_Range_Breakout_Volume"
-timeframe = "4h"
+name = "6h_1d_Donchian_Weekly_Direction"
+timeframe = "6h"
 leverage = 1.0
