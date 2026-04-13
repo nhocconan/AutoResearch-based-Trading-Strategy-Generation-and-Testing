@@ -8,92 +8,105 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    # 12h_1d_camarilla_breakout_volume_v1
+    # Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and 1w trend filter
+    # Long: price breaks above H3 level + volume > 1.5x 20-period 12h average + 1w close > 1w EMA50
+    # Short: price breaks below L3 level + volume > 1.5x 20-period 12h average + 1w close < 1w EMA50
+    # Uses discrete sizing (0.25) to minimize fee drag and ATR-based stoploss
+    # Target: 12-37 trades/year to stay within 12h optimal range (50-150 total over 4 years)
+    
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time']
     
-    # Get 1d data for ATR and Bollinger Bands
+    # Get 1d data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d ATR(14)
-    tr_1d = np.maximum(high_1d[1:] - low_1d[1:], 
-                       np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), 
-                                  np.abs(low_1d[1:] - close_1d[:-1])))
-    tr_1d = np.concatenate([[tr_1d[0]], tr_1d])
-    atr_1d = np.zeros_like(close_1d)
-    atr_1d[0] = tr_1d[0]
-    for i in range(1, len(tr_1d)):
-        atr_1d[i] = 0.93 * atr_1d[i-1] + 0.07 * tr_1d[i]
+    # Calculate 1d Camarilla levels (based on previous day)
+    # Pivot = (H+L+C)/3
+    # H3 = Pivot + 1.1*(H-L)
+    # L3 = Pivot - 1.1*(H-L)
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    hl_range = high_1d - low_1d
+    h3 = pivot + 1.1 * hl_range
+    l3 = pivot - 1.1 * hl_range
     
-    # Calculate 1d Bollinger Bands (20, 2)
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Calculate 1d RSI(14)
-    delta = np.diff(close_1d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1d = 100 - (100 / (1 + rs))
-    # Pad for the first element
-    rsi_1d = np.concatenate([[50], rsi_1d])
+    close_1w = df_1w['close'].values
     
-    # Align all indicators to 6h timeframe
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Calculate 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align all indicators to 12h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Calculate volume average for confirmation (using 12h data)
+    vol_avg_20_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
-    position = 0
-    position_size = 0.25
+    position = 0  # 0: flat, 1: long, -1: short
+    position_size = 0.25  # 25% position size
+    
+    # Track entry price for stoploss
     entry_price = np.full(n, np.nan)
     
-    for i in range(30, n):
+    # Calculate ATR using true range approximation for 12h timeframe
+    atr_12h = np.zeros(n)
+    for i in range(1, n):
+        tr = max(
+            high[i] - low[i],
+            abs(high[i] - close[i-1]),
+            abs(low[i] - close[i-1])
+        )
+        if i < 14:
+            atr_12h[i] = tr  # Simple average for warmup
+        else:
+            atr_12h[i] = 0.93 * atr_12h[i-1] + 0.07 * tr  # Wilder's smoothing
+    
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(upper_bb_aligned[i]) or
-            np.isnan(lower_bb_aligned[i]) or
-            np.isnan(rsi_1d_aligned[i])):
+        if (np.isnan(h3_aligned[i]) or 
+            np.isnan(l3_aligned[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or
+            np.isnan(vol_avg_20_12h[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: Bollinger Band squeeze + RSI extreme
-        bb_width = upper_bb_aligned[i] - lower_bb_aligned[i]
-        bb_width_percentile = pd.Series(bb_width[:i+1]).rolling(window=50, min_periods=10).rank(pct=True).iloc[-1] if i >= 10 else 0.5
+        # Volume confirmation: current 12h volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * vol_avg_20_12h[i]
         
-        # Volatility squeeze condition (BB width in lower 20th percentile)
-        volatility_squeeze = bb_width_percentile < 0.2
+        # Trend filter: 12h close above/below EMA50 (from 1w)
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
-        # RSI extreme conditions
-        rsi_oversold = rsi_1d_aligned[i] < 30
-        rsi_overbought = rsi_1d_aligned[i] > 70
+        # Breakout conditions: price breaks Camarilla levels with volume and trend
+        breakout_long = (close[i] > h3_aligned[i]) and volume_confirmed and uptrend
+        breakout_short = (close[i] < l3_aligned[i]) and volume_confirmed and downtrend
         
-        # Entry signals
-        long_entry = volatility_squeeze and rsi_oversold and close[i] > close[i-1]
-        short_entry = volatility_squeeze and rsi_overbought and close[i] < close[i-1]
-        
-        # Exit conditions: RSI mean reversion or volatility expansion
-        exit_long = position == 1 and (rsi_1d_aligned[i] > 50 or bb_width_percentile > 0.8)
-        exit_short = position == -1 and (rsi_1d_aligned[i] < 50 or bb_width_percentile > 0.8)
+        # Stoploss: 2x ATR below/above entry
+        exit_long = position == 1 and not np.isnan(entry_price[i-1]) and close[i] < entry_price[i-1] - 2.0 * atr_12h[i]
+        exit_short = position == -1 and not np.isnan(entry_price[i-1]) and close[i] > entry_price[i-1] + 2.0 * atr_12h[i]
         
         # Execute signals
-        if long_entry and position != 1:
+        if breakout_long and position != 1:
             position = 1
             signals[i] = position_size
             entry_price[i] = close[i]
-        elif short_entry and position != -1:
+        elif breakout_short and position != -1:
             position = -1
             signals[i] = -position_size
             entry_price[i] = close[i]
@@ -119,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_bb_rsi_squeeze_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
