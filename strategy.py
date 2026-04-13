@@ -5,47 +5,42 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
-    # Hypothesis: 12h Camarilla breakout with 1w EMA(20) trend + volume spike
-    # Long when: price breaks above Camarilla H3 (1d) AND price > 1w EMA20 AND volume > 2.0x 20-bar avg
-    # Short when: price breaks below Camarilla L3 (1d) AND price < 1w EMA20 AND volume > 2.0x 20-bar avg
-    # Exit when: price crosses Camarilla pivot point (PP)
-    # Uses 1w EMA20 for stronger trend filter, reducing whipsaw in bear markets
-    # Target: 50-150 total trades over 4 years (12-37/year)
+    # Hypothesis: 4h Donchian(20) breakout + 12h EMA(50) trend + volume confirmation
+    # Long when: price breaks above Donchian upper (20) AND price > 12h EMA50 AND volume > 2.0x 20-bar avg volume
+    # Short when: price breaks below Donchian lower (20) AND price < 12h EMA50 AND volume > 2.0x 20-bar avg volume
+    # Exit when: price crosses Donchian midpoint OR adverse 12h EMA50 crossover
+    # Uses discrete sizing (0.25) targeting 75-200 total trades over 4 years.
+    # Donchian provides clear trend structure; 12h EMA50 filters counter-trend moves;
+    # Volume spike confirms breakout validity. Works in bull (trend continuation) and bear (mean-reversion at midpoint).
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d and 1w data
-    df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 30 or len(df_1w) < 20:
+    # Calculate 4h Donchian channels (20-period)
+    donchian_window = 20
+    upper_channel = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    lower_channel = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    middle_channel = (upper_channel + lower_channel) / 2.0
+    
+    # Get 12h data for EMA(50) trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    close_1w = df_1w['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Camarilla pivot levels from previous 1d bar
-    PP_1d = (high_1d + low_1d + close_1d) / 3.0
-    H3_1d = PP_1d + (high_1d - low_1d) * 1.1 / 4.0
-    L3_1d = PP_1d - (high_1d - low_1d) * 1.1 / 4.0
+    # Calculate 12h EMA(50) trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 1w EMA(20) trend filter
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Align HTF indicators to 4h timeframe (wait for completed 12h bar)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Align HTF indicators to 12h timeframe
-    PP_1d_aligned = align_htf_to_ltf(prices, df_1d, PP_1d)
-    H3_1d_aligned = align_htf_to_ltf(prices, df_1d, H3_1d)
-    L3_1d_aligned = align_htf_to_ltf(prices, df_1d, L3_1d)
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Volume confirmation: volume > 2.0x 20-bar average
+    # Calculate volume confirmation: volume > 2.0x 20-bar average volume
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirmed = volume > (2.0 * avg_volume)
     
@@ -53,28 +48,28 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
     
-    for i in range(20, n):
+    for i in range(donchian_window, n):
         # Skip if data not ready
-        if (np.isnan(PP_1d_aligned[i]) or np.isnan(H3_1d_aligned[i]) or np.isnan(L3_1d_aligned[i]) or
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or np.isnan(middle_channel[i]) or
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
-        # Camarilla breakout conditions (using previous bar's levels to avoid look-ahead)
-        breakout_up = close[i] > H3_1d_aligned[i-1]  # break above previous H3
-        breakout_down = close[i] < L3_1d_aligned[i-1]  # break below previous L3
+        # Donchian breakout conditions (using current bar's channels)
+        breakout_up = close[i] > upper_channel[i]  # break above upper channel
+        breakout_down = close[i] < lower_channel[i]  # break below lower channel
         
-        # 1w EMA20 trend filter
-        uptrend = close[i] > ema_20_1w_aligned[i]
-        downtrend = close[i] < ema_20_1w_aligned[i]
+        # 12h EMA50 trend filter
+        uptrend = close[i] > ema_50_12h_aligned[i]
+        downtrend = close[i] < ema_50_12h_aligned[i]
         
         # Entry conditions with volume confirmation
         long_entry = breakout_up and uptrend and volume_confirmed[i] and position != 1
         short_entry = breakout_down and downtrend and volume_confirmed[i] and position != -1
         
         # Exit conditions
-        exit_long = (position == 1 and close[i] < PP_1d_aligned[i])
-        exit_short = (position == -1 and close[i] > PP_1d_aligned[i])
+        exit_long = (position == 1 and (close[i] < middle_channel[i] or not uptrend))
+        exit_short = (position == -1 and (close[i] > middle_channel[i] or not downtrend))
         
         # Execute signals
         if long_entry:
@@ -100,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_1w_camarilla_breakout_ema20_volume_v1"
-timeframe = "12h"
+name = "4h_12h_donchian_breakout_ema_volume_v1"
+timeframe = "4h"
 leverage = 1.0
