@@ -3,10 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot levels with 1d trend filter and volume confirmation.
-# Uses Camarilla pivot levels (support/resistance) from daily timeframe for entry/exit.
-# In trending markets, price tends to respect these levels as support/resistance.
-# Combined with 1d EMA trend filter and volume spikes to avoid false breakouts.
+# Hypothesis: 12h Turtle Soup strategy with 1-week trend filter and volume confirmation.
+# Turtle Soup is a reversal pattern that fades false breakouts.
+# In a weekly uptrend, we look for failed new highs (long setup).
+# In a weekly downtrend, we look for failed new lows (short setup).
+# Combined with volume confirmation to filter low-probability signals.
 # Target: 15-35 trades per year (60-140 total over 4 years) for 12h timeframe.
 
 def generate_signals(prices):
@@ -19,111 +20,83 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-day data for Camarilla pivot levels and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # 1-week data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day's OHLC
-    # Using yesterday's data to avoid look-ahead
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    close_1w = df_1w['close'].values
+    # EMA(50) for weekly trend filter
+    ema50_1w = np.zeros(len(close_1w))
+    ema_multiplier = 2 / (50 + 1)
+    ema50_1w[0] = close_1w[0]
+    for i in range(1, len(close_1w)):
+        ema50_1w[i] = (close_1w[i] - ema50_1w[i-1]) * ema_multiplier + ema50_1w[i-1]
     
-    # Camarilla formulas
-    # Pivot = (High + Low + Close) / 3
-    # R4 = Close + (High - Low) * 1.1/2
-    # R3 = Close + (High - Low) * 1.1/4
-    # R2 = Close + (High - Low) * 1.1/6
-    # R1 = Close + (High - Low) * 1.1/12
-    # S1 = Close - (High - Low) * 1.1/12
-    # S2 = Close - (High - Low) * 1.1/6
-    # S3 = Close - (High - Low) * 1.1/4
-    # S4 = Close - (High - Low) * 1.1/2
+    # Align weekly EMA to 12h timeframe
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    pivot = np.full(len(prev_close), np.nan)
-    r4 = np.full(len(prev_close), np.nan)
-    r3 = np.full(len(prev_close), np.nan)
-    r2 = np.full(len(prev_close), np.nan)
-    r1 = np.full(len(prev_close), np.nan)
-    s1 = np.full(len(prev_close), np.nan)
-    s2 = np.full(len(prev_close), np.nan)
-    s3 = np.full(len(prev_close), np.nan)
-    s4 = np.full(len(prev_close), np.nan)
+    # 20-period highest high and lowest low for Turtle Soup setup
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
     
-    for i in range(1, len(prev_close)):
-        if not (np.isnan(prev_high[i]) or np.isnan(prev_low[i]) or np.isnan(prev_close[i])):
-            hl_range = prev_high[i] - prev_low[i]
-            pivot[i] = (prev_high[i] + prev_low[i] + prev_close[i]) / 3.0
-            r4[i] = prev_close[i] + hl_range * 1.1 / 2.0
-            r3[i] = prev_close[i] + hl_range * 1.1 / 4.0
-            r2[i] = prev_close[i] + hl_range * 1.1 / 6.0
-            r1[i] = prev_close[i] + hl_range * 1.1 / 12.0
-            s1[i] = prev_close[i] - hl_range * 1.1 / 12.0
-            s2[i] = prev_close[i] - hl_range * 1.1 / 6.0
-            s3[i] = prev_close[i] - hl_range * 1.1 / 4.0
-            s4[i] = prev_close[i] - hl_range * 1.1 / 2.0
+    for i in range(20, n):
+        highest_high[i] = np.max(high[i-20:i])
+        lowest_low[i] = np.min(low[i-20:i])
     
-    # Align Camarilla levels to 12h timeframe
-    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
-    r4_12h = align_htf_to_ltf(prices, df_1d, r4)
-    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
-    r2_12h = align_htf_to_ltf(prices, df_1d, r2)
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
-    s2_12h = align_htf_to_ltf(prices, df_1d, s2)
-    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
-    s4_12h = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # 1-day EMA for trend filter
-    ema20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
-    
-    # Average volume (24-period = 12 hours) for volume confirmation
+    # Average volume (20-period) for volume confirmation
     avg_volume = np.full(n, np.nan)
-    for i in range(24, n):
-        avg_volume[i] = np.mean(volume[i-24:i])
+    for i in range(20, n):
+        avg_volume[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(24, n):
+    for i in range(20, n):
         # Skip if any required data is not ready
-        if (np.isnan(pivot_12h[i]) or np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or
-            np.isnan(ema20_1d_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        ema_trend = ema20_1d_aligned[i]
+        weekly_trend = ema50_1w_aligned[i]
         
-        # Volume confirmation: current volume > 2.0x average volume
-        volume_confirm = vol > 2.0 * avg_vol
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirm = vol > 1.5 * avg_vol
         
         if position == 0:
-            # Long: Price breaks above R1 with volume + above EMA trend
-            if (price > r1_12h[i] and volume_confirm and price > ema_trend):
+            # Long setup: Weekly uptrend + price makes new 20-period high but closes below it (failed breakout)
+            if (price > weekly_trend and
+                high[i] > highest_high[i] and  # made new high
+                close[i] < highest_high[i] and  # but closed below it (failed breakout)
+                volume_confirm):
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below S1 with volume + below EMA trend
-            elif (price < s1_12h[i] and volume_confirm and price < ema_trend):
+            # Short setup: Weekly downtrend + price makes new 20-period low but closes above it (failed breakdown)
+            elif (price < weekly_trend and
+                  low[i] < lowest_low[i] and   # made new low
+                  close[i] > lowest_low[i] and  # but closed above it (failed breakdown)
+                  volume_confirm):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Price breaks below pivot or trend changes
-            if (price < pivot_12h[i] or price < ema_trend):
+            # Exit long: Price closes above the failed breakout level (invalidates setup) or weekly trend turns down
+            if (close[i] > highest_high[i] or
+                price < weekly_trend):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Price breaks above pivot or trend changes
-            if (price > pivot_12h[i] or price > ema_trend):
+            # Exit short: Price closes below the failed breakdown level (invalidates setup) or weekly trend turns up
+            if (close[i] < lowest_low[i] or
+                price > weekly_trend):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -131,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_Pivot_Trend_Volume"
+name = "12h_1w_TurtleSoup_Reversal_Volume"
 timeframe = "12h"
 leverage = 1.0
