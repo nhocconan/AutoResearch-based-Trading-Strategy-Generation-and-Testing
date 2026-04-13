@@ -1,13 +1,13 @@
-#!/usr/bin/env python3
+# 1d_1W_Camarilla_Pivot_Breakout_v1
+# Hypothesis: Camarilla pivot levels on 1-day chart provide strong support/resistance levels.
+# Breakouts from these levels with volume confirmation and weekly trend filter capture
+# momentum in both bull and bear markets. Weekly trend filter ensures we only trade
+# in the direction of the higher timeframe trend, reducing false signals.
+# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe.
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 12h Donchian breakout with volume confirmation and daily trend filter.
-# Donchian channels capture breakouts in both bull and bear markets.
-# Volume confirmation ensures breakouts have conviction.
-# Daily trend filter avoids counter-trend trades.
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,97 +19,95 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for multi-timeframe analysis
+    # Calculate Camarilla pivot levels on daily data
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Donchian channels (20-period) on 12h data
-    period = 20
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
+    # Calculate weekly trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    for i in range(period-1, n):
-        donchian_high[i] = np.max(high[i-period+1:i+1])
-        donchian_low[i] = np.min(low[i-period+1:i+1])
-    
-    # Calculate ATR (14-period) for volatility filter
-    atr_period = 14
-    tr = np.zeros(n)
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = np.zeros(n)
-    for i in range(atr_period, n):
-        atr[i] = np.mean(tr[i-atr_period+1:i+1])
-    
-    # Calculate average volume (20-period) for volume confirmation
-    avg_volume = np.zeros(n)
-    for i in range(20, n):
-        avg_volume[i] = np.mean(volume[i-20:i])
-    
-    # Align daily trend filter (SMA 50)
-    close_1d = df_1d['close'].values
-    sma_1d = np.zeros(len(close_1d))
-    for i in range(50, len(close_1d)):
-        sma_1d[i] = np.mean(close_1d[i-50:i])
-    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d)
+    close_1w = df_1w['close'].values
+    sma_1w = np.zeros(len(close_1w))
+    for i in range(20, len(close_1w)):
+        sma_1w[i] = np.mean(close_1w[i-20:i])
+    sma_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_1w)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(50, n):
-        # Skip if any required data is not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(atr[i]) or np.isnan(avg_volume[i]) or 
-            np.isnan(sma_1d_aligned[i])):
+    for i in range(1, n):
+        # Need previous day's data for Camarilla calculation
+        if i == 0:
             signals[i] = 0.0
             continue
+            
+        # Get previous day's OHLC (using daily data)
+        # Find the index of the previous day in 1d data
+        prev_day_idx = len(df_1d) - 1
+        # Simple approach: use last available daily data
+        if len(df_1d) >= 2:
+            prev_high = df_1d['high'].iloc[-2]
+            prev_low = df_1d['low'].iloc[-2]
+            prev_close = df_1d['close'].iloc[-2]
+        else:
+            signals[i] = 0.0
+            continue
+            
+        # Calculate Camarilla levels
+        range_val = prev_high - prev_low
+        if range_val <= 0:
+            signals[i] = 0.0
+            continue
+            
+        # Camarilla levels
+        L4 = prev_close - (range_val * 1.1 / 2)
+        L3 = prev_close - (range_val * 1.1 / 4)
+        L2 = prev_close - (range_val * 1.1 / 6)
+        L1 = prev_close - (range_val * 1.1 / 12)
+        H1 = prev_close + (range_val * 1.1 / 12)
+        H2 = prev_close + (range_val * 1.1 / 6)
+        H3 = prev_close + (range_val * 1.1 / 4)
+        H4 = prev_close + (range_val * 1.1 / 2)
         
         price = close[i]
         vol = volume[i]
-        avg_vol = avg_volume[i]
-        donch_high = donchian_high[i]
-        donch_low = donchian_low[i]
-        atr_val = atr[i]
-        daily_sma = sma_1d_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirm = vol > 1.5 * avg_vol
-        
-        # ATR filter: ATR > 0 (always true, but keeps structure)
-        atr_filter = atr_val > 0
+        # Volume confirmation: current volume > 1.5x average volume (20-period)
+        if i >= 20:
+            avg_volume = np.mean(volume[i-20:i])
+            volume_confirm = vol > 1.5 * avg_volume
+        else:
+            volume_confirm = False
+            
+        # Weekly trend filter
+        weekly_trend_up = sma_1w_aligned[i] > 0 if not np.isnan(sma_1w_aligned[i]) else False
+        weekly_trend_down = sma_1w_aligned[i] < 0 if not np.isnan(sma_1w_aligned[i]) else False
         
         if position == 0:
-            # Long: price breaks above Donchian high + volume + price above daily SMA
-            if (price > donch_high and 
-                volume_confirm and 
-                atr_filter and
-                price > daily_sma):
+            # Long: price breaks above H3 or H4 with volume and weekly uptrend
+            if (price > H3 and volume_confirm and weekly_trend_up):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below Donchian low + volume + price below daily SMA
-            elif (price < donch_low and 
-                  volume_confirm and 
-                  atr_filter and
-                  price < daily_sma):
+            # Short: price breaks below L3 or L4 with volume and weekly downtrend
+            elif (price < L3 and volume_confirm and weekly_trend_down):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below Donchian low OR volume drops
-            if (price < donch_low or 
-                vol < 0.5 * avg_vol):
+            # Exit long: price breaks below L3 or weekly trend turns down
+            if (price < L3 or (not weekly_trend_up and weekly_trend_down)):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above Donchian high OR volume drops
-            if (price > donch_high or 
-                vol < 0.5 * avg_vol):
+            # Exit short: price breaks above H3 or weekly trend turns up
+            if (price > H3 or (not weekly_trend_down and weekly_trend_up)):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -117,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Donchian_Breakout_Volume_Filter_v1"
-timeframe = "12h"
+name = "1d_1W_Camarilla_Pivot_Breakout_v1"
+timeframe = "1d"
 leverage = 1.0
