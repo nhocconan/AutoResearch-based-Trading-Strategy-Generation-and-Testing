@@ -1,13 +1,9 @@
-#!/usr/bin/env python3
-"""
-6h_12h_Camarilla_Breakout_Structure
-Hypothesis: Camarilla pivot levels from 12h timeframe provide strong intraday support/resistance.
-Breakouts above R3 or below S3 with volume confirmation indicate institutional participation,
-while closes back inside the H-L range suggest fakeouts. The 1d EMA50 filter ensures trades
-align with the medium-term trend, reducing whipsaws in ranging markets. This structure works
-in both bull (breakouts continue) and bear (fades at resistance) markets by using price
-action confirmation rather than pure breakout logic.
-"""
+# 4h_1d_Camarilla_Breakout_Structure_v1
+# Hypothesis: Camarilla pivot levels from daily timeframe provide strong support/resistance.
+# Breakouts above R3 or below S3 with volume confirmation and aligned with weekly trend
+# (price > weekly EMA200 for longs, price < weekly EMA200 for shorts) capture institutional moves.
+# Works in bull markets (breakouts continue) and bear markets (fades at resistance) by using
+# price action confirmation rather than pure breakout logic. Target: 20-40 trades/year.
 
 import numpy as np
 import pandas as pd
@@ -23,41 +19,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla pivot calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Calculate Camarilla levels for each 12h bar: H-L range based
-    # R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), etc.
-    range_12h = high_12h - low_12h
-    r4_12h = close_12h + 1.5 * range_12h
-    r3_12h = close_12h + 1.1 * range_12h
-    s3_12h = close_12h - 1.1 * range_12h
-    s4_12h = close_12h - 1.5 * range_12h
-    
-    # Align 12h Camarilla levels to 6h
-    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
-    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
-    r4_12h_aligned = align_htf_to_ltf(prices, df_12h, r4_12h)
-    s4_12h_aligned = align_htf_to_ltf(prices, df_12h, s4_12h)
-    
-    # Get 1d data for EMA50 trend filter
+    # Get 1d data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: current volume > 1.8x 20-period average
+    # Calculate Camarilla levels for each daily bar: H-L range based
+    # R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), etc.
+    range_1d = high_1d - low_1d
+    r3_1d = close_1d + 1.1 * range_1d
+    s3_1d = close_1d - 1.1 * range_1d
+    r4_1d = close_1d + 1.5 * range_1d
+    s4_1d = close_1d - 1.5 * range_1d
+    
+    # Align 1d Camarilla levels to 4h
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    
+    # Get weekly data for EMA200 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    
+    # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 1.8)
+    volume_expansion = volume > (vol_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -65,27 +61,25 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is not ready
-        if (np.isnan(r3_12h_aligned[i]) or np.isnan(s3_12h_aligned[i]) or 
-            np.isnan(r4_12h_aligned[i]) or np.isnan(s4_12h_aligned[i]) or
-            np.isnan(ema_50_aligned[i]) or np.isnan(volume_expansion[i])):
+        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
+            np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
+            np.isnan(ema_200_aligned[i]) or np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
         # Long conditions:
         # 1. Breakout above R3 with volume expansion
-        # 2. OR re-entry after fakeout: price closes back above S3 after being below it
-        # 3. Must be above 1d EMA50 for trend alignment
-        breakout_long = (close[i] > r3_12h_aligned[i]) and volume_expansion[i]
-        reentry_long = (close[i] > s3_12h_aligned[i]) and (low[i] <= s3_12h_aligned[i]) and volume_expansion[i]
-        long_condition = (breakout_long or reentry_long) and (close[i] > ema_50_aligned[i])
+        # 2. Must be above weekly EMA200 for trend alignment
+        breakout_long = (close[i] > r3_1d_aligned[i]) and volume_expansion[i]
+        trend_long = close[i] > ema_200_aligned[i]
+        long_condition = breakout_long and trend_long
         
         # Short conditions:
         # 1. Breakdown below S3 with volume expansion
-        # 2. OR re-entry after fakeout: price closes back below R3 after being above it
-        # 3. Must be below 1d EMA50 for trend alignment
-        breakdown_short = (close[i] < s3_12h_aligned[i]) and volume_expansion[i]
-        reentry_short = (close[i] < r3_12h_aligned[i]) and (high[i] >= r3_12h_aligned[i]) and volume_expansion[i]
-        short_condition = (breakdown_short or reentry_short) and (close[i] < ema_50_aligned[i])
+        # 2. Must be below weekly EMA200 for trend alignment
+        breakdown_short = (close[i] < s3_1d_aligned[i]) and volume_expansion[i]
+        trend_short = close[i] < ema_200_aligned[i]
+        short_condition = breakdown_short and trend_short
         
         if long_condition and position != 1:
             position = 1
@@ -99,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_Camarilla_Breakout_Structure"
-timeframe = "6h"
+name = "4h_1d_Camarilla_Breakout_Structure_v1"
+timeframe = "4h"
 leverage = 1.0
