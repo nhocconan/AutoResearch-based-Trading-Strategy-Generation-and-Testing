@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_1D_Camarilla_Pivot_Breakout_With_Volume_Filter
-Hypothesis: 12h price breaks above/below daily Camarilla R4/S4 levels with daily volume > 1.8x 20-period average and daily close >/ < daily VWAP for trend filter. Long when price breaks above R4 + volume condition + close > VWAP. Short when price breaks below S4 + volume condition + close < VWAP. Exit when price crosses daily pivot point (PP). Designed for 12h timeframe to target 15-25 trades/year with strong trend capture in both bull and bear markets.
+6h_1w_VWAP_Deviation_Mean_Reversion_v1
+Hypothesis: In weekly mean-reverting markets, price deviates from weekly VWAP but reverts.
+Long when price < weekly VWAP - 1.5*weekly ATR and weekly RSI < 40.
+Short when price > weekly VWAP + 1.5*weekly ATR and weekly RSI > 60.
+Exit when price crosses weekly VWAP.
+Designed for 6h timeframe to capture mean reversion in both bull and bear markets with low trade frequency.
 """
 
 import numpy as np
@@ -10,84 +14,77 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # Daily data
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Weekly data
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Previous day's values for today's calculation
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    vol_1d = df_1d['volume'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    vol_1w = df_1w['volume'].values
     
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
+    # Weekly VWAP calculation
+    typical_price_1w = (high_1w + low_1w + close_1w) / 3
+    vwap_numerator = np.cumsum(typical_price_1w * vol_1w)
+    vwap_denominator = np.cumsum(vol_1w)
+    vwap_1w = np.where(vwap_denominator != 0, vwap_numerator / vwap_denominator, typical_price_1w)
     
-    # Daily VWAP calculation (approximation using typical price)
-    typical_price = (high_1d + low_1d + close_1d) / 3
-    vwap_numerator = np.cumsum(typical_price * vol_1d)
-    vwap_denominator = np.cumsum(vol_1d)
-    vwap = np.where(vwap_denominator != 0, vwap_numerator / vwap_denominator, typical_price)
+    # Weekly ATR (14-period)
+    tr1 = np.abs(high_1w[1:] - low_1w[1:])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr_1w = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
     
-    # Camarilla calculation
-    range_1d = prev_high - prev_low
-    camarilla_pp = (prev_high + prev_low + prev_close) / 3
-    camarilla_r4 = camarilla_pp + (range_1d * 1.1 / 2)
-    camarilla_s4 = camarilla_pp - (range_1d * 1.1 / 2)
+    # Weekly RSI (14-period)
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_1w = 100 - (100 / (1 + rs))
     
-    # Align 1d data to 12h
-    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap)
-    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean()
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20.values)
+    # Align weekly data to 6h
+    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(camarilla_pp_aligned[i]) or np.isnan(camarilla_r4_aligned[i]) or
-            np.isnan(camarilla_s4_aligned[i]) or np.isnan(vwap_aligned[i]) or
-            np.isnan(vol_ma_20_aligned[i])):
+        if (np.isnan(vwap_1w_aligned[i]) or np.isnan(atr_1w_aligned[i]) or
+            np.isnan(rsi_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current 1d volume > 1.8x 20-period average
-        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
-        vol_condition = vol_1d_aligned[i] > (vol_ma_20_aligned[i] * 1.8)
+        # Entry conditions
+        lower_band = vwap_1w_aligned[i] - 1.5 * atr_1w_aligned[i]
+        upper_band = vwap_1w_aligned[i] + 1.5 * atr_1w_aligned[i]
         
-        # Trend condition: close vs VWAP
-        above_vwap = close[i] > vwap_aligned[i]
-        below_vwap = close[i] < vwap_aligned[i]
+        long_entry = close[i] < lower_band and rsi_1w_aligned[i] < 40
+        short_entry = close[i] > upper_band and rsi_1w_aligned[i] > 60
         
-        # Breakout conditions
-        long_breakout = close[i] > camarilla_r4_aligned[i]
-        short_breakout = close[i] < camarilla_s4_aligned[i]
-        
-        # Exit condition
-        long_exit = close[i] < camarilla_pp_aligned[i]
-        short_exit = close[i] > camarilla_pp_aligned[i]
+        # Exit condition: price crosses weekly VWAP
+        long_exit = close[i] > vwap_1w_aligned[i]
+        short_exit = close[i] < vwap_1w_aligned[i]
         
         if position == 0:
-            if long_breakout and vol_condition and above_vwap:
+            if long_entry:
                 position = 1
                 signals[i] = position_size
-            elif short_breakout and vol_condition and below_vwap:
+            elif short_entry:
                 position = -1
                 signals[i] = -position_size
             else:
@@ -107,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1D_Camarilla_Pivot_Breakout_With_Volume_Filter"
-timeframe = "12h"
+name = "6h_1w_VWAP_Deviation_Mean_Reversion_v1"
+timeframe = "6h"
 leverage = 1.0
