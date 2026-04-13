@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h 1-week Donchian breakout with 1d volume confirmation and weekly volatility regime.
-Uses 1-week Donchian channels for trend direction, 1d volume spike (volume > 1.5x 20-period average) 
-to confirm breakout strength, and 1-week volatility regime (ATR ratio < 0.8 = low volatility) 
-to avoid false breakouts in high volatility. Long when price breaks above weekly Donchian upper 
-in low volatility with volume spike. Short when price breaks below weekly Donchian lower in 
-low volatility with volume spike. Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+Hypothesis: 1h strategy using 4h trend (EMA50) and 1d regime (ADX) for direction, with 1h RSI for entry timing.
+Long when 4h EMA50 up, 1d ADX>25 (trending), and 1h RSI<30 (pullback in uptrend).
+Short when 4h EMA50 down, 1d ADX>25, and 1h RSI>70 (pullback in downtrend).
+Uses session filter (08-20 UTC) to avoid low-liquidity hours. Targets 15-30 trades/year.
+Position size: 0.20.
 """
 
 import numpy as np
@@ -14,87 +13,108 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for volume confirmation
+    # Get 4h data for EMA50 trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 60:
+        return np.zeros(n)
+    
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    
+    # Get 1d data for ADX trend strength
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    volume_1d = df_1d['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d volume spike (volume > 1.5x 20-period average)
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_1d > (vol_ma_20 * 1.5)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
-    
-    # Get 1w data for Donchian channels and volatility regime
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate 1-week Donchian channels (20-period)
-    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
-    
-    # Calculate 1-week ATR for volatility regime
-    # TR = max(high-low, |high-close_prev|, |low-close_prev|)
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr_1w = np.concatenate([[np.max([high_1w[0] - low_1w[0], np.abs(high_1w[0] - close_1w[0]), np.abs(low_1w[0] - close_1w[0])])], 
+    # Calculate ADX (14-period)
+    # TR
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])],
                            np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
+    # +DM and -DM
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[0.0], plus_dm])
+    minus_dm = np.concatenate([[0.0], minus_dm])
     
-    # Calculate 1-week ATR ratio (current ATR / 50-period average ATR) for volatility regime
-    atr_ma_50 = pd.Series(atr_1w).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr_1w / atr_ma_50
+    # Smoothed values
+    tr_14 = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False).mean().values
+    plus_dm_14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values
+    minus_dm_14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values
     
-    # Volatility regime: ATR ratio < 0.8 = low volatility (good for breakouts)
-    low_volatility = atr_ratio < 0.8
+    # DI and DX
+    plus_di_14 = 100 * plus_dm_14 / tr_14
+    minus_di_14 = 100 * minus_dm_14 / tr_14
+    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14 + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1w, atr_ratio)
-    low_volatility_aligned = align_htf_to_ltf(prices, df_1w, low_volatility.astype(float))
+    # Get 1h RSI for entry timing
+    rsi_period = 14
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    # Prepend first value to match length
+    rsi = np.concatenate([[50.0], rsi])
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.25  # 25% of capital
+    position_size = 0.20  # 20% of capital
     
-    for i in range(50, n):
-        # Skip if data not ready
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(vol_spike_aligned[i]) or 
-            np.isnan(low_volatility_aligned[i])):
+    for i in range(100, n):
+        if not in_session[i]:
             signals[i] = 0.0
             continue
         
-        # Entry conditions: Donchian breakout + volume spike + low volatility
-        breakout_long = close[i] > donchian_high_aligned[i]
-        breakout_short = close[i] < donchian_low_aligned[i]
-        vol_confirm = vol_spike_aligned[i] > 0.5  # True if volume spike
-        vol_regime = low_volatility_aligned[i] > 0.5  # True if low volatility
+        # Skip if data not ready
+        if (np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or 
+            np.isnan(rsi[i])):
+            signals[i] = 0.0
+            continue
         
-        long_entry = breakout_long and vol_confirm and vol_regime
-        short_entry = breakout_short and vol_confirm and vol_regime
+        # Trend direction from 4h EMA50
+        ema_up = ema_50_4h_aligned[i] > ema_50_4h_aligned[i-1]
+        ema_down = ema_50_4h_aligned[i] < ema_50_4h_aligned[i-1]
         
-        # Exit when price returns to opposite Donchian level (mean reversion within channel)
-        exit_long = position == 1 and close[i] < donchian_low_aligned[i]
-        exit_short = position == -1 and close[i] > donchian_high_aligned[i]
+        # Trend strength from 1d ADX
+        trending = adx_aligned[i] > 25
+        
+        # Entry timing from 1h RSI
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
+        
+        long_entry = ema_up and trending and rsi_oversold
+        short_entry = ema_down and trending and rsi_overbought
+        
+        # Exit when trend changes or RSI reverts
+        exit_long = position == 1 and (not ema_up or rsi[i] > 50)
+        exit_short = position == -1 and (not ema_down or rsi[i] < 50)
         
         # Execute signals
         if long_entry and position != 1:
@@ -117,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1w_donchian_vol_volatility"
-timeframe = "12h"
+name = "1h_4h_1d_ema_adx_rsi"
+timeframe = "1h"
 leverage = 1.0
