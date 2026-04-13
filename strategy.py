@@ -27,13 +27,6 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Get 4h data for volume confirmation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    volume_4h = df_4h['volume'].values if 'volume' in df_4h.columns else np.ones(len(df_4h))
-    
     # Calculate 1d Camarilla pivot levels (based on previous day)
     # Camarilla: H4 = Close + 1.5*(High-Low), L4 = Close - 1.5*(High-Low)
     # We use the previous day's range to calculate today's levels
@@ -49,6 +42,11 @@ def generate_signals(prices):
     ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
     # Calculate 4h volume average (20-period)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
+        return np.zeros(n)
+    
+    volume_4h = df_4h['volume'].values if 'volume' in df_4h.columns else np.ones(len(df_4h))
     vol_avg_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
     
     # Align all HTF indicators to 4h primary timeframe
@@ -56,6 +54,13 @@ def generate_signals(prices):
     camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     vol_avg_20_aligned = align_htf_to_ltf(prices, df_4h, vol_avg_20)
+    prev_close_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_close_1d)
+    
+    # Calculate Camarilla H3/L3 levels for exit (closer to mean)
+    camarilla_h3 = prev_close_1d + 1.125 * (prev_high_1d - prev_low_1d)
+    camarilla_l3 = prev_close_1d - 1.125 * (prev_high_1d - prev_low_1d)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,7 +71,8 @@ def generate_signals(prices):
         if (np.isnan(camarilla_h4_aligned[i]) or 
             np.isnan(camarilla_l4_aligned[i]) or 
             np.isnan(ema200_1d_aligned[i]) or
-            np.isnan(vol_avg_20_aligned[i])):
+            np.isnan(vol_avg_20_aligned[i]) or
+            np.isnan(prev_close_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -74,8 +80,8 @@ def generate_signals(prices):
         volume_confirmed = volume_4h[i] > 1.8 * vol_avg_20_aligned[i]
         
         # Breakout conditions at Camarilla H4/L4 levels
-        breakout_up = close_4h[i] > camarilla_h4_aligned[i] if 'close_4h' in locals() else close[i] > camarilla_h4_aligned[i]
-        breakout_down = close_4h[i] < camarilla_l4_aligned[i] if 'close_4h' in locals() else close[i] < camarilla_l4_aligned[i]
+        breakout_up = close[i] > camarilla_h4_aligned[i]
+        breakout_down = close[i] < camarilla_l4_aligned[i]
         
         # Trend filter: only trade in direction of 1d EMA200
         # For long: price above EMA200; for short: price below EMA200
@@ -86,16 +92,7 @@ def generate_signals(prices):
         enter_long = breakout_up and volume_confirmed and trend_filter_long
         enter_short = breakout_down and volume_confirmed and trend_filter_short
         
-        # Exit conditions: price returns to previous day's close (pivot point)
-        exit_long = position == 1 and close[i] <= prev_close_1d_aligned if 'prev_close_1d_aligned' in locals() else close[i] <= np.roll(close_1d, 1)[i] if i < len(np.roll(close_1d, 1)) else False
-        exit_short = position == -1 and close[i] >= prev_close_1d_aligned if 'prev_close_1d_aligned' in locals() else close[i] >= np.roll(close_1d, 1)[i] if i < len(np.roll(close_1d, 1)) else False
-        
-        # Simplify exit: exit when price crosses the Camarilla H3/L3 levels (closer to mean)
-        camarilla_h3 = prev_close_1d + 1.125 * (prev_high_1d - prev_low_1d)
-        camarilla_l3 = prev_close_1d - 1.125 * (prev_high_1d - prev_low_1d)
-        camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-        camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-        
+        # Exit conditions: price returns to Camarilla H3/L3 levels (closer to mean)
         exit_long = position == 1 and close[i] <= camarilla_h3_aligned[i]
         exit_short = position == -1 and close[i] >= camarilla_l3_aligned[i]
         
