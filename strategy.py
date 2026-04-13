@@ -13,43 +13,48 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla pivot levels
+    # Daily data for calculations
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
     # Weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    # Calculate daily range and body size
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    open_1d = df_1d['open'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla pivot levels (daily)
-    # Pivot = (H + L + C) / 3
-    # H4 = Pivot + 1.5 * (H - L)
-    # L4 = Pivot - 1.5 * (H - L)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    body_size_1d = np.abs(close_1d - open_1d)
     range_1d = high_1d - low_1d
-    h4_1d = pivot_1d + 1.5 * range_1d
-    l4_1d = pivot_1d - 1.5 * range_1d
     
-    # Align daily data to 4h
-    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
-    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    # Daily 20-period SMA for Bollinger Bands
+    sma_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean()
+    std_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std()
+    upper_bb_1d = sma_20_1d + (2 * std_20_1d)
+    lower_bb_1d = sma_20_1d - (2 * std_20_1d)
     
-    # Align weekly close to 4h for trend filter
-    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
+    # Weekly EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean()
+    
+    # Align 1d data to daily timeframe (no additional alignment needed as we're using 1d timeframe)
+    # Since our primary timeframe is 1d, we can use the values directly
+    body_size_1d_aligned = body_size_1d
+    range_1d_aligned = range_1d
+    upper_bb_1d_aligned = upper_bb_1d.values
+    lower_bb_1d_aligned = lower_bb_1d.values
+    
+    # Align weekly EMA50 to daily timeframe
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w.values)
     
     # Daily volume and its 20-period average
-    volume_1d = df_1d['volume'].values
     volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean()
     volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d.values)
-    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -57,42 +62,54 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]) or
-            np.isnan(close_1w_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i]) or
-            np.isnan(volume_1d_aligned[i])):
+        if (np.isnan(body_size_1d_aligned[i]) or np.isnan(range_1d_aligned[i]) or
+            np.isnan(upper_bb_1d_aligned[i]) or np.isnan(lower_bb_1d_aligned[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Volume condition: current 1d volume > 1.5x 20-period average
-        volume_condition = volume_1d_aligned[i] > (volume_ma_20_1d_aligned[i] * 1.5)
+        volume_condition = volume_1d[i] > (volume_ma_20_1d_aligned[i] * 1.5)
         
-        # Trend filter: only long when price > weekly close, short when price < weekly close
-        long_trend = close[i] > close_1w_aligned[i]
-        short_trend = close[i] < close_1w_aligned[i]
+        # Trend filter: only long when price > weekly EMA50, short when price < weekly EMA50
+        long_trend = close[i] > ema_50_1w_aligned[i]
+        short_trend = close[i] < ema_50_1w_aligned[i]
         
-        # Entry conditions: price at Camarilla H4 or L4 with volume and trend
-        at_h4 = abs(close[i] - h4_1d_aligned[i]) < (0.001 * close[i])  # within 0.1% of H4
-        at_l4 = abs(close[i] - l4_1d_aligned[i]) < (0.001 * close[i])  # within 0.1% of L4
+        # Candlestick pattern: small body (doji-like) near Bollinger Bands
+        # Long: small body near lower BB (potential reversal up)
+        # Short: small body near upper BB (potential reversal down)
+        body_ratio = body_size_1d_aligned[i] / range_1d_aligned[i] if range_1d_aligned[i] > 0 else 1
+        bb_width = upper_bb_1d_aligned[i] - lower_bb_1d_aligned[i]
+        near_lower_bb = close[i] < lower_bb_1d_aligned[i] + (0.1 * bb_width)
+        near_upper_bb = close[i] > upper_bb_1d_aligned[i] - (0.1 * bb_width)
         
+        long_pattern = (body_ratio < 0.3) and near_lower_bb
+        short_pattern = (body_ratio < 0.3) and near_upper_bb
+        
+        # Entry conditions
         if position == 0:
-            if at_h4 and volume_condition and short_trend:
-                position = -1
-                signals[i] = -position_size
-            elif at_l4 and volume_condition and long_trend:
+            if long_pattern and volume_condition and long_trend:
                 position = 1
                 signals[i] = position_size
+            elif short_pattern and volume_condition and short_trend:
+                position = -1
+                signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long when price moves back above L4 (mean reversion)
-            if close[i] > l4_1d_aligned[i]:
+            # Exit when price crosses back above the middle (SMA) or opposite conditions
+            middle_bb_1d = sma_20_1d + std_20_1d  # middle + 0.5*bandwidth
+            middle_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, middle_bb_1d.values)
+            if close[i] > middle_bb_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short when price moves back below H4 (mean reversion)
-            if close[i] < h4_1d_aligned[i]:
+            # Exit when price crosses back below the middle (SMA) or opposite conditions
+            middle_bb_1d = sma_20_1d - std_20_1d  # middle - 0.5*bandwidth
+            middle_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, middle_bb_1d.values)
+            if close[i] < middle_bb_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -100,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_Pivot_Reversion"
-timeframe = "4h"
+name = "1d_1w_Doji_BB_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
