@@ -8,12 +8,12 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Camarilla pivot levels from 1d + volume spike + chop regime filter
-    # Long: price touches L3 support AND chop > 61.8 (range) AND volume > 1.5x avg
-    # Short: price touches H3 resistance AND chop > 61.8 (range) AND volume > 1.5x avg
-    # Exit: price moves to opposite H3/L3 level or closes above/below H4/L4
-    # Using 12h timeframe for optimal trade frequency (target 12-37/year), Camarilla for structure,
-    # daily chop regime to avoid trending markets, and volume confirmation to avoid false signals.
+    # Hypothesis: 4h Donchian(20) breakout with 1d volume spike and 1w ADX regime filter
+    # Long: price breaks above 4h upper band AND 1w ADX > 25 (strong trend) AND 1d volume > 2.0x 20-period avg
+    # Short: price breaks below 4h lower band AND 1w ADX > 25 AND 1d volume > 2.0x 20-period avg
+    # Exit: price retests breakout level (middle of channel) or opposite band touch
+    # Using 4h timeframe for optimal trade frequency (target 20-50/year), Donchian for structure,
+    # 1w ADX to avoid ranging markets, and 1d volume confirmation to filter breakouts.
     # Discrete position sizing (0.25) to minimize fee churn.
     
     close = prices['close'].values
@@ -21,98 +21,117 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for ADX regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate daily Camarilla levels (based on previous day's OHLC)
-    # H4 = close + 1.5*(high - low)
-    # H3 = close + 1.1*(high - low)
-    # L3 = close - 1.1*(high - low)
-    # L4 = close - 1.5*(high - low)
-    prev_close = df_1d['close'].values
-    prev_high = df_1d['high'].values
-    prev_low = df_1d['low'].values
+    # Calculate weekly ADX(14) for trend strength filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla levels for each day
-    camarilla_h4 = prev_close + 1.5 * (prev_high - prev_low)
-    camarilla_h3 = prev_close + 1.1 * (prev_high - prev_low)
-    camarilla_l3 = prev_close - 1.1 * (prev_high - prev_low)
-    camarilla_l4 = prev_close - 1.5 * (prev_high - prev_low)
+    # True Range
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Align daily Camarilla levels to 12h
-    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # Directional Movement
+    up_move = high_1w[1:] - high_1w[:-1]
+    down_move = low_1w[:-1] - low_1w[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
     
-    # Calculate daily chop regime filter (chop > 61.8 = ranging market)
-    # Chop = 100 * log10(sum(ATR1) / (n * log(n))) / log10(n)
-    # Using 14-period chop for daily timeframe
-    tr_1d = np.maximum(
-        prev_high[1:] - prev_low[1:],
-        np.maximum(
-            np.abs(prev_high[1:] - prev_close[:-1]),
-            np.abs(prev_low[1:] - prev_close[:-1])
-        )
-    )
-    tr_1d = np.concatenate([[np.nan], tr_1d])
+    # Wilder's smoothing
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(data[1:period])
+        # Subsequent values: smoothed = (prev * (period-1) + current) / period
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    atr_14 = np.full(len(tr_1d), np.nan)
-    for i in range(14, len(tr_1d)):
-        if not np.isnan(tr_1d[i]):
-            if np.isnan(atr_14[i-1]):
-                atr_14[i] = np.mean(tr_1d[i-13:i+1])
-            else:
-                atr_14[i] = (atr_14[i-1] * 13 + tr_1d[i]) / 14
+    tr14 = wilders_smoothing(tr, 14)
+    plus_dm14 = wilders_smoothing(plus_dm, 14)
+    minus_dm14 = wilders_smoothing(minus_dm, 14)
     
-    # Calculate chop: 100 * log10(sum(atr14) / (14 * log10(14))) / log10(14)
-    chop = np.full(len(atr_14), np.nan)
-    for i in range(14, len(atr_14)):
-        if not np.isnan(atr_14[i]):
-            sum_atr = np.nansum(atr_14[i-13:i+1])
-            if sum_atr > 0:
-                chop[i] = 100 * np.log10(sum_atr) / (14 * np.log10(14)) / np.log10(14)
+    # DI+ and DI-
+    plus_di14 = np.where(tr14 != 0, (plus_dm14 / tr14) * 100, 0)
+    minus_di14 = np.where(tr14 != 0, (minus_dm14 / tr14) * 100, 0)
     
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # DX and ADX
+    dx = np.where((plus_di14 + minus_di14) != 0, 
+                  np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14) * 100, 0)
+    adx = wilders_smoothing(dx, 14)
     
-    # Get 12h volume for confirmation (>1.5x 20-period average)
-    vol_ma = np.full(n, np.nan)
+    # Align weekly ADX to 4h
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Calculate 4h Donchian channels (20-period)
+    upper_band = np.full(n, np.nan)
+    lower_band = np.full(n, np.nan)
+    middle_band = np.full(n, np.nan)
+    
     for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (1.5 * vol_ma)
+        upper_band[i] = np.max(high[i-20:i])
+        lower_band[i] = np.min(low[i-20:i])
+        middle_band[i] = (upper_band[i] + lower_band[i]) / 2
+    
+    # Get daily data for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # Align daily data to 4h
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
+    
+    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+    
+    # Calculate daily volume MA(20) for spike detection
+    vol_ma_1d = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma_1d[i] = np.mean(volume_1d_aligned[i-20:i])
+    volume_spike = volume_1d_aligned > (2.0 * vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(chop_1d_aligned[i]) or np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
-            np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(adx_1w_aligned[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: chop > 61.8 indicates ranging market (good for mean reversion at pivots)
-        ranging_market = chop_1d_aligned[i] > 61.8
+        # Regime filter: ADX > 25 indicates strong trending market
+        strong_trend = adx_1w_aligned[i] > 25
         
-        # Camarilla pivot touch conditions
-        touch_h3 = np.abs(close[i] - h3_1d_aligned[i]) / close[i] < 0.002  # Within 0.2% of H3
-        touch_l3 = np.abs(close[i] - l3_1d_aligned[i]) / close[i] < 0.002  # Within 0.2% of L3
+        # Donchian breakout conditions
+        breakout_upper = close[i] > upper_band[i]
+        breakout_lower = close[i] < lower_band[i]
         
-        # Exit conditions: move to opposite level or break beyond H4/L4
-        move_to_h3_from_long = position == 1 and close[i] > h3_1d_aligned[i]
-        move_to_l3_from_short = position == -1 and close[i] < l3_1d_aligned[i]
-        break_h4 = close[i] > h4_1d_aligned[i]
-        break_l4 = close[i] < l4_1d_aligned[i]
+        # Exit conditions: retest middle band or touch opposite band
+        retest_middle_long = close[i] < middle_band[i] and position == 1  # Long exit on middle band retest
+        retest_middle_short = close[i] > middle_band[i] and position == -1  # Short exit on middle band retest
+        touch_lower = close[i] < lower_band[i]  # Exit long on lower band touch
+        touch_upper = close[i] > upper_band[i]  # Exit short on upper band touch
         
-        # Entry logic: Camarilla touch + ranging market + volume confirmation
-        long_entry = touch_l3 and ranging_market and volume_spike[i]
-        short_entry = touch_h3 and ranging_market and volume_spike[i]
+        # Entry logic: Donchian breakout + strong trend + volume confirmation
+        long_entry = breakout_upper and strong_trend and volume_spike[i]
+        short_entry = breakout_lower and strong_trend and volume_spike[i]
         
-        # Exit logic: move to opposite level or break beyond H4/L4
-        long_exit = move_to_l3_from_long or break_l4
-        short_exit = move_to_h3_from_short or break_h4
+        # Exit logic: middle band retest or opposite band touch
+        long_exit = retest_middle_long or touch_lower
+        short_exit = retest_middle_short or touch_upper
         
         if long_entry and position != 1:
             position = 1
@@ -137,6 +156,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_camarilla_pivot_volume_chop_v1"
-timeframe = "12h"
+name = "4h_1d_1w_donchian_breakout_adx_volume_v1"
+timeframe = "4h"
 leverage = 1.0
