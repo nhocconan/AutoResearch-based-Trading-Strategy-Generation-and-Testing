@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h 1-day Bollinger Band squeeze breakout with volume confirmation and volume regime filter.
-Uses 1-day Bollinger Bands (20,2) for volatility contraction/expansion, 1-day volume > 1.3x 20-period average for breakout confirmation,
-and 1-day volume regime (volume > 0.8x 50-period average) to avoid low-volume false breakouts.
-Long when price breaks above upper BB during expansion with volume confirmation.
-Short when price breaks below lower BB during expansion with volume confirmation.
-Targets 20-40 trades per year to minimize fee drag while capturing meaningful moves.
+6h_12h_1d_Camarilla_Reversal_Momentum
+- 6h primary timeframe
+- 12h Camarilla pivot levels for structure (S3/S4, R3/R4)
+- 1d momentum filter (RSI(14) > 50 for long, < 50 for short)
+- Entry: Price rejects S3/R3 with momentum confirmation → fade
+- Exit: Price reaches S4/R4 or momentum reverses
+- Position size: 0.25 (25% of capital)
+- Target: 50-150 total trades over 4 years (12-37/year)
 """
 
 import numpy as np
@@ -20,78 +22,91 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for Bollinger Bands and volume filters
+    # Get 12h data for Camarilla pivots
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
+        return np.zeros(n)
+    
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # Calculate Camarilla levels (using previous day's range)
+    # Camarilla: H4 = C + 1.1*(H-L)/2, L4 = C - 1.1*(H-L)/2
+    #          H3 = C + 1.1*(H-L)/4, L3 = C - 1.1*(H-L)/4
+    #          H2 = C + 1.1*(H-L)/6, L2 = C - 1.1*(H-L)/6
+    #          H1 = C + 1.1*(H-L)/12, L1 = C - 1.1*(H-L)/12
+    # We'll use H3/L3 (R3/S3) and H4/L4 (R4/S4)
+    range_12h = high_12h - low_12h
+    camarilla_h4 = close_12h + 1.1 * range_12h / 2
+    camarilla_l4 = close_12h - 1.1 * range_12h / 2
+    camarilla_h3 = close_12h + 1.1 * range_12h / 4
+    camarilla_l3 = close_12h - 1.1 * range_12h / 4
+    
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l4)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l3)
+    
+    # Get 1d data for momentum filter (RSI)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 1-day Bollinger Bands (20,2)
-    bb_middle = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
+    # Calculate RSI(14)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
-    bb_middle_aligned = align_htf_to_ltf(prices, df_1d, bb_middle)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Bollinger Band width for squeeze detection
-    bb_width = (bb_upper - bb_lower) / bb_middle
-    bb_width_ma_50 = pd.Series(bb_width).rolling(window=50, min_periods=50).mean().values
-    bb_squeeze = bb_width < 0.8 * bb_width_ma_50  # Bollinger Band squeeze
-    
-    bb_squeeze_aligned = align_htf_to_ltf(prices, df_1d, bb_squeeze.astype(float))
-    
-    # Calculate 1-day volume filters
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_50 = pd.Series(volume_1d).rolling(window=50, min_periods=50).mean().values
-    vol_spike = volume_1d > 1.3 * vol_ma_20  # Volume spike for breakout confirmation
-    vol_regime = volume_1d > 0.8 * vol_ma_50   # Volume regime filter (avoid low volume)
-    
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
-    vol_regime_aligned = align_htf_to_ltf(prices, df_1d, vol_regime.astype(float))
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% of capital
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if data not ready
-        if (np.isnan(bb_upper_aligned[i]) or 
-            np.isnan(bb_lower_aligned[i]) or 
-            np.isnan(bb_middle_aligned[i]) or 
-            np.isnan(bb_squeeze_aligned[i]) or 
-            np.isnan(vol_spike_aligned[i]) or 
-            np.isnan(vol_regime_aligned[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or 
+            np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(camarilla_h4_aligned[i]) or 
+            np.isnan(camarilla_l4_aligned[i]) or 
+            np.isnan(rsi_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: BB breakout + volume spike + volume regime (avoid low volume false breakouts)
-        breakout_long = close[i] > bb_upper_aligned[i]
-        breakout_short = close[i] < bb_lower_aligned[i]
-        vol_confirm = vol_spike_aligned[i] > 0.5  # True if volume spike
-        vol_regime_ok = vol_regime_aligned[i] > 0.5  # True if adequate volume
-        not_squeeze = bb_squeeze_aligned[i] < 0.5  # True if not in squeeze (expansion phase)
+        # Momentum filter
+        rsi_bullish = rsi_1d_aligned[i] > 50
+        rsi_bearish = rsi_1d_aligned[i] < 50
         
-        long_entry = breakout_long and vol_confirm and vol_regime_ok and not_squeeze
-        short_entry = breakout_short and vol_confirm and vol_regime_ok and not_squeeze
+        # Fade at S3/R3 with momentum confirmation
+        # Long: price near S3 and bullish momentum
+        long_setup = (close[i] <= camarilla_l3_aligned[i] * 1.005) and rsi_bullish  # Within 0.5% of S3
+        # Short: price near R3 and bearish momentum
+        short_setup = (close[i] >= camarilla_h3_aligned[i] * 0.995) and rsi_bearish  # Within 0.5% of R3
         
-        # Exit when price returns to Bollinger Band middle (mean reversion)
-        exit_long = position == 1 and close[i] < bb_middle_aligned[i]
-        exit_short = position == -1 and close[i] > bb_middle_aligned[i]
+        # Exit conditions
+        exit_long = position == 1 and (
+            close[i] >= camarilla_h4_aligned[i] or  # Hit S4/R4 target
+            rsi_1d_aligned[i] < 40  # Momentum reversal
+        )
+        exit_short = position == -1 and (
+            close[i] <= camarilla_l4_aligned[i] or  # Hit S4/R4 target
+            rsi_1d_aligned[i] > 60  # Momentum reversal
+        )
         
         # Execute signals
-        if long_entry and position != 1:
+        if long_setup and position != 1:
             position = 1
             signals[i] = position_size
-        elif short_entry and position != -1:
+        elif short_setup and position != -1:
             position = -1
             signals[i] = -position_size
         elif exit_long or exit_short:
@@ -108,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_bb_squeeze_breakout_volume"
-timeframe = "4h"
+name = "6h_12h_1d_Camarilla_Reversal_Momentum"
+timeframe = "6h"
 leverage = 1.0
