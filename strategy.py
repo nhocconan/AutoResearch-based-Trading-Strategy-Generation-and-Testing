@@ -8,35 +8,43 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Bollinger Band breakout with 1w trend filter
-    # Long when: price breaks above BB(20,2) upper band AND 1w EMA200 is rising (bull trend)
-    # Short when: price breaks below BB(20,2) lower band AND 1w EMA200 is falling (bear trend)
-    # Exit when: price crosses BB middle band (20 SMA) or 1w EMA200 trend reverses
+    # Hypothesis: 12h Camarilla pivot breakout with 1d trend filter
+    # Long when: price breaks above H3 (bullish breakout) AND price > 1d EMA50 (uptrend)
+    # Short when: price breaks below L3 (bearish breakdown) AND price < 1d EMA50 (downtrend)
+    # Exit when: price returns to pivot level (mean reversion) OR adverse 1d EMA50 crossover
     # Uses discrete sizing (0.25) targeting 50-150 trades over 4 years.
-    # Works in bull/bear via 1w EMA200 trend filter preventing counter-trend trades.
-    # Bollinger Bands provide volatility-adjusted breakout levels.
+    # Works in bull/bear via 1d EMA50 trend filter preventing counter-trend trades.
+    # Camarilla pivots provide structure in ranging markets, trend filter avoids whipsaws.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get 1w data for EMA200 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
+    # Get 1d data for pivot calculation and EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # Calculate 1w EMA200
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Bollinger Bands (20,2) on 6h
-    lookback = 20
-    sma20 = pd.Series(close).rolling(window=lookback, min_periods=lookback).mean().values
-    std20 = pd.Series(close).rolling(window=lookback, min_periods=lookback).std().values
-    bb_upper = sma20 + 2 * std20
-    bb_lower = sma20 - 2 * std20
-    bb_middle = sma20  # 20 SMA
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Calculate Camarilla levels from previous 1d bar (H3, L3, pivot)
+    # H3 = close + 1.1*(high-low)/4
+    # L3 = close - 1.1*(high-low)/4
+    # pivot = (high+low+close)/3
+    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 4
+    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 4
+    camarilla_pivot = (high_1d + low_1d + close_1d) / 3
+    
+    # Align HTF levels to LTF (wait for completed 1d bar)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -44,31 +52,27 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(sma20[i]) or np.isnan(std20[i]) or np.isnan(ema200_1w_aligned[i])):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(ema50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Bollinger Band conditions
-        price_above_upper = close[i] > bb_upper[i]
-        price_below_lower = close[i] < bb_lower[i]
-        price_cross_above_middle = close[i] > bb_middle[i] and close[i-1] <= bb_middle[i-1]
-        price_cross_below_middle = close[i] < bb_middle[i] and close[i-1] >= bb_middle[i-1]
+        # Camarilla conditions
+        breakout_long = close[i] > h3_aligned[i]  # Price breaks above H3
+        breakdown_short = close[i] < l3_aligned[i]  # Price breaks below L3
+        return_to_pivot = abs(close[i] - pivot_aligned[i]) < 0.001 * close[i]  # Near pivot (0.1%)
         
-        # 1w EMA200 trend filter (rising/falling)
-        if i >= 101:  # Need previous bar for trend check
-            ema200_rising = ema200_1w_aligned[i] > ema200_1w_aligned[i-1]
-            ema200_falling = ema200_1w_aligned[i] < ema200_1w_aligned[i-1]
-        else:
-            ema200_rising = False
-            ema200_falling = False
+        # 1d EMA50 trend filter
+        uptrend = close[i] > ema50_1d_aligned[i]
+        downtrend = close[i] < ema50_1d_aligned[i]
         
         # Entry conditions
-        long_entry = price_above_upper and ema200_rising and position != 1
-        short_entry = price_below_lower and ema200_falling and position != -1
+        long_entry = breakout_long and uptrend and position != 1
+        short_entry = breakdown_short and downtrend and position != -1
         
         # Exit conditions
-        exit_long = price_cross_below_middle or (position == 1 and not ema200_rising)
-        exit_short = price_cross_above_middle or (position == -1 and not ema200_falling)
+        exit_long = return_to_pivot or (position == 1 and not uptrend)
+        exit_short = return_to_pivot or (position == -1 and not downtrend)
         
         # Execute signals
         if long_entry:
@@ -94,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_bb_breakout_trend_filter_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_trend_v1"
+timeframe = "12h"
 leverage = 1.0
