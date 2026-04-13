@@ -8,9 +8,9 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Donchian(20) breakout with 1w trend filter and volume confirmation.
-    # Donchian breakouts capture momentum; weekly trend ensures direction alignment.
-    # Volume confirmation filters false breakouts. Works in bull/bear via weekly trend.
+    # Hypothesis: 6h Williams %R mean reversion with 1w trend filter and volume spike confirmation.
+    # Williams %R identifies overbought/oversold conditions; weekly trend ensures mean reversion trades align with higher timeframe direction.
+    # Volume spike confirms exhaustion and reduces false signals. Works in ranging and trending markets via trend filter.
     # Target: 50-150 total trades over 4 years (12-37/year). Discrete size 0.25 to minimize fees.
     
     close = prices['close'].values
@@ -18,9 +18,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 6h data for Donchian and volume (call ONCE before loop)
+    # Get 6h data for Williams %R and volume (call ONCE before loop)
     df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 30:
+    if len(df_6h) < 20:
         return np.zeros(n)
     
     # Get 1w data for trend filter (call ONCE before loop)
@@ -28,14 +28,14 @@ def generate_signals(prices):
     if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 6h Donchian Channel (20-period)
+    # Calculate 6h Williams %R (14-period)
     high_6h = df_6h['high'].values
     low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
     
-    # Upper band: highest high over 20 periods
-    upper_channel = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
-    # Lower band: lowest low over 20 periods
-    lower_channel = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    highest_high = pd.Series(high_6h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_6h).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_6h) / (highest_high - lowest_low)
     
     # Calculate 6h volume mean (20-period) with min_periods
     volume_6h_series = pd.Series(df_6h['volume'].values)
@@ -46,8 +46,7 @@ def generate_signals(prices):
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Align HTF indicators to 6h timeframe
-    upper_channel_aligned = align_htf_to_ltf(prices, df_6h, upper_channel)
-    lower_channel_aligned = align_htf_to_ltf(prices, df_6h, lower_channel)
+    williams_r_aligned = align_htf_to_ltf(prices, df_6h, williams_r)
     vol_ma_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_20_6h)
     ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
@@ -56,8 +55,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(upper_channel_aligned[i]) or np.isnan(lower_channel_aligned[i]) or 
-            np.isnan(vol_ma_aligned[i]) or np.isnan(ema_50_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(vol_ma_aligned[i]) or 
+            np.isnan(ema_50_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -65,24 +64,26 @@ def generate_signals(prices):
         volume_6h_raw = df_6h['volume'].values
         vol_6h_aligned = align_htf_to_ltf(prices, df_6h, volume_6h_raw)
         
-        # Volume filter: current 6h volume > 1.5 * 20-period mean (volume spike)
-        volume_confirmation = vol_6h_aligned[i] > 1.5 * vol_ma_aligned[i]
+        # Volume filter: current 6h volume > 1.8 * 20-period mean (volume spike for exhaustion)
+        volume_confirmation = vol_6h_aligned[i] > 1.8 * vol_ma_aligned[i]
         
         # Trend filter: price above/below weekly EMA50
         price_above_weekly_ema = close[i] > ema_50_aligned[i]
         price_below_weekly_ema = close[i] < ema_50_aligned[i]
         
-        # Donchian breakout conditions
-        breakout_upper = high[i] > upper_channel_aligned[i]
-        breakout_lower = low[i] < lower_channel_aligned[i]
+        # Williams %R mean reversion conditions
+        williams_oversold = williams_r_aligned[i] < -80  # Oversold
+        williams_overbought = williams_r_aligned[i] > -20  # Overbought
         
-        # Entry conditions
-        long_entry = breakout_upper and volume_confirmation and price_above_weekly_ema
-        short_entry = breakout_lower and volume_confirmation and price_below_weekly_ema
+        # Entry conditions: mean reversion with volume spike and trend alignment
+        long_entry = williams_oversold and volume_confirmation and price_above_weekly_ema
+        short_entry = williams_overbought and volume_confirmation and price_below_weekly_ema
         
-        # Exit conditions: opposite Donchian breakout or loss of volume confirmation
-        long_exit = breakout_lower or not volume_confirmation
-        short_exit = breakout_upper or not volume_confirmation
+        # Exit conditions: Williams %R returns to neutral zone or loss of volume confirmation
+        williams_neutral = williams_r_aligned[i] > -50 and williams_r_aligned[i] < -50  # This is impossible, fix below
+        # Corrected: exit when Williams %R returns to midpoint (-50) or volume confirmation lost
+        long_exit = williams_r_aligned[i] > -50 or not volume_confirmation
+        short_exit = williams_r_aligned[i] < -50 or not volume_confirmation
         
         if long_entry and position != 1:
             position = 1
@@ -107,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_6h_1w_donchian_breakout_volume_v1"
+name = "6h_6h_1w_williamsr_mean_reversion_volume_v1"
 timeframe = "6h"
 leverage = 1.0
