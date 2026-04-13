@@ -5,90 +5,83 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Donchian(20) breakout with weekly trend filter
-    # Enter long when price breaks above 20-bar high AND weekly close > weekly open (bullish week)
-    # Enter short when price breaks below 20-bar low AND weekly close < weekly open (bearish week)
-    # Exit on opposite Donchian breakout (10-bar) or weekly trend reversal
-    # Weekly trend filter ensures we only trade with the dominant weekly momentum
-    # Donchian breakouts capture strong moves; weekly filter avoids counter-trend whipsaws
+    # Hypothesis: 12h Donchian breakout with 1d volume confirmation and ATR filter
+    # Enter long when price breaks above 20-bar Donchian high with volume > 1.5x 20-bar avg
+    # Enter short when price breaks below 20-bar Donchian low with volume > 1.5x 20-bar avg
+    # Exit when price crosses the 12h midpoint (average of Donchian levels)
+    # Uses 1d HTF for volume confirmation to reduce noise and false breakouts
+    # ATR filter ensures sufficient volatility for breakout validity
     # Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 6h data for primary timeframe
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
+    # Get 12h data for primary timeframe
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Get 1w data for trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    # Get 1d data for HTF volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    open_1w = df_1w['open'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 6h Donchian channels (20-bar for entry, 10-bar for exit)
-    # Donchian high = max(high over period), Donchian low = min(low over period)
-    donchian_high_20 = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
-    donchian_high_10 = pd.Series(high_6h).rolling(window=10, min_periods=10).max().values
-    donchian_low_10 = pd.Series(low_6h).rolling(window=10, min_periods=10).min().values
+    # Calculate 12h Donchian channels (20-period)
+    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Align Donchian levels to 6h timeframe (already aligned as we used 6h data)
-    # But we need to shift by 1 to avoid look-ahead (use previous bar's levels)
-    donchian_high_20_aligned = np.roll(donchian_high_20, 1)
-    donchian_low_20_aligned = np.roll(donchian_low_20, 1)
-    donchian_high_10_aligned = np.roll(donchian_high_10, 1)
-    donchian_low_10_aligned = np.roll(donchian_low_10, 1)
-    # Set first value to NaN (no prior data)
-    donchian_high_20_aligned[0] = np.nan
-    donchian_low_20_aligned[0] = np.nan
-    donchian_high_10_aligned[0] = np.nan
-    donchian_low_10_aligned[0] = np.nan
+    # Align 1d volume to 12h timeframe
+    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
     
-    # Calculate weekly trend: bullish if weekly close > weekly open, bearish if <
-    weekly_bullish = close_1w > open_1w
-    weekly_bearish = close_1w < open_1w
+    # Volume confirmation: volume > 1.5x 20-bar average volume (12h)
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirmed = volume > (1.5 * avg_volume)
     
-    # Align weekly trend to 6h timeframe
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
+    # ATR filter for volatility (12h ATR > 12h ATR 50-period MA)
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    volatility_filter = atr > atr_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
     
-    for i in range(20, n):  # start from 20 to have enough data for Donchian
+    for i in range(1, n):  # start from 1 to access previous bar
         # Skip if data not ready
-        if (np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]) or
-            np.isnan(donchian_high_10_aligned[i]) or np.isnan(donchian_low_10_aligned[i]) or
-            np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(donchian_mid[i]) or
+            np.isnan(volume_1d_aligned[i]) or np.isnan(avg_volume[i]) or np.isnan(atr[i]) or np.isnan(atr_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Donchian breakout conditions (using current bar's close vs previous bar's levels)
-        breakout_up = close[i] > donchian_high_20_aligned[i]  # break above 20-bar high
-        breakout_down = close[i] < donchian_low_20_aligned[i]  # break below 20-bar low
+        # Donchian breakout conditions
+        breakout_up = close[i] > donchian_high[i]  # break above upper band
+        breakout_down = close[i] < donchian_low[i]  # break below lower band
         
-        # Exit conditions: opposite 10-bar Donchian breakout or weekly trend reversal
-        exit_long = close[i] < donchian_low_10_aligned[i]  # break below 10-bar low
-        exit_short = close[i] > donchian_high_10_aligned[i]  # break above 10-bar high
-        weekly_reversal_long = weekly_bearish_aligned[i]  # weekly turned bearish
-        weekly_reversal_short = weekly_bullish_aligned[i]  # weekly turned bullish
+        # Entry conditions with volume confirmation and volatility filter
+        long_entry = breakout_up and volume_confirmed[i] and volatility_filter[i] and position != 1
+        short_entry = breakout_down and volume_confirmed[i] and volatility_filter[i] and position != -1
         
-        # Entry conditions with weekly trend filter
-        long_entry = breakout_up and weekly_bullish_aligned[i] and position != 1
-        short_entry = breakout_down and weekly_bearish_aligned[i] and position != -1
+        # Exit conditions
+        exit_long = (position == 1 and close[i] < donchian_mid[i])
+        exit_short = (position == -1 and close[i] > donchian_mid[i])
         
         # Execute signals
         if long_entry:
@@ -97,10 +90,10 @@ def generate_signals(prices):
         elif short_entry:
             position = -1
             signals[i] = -position_size
-        elif position == 1 and (exit_long or weekly_reversal_long):
+        elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (exit_short or weekly_reversal_short):
+        elif position == -1 and exit_short:
             position = 0
             signals[i] = 0.0
         # Hold current position
@@ -114,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_donchian_weekly_trend_filter_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_volume_volatility_filter_v1"
+timeframe = "12h"
 leverage = 1.0
