@@ -8,27 +8,22 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1d Camarilla pivot breakout with 1w trend filter and volume confirmation
-    # Long: price breaks above H3 (resistance) AND volume > 1.5x 20-period average AND price > 1w EMA50
-    # Short: price breaks below L3 (support) AND volume > 1.5x 20-period average AND price < 1w EMA50
-    # Exit: price returns to pivot point (mean reversion in 1d timeframe)
-    # Using 1w for trend filter (stronger regime), 1d only for entry timing and structure
-    # Discrete position sizing (0.25) to balance return and drawdown
-    # Target: 10-25 trades/year (~40-100 over 4 years) to minimize fee drag
+    # Hypothesis: 12h Camarilla breakout with 1d volume spike and chop regime filter
+    # Long: price breaks above H3 AND volume > 1.5x 20-period average AND chop > 61.8 (range market)
+    # Short: price breaks below L3 AND volume > 1.5x 20-period average AND chop > 61.8 (range market)
+    # Exit: price returns to pivot point (mean reversion)
+    # Using 1d for Camarilla structure, 12h only for entry timing and volume
+    # Discrete position sizing (0.25) to minimize fee churn
+    # Target: 12-37 trades/year (~50-150 over 4 years) to avoid fee drag
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots (call ONCE before loop)
+    # Get 1d data for Camarilla pivots and chop (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    # Get 1w data for trend filter (call ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
         return np.zeros(n)
     
     # Calculate 1d Camarilla pivots (based on previous 1d bar)
@@ -47,14 +42,25 @@ def generate_signals(prices):
     h3_1d = close_1d + range_1d * 1.1 / 4
     l3_1d = close_1d - range_1d * 1.1 / 4
     
-    # Align 1d Camarilla levels to 1d (wait for completed 1d bar)
+    # Align 1d Camarilla levels to 12h (wait for completed 1d bar)
     h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
     l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     
-    # 1w EMA50 for trend filter
-    ema_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Chop regime filter on 1d (EWMA of true range / ATR)
+    # Chop > 61.8 = ranging market (good for mean reversion)
+    tr_1d = np.maximum(
+        high_1d[1:] - low_1d[1:],
+        np.maximum(
+            np.abs(high_1d[1:] - close_1d[:-1]),
+            np.abs(low_1d[1:] - close_1d[:-1])
+        )
+    )
+    tr_1d = np.concatenate([[np.nan], tr_1d])  # align length
+    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    true_range_sum = pd.Series(tr_1d).rolling(14, min_periods=14).sum().values
+    chop_1d = 100 * np.log10(true_range_sum / (atr_1d * 14)) / np.log10(10)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
     # Volume confirmation: >1.5x 20-period average (to reduce false signals)
     vol_ma = np.full(n, np.nan)
@@ -68,20 +74,18 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if data not ready
         if (np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or 
-            np.isnan(ema_1w_aligned[i]) or np.isnan(volume_spike[i])):
+            np.isnan(pivot_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
+        # Conditions
         vol_confirm = volume_spike[i]
+        chop_confirm = chop_1d_aligned[i] > 61.8  # ranging market
         
-        # Trend filter: only long if price > 1w EMA50, only short if price < 1w EMA50
-        long_trend_ok = close[i] > ema_1w_aligned[i]
-        short_trend_ok = close[i] < ema_1w_aligned[i]
-        
-        # Entry logic: Camarilla breakout + volume + trend
-        long_entry = (close[i] > h3_1d_aligned[i]) and vol_confirm and long_trend_ok
-        short_entry = (close[i] < l3_1d_aligned[i]) and vol_confirm and short_trend_ok
+        # Entry logic: Camarilla breakout + volume + chop
+        long_entry = (close[i] > h3_1d_aligned[i]) and vol_confirm and chop_confirm
+        short_entry = (close[i] < l3_1d_aligned[i]) and vol_confirm and chop_confirm
         
         # Exit logic: return to pivot (mean reversion)
         long_exit = close[i] < pivot_1d_aligned[i]
@@ -110,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_camarilla_breakout_volume_trend_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_breakout_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
