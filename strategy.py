@@ -1,100 +1,136 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
+"""
+6h_1d1w_Pivot_Reversal_With_Volume
+Hypothesis: In BTC/ETH, weekly pivot points act as strong support/resistance in both bull and bear markets.
+At weekly pivot levels, price often reverses with exhaustion (low volume) or breaks with conviction (high volume).
+We fade reversals at S1/R1 (mean reversion) and breakout at S2/R2/R3/S3 (trend continuation).
+Volume filter ensures we only trade when participation confirms the move.
+Timeframe: 6s balances noise and signal quality, targeting 20-40 trades/year.
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1h data for session filter
-    hours = prices.index.hour
-    
-    # Daily data for ATR and close (trend filter)
+    # Daily data for pivot calculation (needs daily OHLC)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate ATR(14) on daily
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly data for higher timeframe bias
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
     
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr2[0] = tr1[0]  # first bar
-    tr3[0] = tr1[0]  # first bar
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate weekly pivot points from prior week's OHLC
+    # Using (H+L+C)/3 for pivot, then support/resistance levels
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate daily close EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Weekly pivot point (PP) = (H + L + C) / 3
+    pp_1w = (high_1w + low_1w + close_1w) / 3.0
+    # Support and resistance levels
+    r1_1w = 2 * pp_1w - low_1w
+    s1_1w = 2 * pp_1w - high_1w
+    r2_1w = pp_1w + (high_1w - low_1w)
+    s2_1w = pp_1w - (high_1w - low_1w)
+    r3_1w = high_1w + 2 * (pp_1w - low_1w)
+    s3_1w = low_1w - 2 * (high_1w - pp_1w)
     
-    # Align to 1h timeframe
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align weekly pivot levels to 6s timeframe (wait for weekly close)
+    pp_1w_aligned = align_htf_to_ltf(prices, df_1w, pp_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
+    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    
+    # Volume confirmation: 6s volume vs 20-period average of 6s volume
+    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position
     
-    for i in range(100, n):
-        # Skip if any required data is not ready
-        if (np.isnan(atr_14_aligned[i]) or np.isnan(ema_50_1d_aligned[i])):
+    for i in range(20, n):
+        # Skip if pivot data not ready
+        if (np.isnan(pp_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or
+            np.isnan(r2_1w_aligned[i]) or np.isnan(s2_1w_aligned[i]) or np.isnan(r3_1w_aligned[i]) or
+            np.isnan(s3_1w_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
+        # Volume condition: current volume > 1.5x 20-period average
+        volume_condition = volume[i] > (volume_ma_20[i] * 1.5)
         
-        # Trend filter: price relative to daily EMA50
-        long_trend = close[i] > ema_50_1d_aligned[i]
-        short_trend = close[i] < ema_50_1d_aligned[i]
+        # Define zones around pivot levels
+        pp = pp_1w_aligned[i]
+        r1 = r1_1w_aligned[i]
+        s1 = s1_1w_aligned[i]
+        r2 = r2_1w_aligned[i]
+        s2 = s2_1w_aligned[i]
+        r3 = r3_1w_aligned[i]
+        s3 = s3_1w_aligned[i]
         
-        # Volatility filter: current 1h ATR (approximated from daily ATR/24) 
-        # Used for dynamic threshold
-        atr_1h_approx = atr_14_aligned[i] / 24  # rough approximation
+        price = close[i]
         
-        # Entry conditions: volatility breakout with trend filter
-        # Long when price breaks above close + 0.5*ATR with uptrend
-        # Short when price breaks below close - 0.5*ATR with downtrend
-        entry_long = close[i] > close_1d[-1] + 0.5 * atr_1h_approx if i > 0 else False
-        entry_short = close[i] < close_1d[-1] - 0.5 * atr_1h_approx if i > 0 else False
-        
-        # Use previous close for comparison (available at bar i)
-        prev_close = close[i-1]
-        entry_long = close[i] > prev_close + 0.5 * atr_1h_approx
-        entry_short = close[i] < prev_close - 0.5 * atr_1h_approx
+        # Fade logic: reverse at S1/R1 when price approaches with low momentum
+        # Breakout logic: break S2/R2 or S3/R3 with volume
         
         if position == 0:
-            if entry_long and long_trend:
-                position = 1
-                signals[i] = position_size
-            elif entry_short and short_trend:
+            # Fade at S1/R1 (mean reversion)
+            if price <= s1 and price >= s1 * 0.998:  # Near S1
+                if volume_condition:
+                    # Only fade if weekly bias is not strongly opposing
+                    weekly_bias_up = close_1w[i-1] > pp_1w[i-1] if i > 0 and not np.isnan(close_1w[i-1]) and not np.isnan(pp_1w[i-1]) else True
+                    if not weekly_bias_up:  # Fade only in down weekly bias or neutral
+                        position = 1
+                        signals[i] = position_size
+            elif price >= r1 and price <= r1 * 1.002:  # Near R1
+                if volume_condition:
+                    weekly_bias_down = close_1w[i-1] < pp_1w[i-1] if i > 0 and not np.isnan(close_1w[i-1]) and not np.isnan(pp_1w[i-1]) else True
+                    if not weekly_bias_down:  # Fade only in up weekly bias or neutral
+                        position = -1
+                        signals[i] = -position_size
+            
+            # Breakout at S2/R2 or S3/R3 with volume
+            elif price < s2 and volume_condition:
                 position = -1
                 signals[i] = -position_size
-            else:
-                signals[i] = 0.0
+            elif price > r2 and volume_condition:
+                position = 1
+                signals[i] = position_size
+            elif price < s3 and volume_condition:
+                position = -1
+                signals[i] = -position_size * 0.5  # Smaller size for extreme break
+            elif price > r3 and volume_condition:
+                position = 1
+                signals[i] = position_size * 0.5
+        
         elif position == 1:
-            # Exit when price closes below EMA50 (trend change)
-            if close[i] < ema_50_1d_aligned[i]:
+            # Exit long: price returns to pivot or breaks S1 with volume
+            if price >= pp or (price <= s1 and volume_condition):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
+        
         elif position == -1:
-            # Exit when price closes above EMA50 (trend change)
-            if close[i] > ema_50_1d_aligned[i]:
+            # Exit short: price returns to pivot or breaks R1 with volume
+            if price <= pp or (price >= r1 and volume_condition):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -102,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_1d_ATR_Volatility_Breakout_Trend_Filter_v1"
-timeframe = "1h"
+name = "6h_1d1w_Pivot_Reversal_With_Volume"
+timeframe = "6h"
 leverage = 1.0
