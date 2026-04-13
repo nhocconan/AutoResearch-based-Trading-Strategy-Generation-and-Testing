@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_1d_1w_Camarilla_Pivot_Trend
-Hypothesis: Buy pullbacks to S3 in uptrend, sell rallies to R3 in downtrend using 1d trend filter (price above/below 200-period EMA).
-Adds 1w trend filter for stronger confirmation: require both 1d and 1w trend aligned.
-Works in bull markets via pullbacks to support and bear markets via rallies to resistance.
-Volume confirmation ensures institutional participation. Target: 15-25 trades/year.
+4h_12h_Camarilla_Breakout_Volume
+Hypothesis: Breakout above R4 or below S4 of 12h Camarilla levels with volume expansion.
+12h Camarilla provides stronger support/resistance than 1h/4h, reducing false breakouts.
+Volume confirmation ensures institutional participation. Works in both bull (breakouts up)
+and bear (breakdowns down) markets. Target: 20-30 trades/year.
 """
 
 import numpy as np
@@ -38,43 +38,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily and weekly data for trend filter and Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 50 or len(df_1w) < 50:
+    # Get 12h data for Camarilla levels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # 1d trend filter: price above/below 200 EMA
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    uptrend_1d = close_1d > ema_200_1d
-    downtrend_1d = close_1d < ema_200_1d
+    # Calculate 12h Camarilla levels
+    R1_12h, R2_12h, R3_12h, R4_12h, S1_12h, S2_12h, S3_12h, S4_12h = calculate_camarilla(high_12h, low_12h, close_12h)
     
-    # 1w trend filter: price above/below 200 EMA (approx 40 weeks)
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    uptrend_1w = close_1w > ema_200_1w
-    downtrend_1w = close_1w < ema_200_1w
+    # Align all data to 4h timeframe
+    R4_12h_aligned = align_htf_to_ltf(prices, df_12h, R4_12h)
+    S4_12h_aligned = align_htf_to_ltf(prices, df_12h, S4_12h)
     
-    # Calculate Camarilla levels on daily
-    R1_1d, R2_1d, R3_1d, R4_1d, S1_1d, S2_1d, S3_1d, S4_1d = calculate_camarilla(high_1d, low_1d, close_1d)
-    
-    # Align all data to 12h timeframe
-    R3_1d_aligned = align_htf_to_ltf(prices, df_1d, R3_1d)
-    S3_1d_aligned = align_htf_to_ltf(prices, df_1d, S3_1d)
-    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d.astype(float))
-    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d.astype(float))
-    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w.astype(float))
-    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w.astype(float))
-    
-    # Volume confirmation: current volume > 1.3x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 1.3)
+    volume_expansion = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -82,42 +64,29 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(R3_1d_aligned[i]) or np.isnan(S3_1d_aligned[i]) or 
-            np.isnan(uptrend_1d_aligned[i]) or np.isnan(downtrend_1d_aligned[i]) or
-            np.isnan(uptrend_1w_aligned[i]) or np.isnan(downtrend_1w_aligned[i]) or
+        if (np.isnan(R4_12h_aligned[i]) or np.isnan(S4_12h_aligned[i]) or 
             np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Long: pullback to S3 in uptrend (both 1d and 1w) with volume expansion
-        long_condition = (low[i] <= S3_1d_aligned[i]) and uptrend_1d_aligned[i] > 0.5 and uptrend_1w_aligned[i] > 0.5 and volume_expansion[i]
+        # Long: breakout above R4 with volume expansion
+        long_condition = (close[i] > R4_12h_aligned[i]) and volume_expansion[i]
         
-        # Short: rally to R3 in downtrend (both 1d and 1w) with volume expansion
-        short_condition = (high[i] >= R3_1d_aligned[i]) and downtrend_1d_aligned[i] > 0.5 and downtrend_1w_aligned[i] > 0.5 and volume_expansion[i]
+        # Short: breakdown below S4 with volume expansion
+        short_condition = (close[i] < S4_12h_aligned[i]) and volume_expansion[i]
         
         if long_condition and position != 1:
             position = 1
             signals[i] = position_size
-        elif long_condition and position == 1:
-            signals[i] = position_size
         elif short_condition and position != -1:
             position = -1
             signals[i] = -position_size
-        elif short_condition and position == -1:
-            signals[i] = -position_size
         else:
-            # Exit conditions: reverse signal or loss of trend/volume
-            if position == 1 and (not (uptrend_1d_aligned[i] > 0.5 and uptrend_1w_aligned[i] > 0.5) or not volume_expansion[i]):
-                position = 0
-                signals[i] = 0.0
-            elif position == -1 and (not (downtrend_1d_aligned[i] > 0.5 and downtrend_1w_aligned[i] > 0.5) or not volume_expansion[i]):
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = position_size if position == 1 else (-position_size if position == -1 else 0.0)
+            # Hold current position
+            signals[i] = position_size if position == 1 else (-position_size if position == -1 else 0.0)
     
     return signals
 
-name = "12h_1d_1w_Camarilla_Pivot_Trend"
-timeframe = "12h"
+name = "4h_12h_Camarilla_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
