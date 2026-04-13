@@ -8,131 +8,105 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout + volume confirmation + ADX regime filter.
-    # In trending markets (ADX > 25), trade breakouts in direction of trend.
-    # In ranging markets (ADX < 20), fade Donchian band touches.
-    # Volume filter ensures participation. Target: 75-200 total trades over 4 years.
+    # Hypothesis: 1d Donchian(20) breakout with 1w trend filter (HMA21) and volume confirmation.
+    # In bull/bear markets, price tends to continue in direction of weekly trend after breaking daily channels.
+    # Volume confirms institutional participation. Target: 30-100 total trades over 4 years (7-25/year).
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX regime filter (call ONCE before loop)
+    # Get 1d data for Donchian channels and volume MA (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ADX for regime filter
+    # Calculate 1d Donchian channels (20-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    # Donchian upper = highest high of last 20 days
+    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    # Donchian lower = lowest low of last 20 days
+    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Get 1w data for HMA21 trend filter (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Wilder's smoothing function
-    def wilders_smoothing(values, period):
-        result = np.full_like(values, np.nan, dtype=float)
-        if len(values) < period:
-            return result
-        result[period-1] = np.nansum(values[:period])
-        for i in range(period, len(values)):
-            result[i] = result[i-1] - (result[i-1] / period) + values[i]
-        return result
+    # Calculate 1w HMA(21) for trend filter
+    close_1w = df_1w['close'].values
+    # HMA = WMA(2 * WMA(n/2) - WMA(n)), sqrt(n)
+    def wma(values, window):
+        weights = np.arange(1, window + 1)
+        return np.convolve(values, weights / weights.sum(), mode='valid')
     
-    atr_1d = wilders_smoothing(tr, 14)
-    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
-    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
+    half_len = 21 // 2
+    sqrt_len = int(np.sqrt(21))
     
-    # DI+ and DI-
-    di_plus = np.where(atr_1d > 0, (dm_plus_smooth / atr_1d) * 100, 0)
-    di_minus = np.where(atr_1d > 0, (dm_minus_smooth / atr_1d) * 100, 0)
+    if len(close_1w) >= 21:
+        wma_half = wma(close_1w, half_len)
+        wma_full = wma(close_1w, 21)
+        wma_2x_sub = 2 * wma_half - wma_full
+        # Pad the beginning with NaN to align lengths
+        wma_2x_sub_padded = np.full(len(close_1w), np.nan)
+        wma_2x_sub_padded[half_len-1:half_len-1+len(wma_2x_sub)] = wma_2x_sub
+        hma_21 = wma(wma_2x_sub_padded[~np.isnan(wma_2x_sub_padded)], sqrt_len)
+        # Pad the final HMA result to align with original array
+        hma_21_final = np.full(len(close_1w), np.nan)
+        start_idx = len(close_1w) - len(hma_21)
+        hma_21_final[start_idx:] = hma_21
+        hma_21 = hma_21_final
+    else:
+        hma_21 = np.full(len(close_1w), np.nan)
     
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) > 0, np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
-    adx_1d = wilders_smoothing(dx, 14)
+    # Align HTF indicators to 1d timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    hma_21_aligned = align_htf_to_ltf(prices, df_1w, hma_21)
     
-    # Align 1d ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Calculate 4h Donchian channels (20-period)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    
-    # Calculate 4h volume MA(20) for confirmation
+    # Calculate 1d volume MA(20) for confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(lookback, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(adx_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(hma_21_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volume filter: current volume > 20-period MA
         volume_filter = volume[i] > volume_ma[i]
         
-        # Regime filter: ADX > 25 = trending, ADX < 20 = ranging
-        is_trending = adx_aligned[i] > 25
-        is_ranging = adx_aligned[i] < 20
-        
-        # Donchian breakout conditions
-        breakout_up = close[i] > highest_high[i-1]  # Using previous bar's channel
-        breakout_down = close[i] < lowest_low[i-1]
-        touch_upper = abs(high[i] - highest_high[i-1]) < 0.001 * high[i]  # Near upper band
-        touch_lower = abs(low[i] - lowest_low[i-1]) < 0.001 * low[i]    # Near lower band
+        # Trend filter: price above/below weekly HMA21
+        price_above_weekly_hma = close[i] > hma_21_aligned[i]
+        price_below_weekly_hma = close[i] < hma_21_aligned[i]
         
         # Entry conditions
         long_entry = False
         short_entry = False
         
-        if is_trending and volume_filter:
-            # In trending market: trade breakouts in direction of trend
-            # Use 4h EMA50 to determine trend direction
-            if i >= 50:
-                ema50 = pd.Series(close[:i+1]).ewm(span=50, adjust=False, min_periods=50).mean().iloc[-1]
-                uptrend = close[i] > ema50
-                downtrend = close[i] < ema50
-                
-                long_entry = breakout_up and uptrend
-                short_entry = breakout_down and downtrend
-        elif is_ranging and volume_filter:
-            # In ranging market: fade Donchian band touches
-            long_entry = touch_lower
-            short_entry = touch_upper
+        if volume_filter:
+            # Long when price breaks above Donchian upper AND above weekly HMA
+            # Short when price breaks below Donchian lower AND below weekly HMA
+            long_entry = (close[i] > donch_high_aligned[i]) and price_above_weekly_hma
+            short_entry = (close[i] < donch_low_aligned[i]) and price_below_weekly_hma
         
-        # Exit conditions: opposite signal or middle band reversion
+        # Exit conditions: opposite Donchian break or trend change
         long_exit = False
         short_exit = False
         
-        if is_trending:
-            # Exit on opposite breakout or close below/above EMA50
-            if i >= 50:
-                ema50 = pd.Series(close[:i+1]).ewm(span=50, adjust=False, min_periods=50).mean().iloc[-1]
-                long_exit = breakout_down or close[i] < ema50
-                short_exit = breakout_up or close[i] > ema50
-        else:  # ranging
-            # Exit when price reverts to middle of channel
-            middle = (highest_high[i-1] + lowest_low[i-1]) / 2
-            long_exit = close[i] > middle
-            short_exit = close[i] < middle
+        if position == 1:
+            # Exit long when price breaks below Donchian lower OR crosses below weekly HMA
+            long_exit = (close[i] < donch_low_aligned[i]) or (close[i] < hma_21_aligned[i])
+        elif position == -1:
+            # Exit short when price breaks above Donchian upper OR crosses above weekly HMA
+            short_exit = (close[i] > donch_high_aligned[i]) or (close[i] > hma_21_aligned[i])
         
         if long_entry and position != 1:
             position = 1
@@ -157,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_adx_volume_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_hma_volume_v1"
+timeframe = "1d"
 leverage = 1.0
