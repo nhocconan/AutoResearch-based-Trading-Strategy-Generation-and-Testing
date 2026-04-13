@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with volume confirmation and momentum filter.
-# The Alligator (Jaw/Teeth/Lips) identifies trends when lines are aligned and separated.
-# In trending markets (JAW < TEETH < LIPS for uptrend, reverse for downtrend),
-# we enter with volume confirmation and exit when lines re-intertwine.
-# Uses 12h primary timeframe with 1-day trend filter for higher reliability.
-# Target: 50-150 total trades over 4 years (12-37/year) to stay within profitable range.
+# Hypothesis: 4-hour RSI mean reversion with 1-day trend filter and volume confirmation.
+# RSI(14) on 4h identifies overbought (>70) and oversold (<30) conditions for mean reversion.
+# 1-day EMA(50) provides trend direction - only trade counter-trend when RSI extreme aligns with trend exhaustion.
+# Volume confirmation ensures institutional participation at reversal points.
+# Designed for both bull and bear markets by trading reversals within the trend.
+# Target: 80-150 total trades over 4 years (20-38/year) to stay within profitable range.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,128 +20,109 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-day data for multi-timeframe analysis
+    # Daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Williams Alligator on 12h data
-    # Jaw: 13-period SMMA, shifted 8 bars forward
-    # Teeth: 8-period SMMA, shifted 5 bars forward  
-    # Lips: 5-period SMMA, shifted 3 bars forward
-    def smma(arr, period):
-        """Smoothed Moving Average"""
-        result = np.full_like(arr, np.nan, dtype=np.float64)
-        if len(arr) < period:
-            return result
-        # First value is simple SMA
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: SMMA = (PREV_SMMA * (N-1) + CURRENT) / N
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
-    
-    jaw = smma(close, 13)
-    teeth = smma(close, 8)
-    lips = smma(close, 5)
-    
-    # Apply shifts (Jaw +8, Teeth +5, Lips +3)
-    jaw_shifted = np.full_like(jaw, np.nan)
-    teeth_shifted = np.full_like(teeth, np.nan)
-    lips_shifted = np.full_like(lips, np.nan)
-    
-    if len(jaw) > 8:
-        jaw_shifted[8:] = jaw[:-8]
-    if len(teeth) > 5:
-        teeth_shifted[5:] = teeth[:-5]
-    if len(lips) > 3:
-        lips_shifted[3:] = lips[:-3]
-    
-    # Calculate average true range for volatility filter
-    def atr(high, low, close, period=14):
-        tr = np.zeros_like(high)
-        tr[0] = high[0] - low[0]
-        for i in range(1, len(high)):
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    # Calculate RSI on 4h data
+    def rsi(close, period=14):
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
         
-        # Smoothed ATR
-        atr_result = np.zeros_like(tr)
-        if len(tr) >= period:
-            atr_result[period-1] = np.mean(tr[:period])
-            for i in range(period, len(tr)):
-                atr_result[i] = (atr_result[i-1] * (period-1) + tr[i]) / period
-        return atr_result
+        avg_gain = np.full(len(close), np.nan)
+        avg_loss = np.full(len(close), np.nan)
+        
+        # First average using simple mean
+        if len(gain) >= period:
+            avg_gain[period] = np.mean(gain[:period])
+            avg_loss[period] = np.mean(loss[:period])
+            
+            # Wilder smoothing
+            for i in range(period+1, len(close)):
+                avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+                avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi_values = 100 - (100 / (1 + rs))
+        return rsi_values
     
-    atr_values = atr(high, low, close, 14)
+    rsi_values = rsi(close, 14)
     
-    # Volume moving average for confirmation
+    # Calculate EMA on daily close for trend filter
+    def ema(close, period):
+        ema_values = np.full(len(close), np.nan)
+        if len(close) >= period:
+            multiplier = 2 / (period + 1)
+            ema_values[period-1] = np.mean(close[:period])
+            for i in range(period, len(close)):
+                ema_values[i] = (close[i] * multiplier) + (ema_values[i-1] * (1 - multiplier))
+        return ema_values
+    
+    ema_50_1d = ema(df_1d['close'].values, 50)
+    
+    # Calculate volume moving average for confirmation
     def sma(arr, period):
-        result = np.full_like(arr, np.nan, dtype=np.float64)
-        if len(arr) < period:
-            return result
+        sma_values = np.full(len(arr), np.nan)
         for i in range(period-1, len(arr)):
-            result[i] = np.mean(arr[i-period+1:i+1])
-        return result
+            sma_values[i] = np.mean(arr[i-period+1:i+1])
+        return sma_values
     
     volume_ma = sma(volume, 20)
     
-    # Align all indicators to main timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_shifted)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_shifted)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_shifted)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_values)
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
+    # Align all data to 4h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), rsi_values)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    volume_ma_aligned = align_htf_to_ltf(prices, pd.DataFrame({'volume': volume}), volume_ma)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(atr_aligned[i]) or 
+        if (np.isnan(rsi_aligned[i]) or np.isnan(ema_50_aligned[i]) or 
             np.isnan(volume_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        jaw_val = jaw_aligned[i]
-        teeth_val = teeth_aligned[i]
-        lips_val = lips_aligned[i]
-        atr_val = atr_aligned[i]
-        vol_val = volume[i]
-        vol_ma_val = volume_ma_aligned[i]
+        price = close[i]
+        rsi_val = rsi_aligned[i]
+        ema_trend = ema_50_aligned[i]
+        vol_ma = volume_ma_aligned[i]
+        vol_current = volume[i]
         
-        # Alligator alignment conditions
-        bullish_alignment = (jaw_val < teeth_val) and (teeth_val < lips_val)
-        bearish_alignment = (jaw_val > teeth_val) and (teeth_val > lips_val)
-        
-        # Volume confirmation (volume above average)
-        volume_confirmed = vol_val > vol_ma_val
-        
-        # Volatility filter (avoid extremely low volatility periods)
-        vol_filter = atr_val > 0
+        # Volume confirmation: current volume above average
+        volume_confirmed = vol_current > vol_ma
         
         if position == 0:
-            # Long: bullish alignment + volume confirmation
-            if bullish_alignment and volume_confirmed and vol_filter:
+            # Long setup: RSI oversold (<30) AND price above daily EMA (uptrend) AND volume confirmation
+            if (rsi_val < 30 and 
+                price > ema_trend and 
+                volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: bearish alignment + volume confirmation
-            elif bearish_alignment and volume_confirmed and vol_filter:
+            # Short setup: RSI overbought (>70) AND price below daily EMA (downtrend) AND volume confirmation
+            elif (rsi_val > 70 and 
+                  price < ema_trend and 
+                  volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: alignment breaks or volume dries up
-            if not bullish_alignment or not volume_confirmed:
+            # Exit long: RSI returns to neutral (>50) OR price breaks below daily EMA
+            if (rsi_val > 50 or 
+                price < ema_trend):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: alignment breaks or volume dries up
-            if not bearish_alignment or not volume_confirmed:
+            # Exit short: RSI returns to neutral (<50) OR price breaks above daily EMA
+            if (rsi_val < 50 or 
+                price > ema_trend):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -149,6 +130,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Alligator_Volume_Filter_v1"
-timeframe = "12h"
+name = "4h_1d_RSI_MeanReversion_TrendFilter_v1"
+timeframe = "4h"
 leverage = 1.0
