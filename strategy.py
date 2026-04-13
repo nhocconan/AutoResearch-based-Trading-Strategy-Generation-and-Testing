@@ -8,52 +8,43 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with 1d ATR(14) volatility filter and 1d close > SMA(50) trend filter
-    # Long when: price breaks above Donchian(20) high AND 1d close > SMA(50) (bull regime) AND ATR(14) > 1.2x 20-bar avg ATR
-    # Short when: price breaks below Donchian(20) low AND 1d close < SMA(50) (bear regime) AND ATR(14) > 1.2x 20-bar avg ATR
-    # Exit when: price crosses Donchian(20) midpoint OR 1d close crosses SMA(50) in opposite direction
-    # Uses discrete sizing (0.25) targeting 75-200 trades over 4 years.
-    # Volatility filter ensures breakouts occur during expansion, reducing false signals in chop.
-    # Trend filter prevents counter-trend trades in strong regimes.
+    # Hypothesis: 1d Donchian(20) breakout with 1w HMA(21) trend filter and volume confirmation
+    # Long when: price breaks above Donchian(20) high AND price > 1w HMA(21) (uptrend) AND volume > 1.5x 20-bar avg volume
+    # Short when: price breaks below Donchian(20) low AND price < 1w HMA(21) (downtrend) AND volume > 1.5x 20-bar avg volume
+    # Exit when: price crosses Donchian(20) midpoint OR adverse 1w HMA(21) crossover
+    # Uses discrete sizing (0.25) targeting 30-100 trades over 4 years.
+    # Works in bull/bear via 1w HMA(21) trend filter preventing counter-trend trades.
+    # Volume confirmation reduces false breakouts in choppy markets.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for trend and volatility filters
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w data for HMA(21) trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 21:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1w = df_1w['close'].values
+    # Calculate 1w HMA(21)
+    half_length = 21 // 2
+    sqrt_length = int(np.sqrt(21))
+    wma1 = pd.Series(close_1w).ewm(span=half_length, adjust=False, min_periods=half_length).mean().values
+    wma2 = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    raw_hma = 2 * wma1 - wma2
+    hma_1w = pd.Series(raw_hma).ewm(span=sqrt_length, adjust=False, min_periods=sqrt_length).mean().values
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate 1d SMA(50) for trend filter
-    sma_50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
-    sma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
-    
-    # Calculate 1d ATR(14) for volatility filter
-    tr1 = pd.Series(high_1d - low_1d)
-    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
-    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    
-    # Calculate Donchian(20) channels on 4h
+    # Calculate Donchian(20) channels
     lookback = 20
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     donchian_mid = (highest_high + lowest_low) / 2
     
-    # Calculate 4h ATR(14) for volatility confirmation
-    tr1_4h = pd.Series(high - low)
-    tr2_4h = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3_4h = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr_4h = pd.concat([tr1_4h, tr2_4h, tr3_4h], axis=1).max(axis=1)
-    atr_14_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
-    avg_atr_4h = pd.Series(atr_14_4h).rolling(window=20, min_periods=20).mean().values
+    # Calculate volume confirmation: volume > 1.5x 20-bar average volume
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirmed = volume > (1.5 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -62,8 +53,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if data not ready
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(sma_50_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or
-            np.isnan(avg_atr_4h[i])):
+            np.isnan(hma_1w_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
@@ -71,20 +61,17 @@ def generate_signals(prices):
         breakout_up = close[i] > highest_high[i-1]  # Break above previous period high
         breakout_down = close[i] < lowest_low[i-1]  # Break below previous period low
         
-        # 1d trend filter: close > SMA(50) for uptrend, < SMA(50) for downtrend
-        uptrend = close_1d[-1] > sma_50_1d_aligned[i] if len(close_1d) > 0 else False  # Use last known 1d close
-        downtrend = close_1d[-1] < sma_50_1d_aligned[i] if len(close_1d) > 0 else False
+        # 1w HMA(21) trend filter
+        uptrend = close[i] > hma_1w_aligned[i]
+        downtrend = close[i] < hma_1w_aligned[i]
         
-        # Volatility confirmation: 4h ATR > 1.2x 20-bar avg ATR (breakout during expansion)
-        vol_expansion = atr_14_4h[i] > (1.2 * avg_atr_4h[i])
-        
-        # Entry conditions
-        long_entry = breakout_up and uptrend and vol_expansion and position != 1
-        short_entry = breakout_down and downtrend and vol_expansion and position != -1
+        # Entry conditions with volume confirmation
+        long_entry = breakout_up and uptrend and volume_confirmed[i] and position != 1
+        short_entry = breakout_down and downtrend and volume_confirmed[i] and position != -1
         
         # Exit conditions
-        exit_long = (position == 1 and (close[i] < donchian_mid[i] or close_1d[-1] < sma_50_1d_aligned[i]))
-        exit_short = (position == -1 and (close[i] > donchian_mid[i] or close_1d[-1] > sma_50_1d_aligned[i]))
+        exit_long = (position == 1 and (close[i] < donchian_mid[i] or not uptrend))
+        exit_short = (position == -1 and (close[i] > donchian_mid[i] or not downtrend))
         
         # Execute signals
         if long_entry:
@@ -110,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_atr_sma_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_hma_volume_v1"
+timeframe = "1d"
 leverage = 1.0
