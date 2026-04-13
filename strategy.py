@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_1d_1w_Triple_Timeframe_Confluence
-Hypothesis: Combines 1w trend filter, 1d momentum, and 4h entry timing to capture medium-term moves in both bull and bear markets.
-Goes long when 1w EMA21 > EMA50 (bullish trend), 1d RSI > 50 (bullish momentum), and 4h close > 4h EMA21 with volume > 1.5x average.
-Goes short when 1w EMA21 < EMA50 (bearish trend), 1d RSI < 50 (bearish momentum), and 4h close < 4h EMA21 with volume > 1.5x average.
-Uses discrete position sizing (0.25) to minimize fee churn and includes ATR-based stoploss.
-Target: 20-50 trades per year on 4h (80-200 total over 4 years).
+1d_1w_Camilla_Trend_Filter
+Hypothesis: Combines Camarilla pivot levels on daily with weekly trend filter to trade reversions in range-bound markets and trend continuations in trending markets.
+In ranging markets (weekly ADX < 25), trades mean reversion at Camarilla support/resistance levels.
+In trending markets (weekly ADX >= 25), trades breakouts of Camarilla expansion levels.
+Uses volume confirmation to avoid false signals. Designed for low-frequency trading (10-25 trades/year) to minimize fee impact.
+Works in both bull and bear markets by adapting to market regime.
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,160 +22,174 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly EMA21 and EMA50 for trend filter
-    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Get daily data for momentum
+    # Get daily data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily RSI(14)
-    delta = pd.Series(close_1d).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d = rsi_1d.values
+    # Calculate Camarilla levels for daily
+    # Using previous day's OHLC
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = close_1d[0]  # first day uses current day
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
     
-    # Get 4h data for entry timing
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Camarilla calculations
+    range_ = prev_high - prev_low
+    camarilla_h5 = prev_close + 1.1 * range_ * 1.1 / 12  # Resistance 5
+    camarilla_h4 = prev_close + 1.1 * range_ * 1.1 / 6   # Resistance 4
+    camarilla_h3 = prev_close + 1.1 * range_ * 1.1 / 4   # Resistance 3
+    camarilla_l3 = prev_close - 1.1 * range_ * 1.1 / 4   # Support 3
+    camarilla_l4 = prev_close - 1.1 * range_ * 1.1 / 6   # Support 4
+    camarilla_l5 = prev_close - 1.1 * range_ * 1.1 / 12  # Support 5
+    
+    # Weekly trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    volume_4h = df_4h['volume'].values
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Calculate 4h EMA21 for entry
-    ema21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Calculate weekly ADX (14)
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(0, high[i] - high[i-1])
+            minus_dm[i] = max(0, low[i-1] - low[i])
+            if plus_dm[i] == minus_dm[i]:
+                plus_dm[i] = 0
+                minus_dm[i] = 0
+            elif plus_dm[i] < minus_dm[i]:
+                plus_dm[i] = 0
+            else:
+                minus_dm[i] = 0
+            
+            tr[i] = max(high[i] - low[i], 
+                       abs(high[i] - high[i-1]), 
+                       abs(low[i] - low[i-1]))
+        
+        # Wilder's smoothing
+        atr = np.zeros_like(high)
+        plus_di = np.zeros_like(high)
+        minus_di = np.zeros_like(high)
+        
+        # Initial values
+        atr[period-1] = np.mean(tr[1:period])
+        plus_di[period-1] = np.mean(plus_dm[1:period]) / atr[period-1] * 100 if atr[period-1] != 0 else 0
+        minus_di[period-1] = np.mean(minus_dm[1:period]) / atr[period-1] * 100 if atr[period-1] != 0 else 0
+        
+        # Wilder smoothing
+        for i in range(period, len(high)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+            plus_di[i] = (plus_di[i-1] * (period-1) + plus_dm[i]) / atr[i] * 100 if atr[i] != 0 else 0
+            minus_di[i] = (minus_di[i-1] * (period-1) + minus_dm[i]) / atr[i] * 100 if atr[i] != 0 else 0
+        
+        dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
+        adx = np.zeros_like(high)
+        adx[2*period-2] = np.mean(dx[period-1:2*period-1]) if np.sum(~np.isnan(dx[period-1:2*period-1])) > 0 else 0
+        for i in range(2*period-1, len(high)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    # Calculate volume average for confirmation
-    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
     
-    # Calculate ATR for stoploss
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    atr_4h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Align all to daily timeframe
+    camarilla_h5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h5)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    camarilla_l5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l5)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
-    # Align all signals to 4h timeframe
-    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
-    vol_ma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20_4h)
-    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+    # Volume confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volume_spike = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% of capital
-    atr_multiplier = 2.5  # ATR multiplier for stoploss
     
-    # Track entry price for stoploss
-    entry_price = np.zeros(n)
-    position_side = np.zeros(n)  # 1 for long, -1 for short, 0 for flat
-    
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if data not ready
-        if (np.isnan(ema21_1w_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or
-            np.isnan(rsi_1d_aligned[i]) or np.isnan(ema21_4h_aligned[i]) or
-            np.isnan(vol_ma_20_4h_aligned[i]) or np.isnan(atr_4h_aligned[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(adx_1w_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend and momentum
-        bullish_trend = ema21_1w_aligned[i] > ema50_1w_aligned[i]
-        bearish_trend = ema21_1w_aligned[i] < ema50_1w_aligned[i]
-        bullish_momentum = rsi_1d_aligned[i] > 50
-        bearish_momentum = rsi_1d_aligned[i] < 50
+        # Determine market regime based on weekly ADX
+        is_trending = adx_1w_aligned[i] >= 25
+        is_ranging = adx_1w_aligned[i] < 25
         
-        # Volume confirmation
-        volume_confirmation = volume[i] > (vol_ma_20_4h_aligned[i] * 1.5)
-        
-        # Update entry price and position side when position changes
-        if position == 1 and position_side[i-1] != 1:
-            entry_price[i] = close[i]
-            position_side[i] = 1
-        elif position == -1 and position_side[i-1] != -1:
-            entry_price[i] = close[i]
-            position_side[i] = -1
-        else:
-            # Carry forward
-            entry_price[i] = entry_price[i-1] if i > 0 else 0
-            position_side[i] = position_side[i-1] if i > 0 else 0
-        
-        # Check stoploss
-        stoploss_triggered = False
-        if position == 1 and i > 0:
-            if close[i] < entry_price[i] - (atr_multiplier * atr_4h_aligned[i]):
-                stoploss_triggered = True
-        elif position == -1 and i > 0:
-            if close[i] > entry_price[i] + (atr_multiplier * atr_4h_aligned[i]):
-                stoploss_triggered = True
-        
-        if stoploss_triggered:
-            position = 0
-            position_side[i] = 0
-            signals[i] = 0.0
-            continue
-        
-        # Entry logic
-        if bullish_trend and bullish_momentum and volume_confirmation:
-            # Long conditions
-            if close[i] > ema21_4h_aligned[i]:
+        if is_ranging:
+            # Ranging market: mean reversion at Camarilla H3/L3
+            if close[i] <= camarilla_l3_aligned[i] and volume_spike[i]:
                 if position != 1:
                     position = 1
                     signals[i] = position_size
                 else:
                     signals[i] = position_size
-            else:
-                # Hold or exit
-                if position == 1:
-                    signals[i] = position_size
-                else:
-                    signals[i] = 0.0
-                    position = 0
-        elif bearish_trend and bearish_momentum and volume_confirmation:
-            # Short conditions
-            if close[i] < ema21_4h_aligned[i]:
+            elif close[i] >= camarilla_h3_aligned[i] and volume_spike[i]:
                 if position != -1:
                     position = -1
                     signals[i] = -position_size
                 else:
                     signals[i] = -position_size
-            else:
-                # Hold or exit
-                if position == -1:
-                    signals[i] = -position_size
-                else:
-                    signals[i] = 0.0
-                    position = 0
-        else:
-            # No clear signal - exit
-            if position != 0:
+            # Exit when price returns to midpoint
+            elif position == 1 and close[i] >= (camarilla_h3_aligned[i] + camarilla_l3_aligned[i]) / 2:
                 position = 0
                 signals[i] = 0.0
+            elif position == -1 and close[i] <= (camarilla_h3_aligned[i] + camarilla_l3_aligned[i]) / 2:
+                position = 0
+                signals[i] = 0.0
+            elif position == 1:
+                signals[i] = position_size
+            elif position == -1:
+                signals[i] = -position_size
+            else:
+                signals[i] = 0.0
+        else:
+            # Trending market: breakout of Camarilla H4/L4
+            if close[i] > camarilla_h4_aligned[i] and volume_spike[i]:
+                if position != 1:
+                    position = 1
+                    signals[i] = position_size
+                else:
+                    signals[i] = position_size
+            elif close[i] < camarilla_l4_aligned[i] and volume_spike[i]:
+                if position != -1:
+                    position = -1
+                    signals[i] = -position_size
+                else:
+                    signals[i] = -position_size
+            # Exit when price returns to Camarilla H3/L3
+            elif position == 1 and close[i] <= camarilla_h3_aligned[i]:
+                position = 0
+                signals[i] = 0.0
+            elif position == -1 and close[i] >= camarilla_l3_aligned[i]:
+                position = 0
+                signals[i] = 0.0
+            elif position == 1:
+                signals[i] = position_size
+            elif position == -1:
+                signals[i] = -position_size
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_1d_1w_Triple_Timeframe_Confluence"
-timeframe = "4h"
+name = "1d_1w_Camilla_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
