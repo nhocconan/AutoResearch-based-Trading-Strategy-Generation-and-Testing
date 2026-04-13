@@ -8,11 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h strategy using 1d Williams %R extremes with 1w EMA trend filter
+    # Hypothesis: 12h strategy using 1d Williams %R extremes with 1w EMA trend filter and volume confirmation
     # Works in both bull and bear: Williams %R captures oversold/overbought reversals,
     # 1w EMA > price for shorts, < price for longs ensures trend alignment,
     # volume confirmation ensures momentum. Discrete sizing (0.25) minimizes fee drag.
-    # Target: 20-40 trades/year to stay within 4h optimal range.
+    # Target: 12-37 trades/year for 12h timeframe to stay within optimal range.
     
     close = prices['close'].values
     high = prices['high'].values
@@ -48,7 +48,7 @@ def generate_signals(prices):
     # Get 1d volume for confirmation (20-period average)
     vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all HTF indicators to 4h primary timeframe
+    # Align all HTF indicators to 12h primary timeframe
     williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
@@ -69,7 +69,7 @@ def generate_signals(prices):
             continue
         
         # Volume confirmation: current 1d volume > 1.5x 20-period average
-        idx_1d = i // (24 * 6)  # 1d bars in 4h timeframe (6 bars per day)
+        idx_1d = i // (24 * 2)  # 1d bars in 12h timeframe (2 bars per day)
         if idx_1d >= len(volume_1d):
             signals[i] = 0.0
             continue
@@ -121,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_1w_williams_r_extreme_ema_volume_v1"
-timeframe = "4h"
+name = "12h_1d_1w_williams_r_extreme_ema_volume_v1"
+timeframe = "12h"
 leverage = 1.0
