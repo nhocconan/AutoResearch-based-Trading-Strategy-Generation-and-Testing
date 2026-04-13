@@ -5,91 +5,100 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    # Pre-compute hours for session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    
+    # Load 4h data once before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    # Load 1d data for higher timeframe context
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # 4h ATR for volatility filter
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    tr1 = np.abs(high_4h[1:] - low_4h[1:])
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+    
+    # 1d close for trend filter
+    close_1d = df_1d['close'].values
+    sma_50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
+    sma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
+    
+    # 1h price action
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data (primary) and 12h data (HTF)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    # Calculate EMA on 4h data (21-period)
-    close_4h = df_4h['close'].values
-    ema_21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # Calculate RSI on 12h data (14-period)
-    close_12h = df_12h['close'].values
-    delta = np.diff(close_12h, prepend=close_12h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14_12h = 100 - (100 / (1 + rs))
-    
-    # Calculate volume ratio on 12h data
-    volume_12h = df_12h['volume'].values
-    volume_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    
-    # Align indicators to 4h timeframe
-    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
-    rsi_14_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_14_12h)
-    volume_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_ma_20_12h)
+    # 1h Bollinger Bands (20, 2)
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.25  # 25% position size
+    position_size = 0.20  # 20% position size
     
-    for i in range(100, n):
+    for i in range(50, n):
+        # Session filter: 08-20 UTC
+        hour = hours[i]
+        in_session = 8 <= hour <= 20
+        
         # Skip if any required data is not ready
-        if (np.isnan(ema_21_4h_aligned[i]) or np.isnan(rsi_14_12h_aligned[i]) or
-            np.isnan(volume_ma_20_12h_aligned[i])):
+        if (np.isnan(atr_4h_aligned[i]) or np.isnan(sma_50_1d_aligned[i]) or
+            np.isnan(sma_20[i]) or np.isnan(std_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current 12h volume > 1.5x 20-period average
-        volume_condition = volume_12h[i // 2] > (volume_ma_20_12h_aligned[i] * 1.5)
+        # Volatility filter: avoid low volatility periods
+        vol_filter = atr_4h_aligned[i] > 0
         
-        # Trend filter: EMA direction on 4h
-        # Long when close > EMA21 (uptrend)
-        # Short when close < EMA21 (downtrend)
-        long_trend = close[i] > ema_21_4h_aligned[i]
-        short_trend = close[i] < ema_21_4h_aligned[i]
+        # Trend filter: price vs 50-day SMA on 1d
+        uptrend = close[i] > sma_50_1d_aligned[i]
+        downtrend = close[i] < sma_50_1d_aligned[i]
         
-        # Momentum filter: RSI extremes on 12h
-        # Long when RSI < 30 (oversold)
-        # Short when RSI > 70 (overbought)
-        rsi_oversold = rsi_14_12h_aligned[i] < 30
-        rsi_overbought = rsi_14_12h_aligned[i] > 70
+        # Bollinger Band mean reversion signals
+        touch_lower = low[i] <= lower_bb[i]
+        touch_upper = high[i] >= upper_bb[i]
         
         if position == 0:
-            if long_trend and volume_condition and rsi_oversold:
-                position = 1
-                signals[i] = position_size
-            elif short_trend and volume_condition and rsi_overbought:
-                position = -1
-                signals[i] = -position_size
+            if in_session and vol_filter:
+                # Long when touching lower BB in uptrend
+                if touch_lower and uptrend:
+                    position = 1
+                    signals[i] = position_size
+                # Short when touching upper BB in downtrend
+                elif touch_upper and downtrend:
+                    position = -1
+                    signals[i] = -position_size
+                else:
+                    signals[i] = 0.0
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit when trend reverses or RSI becomes overbought
-            if not long_trend or rsi_14_12h_aligned[i] > 70:
+            # Exit when price touches upper BB or trend breaks
+            if touch_upper or not uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit when trend reverses or RSI becomes oversold
-            if not short_trend or rsi_14_12h_aligned[i] < 30:
+            # Exit when price touches lower BB or trend breaks
+            if touch_lower or not downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -97,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_EMA21_RSI14_Volume_Filter_v1"
-timeframe = "4h"
+name = "1h_4h1d_Bollinger_MeanReversion_TrendFilter_v1"
+timeframe = "1h"
 leverage = 1.0
