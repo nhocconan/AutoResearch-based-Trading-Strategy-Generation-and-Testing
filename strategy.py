@@ -1,13 +1,11 @@
-#!/usr/bin/env python3
-"""
-4h_1d_Range_Breakout_With_Volume_Confirmation_v2
-Hypothesis: 4h price breaks above/below daily range (high-low) with volume confirmation.
-Long when price breaks above prior day's high + volume > 1.5x 20-day average.
-Short when price breaks below prior day's low + volume > 1.5x 20-day average.
-Exit when price returns to prior day's close.
-Designed for 4h timeframe to capture breakouts in both bull and bear markets.
-Target: 20-50 trades/year per symbol for better generalization.
-"""
+# 4h_12h_Camarilla_Pivot_Breakout_With_Volume_Confirmation
+# Hypothesis: 4h price breaks above/below daily Camarilla R4/S4 levels with daily volume > 2.0x 20-period average.
+# Long when price breaks above R4 + volume condition.
+# Short when price breaks below S4 + volume condition.
+# Exit when price crosses daily pivot point (PP).
+# Incorporates 12h trend filter: only trade long when price > 12h EMA50, short when price < 12h EMA50.
+# Designed for 4h timeframe to balance trade frequency and edge in both bull and bear markets.
+# Target: 20-50 trades/year per symbol for better generalization.
 
 import numpy as np
 import pandas as pd
@@ -22,9 +20,14 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     
-    # Daily data for range calculation
+    # Daily data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
     # Previous day's values for today's calculation
@@ -40,20 +43,30 @@ def generate_signals(prices):
     prev_low[0] = low_1d[0]
     prev_close[0] = close_1d[0]
     
-    # Daily range and key levels
-    prev_range = prev_high - prev_low
-    prev_high_level = prev_high
-    prev_low_level = prev_low
+    # Daily VWAP calculation (approximation using typical price)
+    typical_price = (high_1d + low_1d + close_1d) / 3
+    vwap_numerator = np.cumsum(typical_price * vol_1d)
+    vwap_denominator = np.cumsum(vol_1d)
+    vwap = np.where(vwap_denominator != 0, vwap_numerator / vwap_denominator, typical_price)
     
-    # Volume moving average
-    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean()
+    # Camarilla calculation
+    range_1d = prev_high - prev_low
+    camarilla_pp = (prev_high + prev_low + prev_close) / 3
+    camarilla_r4 = camarilla_pp + (range_1d * 1.1 / 2)
+    camarilla_s4 = camarilla_pp - (range_1d * 1.1 / 2)
     
     # Align 1d data to 4h
-    prev_high_aligned = align_htf_to_ltf(prices, df_1d, prev_high_level)
-    prev_low_aligned = align_htf_to_ltf(prices, df_1d, prev_low_level)
-    prev_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close)
+    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap)
+    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean()
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20.values)
-    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
+    
+    # 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean()
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -61,28 +74,33 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(prev_high_aligned[i]) or np.isnan(prev_low_aligned[i]) or
-            np.isnan(prev_close_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or
-            np.isnan(vol_1d_aligned[i])):
+        if (np.isnan(camarilla_pp_aligned[i]) or np.isnan(camarilla_r4_aligned[i]) or
+            np.isnan(camarilla_s4_aligned[i]) or np.isnan(vwap_aligned[i]) or
+            np.isnan(vol_ma_20_aligned[i]) or np.isnan(ema_50_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current 1d volume > 1.5x 20-period average
-        vol_condition = vol_1d_aligned[i] > (vol_ma_20_aligned[i] * 1.5)
+        # Volume condition: current 1d volume > 2.0x 20-period average
+        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
+        vol_condition = vol_1d_aligned[i] > (vol_ma_20_aligned[i] * 2.0)
+        
+        # Trend filter: only long when price > 12h EMA50, short when price < 12h EMA50
+        long_trend = close[i] > ema_50_12h_aligned[i]
+        short_trend = close[i] < ema_50_12h_aligned[i]
         
         # Breakout conditions
-        long_breakout = close[i] > prev_high_aligned[i]
-        short_breakout = close[i] < prev_low_aligned[i]
+        long_breakout = close[i] > camarilla_r4_aligned[i]
+        short_breakout = close[i] < camarilla_s4_aligned[i]
         
-        # Exit condition: price returns to prior day's close
-        long_exit = close[i] < prev_close_aligned[i]
-        short_exit = close[i] > prev_close_aligned[i]
+        # Exit condition
+        long_exit = close[i] < camarilla_pp_aligned[i]
+        short_exit = close[i] > camarilla_pp_aligned[i]
         
         if position == 0:
-            if long_breakout and vol_condition:
+            if long_breakout and vol_condition and long_trend:
                 position = 1
                 signals[i] = position_size
-            elif short_breakout and vol_condition:
+            elif short_breakout and vol_condition and short_trend:
                 position = -1
                 signals[i] = -position_size
             else:
@@ -102,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Range_Breakout_With_Volume_Confirmation_v2"
+name = "4h_12h_Camarilla_Pivot_Breakout_With_Volume_Confirmation"
 timeframe = "4h"
 leverage = 1.0
