@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_12h_1d_Camarilla_Reversal_Momentum
-- 6h primary timeframe
-- 12h Camarilla pivot levels for structure (S3/S4, R3/R4)
-- 1d momentum filter (RSI(14) > 50 for long, < 50 for short)
-- Entry: Price rejects S3/R3 with momentum confirmation → fade
-- Exit: Price reaches S4/R4 or momentum reverses
-- Position size: 0.25 (25% of capital)
-- Target: 50-150 total trades over 4 years (12-37/year)
+Hypothesis: 4h 1-day Donchian breakout with volume confirmation and volatility regime.
+Uses 1-day Donchian channels for trend direction, 4h volume spike (volume > 1.8x 20-period average) 
+to confirm breakout strength, and 1-day volatility regime (ATR ratio < 0.7 = low volatility) 
+to avoid false breakouts in high volatility. Long when price breaks above daily Donchian upper 
+in low volatility with volume spike. Short when price breaks below daily Donchian lower in 
+low volatility with volume spike. Target: 80-150 total trades over 4 years (20-38/year) to avoid fee drag.
 """
 
 import numpy as np
@@ -22,91 +20,88 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 12h data for Camarilla pivots
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Calculate Camarilla levels (using previous day's range)
-    # Camarilla: H4 = C + 1.1*(H-L)/2, L4 = C - 1.1*(H-L)/2
-    #          H3 = C + 1.1*(H-L)/4, L3 = C - 1.1*(H-L)/4
-    #          H2 = C + 1.1*(H-L)/6, L2 = C - 1.1*(H-L)/6
-    #          H1 = C + 1.1*(H-L)/12, L1 = C - 1.1*(H-L)/12
-    # We'll use H3/L3 (R3/S3) and H4/L4 (R4/S4)
-    range_12h = high_12h - low_12h
-    camarilla_h4 = close_12h + 1.1 * range_12h / 2
-    camarilla_l4 = close_12h - 1.1 * range_12h / 2
-    camarilla_h3 = close_12h + 1.1 * range_12h / 4
-    camarilla_l3 = close_12h - 1.1 * range_12h / 4
-    
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l4)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l3)
-    
-    # Get 1d data for momentum filter (RSI)
+    # Get 1d data for Donchian channels and volatility regime
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate RSI(14)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate 1-day Donchian channels (20-period)
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Calculate 1-day ATR for volatility regime
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], 
+                           np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate 1-day ATR ratio (current ATR / 50-period average ATR) for volatility regime
+    atr_ma_50 = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr_1d / atr_ma_50
+    
+    # Volatility regime: ATR ratio < 0.7 = low volatility (good for breakouts)
+    low_volatility = atr_ratio < 0.7
+    
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    low_volatility_aligned = align_htf_to_ltf(prices, df_1d, low_volatility.astype(float))
+    
+    # Get 4h data for volume confirmation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
+        return np.zeros(n)
+    
+    volume_4h = df_4h['volume'].values
+    
+    # Calculate 4h volume spike (volume > 1.8x 20-period average)
+    vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_4h > (vol_ma_20 * 1.8)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_4h, vol_spike.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% of capital
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(camarilla_h4_aligned[i]) or 
-            np.isnan(camarilla_l4_aligned[i]) or 
-            np.isnan(rsi_1d_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(vol_spike_aligned[i]) or 
+            np.isnan(low_volatility_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Momentum filter
-        rsi_bullish = rsi_1d_aligned[i] > 50
-        rsi_bearish = rsi_1d_aligned[i] < 50
+        # Entry conditions: Donchian breakout + volume spike + low volatility
+        breakout_long = close[i] > donchian_high_aligned[i]
+        breakout_short = close[i] < donchian_low_aligned[i]
+        vol_confirm = vol_spike_aligned[i] > 0.5  # True if volume spike
+        vol_regime = low_volatility_aligned[i] > 0.5  # True if low volatility
         
-        # Fade at S3/R3 with momentum confirmation
-        # Long: price near S3 and bullish momentum
-        long_setup = (close[i] <= camarilla_l3_aligned[i] * 1.005) and rsi_bullish  # Within 0.5% of S3
-        # Short: price near R3 and bearish momentum
-        short_setup = (close[i] >= camarilla_h3_aligned[i] * 0.995) and rsi_bearish  # Within 0.5% of R3
+        long_entry = breakout_long and vol_confirm and vol_regime
+        short_entry = breakout_short and vol_confirm and vol_regime
         
-        # Exit conditions
-        exit_long = position == 1 and (
-            close[i] >= camarilla_h4_aligned[i] or  # Hit S4/R4 target
-            rsi_1d_aligned[i] < 40  # Momentum reversal
-        )
-        exit_short = position == -1 and (
-            close[i] <= camarilla_l4_aligned[i] or  # Hit S4/R4 target
-            rsi_1d_aligned[i] > 60  # Momentum reversal
-        )
+        # Exit when price returns to opposite Donchian level (mean reversion within channel)
+        exit_long = position == 1 and close[i] < donchian_low_aligned[i]
+        exit_short = position == -1 and close[i] > donchian_high_aligned[i]
         
         # Execute signals
-        if long_setup and position != 1:
+        if long_entry and position != 1:
             position = 1
             signals[i] = position_size
-        elif short_setup and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -position_size
         elif exit_long or exit_short:
@@ -123,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_1d_Camarilla_Reversal_Momentum"
-timeframe = "6h"
+name = "4h_1d_donchian_vol_volatility"
+timeframe = "4h"
 leverage = 1.0
