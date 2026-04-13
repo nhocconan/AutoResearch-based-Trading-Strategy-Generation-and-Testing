@@ -5,78 +5,77 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Hypothesis: 1d Donchian(20) breakout with 1w volume confirmation
-    # Enter long when price breaks above 20-day high with volume > 1.5x 20-day avg
-    # Enter short when price breaks below 20-day low with volume > 1.5x 20-day avg
-    # Exit on opposite Donchian breakout or when price crosses 20-day midpoint
-    # Uses 1w HTF for volume confirmation to reduce noise and false breakouts
-    # Works in bull (continuation breaks) and bear (reversal breaks at extremes)
-    # Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag
+    # Hypothesis: 6h Williams %R mean reversion with 12h trend filter
+    # Long when Williams %R < -80 (oversold) AND 12h close > 12h EMA50 (uptrend)
+    # Short when Williams %R > -20 (overbought) AND 12h close < 12h EMA50 (downtrend)
+    # Exit when Williams %R crosses -50 (mean reversion midpoint)
+    # Uses 12h EMA for trend filter to avoid counter-trend trades
+    # Williams %R identifies exhaustion points in 6h cycles
+    # Works in bull (buy dips in uptrend) and bear (sell rallies in downtrend)
+    # Target: 80-150 total trades over 4 years (20-38/year) to minimize fee drag
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for primary timeframe
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 6h data for primary timeframe
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
     
-    # Get 1w data for volume confirmation (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    # Get 12h data for trend filter (HTF)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 1:
         return np.zeros(n)
     
-    volume_1w = df_1w['volume'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 1d Donchian channels (20-period)
-    # Donchian high = rolling max of high, Donchian low = rolling min of low
-    high_series = pd.Series(high_1d)
-    low_series = pd.Series(low_1d)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2.0  # midpoint
+    # Calculate 6h Williams %R (14-period)
+    highest_high = pd.Series(high_6h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_6h).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_6h) / (highest_high - lowest_low)
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Align 1d Donchian levels to 1d timeframe (no alignment needed as already 1d)
-    # But we keep the pattern for consistency
-    donchian_high_aligned = donchian_high  # already 1d
-    donchian_low_aligned = donchian_low    # already 1d
-    donchian_mid_aligned = donchian_mid    # already 1d
+    # Calculate 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume confirmation: volume > 1.5x 20-day average volume (using 1d volume)
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (1.5 * avg_volume)
+    # Align 12h EMA50 to 6h timeframe
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
     
-    for i in range(20, n):  # start from 20 to have enough data for Donchian
+    for i in range(14, n):  # start from 14 to allow Williams %R calculation
         # Skip if data not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(donchian_mid_aligned[i]) or
-            np.isnan(avg_volume[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_50_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > donchian_high_aligned[i]   # break above 20-day high
-        breakout_down = close[i] < donchian_low_aligned[i]  # break below 20-day low
+        # Williams %R conditions
+        oversold = williams_r[i] < -80
+        overbought = williams_r[i] > -20
+        exit_signal = williams_r[i] > -50  # exit when crosses above -50
         
-        # Entry conditions with volume confirmation
-        long_entry = breakout_up and volume_confirmed[i] and position != 1
-        short_entry = breakout_down and volume_confirmed[i] and position != -1
+        # 12h trend filter
+        uptrend = close[i] > ema_50_12h_aligned[i]
+        downtrend = close[i] < ema_50_12h_aligned[i]
         
-        # Exit conditions: opposite breakout or midpoint cross
-        exit_long = (position == 1 and (close[i] < donchian_mid_aligned[i] or breakout_down))
-        exit_short = (position == -1 and (close[i] > donchian_mid_aligned[i] or breakout_up))
+        # Entry conditions
+        long_entry = oversold and uptrend and position != 1
+        short_entry = overbought and downtrend and position != -1
+        
+        # Exit conditions
+        exit_long = position == 1 and exit_signal
+        exit_short = position == -1 and exit_signal
         
         # Execute signals
         if long_entry:
@@ -102,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_donchian_breakout_volume_v1"
-timeframe = "1d"
+name = "6h_12h_williamsr_ema_trend_filter_v1"
+timeframe = "6h"
 leverage = 1.0
