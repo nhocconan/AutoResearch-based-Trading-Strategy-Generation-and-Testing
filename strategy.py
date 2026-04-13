@@ -1,47 +1,23 @@
 #!/usr/bin/env python3
 """
-6h_12h_ADX_Trend_Reversal
-Hypothesis: In 12h trends (ADX > 25), 6h reversals occur when price rejects 12h EMA21 with RSI divergence.
-Works in bull/bear by trading pullbacks in strong trends. Uses ADX trend filter + RSI divergence for precise entries.
-Target: 20-35 trades/year.
+4h_1d_Camarilla_3T4_Reversal
+Hypothesis: Price reverses from Camarilla H3/L3 levels with trend filter (HMA21) and volume confirmation.
+Works in bull markets via bounces from L3 and bear markets via rejections at H3. Target: 25-35 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_adx(high, low, close, period=14):
-    """Calculate Average Directional Index."""
-    plus_dm = np.diff(high, prepend=high[0])
-    minus_dm = np.diff(low, prepend=low[0])
-    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0.0)
-    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0.0)
-    
-    tr = np.maximum(np.absolute(np.diff(high, prepend=high[0])),
-                    np.maximum(np.absolute(np.diff(low, prepend=low[0])),
-                               np.absolute(np.diff(close, prepend=close[0]))))
-    
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False).mean().values
-    
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/period, adjust=False).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/period, adjust=False).mean().values / atr
-    
-    dx = 100 * np.absolute(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False).mean().values
-    return adx
-
-def calculate_rsi(close, period=14):
-    """Calculate Relative Strength Index."""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False).mean().values
-    
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+def calculate_hma(series, period):
+    """Calculate Hull Moving Average."""
+    half = int(period / 2)
+    sqrt = int(np.sqrt(period))
+    wma2 = pd.Series(series).ewm(span=half, adjust=False).mean()
+    wma1 = pd.Series(series).ewm(span=period, adjust=False).mean()
+    raw_hma = 2 * wma2 - wma1
+    hma = pd.Series(raw_hma).ewm(span=sqrt, adjust=False).mean()
+    return hma.values
 
 def generate_signals(prices):
     n = len(prices)
@@ -51,66 +27,73 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 12h data for trend filter and EMA
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get daily data for trend filter and Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 12h ADX trend filter
-    adx_12h = calculate_adx(high_12h, low_12h, close_12h, 14)
-    strong_trend = adx_12h > 25
+    # 1d trend filter: HMA21
+    hma_21 = calculate_hma(close_1d, 21)
+    uptrend = hma_21 > 0  # HMA slope positive
+    downtrend = hma_21 < 0  # HMA slope negative
     
-    # 12h EMA21 for dynamic support/resistance
-    ema_21_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Calculate Camarilla H3/L3 on daily
+    range_1d = high_1d - low_1d
+    range_1d = np.where(range_1d == 0, 1e-10, range_1d)
+    C = close_1d
+    H3 = C + ((high_1d - low_1d) * 1.1666)
+    L3 = C - ((high_1d - low_1d) * 1.1666)
     
-    # 6h RSI for divergence detection
-    rsi_6h = calculate_rsi(close, 14)
+    # Align all data to 4h timeframe
+    H3_1d_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_1d_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    uptrend_aligned = align_htf_to_ltf(prices, df_1d, uptrend.astype(float))
+    downtrend_aligned = align_htf_to_ltf(prices, df_1d, downtrend.astype(float))
     
-    # Align 12h indicators to 6h
-    strong_trend_aligned = align_htf_to_ltf(prices, df_12h, strong_trend.astype(float))
-    ema_21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_21_12h)
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volume_expansion = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(strong_trend_aligned[i]) or 
-            np.isnan(ema_21_12h_aligned[i]) or
-            np.isnan(rsi_6h[i])):
+        if (np.isnan(H3_1d_aligned[i]) or np.isnan(L3_1d_aligned[i]) or 
+            np.isnan(uptrend_aligned[i]) or np.isnan(downtrend_aligned[i]) or
+            np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Bullish reversal: price rejects 12h EMA21 from below with RSI oversold
-        bullish_reject = (close[i] > ema_21_12h_aligned[i] and 
-                         low[i] <= ema_21_12h_aligned[i] * 1.002 and  # within 0.2% of EMA
-                         rsi_6h[i] < 35 and
-                         strong_trend_aligned[i] > 0.5)
+        # Long: bounce from L3 in uptrend with volume expansion
+        long_condition = (low[i] <= L3_1d_aligned[i]) and uptrend_aligned[i] > 0.5 and volume_expansion[i]
         
-        # Bearish reversal: price rejects 12h EMA21 from above with RSI overbought
-        bearish_reject = (close[i] < ema_21_12h_aligned[i] and 
-                         high[i] >= ema_21_12h_aligned[i] * 0.998 and  # within 0.2% of EMA
-                         rsi_6h[i] > 65 and
-                         strong_trend_aligned[i] > 0.5)
+        # Short: rejection at H3 in downtrend with volume expansion
+        short_condition = (high[i] >= H3_1d_aligned[i]) and downtrend_aligned[i] > 0.5 and volume_expansion[i]
         
-        if bullish_reject and position != 1:
+        if long_condition and position != 1:
             position = 1
             signals[i] = position_size
-        elif bearish_reject and position != -1:
+        elif long_condition and position == 1:
+            signals[i] = position_size
+        elif short_condition and position != -1:
             position = -1
             signals[i] = -position_size
+        elif short_condition and position == -1:
+            signals[i] = -position_size
         else:
-            # Exit on trend weakening or opposite signal
-            if position == 1 and (strong_trend_aligned[i] <= 0.5 or bearish_reject):
+            # Exit: reverse signal or loss of trend/volume
+            if position == 1 and (not uptrend_aligned[i] > 0.5 or not volume_expansion[i]):
                 position = 0
                 signals[i] = 0.0
-            elif position == -1 and (strong_trend_aligned[i] <= 0.5 or bullish_reject):
+            elif position == -1 and (not downtrend_aligned[i] > 0.5 or not volume_expansion[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -118,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_ADX_Trend_Reversal"
-timeframe = "6h"
+name = "4h_1d_Camarilla_3T4_Reversal"
+timeframe = "4h"
 leverage = 1.0
