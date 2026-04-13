@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Range_Breakout
-Hypothesis: Trade breakouts from 1d Camarilla pivot levels (H4/L4) on 4h timeframe with volume confirmation.
-Uses 1d Camarilla levels as strong support/resistance that institutions respect. Works in bull (breakouts above H4)
-and bear (breakdowns below L4) markets. Volume filter ensures institutional participation. Target: 25-35 trades/year.
+12h_1d_Camarilla_Breakout_MultiTF
+Hypothesis: Trade 12h breakouts from 1d Camarilla pivot levels (H4/L4) with volume confirmation.
+Uses 1d Camarilla levels as institutional support/resistance. Works in bull (breakouts above H4)
+and bear (breakdowns below L4) markets. Volume filter ensures institutional participation.
+Target: 15-30 trades/year (60-120 total over 4 years).
 """
 
 import numpy as np
@@ -49,13 +50,13 @@ def generate_signals(prices):
     # Calculate 1d Camarilla levels
     R1_1d, R2_1d, R3_1d, R4_1d, S1_1d, S2_1d, S3_1d, S4_1d = calculate_camarilla(high_1d, low_1d, close_1d)
     
-    # Align all data to 4h timeframe
+    # Align all data to 12h timeframe
     R4_1d_aligned = align_htf_to_ltf(prices, df_1d, R4_1d)
     S4_1d_aligned = align_htf_to_ltf(prices, df_1d, S4_1d)
     
-    # Volume confirmation: current volume > 1.8x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 1.8)
+    volume_expansion = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -86,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_Range_Breakout"
-timeframe = "4h"
+name = "12h_1d_Camarilla_Breakout_MultiTF"
+timeframe = "12h"
 leverage = 1.0
