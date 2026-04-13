@@ -14,16 +14,12 @@ def generate_signals(prices):
     
     # Get 1d data for HTF calculations
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate 10-period EMA on 1d (trend filter)
-    close_1d_series = pd.Series(close_1d)
-    ema_10_1d = close_1d_series.ewm(span=10, adjust=False, min_periods=10).mean().values
     
     # Calculate 20-period Donchian channels on 1d
     high_20 = np.full(len(close_1d), np.nan)
@@ -32,17 +28,14 @@ def generate_signals(prices):
         high_20[i] = np.max(high_1d[i-20:i])
         low_20[i] = np.min(low_1d[i-20:i])
     
-    # Calculate volume SMA on 1d
-    volume_1d = df_1d['volume'].values
-    volume_sma_20 = np.full(len(volume_1d), np.nan)
-    for i in range(20, len(volume_1d)):
-        volume_sma_20[i] = np.mean(volume_1d[i-20:i])
+    # Calculate 20-period EMA on 1d (trend filter)
+    close_1d_series = pd.Series(close_1d)
+    ema_20_1d = close_1d_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align indicators to 6h timeframe
-    ema_10_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_10_1d)
+    # Align indicators to 12h timeframe
     high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
     low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
-    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20)
+    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -50,27 +43,23 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema_10_1d_aligned[i]) or 
-            np.isnan(high_20_aligned[i]) or 
+        if (np.isnan(high_20_aligned[i]) or 
             np.isnan(low_20_aligned[i]) or 
-            np.isnan(volume_sma_20_aligned[i])):
+            np.isnan(ema_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below EMA10
-        above_ema = close[i] > ema_10_1d_aligned[i]
-        below_ema = close[i] < ema_10_1d_aligned[i]
+        # Trend filter: price above/below EMA20
+        above_ema = close[i] > ema_20_aligned[i]
+        below_ema = close[i] < ema_20_aligned[i]
         
         # Donchian breakout conditions
         long_breakout = close[i] > high_20_aligned[i]
         short_breakout = close[i] < low_20_aligned[i]
         
-        # Volume confirmation: current volume > 20-period average
-        volume_confirmed = prices['volume'].iloc[i] > volume_sma_20_aligned[i]
-        
-        # Entry conditions: breakout in direction of trend with volume
-        long_entry = long_breakout and above_ema and volume_confirmed
-        short_entry = short_breakout and below_ema and volume_confirmed
+        # Entry conditions: breakout in direction of trend
+        long_entry = long_breakout and above_ema
+        short_entry = short_breakout and below_ema
         
         # Exit conditions: opposite breakout or trend reversal
         exit_long = position == 1 and (short_breakout or below_ema)
@@ -97,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_ema10_volume_filter_breakout"
-timeframe = "6h"
+name = "12h_1d_donchian_ema20_breakout"
+timeframe = "12h"
 leverage = 1.0
