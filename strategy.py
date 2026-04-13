@@ -3,13 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1d trend filter and volume confirmation.
-# The Williams Alligator uses three smoothed moving averages (Jaws, Teeth, Lips) to identify trends.
-# In bull markets: Lips > Teeth > Jaws (bullish alignment)
-# In bear markets: Lips < Teeth < Jaws (bearish alignment)
-# The 1d trend filter ensures we only trade in the direction of the higher timeframe trend.
-# Volume confirmation ensures trades have sufficient conviction.
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+# Hypothesis: 4h Camarilla pivot reversal with 1d volume spike and 4h RSI filter.
+# Camarilla levels act as reversal zones in ranging markets.
+# Volume spikes confirm institutional interest at key levels.
+# RSI filter ensures we trade in the direction of momentum.
+# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,111 +19,118 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for multi-timeframe analysis
+    # Daily data for Camarilla and volume analysis
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Williams Alligator on 12h data
-    # Jaws: 13-period SMMA, 8-bar shift
-    # Teeth: 8-period SMMA, 5-bar shift  
-    # Lips: 5-period SMMA, 3-bar shift
-    def smoothed_mma(data, period):
-        """Smoothed Moving Average (SMMA) - similar to Wilder's smoothing"""
-        sma = np.full(len(data), np.nan)
-        if len(data) < period:
-            return sma
-        # First value is simple average
-        sma[period-1] = np.mean(data[:period])
-        # Subsequent values: (prev_sma * (period-1) + current_price) / period
-        for i in range(period, len(data)):
-            sma[i] = (sma[i-1] * (period-1) + data[i]) / period
-        return sma
-    
-    jaws = smoothed_mma(close, 13)
-    teeth = smoothed_mma(close, 8)
-    lips = smoothed_mma(close, 5)
-    
-    # Apply shifts (Jaws: 8 bars, Teeth: 5 bars, Lips: 3 bars)
-    jaws_shifted = np.full_like(jaws, np.nan)
-    teeth_shifted = np.full_like(teeth, np.nan)
-    lips_shifted = np.full_like(lips, np.nan)
-    
-    for i in range(8, len(jaws)):
-        jaws_shifted[i] = jaws[i-8]
-    for i in range(5, len(teeth)):
-        teeth_shifted[i] = teeth[i-5]
-    for i in range(3, len(lips)):
-        lips_shifted[i] = lips[i-3]
-    
-    # Average volume (20-period) for volume confirmation
-    avg_volume = np.full(n, np.nan)
-    for i in range(20, n):
-        avg_volume[i] = np.mean(volume[i-20:i])
-    
-    # 1d trend filter: EMA 34
+    # Calculate Camarilla levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_34_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 34:
-        ema_34_1d[33] = np.mean(close_1d[:34])  # First EMA value
-        for i in range(34, len(close_1d)):
-            ema_34_1d[i] = (close_1d[i] * 2/(34+1)) + (ema_34_1d[i-1] * (33)/(34+1))
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    camarilla_h5 = np.zeros(len(close_1d))
+    camarilla_h4 = np.zeros(len(close_1d))
+    camarilla_h3 = np.zeros(len(close_1d))
+    camarilla_l3 = np.zeros(len(close_1d))
+    camarilla_l4 = np.zeros(len(close_1d))
+    camarilla_l5 = np.zeros(len(close_1d))
+    
+    for i in range(1, len(close_1d)):
+        # Previous day's values
+        ph = high_1d[i-1]
+        pl = low_1d[i-1]
+        pc = close_1d[i-1]
+        rang = ph - pl
+        
+        camarilla_h5[i] = pc + 1.1 * rang / 2
+        camarilla_h4[i] = pc + 1.1 * rang / 4
+        camarilla_h3[i] = pc + 1.1 * rang / 6
+        camarilla_l3[i] = pc - 1.1 * rang / 6
+        camarilla_l4[i] = pc - 1.1 * rang / 4
+        camarilla_l5[i] = pc - 1.1 * rang / 2
+    
+    # Align Camarilla levels to 4h timeframe
+    h5_4h = align_htf_to_ltf(prices, df_1d, camarilla_h5)
+    h4_4h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    h3_4h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_4h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    l4_4h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    l5_4h = align_htf_to_ltf(prices, df_1d, camarilla_l5)
+    
+    # Calculate 20-period average volume for spike detection
+    vol_avg = np.zeros(n)
+    for i in range(20, n):
+        vol_avg[i] = np.mean(volume[i-20:i])
+    
+    # Calculate 4h RSI (14-period)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    for i in range(14, n):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[1:15])
+            avg_loss[i] = np.mean(loss[1:15])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.zeros(n)
+    rsi = np.zeros(n)
+    for i in range(14, n):
+        if avg_loss[i] != 0:
+            rs[i] = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100 - (100 / (1 + rs[i]))
+        else:
+            rsi[i] = 100
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(34, n):  # Start after enough data for all indicators
+    for i in range(30, n):
         # Skip if any required data is not ready
-        if (np.isnan(lips_shifted[i]) or np.isnan(teeth_shifted[i]) or 
-            np.isnan(jaws_shifted[i]) or np.isnan(avg_volume[i]) or 
-            np.isnan(ema_34_1d_aligned[i])):
+        if (np.isnan(h5_4h[i]) or np.isnan(l5_4h[i]) or 
+            np.isnan(vol_avg[i]) or np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        avg_vol = avg_volume[i]
-        lips_val = lips_shifted[i]
-        teeth_val = teeth_shifted[i]
-        jaws_val = jaws_shifted[i]
-        ema_1d = ema_34_1d_aligned[i]
+        avg_vol = vol_avg[i]
+        rsi_val = rsi[i]
         
-        # Volume confirmation: current volume > 1.3x average volume
-        volume_confirm = vol > 1.3 * avg_vol
+        # Volume spike: current volume > 2.0x average volume
+        volume_spike = vol > 2.0 * avg_vol
         
         if position == 0:
-            # Bullish alignment: Lips > Teeth > Jaws AND price above 1d EMA
-            if (lips_val > teeth_val and 
-                teeth_val > jaws_val and 
-                price > ema_1d and
-                volume_confirm):
+            # Long reversal: price touches L3/L4 + volume spike + RSI < 40 (oversold bounce)
+            if (abs(price - l3_4h[i]) < 0.001 * price or abs(price - l4_4h[i]) < 0.001 * price) and \
+               volume_spike and \
+               rsi_val < 40:
                 position = 1
                 signals[i] = position_size
-            # Bearish alignment: Lips < Teeth < Jaws AND price below 1d EMA
-            elif (lips_val < teeth_val and 
-                  teeth_val < jaws_val and 
-                  price < ema_1d and
-                  volume_confirm):
+            # Short reversal: price touches H3/H4 + volume spike + RSI > 60 (overbought reversal)
+            elif (abs(price - h3_4h[i]) < 0.001 * price or abs(price - h4_4h[i]) < 0.001 * price) and \
+                 volume_spike and \
+                 rsi_val > 60:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: bearish alignment OR price crosses below 1d EMA
-            if (lips_val < teeth_val or 
-                teeth_val < jaws_val or
-                price < ema_1d):
+            # Exit long: price reaches H3 or RSI > 70
+            if (price >= h3_4h[i] or rsi_val > 70):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: bullish alignment OR price crosses above 1d EMA
-            if (lips_val > teeth_val or 
-                teeth_val > jaws_val or
-                price > ema_1d):
+            # Exit short: price reaches L3 or RSI < 30
+            if (price <= l3_4h[i] or rsi_val < 30):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -133,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Williams_Alligator_Trend_Filter_v1"
-timeframe = "12h"
+name = "4h_1d_Camarilla_Volume_Spike_RSI_v1"
+timeframe = "4h"
 leverage = 1.0
