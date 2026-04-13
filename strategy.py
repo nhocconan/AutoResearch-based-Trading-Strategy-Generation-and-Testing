@@ -13,7 +13,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for pivot levels and volume
+    # Daily data for pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -24,41 +24,31 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Calculate daily Camarilla pivot levels (using previous day's data)
-    # Pivot levels are calculated from previous day's OHLC
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     
-    # Camarilla levels
+    # Calculate pivot and range
     pivot = (prev_high + prev_low + prev_close) / 3
     range_hl = prev_high - prev_low
     
     # Resistance levels
     r1 = pivot + (range_hl * 1.1 / 12)
     r2 = pivot + (range_hl * 1.1 / 6)
-    r3 = pivot + (range_hl * 1.1 / 4)
-    r4 = pivot + (range_hl * 1.1 / 2)
     
     # Support levels
     s1 = pivot - (range_hl * 1.1 / 12)
     s2 = pivot - (range_hl * 1.1 / 6)
-    s3 = pivot - (range_hl * 1.1 / 4)
-    s4 = pivot - (range_hl * 1.1 / 2)
     
     # Weekly EMA for trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean()
+    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean()
     
-    # Align all data to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    # Align all data to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w.values)
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w.values)
     
     # Daily volume and its 20-period average
     volume_1d = df_1d['volume'].values
@@ -71,22 +61,21 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or
-            np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(s2_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current 12h volume > 1.5x 20-period average
-        # Approximate 12h volume from daily volume (assuming 2x 12h periods per day)
-        volume_12h_approx = volume[i]  # Current 12h bar volume
-        volume_ma_20_12h = volume_ma_20_1d_aligned[i] / 2  # Approximate 20-period average for 12h
-        volume_condition = volume_12h_approx > (volume_ma_20_12h * 1.5)
+        # Volume condition: current 4h volume > 1.3x 20-period average
+        # Approximate 4h volume from daily volume (assuming 6x 4h periods per day)
+        volume_4h_approx = volume[i]  # Current 4h bar volume
+        volume_ma_20_4h = volume_ma_20_1d_aligned[i] / 6  # Approximate 20-period average for 4h
+        volume_condition = volume_4h_approx > (volume_ma_20_4h * 1.3)
         
-        # Trend filter: only long when price > weekly EMA50, short when price < weekly EMA50
-        long_trend = close[i] > ema_50_1w_aligned[i]
-        short_trend = close[i] < ema_50_1w_aligned[i]
+        # Trend filter: only long when price > weekly EMA20, short when price < weekly EMA20
+        long_trend = close[i] > ema_20_1w_aligned[i]
+        short_trend = close[i] < ema_20_1w_aligned[i]
         
         # Entry conditions: price near Camarilla levels with volume and trend confirmation
         # Long when price touches or crosses above S1/S2 with volume and uptrend
@@ -104,15 +93,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit when price reaches pivot or shows reversal signs
-            if close[i] >= pivot_aligned[i] * 0.998:
+            # Exit when price reaches R1 or shows reversal signs
+            if close[i] >= r1_aligned[i] * 0.998:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit when price reaches pivot or shows reversal signs
-            if close[i] <= pivot_aligned[i] * 1.002:
+            # Exit when price reaches S1 or shows reversal signs
+            if close[i] <= s1_aligned[i] * 1.002:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -120,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d1w_Camarilla_Pivot_Breakout_With_Volume_Confirmation_v1"
-timeframe = "12h"
+name = "4h_1d1w_Camarilla_Pivot_Breakout_With_Volume_Confirmation_v1"
+timeframe = "4h"
 leverage = 1.0
