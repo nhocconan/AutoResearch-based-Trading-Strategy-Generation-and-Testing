@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_1W_1D_Volatility_Squeeze_Breakout
-Hypothesis: In 6h timeframe, buy when price breaks above weekly Bollinger upper band with volatility contraction (BBW < 50th percentile) and 1d EMA20 alignment, sell when breaks below lower band with same conditions. Uses weekly volatility regime to filter breakouts, works in bull (breakouts continuation) and bear (mean reversion in squeeze) markets. Targets 15-35 trades/year with 30% position size.
+12h_1D_Camarilla_Pivot_Breakout_Volume_Confirmation
+Hypothesis: Buy when price breaks above daily Camarilla H4 level with volume > 2x 50-period average and price > daily EMA50, sell when price breaks below daily L4 level with volume confirmation and price < daily EMA50. Uses 12h primary timeframe with 1d trend filter. Designed to work in both bull and bear markets by capturing genuine breakouts with strong volume and trend alignment. Low frequency design to avoid fee drag.
 """
 
 import numpy as np
@@ -10,94 +10,90 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Weekly data for Bollinger Bands and volatility regime
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Volume confirmation: current volume > 2x 50-period average
+    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean()
+    volume_expansion = volume > (vol_ma_50 * 2.0)
     
-    # Weekly Bollinger Bands (20, 2)
-    weekly_close = df_1w['close'].values
-    bb_period = 20
-    bb_std = 2
-    sma = pd.Series(weekly_close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std = pd.Series(weekly_close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_band = sma + (bb_std * std)
-    lower_band = sma - (bb_std * std)
-    
-    # Bollinger Width for volatility regime
-    bb_width = (upper_band - lower_band) / sma
-    # Historical 50th percentile of BB width (volatility median)
-    bb_width_median = pd.Series(bb_width).rolling(window=50, min_periods=50).median().values
-    volatility_squeeze = bb_width < bb_width_median  # True when volatility below median
-    
-    # Align weekly indicators to 6h
-    upper_band_aligned = align_htf_to_ltf(prices, df_1w, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1w, lower_band)
-    volatility_squeeze_aligned = align_htf_to_ltf(prices, df_1w, volatility_squeeze.astype(float))
-    
-    # Daily EMA20 for trend alignment
+    # Previous day's high/low/close for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    daily_close = df_1d['close'].values
-    ema20 = pd.Series(daily_close).ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema20_aligned = align_htf_to_ltf(prices, df_1d, ema20)
+    prev_high_1d = df_1d['high'].values
+    prev_low_1d = df_1d['low'].values
+    prev_close_1d = df_1d['close'].values
+    
+    # Calculate daily Camarilla levels
+    camarilla_h4_1d = prev_close_1d + 1.1 * (prev_high_1d - prev_low_1d) / 2
+    camarilla_l4_1d = prev_close_1d - 1.1 * (prev_high_1d - prev_low_1d) / 2
+    
+    # Align daily levels to 12h timeframe (wait for daily close)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4_1d)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4_1d)
+    
+    # Daily EMA50 trend filter
+    ema50_1d_raw = pd.Series(prev_close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d_raw)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.30  # 30% position size
+    position_size = 0.25  # 25% position size
+    bars_since_entry = 0  # Track holding period
     
-    for i in range(100, n):
-        # Skip if any data not ready
-        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or
-            np.isnan(volatility_squeeze_aligned[i]) or np.isnan(ema20_aligned[i])):
+    for i in range(60, n):  # warmup period
+        # Skip if any required data is not ready
+        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_expansion[i])):
             signals[i] = 0.0
+            bars_since_entry = 0
             continue
         
-        # Long: price breaks above weekly upper band + volatility squeeze + price > daily EMA20
-        long_signal = (close[i] > upper_band_aligned[i] and 
-                      volatility_squeeze_aligned[i] > 0.5 and  # True when aligned
-                      close[i] > ema20_aligned[i])
+        bars_since_entry += 1
         
-        # Short: price breaks below weekly lower band + volatility squeeze + price < daily EMA20
-        short_signal = (close[i] < lower_band_aligned[i] and 
-                       volatility_squeeze_aligned[i] > 0.5 and  # True when aligned
-                       close[i] < ema20_aligned[i])
+        # Long signal: break above daily Camarilla H4 with volume expansion and price above daily EMA50
+        long_signal = (close[i] > camarilla_h4_aligned[i] and 
+                      volume_expansion[i] and 
+                      close[i] > ema50_1d_aligned[i])
         
-        if position == 0:
+        # Short signal: break below daily Camarilla L4 with volume expansion and price below daily EMA50
+        short_signal = (close[i] < camarilla_l4_aligned[i] and 
+                       volume_expansion[i] and 
+                       close[i] < ema50_1d_aligned[i])
+        
+        # Exit conditions: minimum holding period reached and opposite signal
+        if position == 1 and bars_since_entry >= 4 and short_signal:
+            position = -1
+            signals[i] = -position_size
+            bars_since_entry = 0
+        elif position == -1 and bars_since_entry >= 4 and long_signal:
+            position = 1
+            signals[i] = position_size
+            bars_since_entry = 0
+        elif position == 0:
             if long_signal:
                 position = 1
                 signals[i] = position_size
+                bars_since_entry = 0
             elif short_signal:
                 position = -1
                 signals[i] = -position_size
+                bars_since_entry = 0
             else:
                 signals[i] = 0.0
-        elif position == 1:
-            # Exit long: price breaks below weekly lower band OR price < daily EMA20
-            if close[i] < lower_band_aligned[i] or close[i] < ema20_aligned[i]:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = position_size
-        elif position == -1:
-            # Exit short: price breaks above weekly upper band OR price > daily EMA20
-            if close[i] > upper_band_aligned[i] or close[i] > ema20_aligned[i]:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = -position_size
+        else:
+            # Hold current position
+            signals[i] = position_size if position == 1 else (-position_size if position == -1 else 0.0)
     
     return signals
 
-name = "6h_1W_1D_Volatility_Squeeze_Breakout"
-timeframe = "6h"
+name = "12h_1D_Camarilla_Pivot_Breakout_Volume_Confirmation"
+timeframe = "12h"
 leverage = 1.0
