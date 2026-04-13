@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h timeframe with 1w/1d multi-timeframe confirmation.
-# Uses 1w Donchian breakout (20-period) with 1d RSI(14) filter and volume confirmation.
-# Long: Price breaks above 1w Donchian upper band + 1d RSI < 70 + volume > 1.5x 6h avg volume.
-# Short: Price breaks below 1w Donchian lower band + 1d RSI > 30 + volume > 1.5x 6h avg volume.
-# Exit: Price crosses 1w Donchian midline (mean of upper/lower band).
-# Combines weekly structure with daily momentum and volume to avoid false breakouts.
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
+# Hypothesis: 12h timeframe with 1d Donchian breakout and volume confirmation.
+# Long: Price breaks above Donchian(20) upper band + volume > 1.5x average volume.
+# Short: Price breaks below Donchian(20) lower band + volume > 1.5x average volume.
+# Exit: Price closes back inside the Donchian channel.
+# Uses 1d Donchian channels for structure, 12h for execution with volume confirmation.
+# Time filter: 00-23 UTC (all hours) to maximize opportunities while maintaining discipline.
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,55 +21,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1w data for Donchian channel (20-period)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    # 1d data for RSI(14)
+    # 1d data for Donchian channels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1w Donchian channel (20-period high/low)
-    donchian_high = np.full(len(high_1w), np.nan)
-    donchian_low = np.full(len(low_1w), np.nan)
-    for i in range(20, len(high_1w)):
-        donchian_high[i] = np.max(high_1w[i-20:i])
-        donchian_low[i] = np.min(low_1w[i-20:i])
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # Calculate Donchian channels (20-period)
+    donch_up = np.full(len(close_1d), np.nan)
+    donch_low = np.full(len(close_1d), np.nan)
+    for i in range(20, len(close_1d)):
+        donch_up[i] = np.max(high_1d[i-20:i])
+        donch_low[i] = np.min(low_1d[i-20:i])
     
-    # Calculate 1d RSI(14)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.full_like(gain, np.nan)
-    avg_loss = np.full_like(loss, np.nan)
-    for i in range(14, len(gain)):
-        if i == 14:
-            avg_gain[i] = np.mean(gain[1:15])
-            avg_loss[i] = np.mean(loss[1:15])
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Average volume (20-period) for volume confirmation on 6h
+    # Average volume (20-period) for volume confirmation
     avg_volume = np.full(n, np.nan)
     for i in range(20, n):
         avg_volume[i] = np.mean(volume[i-20:i])
     
-    # Align 1w Donchian and 1d RSI to 6h
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Align 1d Donchian levels to 12h
+    donch_up_aligned = align_htf_to_ltf(prices, df_1d, donch_up)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -77,8 +52,7 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(donchian_mid_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+        if (np.isnan(donch_up_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
@@ -86,35 +60,33 @@ def generate_signals(prices):
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        upper = donchian_high_aligned[i]
-        lower = donchian_low_aligned[i]
-        mid = donchian_mid_aligned[i]
-        rsi_val = rsi_aligned[i]
+        upper = donch_up_aligned[i]
+        lower = donch_low_aligned[i]
         
         # Volume confirmation: current volume > 1.5x average volume
         volume_confirm = vol > 1.5 * avg_vol
         
         if position == 0:
-            # Long: price breaks above upper band + RSI < 70 + volume confirmation
-            if (price > upper and rsi_val < 70 and volume_confirm):
+            # Long: price breaks above upper band + volume confirmation
+            if (price > upper and volume_confirm):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below lower band + RSI > 30 + volume confirmation
-            elif (price < lower and rsi_val > 30 and volume_confirm):
+            # Short: price breaks below lower band + volume confirmation
+            elif (price < lower and volume_confirm):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below midline
-            if price < mid:
+            # Exit long: price closes inside channel (below upper band)
+            if price < upper:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above midline
-            if price > mid:
+            # Exit short: price closes inside channel (above lower band)
+            if price > lower:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -122,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_1d_Donchian_RSI_Volume"
-timeframe = "6h"
+name = "12h_1d_Donchian_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
