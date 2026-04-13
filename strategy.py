@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_1D_Camarilla_Pivot_Breakout_Volume_Confirmation_v12
-Hypothesis: 4h price breaks above/below daily Camarilla R4/S4 levels with daily volume > 1.8x 20-period average and daily close >/ < daily VWAP for trend filter.
-Long when price breaks above R4 + volume condition + close > VWAP.
-Short when price breaks below S4 + volume condition + close < VWAP.
-Exit when price crosses daily pivot point (PP).
-Designed for 4h timeframe to target 25-35 trades/year with strong trend capture in both bull and bear markets.
+12h_1D_Camarilla_Pivot_Breakout_With_Volume_Filter
+Hypothesis: 12h price breaks above/below daily Camarilla R4/S4 levels with daily volume > 1.8x 20-period average and daily close >/ < daily VWAP for trend filter. Long when price breaks above R4 + volume condition + close > VWAP. Short when price breaks below S4 + volume condition + close < VWAP. Exit when price crosses daily pivot point (PP). Designed for 12h timeframe to target 15-25 trades/year with strong trend capture in both bull and bear markets.
 """
 
 import numpy as np
@@ -14,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -51,7 +47,7 @@ def generate_signals(prices):
     camarilla_r4 = camarilla_pp + (range_1d * 1.1 / 2)
     camarilla_s4 = camarilla_pp - (range_1d * 1.1 / 2)
     
-    # Align 1d data to 4h
+    # Align 1d data to 12h
     camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
     camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
     camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
@@ -63,7 +59,7 @@ def generate_signals(prices):
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is not ready
         if (np.isnan(camarilla_pp_aligned[i]) or np.isnan(camarilla_r4_aligned[i]) or
             np.isnan(camarilla_s4_aligned[i]) or np.isnan(vwap_aligned[i]) or
@@ -111,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1D_Camarilla_Pivot_Breakout_Volume_Confirmation_v12"
-timeframe = "4h"
+name = "12h_1D_Camarilla_Pivot_Breakout_With_Volume_Filter"
+timeframe = "12h"
 leverage = 1.0
