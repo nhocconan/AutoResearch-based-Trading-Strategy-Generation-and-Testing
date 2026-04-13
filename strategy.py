@@ -8,56 +8,38 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h strategy using 1d Williams Alligator (Jaw/Teeth/Lips) + 1w volume confirmation
-    # Alligator identifies trend (Jaw > Teeth > Lips = uptrend, reverse = downtrend)
-    # Weekly volume spike confirms institutional participation
-    # Discrete sizing (0.25) minimizes fee drag. Target: 12-25 trades/year.
+    # Hypothesis: 4h strategy using 1d Camarilla pivot levels with volume spike confirmation
+    # Works in both bull and bear: Camarilla levels act as support/resistance,
+    # volume spike confirms institutional interest, discrete sizing minimizes fee drag.
+    # Target: 20-40 trades/year to stay within 4h optimal range.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values if 'volume' in prices.columns else np.ones(len(prices))
     
-    # Get 1d data for Williams Alligator (SMMA of median price)
+    # Get 1d data for Camarilla pivot calculation (primary HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    median_price_1d = (high_1d + low_1d) / 2
+    volume_1d = df_1d['volume'].values if 'volume' in df_1d.columns else np.ones(len(df_1d))
     
-    # Calculate SMMA (Smoothed Moving Average) - Wilder's smoothing
-    def smma(source, period):
-        result = np.full_like(source, np.nan)
-        if len(source) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(source[:period])
-        # Subsequent values: (prev * (period-1) + current) / period
-        for i in range(period, len(source)):
-            result[i] = (result[i-1] * (period-1) + source[i]) / period
-        return result
+    # Calculate 1d Camarilla levels (based on previous day)
+    # Camarilla: H4 = Close + 1.1*(High-Low)/2, L4 = Close - 1.1*(High-Low)/2
+    camarilla_high = close_1d + 1.1 * (high_1d - low_1d) / 2
+    camarilla_low = close_1d - 1.1 * (high_1d - low_1d) / 2
     
-    # Williams Alligator: Jaw (13, 8), Teeth (8, 5), Lips (5, 3)
-    jaw = smma(median_price_1d, 13)
-    teeth = smma(median_price_1d, 8)
-    lips = smma(median_price_1d, 5)
+    # Calculate 1d volume average (20-period) for confirmation
+    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Get 1w data for volume confirmation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    volume_1w = df_1w['volume'].values if 'volume' in df_1w.columns else np.ones(len(df_1w))
-    vol_avg_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all HTF indicators to 12h primary timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
-    vol_avg_20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_avg_20_1w)
+    # Align all HTF indicators to 4h primary timeframe
+    camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
+    camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -68,31 +50,28 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(jaw_aligned[i]) or 
-            np.isnan(teeth_aligned[i]) or
-            np.isnan(lips_aligned[i]) or
-            np.isnan(vol_avg_20_1w_aligned[i])):
+        if (np.isnan(camarilla_high_aligned[i]) or 
+            np.isnan(camarilla_low_aligned[i]) or
+            np.isnan(vol_avg_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1w volume > 1.5x 20-period average
-        idx_1w = i // (24 * 2 * 7)  # 1w bars in 12h timeframe (14 bars per week)
-        if idx_1w >= len(volume_1w):
+        # Volume confirmation: current 1d volume > 1.5x 20-period average
+        idx_1d = i // (24 * 6)  # 1d bars in 4h timeframe (6 bars per day)
+        if idx_1d >= len(volume_1d):
             signals[i] = 0.0
             continue
-        volume_confirmed = volume_1w[idx_1w] > 1.5 * vol_avg_20_1w_aligned[i]
+        volume_confirmed = volume_1d[idx_1d] > 1.5 * vol_avg_20_1d_aligned[i]
         
-        # Alligator trend conditions
-        bullish_alignment = jaw_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > lips_aligned[i]
-        bearish_alignment = jaw_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < lips_aligned[i]
+        # Entry conditions: Camarilla level touch + volume confirmation
+        # Long when price touches or breaks above Camarilla H4 resistance
+        # Short when price touches or breaks below Camarilla L4 support
+        enter_long = (close[i] >= camarilla_high_aligned[i]) and volume_confirmed
+        enter_short = (close[i] <= camarilla_low_aligned[i]) and volume_confirmed
         
-        # Entry conditions: Alligator alignment + volume confirmation
-        enter_long = bullish_alignment and volume_confirmed
-        enter_short = bearish_alignment and volume_confirmed
-        
-        # Stoploss: based on Alligator width ( Jaw - Lips )
-        alligator_width = abs(jaw_aligned[i] - lips_aligned[i])
-        stop_distance = alligator_width * 0.15  # 15% of Alligator width
+        # Stoploss: 1.5x ATR based on 4h true range (simplified using Camarilla width)
+        camarilla_width = camarilla_high_aligned[i] - camarilla_low_aligned[i]
+        stop_distance = camarilla_width * 0.15  # 15% of level width
         
         exit_long = position == 1 and not np.isnan(entry_price[i-1]) and close[i] < entry_price[i-1] - stop_distance
         exit_short = position == -1 and not np.isnan(entry_price[i-1]) and close[i] > entry_price[i-1] + stop_distance
@@ -128,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_1w_williams_alligator_volume_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
