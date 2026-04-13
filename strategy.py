@@ -8,44 +8,49 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian(20) breakout + 1d Camarilla pivot structure + volume confirmation
-    # Long when: price breaks above Donchian(20) high AND price > Camarilla H3 (1d) AND volume > 1.5x avg volume
-    # Short when: price breaks below Donchian(20) low AND price < Camarilla L3 (1d) AND volume > 1.5x avg volume
-    # Exit when: price crosses Donchian midpoint OR volume drops below average
-    # Uses discrete sizing (0.25) targeting 50-150 trades over 4 years.
-    # Works in bull/bear via Camarilla pivot structure providing dynamic support/resistance levels.
+    # Hypothesis: 1h Camarilla breakout with 4h trend filter and volume confirmation
+    # Long when: price breaks above 1h Donchian(20) high AND price > 4h Camarilla H3 AND volume > 1.5x avg volume AND 4h close > 4h open (bullish candle)
+    # Short when: price breaks below 1h Donchian(20) low AND price < 4h Camarilla L3 AND volume > 1.5x avg volume AND 4h close < 4h open (bearish candle)
+    # Exit when: price crosses 1h Donchian midpoint
+    # Uses 4h for trend bias and Camarilla structure, 1h for precise entry timing.
+    # Session filter: 08-20 UTC to avoid low-volume periods.
+    # Discrete sizing: 0.20 targeting 60-150 total trades over 4 years.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Get 1d data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Pre-compute hour for session filter
+    hours = pd.DatetimeIndex(open_time).hour
+    
+    # Get 4h data for trend and Camarilla
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    open_4h = df_4h['open'].values
     
-    # Calculate 1d Camarilla pivots (using previous day's range)
-    # Camarilla levels: H4 = close + 1.5*(high-low), H3 = close + 1.125*(high-low)
-    #                 L3 = close - 1.125*(high-low), L4 = close - 1.5*(high-low)
-    # We'll use H3/L3 as entry filters and H4/L4 as stop levels
-    range_1d = high_1d - low_1d
-    h3_1d = close_1d + 1.125 * range_1d
-    l3_1d = close_1d - 1.125 * range_1d
-    h4_1d = close_1d + 1.5 * range_1d
-    l4_1d = close_1d - 1.5 * range_1d
+    # Calculate 4h Camarilla pivots (using previous bar's range)
+    range_4h = high_4h - low_4h
+    h3_4h = close_4h + 1.125 * range_4h
+    l3_4h = close_4h - 1.125 * range_4h
     
-    # Align 1d Camarilla levels to 12h timeframe
-    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
-    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
-    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    # Align 4h Camarilla levels to 1h timeframe
+    h3_4h_aligned = align_htf_to_ltf(prices, df_4h, h3_4h)
+    l3_4h_aligned = align_htf_to_ltf(prices, df_4h, l3_4h)
     
-    # Calculate Donchian(20) channels on 12h
+    # Calculate 4h bullish/bearish candle filter
+    bullish_4h = close_4h > open_4h
+    bearish_4h = close_4h < open_4h
+    bullish_4h_aligned = align_htf_to_ltf(prices, df_4h, bullish_4h.astype(float))
+    bearish_4h_aligned = align_htf_to_ltf(prices, df_4h, bearish_4h.astype(float))
+    
+    # Calculate Donchian(20) channels on 1h
     lookback = 20
     donchian_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     donchian_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
@@ -57,13 +62,20 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.25  # 25% position size
+    position_size = 0.20  # 20% position size
     
     for i in range(100, n):
+        # Session filter: 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            signals[i] = 0.0
+            continue
+        
         # Skip if data not ready
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
-            np.isnan(vol_threshold[i])):
+            np.isnan(h3_4h_aligned[i]) or np.isnan(l3_4h_aligned[i]) or
+            np.isnan(vol_threshold[i]) or np.isnan(bullish_4h_aligned[i]) or
+            np.isnan(bearish_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -74,17 +86,17 @@ def generate_signals(prices):
         long_breakout = close[i] > donchian_high[i]
         short_breakout = close[i] < donchian_low[i]
         
-        # Camarilla filters
-        long_filter = close[i] > h3_1d_aligned[i]
-        short_filter = close[i] < l3_1d_aligned[i]
+        # Camarilla and trend filters
+        long_filter = close[i] > h3_4h_aligned[i] and bullish_4h_aligned[i] > 0.5
+        short_filter = close[i] < l3_4h_aligned[i] and bearish_4h_aligned[i] > 0.5
         
         # Entry conditions
         long_entry = long_breakout and long_filter and vol_ok and position != 1
         short_entry = short_breakout and short_filter and vol_ok and position != -1
         
-        # Exit conditions: price crosses Donchian midpoint OR volume drops below average
-        exit_long = close[i] < donchian_mid[i] or volume[i] < vol_ma[i]
-        exit_short = close[i] > donchian_mid[i] or volume[i] < vol_ma[i]
+        # Exit conditions: price crosses Donchian midpoint
+        exit_long = close[i] < donchian_mid[i]
+        exit_short = close[i] > donchian_mid[i]
         
         # Execute signals
         if long_entry:
@@ -110,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_donchian_camarilla_volume_v1"
-timeframe = "12h"
+name = "1h_4h_camarilla_breakout_volume_session_v1"
+timeframe = "1h"
 leverage = 1.0
