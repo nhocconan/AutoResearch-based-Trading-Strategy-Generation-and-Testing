@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_12h_1d_Camarilla_Pivot_Breakout
-Hypothesis: Uses daily Camarilla pivot levels (calculated from prior day's range) to identify key support/resistance.
-Enters on 6h break of R4/S4 levels with volume confirmation, using 12h trend filter to avoid counter-trend trades.
-Works in bull markets (breakouts continue) and bear markets (breakdowns continue) by trading momentum after volatility expansion.
-Target: 15-35 trades/year on 6h (60-140 total over 4 years).
+12h_1d_Touch_Retest
+Hypothesis: In 12h timeframe, price often retraces to test prior daily high/low levels after breaking them.
+Enter long when price retraces to test broken daily high as support in uptrend (price > 50 EMA).
+Enter short when price retraces to test broken daily low as resistance in downtrend (price < 50 EMA).
+Use volume confirmation on retest and EMA trend filter to avoid counter-trend trades.
+Target: 15-35 trades/year on 12h (60-140 total over 4 years).
+Works in bull markets via long retests of daily highs, in bear markets via short retests of daily lows.
 """
 
 import numpy as np
@@ -13,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,95 +23,116 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
+    # Get daily data for reference levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels from previous day's range
-    # R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, R2 = C + (H-L)*1.1/6, R1 = C + (H-L)*1.1/12
-    # S1 = C - (H-L)*1.1/12, S2 = C - (H-L)*1.1/6, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
-    range_1d = high_1d - low_1d
-    camarilla_r4 = close_1d + range_1d * 1.1 / 2
-    camarilla_r3 = close_1d + range_1d * 1.1 / 4
-    camarilla_s3 = close_1d - range_1d * 1.1 / 4
-    camarilla_s4 = close_1d - range_1d * 1.1 / 2
+    # Calculate 50 EMA on daily for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
+    # Track broken daily levels (levels that price has closed beyond)
+    broken_high = np.full(len(close_1d), np.nan)  # broken daily highs acting as support
+    broken_low = np.full(len(close_1d), np.nan)   # broken daily lows acting as resistance
     
-    close_12h = df_12h['close'].values
-    # Simple trend: price above/below 20-period EMA
-    ema_20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    trend_up = close_12h > ema_20_12h
-    trend_down = close_12h < ema_20_12h
+    for i in range(1, len(close_1d)):
+        # If daily close breaks above prior daily high, that high becomes potential support
+        if close_1d[i] > high_1d[i-1]:
+            broken_high[i] = high_1d[i-1]
+        else:
+            broken_high[i] = broken_high[i-1]
+            
+        # If daily close breaks below prior daily low, that low becomes potential resistance
+        if close_1d[i] < low_1d[i-1]:
+            broken_low[i] = low_1d[i-1]
+        else:
+            broken_low[i] = broken_low[i-1]
     
-    # Align all signals to 6h timeframe
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    trend_up_aligned = align_htf_to_ltf(prices, df_12h, trend_up)
-    trend_down_aligned = align_htf_to_ltf(prices, df_12h, trend_down)
+    # Align daily data to 12h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    broken_high_aligned = align_htf_to_ltf(prices, df_1d, broken_high)
+    broken_low_aligned = align_htf_to_ltf(prices, df_1d, broken_low)
     
-    # Session filter: 08:00-20:00 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_mask = (hours >= 8) & (hours <= 20)
+    # Calculate 12h EMA for additional timing filter (optional)
+    ema_20_12h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean()
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% of capital
     
     for i in range(50, n):
-        # Skip if not in session or data not ready
-        if not session_mask[i] or \
-           np.isnan(camarilla_r4_aligned[i]) or \
-           np.isnan(camarilla_r3_aligned[i]) or \
-           np.isnan(camarilla_s3_aligned[i]) or \
-           np.isnan(camarilla_s4_aligned[i]) or \
-           np.isnan(trend_up_aligned[i]) or \
-           np.isnan(trend_down_aligned[i]):
+        # Skip if data not ready
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(broken_high_aligned[i]) or np.isnan(broken_low_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: price breaks S4/R4 with volume confirmation and trend alignment
-        vol_ma_20_6h = pd.Series(volume[max(0, i-19):i+1]).mean() if i >= 20 else 0
-        volume_expansion = volume[i] > (vol_ma_20_6h * 1.5) if i >= 20 else False
-        
-        # Long: price breaks above R4 with volume and uptrend
-        if (close[i] > camarilla_r4_aligned[i] and 
-            volume_expansion and 
-            trend_up_aligned[i]):
-            if position != 1:
-                position = 1
-                signals[i] = position_size
-            else:
-                signals[i] = position_size
-        # Short: price breaks below S4 with volume and downtrend
-        elif (close[i] < camarilla_s4_aligned[i] and 
-              volume_expansion and 
-              trend_down_aligned[i]):
-            if position != -1:
-                position = -1
-                signals[i] = -position_size
-            else:
-                signals[i] = -position_size
-        # Hold current position
-        elif position == 1:
-            signals[i] = position_size
-        elif position == -1:
-            signals[i] = -position_size
+        # Volume confirmation: current volume > 1.5x 20-period average
+        if i >= 20:
+            vol_ma_20 = pd.Series(volume[:i+1]).rolling(window=20, min_periods=20).mean().iloc[-1]
+            volume_expansion = volume[i] > (vol_ma_20 * 1.5)
         else:
-            signals[i] = 0.0
+            volume_expansion = False
+        
+        # Long setup: price > daily 50 EMA (uptrend) and retesting broken daily high
+        if close[i] > ema_50_1d_aligned[i] and not np.isnan(broken_high_aligned[i]):
+            # Price is near broken high level (within 0.5%)
+            if abs(close[i] - broken_high_aligned[i]) / broken_high_aligned[i] < 0.005:
+                if volume_expansion:
+                    if position != 1:
+                        position = 1
+                        signals[i] = position_size
+                    else:
+                        signals[i] = position_size
+                else:
+                    # Hold position if already long
+                    if position == 1:
+                        signals[i] = position_size
+                    else:
+                        signals[i] = 0.0
+            else:
+                # Not at retest level - hold if long, otherwise flat
+                if position == 1:
+                    signals[i] = position_size
+                else:
+                    signals[i] = 0.0
+        
+        # Short setup: price < daily 50 EMA (downtrend) and retesting broken daily low
+        elif close[i] < ema_50_1d_aligned[i] and not np.isnan(broken_low_aligned[i]):
+            # Price is near broken low level (within 0.5%)
+            if abs(close[i] - broken_low_aligned[i]) / broken_low_aligned[i] < 0.005:
+                if volume_expansion:
+                    if position != -1:
+                        position = -1
+                        signals[i] = -position_size
+                    else:
+                        signals[i] = -position_size
+                else:
+                    # Hold position if already short
+                    if position == -1:
+                        signals[i] = -position_size
+                    else:
+                        signals[i] = 0.0
+            else:
+                # Not at retest level - hold if short, otherwise flat
+                if position == -1:
+                    signals[i] = -position_size
+                else:
+                    signals[i] = 0.0
+        
+        # No clear setup - flatten
+        else:
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
     
     return signals
 
-name = "6h_12h_1d_Camarilla_Pivot_Breakout"
-timeframe = "6h"
+name = "12h_1d_Touch_Retest"
+timeframe = "12h"
 leverage = 1.0
