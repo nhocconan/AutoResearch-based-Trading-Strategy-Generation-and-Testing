@@ -8,12 +8,12 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1d Donchian breakout with 1w ATR volatility filter and volume confirmation
-    # Long: Close > Donchian(20) high AND 1w ATR ratio > 0.8 (low volatility regime) AND volume > 1.2x avg
-    # Short: Close < Donchian(20) low AND 1w ATR ratio > 0.8 AND volume > 1.2x avg
-    # Exit: Opposite Donchian break or volatility expansion (ATR ratio < 0.6)
-    # Using 1d timeframe for low trade frequency, Donchian for structure,
-    # 1w ATR ratio for volatility regime filter (avoid choppy markets), volume for confirmation.
+    # Hypothesis: 6h Donchian(20) breakout with 1d ATR filter and volume confirmation
+    # Long: price breaks above Donchian upper AND ATR(14) > ATR(50) AND volume > 1.5x avg
+    # Short: price breaks below Donchian lower AND ATR(14) > ATR(50) AND volume > 1.5x avg
+    # Exit: price reverts to Donchian midpoint OR ATR contraction
+    # Using 6h timeframe for moderate trade frequency, Donchian for structure break,
+    # ATR regime filter to trade only in expanding volatility, volume for confirmation.
     # Discrete position sizing (0.25) to minimize fee churn.
     
     close = prices['close'].values
@@ -21,84 +21,98 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for ATR volatility regime filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Calculate Donchian channels (20-period)
+    lookback = 20
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
     
-    # Calculate weekly ATR(14) and its 50-period SMA for regime filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    for i in range(n):
+        if i >= lookback - 1:
+            highest_high[i] = np.max(high[i-lookback+1:i+1])
+            lowest_low[i] = np.min(low[i-lookback+1:i+1])
     
-    # True Range calculation
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr1[0] = 0  # First bar has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
+    # Calculate ATR(14) and ATR(50) for volatility regime filter
+    # True Range = max(high-low, abs(high-prev_close), abs(low-prev_close))
+    prev_close = np.append([close[0]], close[:-1])
+    tr1 = high - low
+    tr2 = np.abs(high - prev_close)
+    tr3 = np.abs(low - prev_close)
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # ATR calculation with Wilder's smoothing
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
+    # ATR calculation using Wilder's smoothing
+    def atr_calc(data, period):
+        result = np.full(n, np.nan)
         if len(data) < period:
             return result
         # First value is simple average
         result[period-1] = np.mean(data[:period])
         # Subsequent values: smoothed = (prev * (period-1) + current) / period
-        for i in range(period, len(data)):
+        for i in range(period, n):
             result[i] = (result[i-1] * (period-1) + data[i]) / period
         return result
     
-    atr_1w = wilders_smoothing(tr, 14)
-    atr_ma_1w = np.full_like(atr_1w, np.nan)
-    for i in range(50, len(atr_1w)):
-        atr_ma_1w[i] = np.mean(atr_1w[i-50:i])
+    atr_14 = atr_calc(tr, 14)
+    atr_50 = atr_calc(tr, 50)
     
-    # ATR ratio = current ATR / 50-period MA ATR (values < 1 = low volatility)
-    atr_ratio_1w = np.where(atr_ma_1w > 0, atr_1w / atr_ma_1w, 1.0)
+    # ATR regime: expanding volatility (short-term > long-term)
+    atr_expanding = atr_14 > atr_50
     
-    # Align weekly ATR ratio to 1d
-    atr_ratio_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_ratio_1w)
+    # Get daily data for HTF confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Calculate daily Donchian channels (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
+    # Calculate daily ATR(14) for additional filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    prev_close_1d = np.append([close_1d[0]], close_1d[:-1])
+    tr1_1d = high_1d - low_1d
+    tr2_1d = np.abs(high_1d - prev_close_1d)
+    tr3_1d = np.abs(low_1d - prev_close_1d)
+    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
+    
+    atr_1d = atr_calc(tr_1d, 14)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # Daily volume average for confirmation
+    volume_1d = df_1d['volume'].values
+    vol_ma_1d = np.full(len(volume_1d), np.nan)
+    for i in range(20, len(volume_1d)):
+        vol_ma_1d[i] = np.mean(volume_1d[i-20:i])
+    volume_spike_1d = volume_1d > (1.5 * vol_ma_1d)
+    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
+    
+    # 6h volume confirmation (>1.5x 20-period average)
+    vol_ma_6h = np.full(n, np.nan)
     for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
+        vol_ma_6h[i] = np.mean(volume[i-20:i])
+    volume_spike_6h = volume > (1.5 * vol_ma_6h)
     
-    # Get daily volume for confirmation (>1.2x 20-period average)
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (1.2 * vol_ma)
+    # Donchian breakout conditions
+    upper_break = close > highest_high
+    lower_break = close < lowest_low
+    midpoint = (highest_high + lowest_low) / 2
+    midpoint_reversion = np.abs(close - midpoint) < (highest_high - lowest_low) * 0.1
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(atr_ratio_1w_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(atr_expanding[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(volume_spike_6h[i]) or np.isnan(volume_spike_1d_aligned[i]) or
+            np.isnan(upper_break[i]) or np.isnan(lower_break[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: ATR ratio > 0.8 = low volatility (good for breakouts)
-        low_vol_regime = atr_ratio_1w_aligned[i] > 0.8
+        # Entry conditions: Donchian breakout + ATR expanding + volume confirmation
+        long_entry = upper_break[i] and atr_expanding[i] and volume_spike_6h[i] and volume_spike_1d_aligned[i] > 0.5
+        short_entry = lower_break[i] and atr_expanding[i] and volume_spike_6h[i] and volume_spike_1d_aligned[i] > 0.5
         
-        # Volume confirmation
-        vol_confirm = volume_spike[i]
-        
-        # Entry logic: Donchian breakout + low volatility regime + volume confirmation
-        long_entry = (close[i] > donchian_high[i]) and low_vol_regime and vol_confirm
-        short_entry = (close[i] < donchian_low[i]) and low_vol_regime and vol_confirm
-        
-        # Exit logic: Opposite Donchian break or volatility expansion (ATR ratio < 0.6)
-        long_exit = (close[i] < donchian_low[i]) or (atr_ratio_1w_aligned[i] < 0.6)
-        short_exit = (close[i] > donchian_high[i]) or (atr_ratio_1w_aligned[i] < 0.6)
+        # Exit conditions: midpoint reversion OR ATR contraction OR volume dry-up
+        long_exit = midpoint_reversion[i] or not atr_expanding[i] or not volume_spike_6h[i]
+        short_exit = midpoint_reversion[i] or not atr_expanding[i] or not volume_spike_6h[i]
         
         if long_entry and position != 1:
             position = 1
@@ -123,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_donchian_atr_volume_v2"
-timeframe = "1d"
+name = "6h_1d_donchian_atr_volume_v1"
+timeframe = "6h"
 leverage = 1.0
