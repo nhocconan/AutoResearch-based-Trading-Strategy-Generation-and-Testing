@@ -3,103 +3,151 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h price action above/below 1-day KAMA with volume confirmation.
-# Kaufman Adaptive Moving Average (KAMA) adapts to market noise - in trending markets
-# it follows price closely, in ranging markets it stays flat. This creates a dynamic
-# support/resistance that respects both trending and ranging conditions.
-# Combined with volume spikes to confirm breakouts and avoid false signals.
-# Target: 15-30 trades per year (60-120 total over 4 years) for 12h timeframe.
+# Hypothesis: 4h ADX trend strength filter + Bollinger Bands mean reversion + volume confirmation.
+# In strong trends (ADX > 25), price tends to revert to the Bollinger Band mean (20-period SMA).
+# In weak trends/ranges (ADX < 20), we avoid trading to prevent whipsaw.
+# Volume confirmation ensures institutional participation. Target: 20-40 trades/year (80-160 total).
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-day data for KAMA trend filter
+    # 1-day data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # KAMA ( Kaufman Adaptive Moving Average ) - 30 period
-    # ER = Efficiency Ratio, SC = Smoothing Constant
-    def calculate_kama(data, period=30, fast=2, slow=30):
-        kama = np.full(len(data), np.nan)
-        if len(data) < period:
-            return kama
-            
-        # Calculate change and volatility
-        change = np.abs(np.diff(data, period))
-        volatility = np.sum(np.abs(np.diff(data)), axis=1)
+    # ADX(14) calculation on daily timeframe
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[np.nan], tr])  # align with original indices
         
-        # Avoid division by zero
-        er = np.where(volatility != 0, change / volatility, 0)
+        # Directional Movement
+        up_move = high[1:] - high[:-1]
+        down_move = low[:-1] - low[1:]
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        plus_dm = np.concatenate([[0.0], plus_dm])
+        minus_dm = np.concatenate([[0.0], minus_dm])
         
-        # Smoothing constant
-        sc = np.power(er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1), 2)
+        # Smoothed values using Wilder's smoothing (EMA with alpha=1/period)
+        def wilders_smooth(data, period):
+            smoothed = np.full_like(data, np.nan)
+            if len(data) < period:
+                return smoothed
+            # First value is simple average
+            smoothed[period-1] = np.nanmean(data[1:period])
+            # Subsequent values: smoothed[i] = (smoothed[i-1] * (period-1) + data[i]) / period
+            for i in range(period, len(data)):
+                if not np.isnan(smoothed[i-1]):
+                    smoothed[i] = (smoothed[i-1] * (period-1) + data[i]) / period
+                else:
+                    smoothed[i] = np.nan
+            return smoothed
         
-        # Initialize KAMA
-        kama[period-1] = data[period-1]
+        tr_smoothed = wilders_smooth(tr, period)
+        plus_dm_smoothed = wilders_smooth(plus_dm, period)
+        minus_dm_smoothed = wilders_smooth(minus_dm, period)
         
-        # Calculate KAMA
-        for i in range(period, len(data)):
-            kama[i] = kama[i-1] + sc[i] * (data[i] - kama[i-1])
-            
-        return kama
+        # Directional Indicators
+        plus_di = 100 * plus_dm_smoothed / tr_smoothed
+        minus_di = 100 * minus_dm_smoothed / tr_smoothed
+        
+        # DX and ADX
+        dx = np.full_like(close, np.nan)
+        mask = (plus_di + minus_di) > 0
+        dx[mask] = 100 * np.abs(plus_di[mask] - minus_di[mask]) / (plus_di[mask] + minus_di[mask])
+        
+        adx = wilders_smooth(dx, period)
+        return adx
     
-    kama_1d = calculate_kama(close_1d, 30, 2, 30)
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Volume average (24-period = 12 hours for volume confirmation)
+    # Bollinger Bands on 4h timeframe (20, 2)
+    bb_period = 20
+    bb_std = 2.0
+    sma = np.full(n, np.nan)
+    std_dev = np.full(n, np.nan)
+    upper_band = np.full(n, np.nan)
+    lower_band = np.full(n, np.nan)
+    
+    for i in range(bb_period-1, n):
+        sma[i] = np.mean(close[i-bb_period+1:i+1])
+        std_dev[i] = np.std(close[i-bb_period+1:i+1])
+        upper_band[i] = sma[i] + bb_std * std_dev[i]
+        lower_band[i] = sma[i] - bb_std * std_dev[i]
+    
+    # Average volume (20-period) for volume confirmation
     avg_volume = np.full(n, np.nan)
-    for i in range(24, n):
-        avg_volume[i] = np.mean(volume[i-24:i])
+    for i in range(20, n):
+        avg_volume[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(24, n):
+    for i in range(30, n):
         # Skip if any required data is not ready
-        if np.isnan(kama_1d_aligned[i]) or np.isnan(avg_volume[i]):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(sma[i]) or 
+            np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        kama_val = kama_1d_aligned[i]
+        adx_val = adx_1d_aligned[i]
+        sma_val = sma[i]
         
-        # Volume confirmation: current volume > 2.0x average volume
-        volume_confirm = vol > 2.0 * avg_vol
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirm = vol > 1.5 * avg_vol
+        
+        # ADX filter: only trade when trend is strong enough (ADX > 25)
+        strong_trend = adx_val > 25
         
         if position == 0:
-            # Long: Price above KAMA + volume confirmation
-            if price > kama_val and volume_confirm:
+            # Long: price near lower BB + strong trend + volume confirmation
+            if (price <= lower_band[i] * 1.02 and  # within 2% of lower band
+                strong_trend and
+                volume_confirm):
                 position = 1
                 signals[i] = position_size
-            # Short: Price below KAMA + volume confirmation
-            elif price < kama_val and volume_confirm:
+            # Short: price near upper BB + strong trend + volume confirmation
+            elif (price >= upper_band[i] * 0.98 and  # within 2% of upper band
+                  strong_trend and
+                  volume_confirm):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Price crosses below KAMA
-            if price < kama_val:
+            # Exit long: price returns to SMA or trend weakens
+            if (price >= sma_val * 0.995 or  # near SMA
+                adx_val < 20):  # trend weakening
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Price crosses above KAMA
-            if price > kama_val:
+            # Exit short: price returns to SMA or trend weakens
+            if (price <= sma_val * 1.005 or  # near SMA
+                adx_val < 20):  # trend weakening
                 position = 0
                 signals[i] = 0.0
             else:
@@ -107,6 +155,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_KAMA_Volume_Adaptive"
-timeframe = "12h"
+name = "4h_1d_ADX_Bollinger_MeanReversion"
+timeframe = "4h"
 leverage = 1.0
