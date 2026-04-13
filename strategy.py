@@ -8,22 +8,26 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h primary timeframe with 1d HTF filter
-    # Long: price breaks above 1d Donchian(20) high + volume > 1.5x 20-period avg + chop < 61.8
-    # Short: price breaks below 1d Donchian(20) low + volume > 1.5x 20-period avg + chop < 61.8
-    # Exit: price returns to 1d Donchian middle (10-period average of high/low)
-    # Target: 75-200 total trades over 4 years (19-50/year) to balance edge and fee drag
-    # 4h timeframe captures intraday swings while 1d filter ensures alignment with daily structure
-    # Donchian breakouts with volume/regime confirmation work in both bull and bear markets
+    # Hypothesis: 1d primary with 1w HTF - Donchian breakout with volume/regime filter
+    # Works in bull/bear: breakouts capture strong moves, volume/regime filter reduces false signals
+    # Target: 30-80 trades over 4 years (7-20/year) for low fee drag
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values if 'volume' in prices.columns else np.ones(len(prices))
     
-    # Get 1d data for primary timeframe (daily Donchian channels)
+    # Get 1w data for HTF Donchian channels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    # Get 1d data for volume confirmation and chop regime
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -31,12 +35,12 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values if 'volume' in df_1d.columns else np.ones(len(df_1d))
     
-    # Calculate Donchian channels on 1d data (20-period)
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate 1w Donchian channels (20-period)
+    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Calculate Chopiness Index on 1d data (14-period)
+    # Calculate 1d Chop Index (14-period)
     def calculate_chop(high, low, close, window=14):
         # True Range
         tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - np.roll(close, 1)[1:]))
@@ -64,10 +68,10 @@ def generate_signals(prices):
     # Volume averages on 1d data (20-period)
     vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all indicators to 4h timeframe (primary)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid)
+    # Align all indicators to 1d timeframe (primary)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid)
     chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
@@ -99,7 +103,7 @@ def generate_signals(prices):
         enter_long = is_trending_regime and breakout_up and volume_confirmed
         enter_short = is_trending_regime and breakout_down and volume_confirmed
         
-        # Exit conditions: price returns to 1d Donchian middle
+        # Exit conditions: price returns to 1w Donchian middle
         exit_long = position == 1 and close_1d[i] <= donchian_mid_aligned[i]
         exit_short = position == -1 and close_1d[i] >= donchian_mid_aligned[i]
         
@@ -127,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_breakout_volume_chop_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_breakout_volume_chop_v2"
+timeframe = "1d"
 leverage = 1.0
