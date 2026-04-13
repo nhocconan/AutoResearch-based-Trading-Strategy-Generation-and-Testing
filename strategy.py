@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h timeframe with 12h Donchian breakout and 1d trend filter.
-# Long: Price breaks above 12h Donchian upper (20-period) + price > 1d EMA200 + volume > 1.3x avg volume (20-period).
-# Short: Price breaks below 12h Donchian lower (20-period) + price < 1d EMA200 + volume > 1.3x avg volume.
-# Uses 12h for breakout structure, 1d for trend filter, 4h for entry timing with volume confirmation.
-# Session filter: 08-20 UTC to avoid low-liquidity hours.
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+# Hypothesis: 12h timeframe with 1d Camarilla pivot levels and volume confirmation.
+# Long: Price crosses above Camarilla R3 level + volume > 1.5x average volume (20-period).
+# Short: Price crosses below Camarilla S3 level + volume > 1.5x average volume.
+# Uses 1d Camarilla levels for support/resistance structure, 12h for execution with volume confirmation.
+# Time filter: 00-23 UTC (all hours) to maximize opportunities while maintaining discipline.
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,43 +20,37 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Session filter: 08-20 UTC (pre-compute hours)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    
-    # 12h data for Donchian channels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    
-    # 12h Donchian channels (20-period)
-    donchian_high = np.full(len(high_12h), np.nan)
-    donchian_low = np.full(len(low_12h), np.nan)
-    for i in range(20, len(high_12h)):
-        donchian_high[i] = np.max(high_12h[i-20:i])
-        donchian_low[i] = np.min(low_12h[i-20:i])
-    
-    # 1d data for EMA200 trend filter
+    # 1d data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Calculate Camarilla levels (using previous day's data)
+    camarilla_r3 = np.full(len(close_1d), np.nan)
+    camarilla_s3 = np.full(len(close_1d), np.nan)
+    for i in range(1, len(close_1d)):
+        # Previous day's OHLC
+        ph = high_1d[i-1]
+        pl = low_1d[i-1]
+        pc = close_1d[i-1]
+        rang = ph - pl
+        
+        # Camarilla levels
+        camarilla_r3[i] = pc + (rang * 1.1 / 4)
+        camarilla_s3[i] = pc - (rang * 1.1 / 4)
     
     # Average volume (20-period) for volume confirmation
     avg_volume = np.full(n, np.nan)
     for i in range(20, n):
         avg_volume[i] = np.mean(volume[i-20:i])
     
-    # Align 12h Donchian to 4h
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
-    
-    # Align 1d EMA200 to 4h
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Align 1d Camarilla levels to 12h
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -64,54 +58,41 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_200_1d_aligned[i]) or np.isnan(avg_volume[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        if not (8 <= hour <= 20):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        upper = donchian_high_aligned[i]
-        lower = donchian_low_aligned[i]
-        ema_trend = ema_200_1d_aligned[i]
+        r3 = camarilla_r3_aligned[i]
+        s3 = camarilla_s3_aligned[i]
         
-        # Volume confirmation: current volume > 1.3x average volume
-        volume_confirm = vol > 1.3 * avg_vol
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirm = vol > 1.5 * avg_vol
         
         if position == 0:
-            # Long: break above Donchian high + above EMA200 + volume confirmation
-            if (price > upper and 
-                price > ema_trend and
-                volume_confirm):
+            # Long: price crosses above R3 + volume confirmation
+            if (price > r3 and volume_confirm):
                 position = 1
                 signals[i] = position_size
-            # Short: break below Donchian low + below EMA200 + volume confirmation
-            elif (price < lower and 
-                  price < ema_trend and
-                  volume_confirm):
+            # Short: price crosses below S3 + volume confirmation
+            elif (price < s3 and volume_confirm):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below Donchian low or below EMA200
-            if (price < lower or
-                price < ema_trend):
+            # Exit long: price closes below S3 (opposite level)
+            if price < s3:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes above Donchian high or above EMA200
-            if (price > upper or
-                price > ema_trend):
+            # Exit short: price closes above R3 (opposite level)
+            if price > r3:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -119,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_1d_Donchian_EMA_Volume"
-timeframe = "4h"
+name = "12h_1d_Camarilla_R3S3_Volume"
+timeframe = "12h"
 leverage = 1.0
