@@ -8,34 +8,51 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Williams %R mean reversion with 12h trend filter and volume spike confirmation.
-    # Williams %R identifies overbought/oversold conditions (long when < -80, short when > -20).
-    # 12h EMA50 provides trend filter (long only when price > EMA50, short only when price < EMA50).
-    # Volume spike (current > 1.5 * 20-period MA) confirms momentum behind the move.
-    # Target: 50-150 total trades over 4 years = 12-37/year.
-    # Works in bull markets (long oversold in uptrend) and bear markets (short overbought in downtrend).
+    # Hypothesis: 4h Donchian(20) breakout with 1d volume spike filter and ATR-based position sizing.
+    # Donchian breakouts capture momentum in both bull and bear markets.
+    # Volume spike (current volume > 1.5 * 20-period MA) confirms breakout validity.
+    # Position size scales with volatility: size = 0.25 * (ATR(14) / price) normalized to max 0.30.
+    # Uses discrete position sizes (0.0, ±0.25) to minimize fee churn.
+    # Target: 75-200 total trades over 4 years (19-50/year).
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter (call ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for ATR calculation (call ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 12h EMA50
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate 1d ATR(14) for volatility scaling
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 6h Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # True Range components
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0  # First period has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Calculate 6h volume MA(20) for spike confirmation
+    # ATR(14) using Wilder's smoothing (equivalent to EMA with alpha=1/14)
+    atr_1d = np.zeros_like(tr)
+    atr_1d[13] = np.mean(tr[1:14])  # Seed with simple average
+    for i in range(14, len(tr)):
+        atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
+    
+    # Align 1d ATR to 4h timeframe
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # Calculate 4h Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 4h volume MA(20) for confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -43,36 +60,39 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema_12h_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(volume_ma[i]) or np.isnan(atr_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume spike filter: current volume > 1.5 * 20-period MA
-        volume_spike = volume[i] > 1.5 * volume_ma[i]
+        # Volume filter: current volume > 1.5 * 20-period MA
+        volume_filter = volume[i] > 1.5 * volume_ma[i]
         
-        # Williams %R conditions
-        oversold = williams_r[i] < -80
-        overbought = williams_r[i] > -20
+        # Breakout conditions
+        long_breakout = close[i] > donchian_high[i-1]  # Break above prior period's high
+        short_breakout = close[i] < donchian_low[i-1]  # Break below prior period's low
         
-        # Trend filter from 12h EMA50
-        uptrend = close[i] > ema_12h_aligned[i]
-        downtrend = close[i] < ema_12h_aligned[i]
+        # Dynamic position size based on volatility (ATR/price ratio)
+        # Normalize ATR ratio to target size 0.25, max 0.30
+        atr_ratio = atr_1d_aligned[i] / close[i]
+        base_size = 0.25
+        vol_scaled_size = base_size * (atr_ratio / 0.01)  # Normalize to 1% ATR/price
+        position_size = np.clip(vol_scaled_size, 0.0, 0.30)
         
-        # Entry conditions
-        long_entry = oversold and uptrend and volume_spike
-        short_entry = overbought and downtrend and volume_spike
+        # Entry conditions: breakout with volume confirmation
+        long_entry = long_breakout and volume_filter
+        short_entry = short_breakout and volume_filter
         
-        # Exit conditions: opposite Williams %R extreme or loss of trend
-        long_exit = williams_r[i] > -20 or not uptrend
-        short_exit = williams_r[i] < -80 or not downtrend
+        # Exit conditions: opposite breakout
+        long_exit = short_breakout
+        short_exit = long_breakout
         
         if long_entry and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = position_size
         elif short_entry and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -position_size
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -82,14 +102,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = position_size
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -position_size
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "6h_12h_williamsr_trend_volume_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_volume_atr_size_v1"
+timeframe = "4h"
 leverage = 1.0
