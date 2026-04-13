@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Pivot_Breakout_With_Volume_Confirmation
-Hypothesis: Buy when price breaks above Camarilla H4 level with volume > 1.5x 20-period average,
-sell when price breaks below L4 level with volume confirmation, using 1d EMA trend filter.
-Camarilla levels provide intraday support/resistance; breakouts capture momentum in trending markets.
-Volume confirms institutional participation. Works in bull markets via upside breakouts and
-in bear markets via downside breaks. Target: 20-30 trades/year per symbol.
+4h_1d_Camarilla_Pivot_Breakout_With_Volume_Confirmation_v1
+Hypothesis: Breakouts of Camarilla H3/L3 levels with volume > 1.5x 20-period average and
+1d EMA200 trend filter. Captures institutional breakouts in trending markets while
+avoiding false signals in ranging conditions. Target: 20-30 trades/year per symbol.
 """
 
 import numpy as np
@@ -14,20 +12,13 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Calculate True Range and ATR for volatility
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[0], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -42,40 +33,40 @@ def generate_signals(prices):
     prev_close[0] = np.nan
     
     # Calculate Camarilla levels for current period using previous period's range
-    # H4 = close + 1.1 * (high - low) / 2
-    # L4 = close - 1.1 * (high - low) / 2
-    camarilla_h4 = prev_close + 1.1 * (prev_high - prev_low) / 2
-    camarilla_l4 = prev_close - 1.1 * (prev_high - prev_low) / 2
+    # H3 = close + 1.1 * (high - low) / 4
+    # L3 = close - 1.1 * (high - low) / 4
+    camarilla_h3 = prev_close + 1.1 * (prev_high - prev_low) / 4
+    camarilla_l3 = prev_close - 1.1 * (prev_high - prev_low) / 4
     
-    # 1d EMA trend filter
+    # 1d EMA200 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        ema50_1d = np.full(len(prices), np.nan)
+    if len(df_1d) < 200:
+        ema200_1d = np.full(len(prices), np.nan)
     else:
         close_1d = df_1d['close'].values
-        ema50_1d_raw = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema50_1d = align_htf_to_ltf(prices, df_1d, ema50_1d_raw)
+        ema200_1d_raw = pd.Series(close_1d).ewm(span=200, min_periods=200, adjust=False).mean().values
+        ema200_1d = align_htf_to_ltf(prices, df_1d, ema200_1d_raw)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(50, n):  # warmup period
+    for i in range(200, n):
         # Skip if any required data is not ready
-        if (np.isnan(camarilla_h4[i]) or np.isnan(camarilla_l4[i]) or 
-            np.isnan(ema50_1d[i]) or np.isnan(volume_expansion[i])):
+        if (np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or 
+            np.isnan(ema200_1d[i]) or np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Long signal: break above Camarilla H4 with volume expansion and 1d uptrend
-        long_signal = (close[i] > camarilla_h4[i] and 
+        # Long signal: break above Camarilla H3 with volume expansion and 1d uptrend
+        long_signal = (close[i] > camarilla_h3[i] and 
                       volume_expansion[i] and 
-                      close[i] > ema50_1d[i])
+                      close[i] > ema200_1d[i])
         
-        # Short signal: break below Camarilla L4 with volume expansion and 1d downtrend
-        short_signal = (close[i] < camarilla_l4[i] and 
+        # Short signal: break below Camarilla L3 with volume expansion and 1d downtrend
+        short_signal = (close[i] < camarilla_l3[i] and 
                        volume_expansion[i] and 
-                       close[i] < ema50_1d[i])
+                       close[i] < ema200_1d[i])
         
         if long_signal and position != 1:
             position = 1
@@ -89,6 +80,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_Pivot_Breakout_With_Volume_Confirmation"
-timeframe = "12h"
+name = "4h_1d_Camarilla_Pivot_Breakout_With_Volume_Confirmation_v1"
+timeframe = "4h"
 leverage = 1.0
