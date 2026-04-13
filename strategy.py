@@ -1,4 +1,3 @@
-# 40150
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -6,121 +5,120 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
+    
+    # Hypothesis: 6h ADX(14) + volume spike + 1d trend filter
+    # Long: ADX > 25 (trending) + +DI > -DI (bullish momentum) + volume > 2x 20-period avg + 1d close > 1d EMA50
+    # Short: ADX > 25 + -DI > +DI (bearish momentum) + volume > 2x 20-period avg + 1d close < 1d EMA50
+    # Uses discrete sizing (0.25) to minimize fee drag and volatility-based exit
+    # Target: 12-37 trades/year to stay within 6h optimal range (50-150 total over 4 years)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time']
     
-    # Get 1d data for daily indicators
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 200-day EMA for trend filter
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate daily ATR for volatility filter
-    tr_1d = np.maximum(
-        high_1d - low_1d,
-        np.maximum(
-            np.abs(high_1d - np.roll(close_1d, 1)),
-            np.abs(low_1d - np.roll(close_1d, 1))
-        )
-    )
-    tr_1d[0] = high_1d[0] - low_1d[0]
-    atr_1d = np.zeros_like(tr_1d)
-    for i in range(len(tr_1d)):
-        if i < 14:
-            atr_1d[i] = np.mean(tr_1d[:i+1])
-        else:
-            atr_1d[i] = 0.93 * atr_1d[i-1] + 0.07 * tr_1d[i]
+    # Calculate ADX and DI using Wilder's smoothing
+    # True Range
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]  # First bar
     
-    # Get 1w data for weekly trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
+    up_move = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    down_move = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Wilder's smoothing (alpha = 1/period)
+    def wilder_smooth(data, period):
+        result = np.zeros_like(data)
+        alpha = 1.0 / period
+        result[period-1] = np.mean(data[:period])  # Seed
+        for i in range(period, len(data)):
+            result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
+        return result
     
-    # Align all indicators to daily timeframe
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    atr_6h = wilder_smooth(tr, 14)
+    plus_di_6h = 100 * wilder_smooth(up_move, 14) / (atr_6h + 1e-10)
+    minus_di_6h = 100 * wilder_smooth(down_move, 14) / (atr_6h + 1e-10)
+    dx_6h = 100 * np.abs(plus_di_6h - minus_di_6h) / (plus_di_6h + minus_di_6h + 1e-10)
+    adx_6h = wilder_smooth(dx_6h, 14)
+    
+    # Calculate volume average for confirmation (using 6h data)
+    vol_avg_20_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
     
-    # Track entry price for stoploss
-    entry_price = np.full(n, np.nan)
-    
-    for i in range(200, n):
+    for i in range(30, n):
         # Skip if data not ready
-        if (np.isnan(ema_200_1d_aligned[i]) or 
-            np.isnan(atr_1d_aligned[i]) or
-            np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(adx_6h[i]) or 
+            np.isnan(plus_di_6h[i]) or
+            np.isnan(minus_di_6h[i]) or
+            np.isnan(vol_avg_20_6h[i]) or
+            np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: daily close above/below EMA200
-        uptrend = close[i] > ema_200_1d_aligned[i]
-        downtrend = close[i] < ema_200_1d_aligned[i]
+        # Volume confirmation: current 6h volume > 2x 20-period average
+        volume_confirmed = volume[i] > 2.0 * vol_avg_20_6h[i]
         
-        # Weekly trend filter: weekly EMA50 slope
-        weekly_uptrend = ema_50_1w_aligned[i] > ema_50_1w_aligned[i-5] if i >= 5 else False
-        weekly_downtrend = ema_50_1w_aligned[i] < ema_50_1w_aligned[i-5] if i >= 5 else False
+        # Trend filter: 6h close above/below EMA50 (from 1d)
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Volatility filter: avoid extremely low volatility days
-        low_vol_filter = atr_1d_aligned[i] > 0.01 * close[i]  # ATR > 1% of price
+        # ADX conditions: strong trend with directional bias
+        strong_trend = adx_6h[i] > 25
+        bullish_momentum = plus_di_6h[i] > minus_di_6h[i]
+        bearish_momentum = minus_di_6h[i] > plus_di_6h[i]
         
-        # Entry conditions: aligned weekly and daily trend with volatility filter
-        long_entry = uptrend and weekly_uptrend and low_vol_filter
-        short_entry = downtrend and weekly_downtrend and low_vol_filter
+        # Entry conditions
+        enter_long = strong_trend and bullish_momentum and volume_confirmed and uptrend
+        enter_short = strong_trend and bearish_momentum and volume_confirmed and downtrend
         
-        # Exit conditions: trend reversal
-        long_exit = not uptrend or not weekly_uptrend
-        short_exit = not downtrend or not weekly_downtrend
+        # Exit conditions: trend weakening or reversal
+        exit_long = position == 1 and (adx_6h[i] < 20 or minus_di_6h[i] > plus_di_6h[i])
+        exit_short = position == -1 and (adx_6h[i] < 20 or plus_di_6h[i] > minus_di_6h[i])
         
         # Execute signals
-        if long_entry and position != 1:
+        if enter_long and position != 1:
             position = 1
             signals[i] = position_size
-            entry_price[i] = close[i]
-        elif short_entry and position != -1:
+        elif enter_short and position != -1:
             position = -1
             signals[i] = -position_size
-            entry_price[i] = close[i]
-        elif position == 1 and long_exit:
+        elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
-            entry_price[i] = np.nan
-        elif position == -1 and short_exit:
+        elif position == -1 and exit_short:
             position = 0
             signals[i] = 0.0
-            entry_price[i] = np.nan
         # Hold current position
         else:
             if position == 1:
                 signals[i] = position_size
-                entry_price[i] = entry_price[i-1] if i > 0 else np.nan
             elif position == -1:
                 signals[i] = -position_size
-                entry_price[i] = entry_price[i-1] if i > 0 else np.nan
             else:
                 signals[i] = 0.0
-                entry_price[i] = np.nan
     
     return signals
 
-name = "1d_1w_ema_trend_filter_v1"
-timeframe = "1d"
+name = "6h_1d_adx_volume_trend_v1"
+timeframe = "6h"
 leverage = 1.0
