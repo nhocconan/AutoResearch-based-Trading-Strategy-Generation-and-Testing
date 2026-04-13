@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_1w_Camarilla_Reverse_Trend
-Hypothesis: Camarilla pivot levels on daily chart provide reversal signals during weekly trend extremes.
-In strong weekly trends (price > weekly EMA50), look for reversals at Camarilla H3/L3 levels.
-In weak weekly trends (price < weekly EMA50), look for continuations at H4/L4 levels.
-Uses volume confirmation to filter false signals. Works in both bull and bear markets by adapting to weekly trend context.
-Target: 15-25 trades/year on 1d (60-100 total over 4 years).
+12h_1d_Camarilla_Pivot_Breakout_Volume
+Hypothesis: Uses Camarilla pivot levels from daily timeframe on 12h chart. Enters long when price breaks above H4 level with volume > 1.5x average, short when breaks below L4 level. Uses 12h ADX > 25 to filter trending markets. Works in both bull and bear by trading momentum after range breakouts. Target: 15-35 trades/year on 12h (60-140 total over 4 years).
 """
 
 import numpy as np
@@ -22,143 +18,175 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculations
+    # Get daily data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for each day (based on previous day)
-    # H4 = close + 1.5 * (high - low)
-    # L4 = close - 1.5 * (high - low)
-    # H3 = close + 1.125 * (high - low)
-    # L3 = close - 1.125 * (high - low)
-    # H3 and L3 are primary reversal levels
-    # H4 and L4 are breakout/continuation levels
+    # Calculate Camarilla pivot levels for each day
+    # H4 = close + 1.1 * (high - low) / 2
+    # L4 = close - 1.1 * (high - low) / 2
+    # H3 = close + 1.1 * (high - low) / 4
+    # L3 = close - 1.1 * (high - low) / 4
+    # H2 = close + 1.1 * (high - low) / 6
+    # L2 = close - 1.1 * (high - low) / 6
+    # H1 = close + 1.1 * (high - low) / 12
+    # L1 = close - 1.1 * (high - low) / 12
     
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    range_1d = high_1d - low_1d
+    H4 = close_1d + 1.1 * range_1d / 2
+    L4 = close_1d - 1.1 * range_1d / 2
+    H3 = close_1d + 1.1 * range_1d / 4
+    L3 = close_1d - 1.1 * range_1d / 4
+    H2 = close_1d + 1.1 * range_1d / 6
+    L2 = close_1d - 1.1 * range_1d / 6
+    H1 = close_1d + 1.1 * range_1d / 12
+    L1 = close_1d - 1.1 * range_1d / 12
     
-    # First day has no previous data
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
-    
-    # Calculate Camarilla levels
-    H4 = prev_close + 1.5 * (prev_high - prev_low)
-    L4 = prev_close - 1.5 * (prev_high - prev_low)
-    H3 = prev_close + 1.125 * (prev_high - prev_low)
-    L3 = prev_close - 1.125 * (prev_high - prev_low)
-    
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    # Weekly EMA50 for trend direction
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align all to daily timeframe
+    # Align Camarilla levels to 12h timeframe
     H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
     L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    H2_aligned = align_htf_to_ltf(prices, df_1d, H2)
+    L2_aligned = align_htf_to_ltf(prices, df_1d, L2)
+    H1_aligned = align_htf_to_ltf(prices, df_1d, H1)
+    L1_aligned = align_htf_to_ltf(prices, df_1d, L1)
     
-    # Volume confirmation: volume > 1.5x 20-day average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 1.5)
+    # Calculate 12h ADX for trend filtering
+    # ADX requires +DI and -DI calculation
+    # +DI = 100 * EMA(|+DM|, 14) / ATR
+    # -DI = 100 * EMA(|-DM|, 14) / ATR
+    # ADX = EMA(|+DI - -DI| / (+DI + -DI), 14)
+    
+    # Calculate True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # Calculate +DM and -DM
+    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Calculate ATR and DX
+    atr = np.zeros(n)
+    atr[0] = np.nan
+    for i in range(1, n):
+        if i < 14:
+            atr[i] = np.nan
+        else:
+            if np.isnan(atr[i-1]):
+                atr[i] = np.nanmean(tr[i-13:i+1])
+            else:
+                atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    
+    # Calculate +DI and -DI
+    di_plus = np.zeros(n)
+    di_minus = np.zeros(n)
+    for i in range(14, n):
+        if np.isnan(atr[i]) or atr[i] == 0:
+            di_plus[i] = 0
+            di_minus[i] = 0
+        else:
+            # Calculate smoothed +DM and -DM
+            dm_plus_smooth = np.zeros(n)
+            dm_minus_smooth = np.zeros(n)
+            if i == 14:
+                dm_plus_smooth[i] = np.nansum(dm_plus[i-13:i+1])
+                dm_minus_smooth[i] = np.nansum(dm_minus[i-13:i+1])
+            else:
+                dm_plus_smooth[i] = dm_plus_smooth[i-1] - (dm_plus_smooth[i-1] / 14) + dm_plus[i]
+                dm_minus_smooth[i] = dm_minus_smooth[i-1] - (dm_minus_smooth[i-1] / 14) + dm_minus[i]
+            
+            di_plus[i] = 100 * dm_plus_smooth[i] / atr[i] if atr[i] != 0 else 0
+            di_minus[i] = 100 * dm_minus_smooth[i] / atr[i] if atr[i] != 0 else 0
+    
+    # Calculate ADX
+    dx = np.zeros(n)
+    adx = np.zeros(n)
+    for i in range(14, n):
+        if di_plus[i] + di_minus[i] == 0:
+            dx[i] = 0
+        else:
+            dx[i] = 100 * np.abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i])
+    
+    for i in range(28, n):
+        if i < 28:
+            adx[i] = np.nan
+        else:
+            if np.isnan(adx[i-1]):
+                adx[i] = np.nanmean(dx[i-13:i+1])
+            else:
+                adx[i] = (adx[i-1] * 13 + dx[i]) / 14
+    
+    # Volume confirmation: 20-period average
+    vol_ma_20 = np.zeros(n)
+    vol_series = pd.Series(volume)
+    for i in range(n):
+        if i < 20:
+            vol_ma_20[i] = np.nan
+        else:
+            vol_ma_20[i] = vol_series.iloc[i-19:i+1].mean()
+    
+    # Session filter: 08:00-20:00 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_mask = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% of capital
     
-    for i in range(50, n):
-        # Skip if data not ready
-        if (np.isnan(H4_aligned[i]) or np.isnan(L3_aligned[i]) or 
-            np.isnan(H3_aligned[i]) or np.isnan(L4_aligned[i]) or
-            np.isnan(ema_50_1w_aligned[i])):
+    for i in range(30, n):
+        # Skip if not in session or data not ready
+        if not session_mask[i] or \
+           np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or \
+           np.isnan(adx[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
-        # Determine weekly trend: price above/below weekly EMA50
-        weekly_uptrend = close_1w[-1] > ema_50_1w[-1] if len(close_1w) > 0 else False
-        # Simplified: use aligned weekly EMA for current day
-        weekly_uptrend_today = close[i] > ema_50_1w_aligned[i]
-        
-        # Long conditions
-        long_signal = False
-        if weekly_uptrend_today:
-            # In uptrend: look for reversals at H3 (sell the bounce)
-            if close[i] <= H3_aligned[i] and volume_expansion[i]:
-                long_signal = False  # Actually a short signal in uptrend at H3
-            # In uptrend: look for continuations above H4 (breakout)
-            elif close[i] > H4_aligned[i] and volume_expansion[i]:
-                long_signal = True
-        else:
-            # In downtrend/sideways: look for reversals at L3 (buy the dip)
-            if close[i] >= L3_aligned[i] and volume_expansion[i]:
-                long_signal = True
-            # In downtrend: look for continuations below L4 (breakdown)
-            elif close[i] < L4_aligned[i] and volume_expansion[i]:
-                long_signal = False  # Actually a short signal
-        
-        # Short conditions
-        short_signal = False
-        if weekly_uptrend_today:
-            # In uptrend: look for reversals at H3 (sell the bounce)
-            if close[i] <= H3_aligned[i] and volume_expansion[i]:
-                short_signal = True
-            # In uptrend: look for continuations above H4 (breakout)
-            elif close[i] > H4_aligned[i] and volume_expansion[i]:
-                short_signal = False  # Actually a long signal
-        else:
-            # In downtrend/sideways: look for reversals at L3 (buy the dip)
-            if close[i] >= L3_aligned[i] and volume_expansion[i]:
-                short_signal = False  # Actually a long signal
-            # In downtrend: look for continuations below L4 (breakdown)
-            elif close[i] < L4_aligned[i] and volume_expansion[i]:
-                short_signal = True
-        
-        # Special case: ranging market (price near weekly EMA) - mean reversion at H3/L3
-        if abs(close[i] - ema_50_1w_aligned[i]) < (ema_50_1w_aligned[i] * 0.02):  # Within 2% of weekly EMA
-            # Mean reversion: sell at H3, buy at L3
-            if close[i] > H3_aligned[i] and volume_expansion[i]:
-                short_signal = True
-                long_signal = False
-            elif close[i] < L3_aligned[i] and volume_expansion[i]:
-                long_signal = True
-                short_signal = False
-        
-        # Update position
-        if long_signal and not short_signal:
-            if position != 1:
-                position = 1
-                signals[i] = position_size
-            else:
-                signals[i] = position_size
-        elif short_signal and not long_signal:
-            if position != -1:
-                position = -1
-                signals[i] = -position_size
-            else:
-                signals[i] = -position_size
-        else:
-            # Hold current position or flat
-            if position == 1:
-                signals[i] = position_size
-            elif position == -1:
-                signals[i] = -position_size
+        # Trend filter: only trade when ADX > 25 (trending market)
+        if adx[i] <= 25:
+            # No strong trend - stay flat
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
             else:
                 signals[i] = 0.0
+            continue
+        
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_expansion = volume[i] > (vol_ma_20[i] * 1.5) if not np.isnan(vol_ma_20[i]) else False
+        
+        # Breakout conditions
+        long_breakout = (close[i] > H4_aligned[i]) and volume_expansion
+        short_breakout = (close[i] < L4_aligned[i]) and volume_expansion
+        
+        # Entry logic
+        if long_breakout and position != 1:
+            position = 1
+            signals[i] = position_size
+        elif short_breakout and position != -1:
+            position = -1
+            signals[i] = -position_size
+        elif position == 1:
+            # Hold long position
+            signals[i] = position_size
+        elif position == -1:
+            # Hold short position
+            signals[i] = -position_size
+        else:
+            # Flat
+            signals[i] = 0.0
     
     return signals
 
-name = "1d_1w_Camarilla_Reverse_Trend"
-timeframe = "1d"
+name = "12h_1d_Camarilla_Pivot_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
