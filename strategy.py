@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_1w_Camarilla_Pivot_Breakout
-Hypothesis: Combines weekly Camarilla pivot levels with daily price action to trade breakouts.
-In ranging markets, price tends to revert to the mean (pivot); in trending markets, breaks of
-H3/L3 levels indicate momentum. Uses volume confirmation to filter false breaks.
-Works in both bull and bear markets by adapting to regime via price action relative to pivot.
-Target: 10-25 trades/year on 1d (40-100 total over 4 years).
+12h_1d_Camarilla_Pivot_Volume_Reversal
+Hypothesis: Trade reversals at Camarilla pivot levels on 1d timeframe with volume confirmation on 12h.
+In ranging markets, price often reverses at key support/resistance levels (H3/L3).
+Go long when price touches L3 with rising volume, short when touches H3 with falling volume.
+Works in both bull and bear markets by capturing mean reversion at statistically significant levels.
+Target: 12-37 trades/year on 12h (50-150 total over 4 years).
 """
 
 import numpy as np
@@ -22,93 +22,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
-        return np.zeros(n)
-    
-    # Calculate Camarilla levels from previous week
-    high_prev = df_1w['high'].shift(1).values  # Previous week high
-    low_prev = df_1w['low'].shift(1).values    # Previous week low
-    close_prev = df_1w['close'].shift(1).values # Previous week close
-    
-    # Camarilla formulas
-    range_prev = high_prev - low_prev
-    # Levels: H4, H3, H2, H1, L1, L2, L3, L4
-    # We use H3 and L3 for breakouts
-    camarilla_h3 = close_prev + (range_prev * 1.1 / 6)
-    camarilla_l3 = close_prev - (range_prev * 1.1 / 6)
-    
-    # Align weekly levels to daily timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
-    
-    # Get daily data for entry and volume confirmation
+    # Get daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Volume confirmation: 20-period average
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume_1d > (vol_ma_20 * 1.5)
-    volume_expansion_aligned = align_htf_to_ltf(prices, df_1d, volume_expansion.values)
+    # Calculate Camarilla levels for each day: based on previous day's range
+    # H3 = close + 1.1*(high - low)/2
+    # L3 = close - 1.1*(high - low)/2
+    # Using previous day's values to avoid look-ahead
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d[0] = close_1d[0]  # first day uses same day
+    prev_high_1d[0] = high_1d[0]
+    prev_low_1d[0] = low_1d[0]
     
-    # Pivot (mean) for mean reversion in range
-    camarilla_pivot = (high_prev + low_prev + close_prev) / 3
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1w, camarilla_pivot)
+    range_1d = prev_high_1d - prev_low_1d
+    H3 = prev_close_1d + 1.1 * range_1d / 2
+    L3 = prev_close_1d - 1.1 * range_1d / 2
+    
+    # Get 12h data for price and volume confirmation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean()
+    volume_expansion = volume_12h > (vol_ma_20_12h * 1.5)
+    
+    # Align all signals to main timeframe
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    volume_expansion_aligned = align_htf_to_ltf(prices, df_12h, volume_expansion)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% of capital
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if np.isnan(camarilla_h3_aligned[i]) or \
-           np.isnan(camarilla_l3_aligned[i]) or \
-           np.isnan(camarilla_pivot_aligned[i]) or \
-           np.isnan(volume_expansion_aligned[i]):
+        if np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or np.isnan(volume_expansion_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Long conditions: price above H3 with volume expansion OR below pivot with mean reversion
-        long_breakout = close[i] > camarilla_h3_aligned[i] and volume_expansion_aligned[i]
-        long_reversion = close[i] < camarilla_pivot_aligned[i] and \
-                        close[i] > camarilla_l3_aligned[i] and \
-                        volume_expansion_aligned[i]
-        
-        # Short conditions: price below L3 with volume expansion OR above pivot with mean reversion
-        short_breakout = close[i] < camarilla_l3_aligned[i] and volume_expansion_aligned[i]
-        short_reversion = close[i] > camarilla_pivot_aligned[i] and \
-                         close[i] < camarilla_h3_aligned[i] and \
-                         volume_expansion_aligned[i]
-        
-        # Entry logic
-        if long_breakout or long_reversion:
+        # Long when price touches or goes below L3 with volume expansion
+        if low[i] <= L3_aligned[i] and volume_expansion_aligned[i]:
             if position != 1:
                 position = 1
                 signals[i] = position_size
             else:
                 signals[i] = position_size
-        elif short_breakout or short_reversion:
+        # Short when price touches or goes above H3 with volume expansion
+        elif high[i] >= H3_aligned[i] and volume_expansion_aligned[i]:
             if position != -1:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = -position_size
+        # Exit when price moves back toward midline (between H3 and L3)
+        elif position == 1 and close[i] > (H3_aligned[i] + L3_aligned[i]) / 2:
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and close[i] < (H3_aligned[i] + L3_aligned[i]) / 2:
+            position = 0
+            signals[i] = 0.0
+        # Hold position
+        elif position == 1:
+            signals[i] = position_size
+        elif position == -1:
+            signals[i] = -position_size
         else:
-            # Hold or flat
-            if position == 1:
-                signals[i] = position_size
-            elif position == -1:
-                signals[i] = -position_size
-            else:
-                signals[i] = 0.0
+            signals[i] = 0.0
     
     return signals
 
-name = "1d_1w_Camarilla_Pivot_Breakout"
-timeframe = "1d"
+name = "12h_1d_Camarilla_Pivot_Volume_Reversal"
+timeframe = "12h"
 leverage = 1.0
