@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_1d_1w_Momentum_Fusion_V1
-Hypothesis: Combines 1-day momentum (price vs 50-day EMA) with 4-hour momentum (RSI divergence) and 1-week trend filter (ADX) to capture momentum bursts in both bull and bear markets. Uses strict entry conditions (momentum alignment + volume confirmation) to limit trades to ~20-30/year, reducing fee drag. Exits on momentum reversal or trend exhaustion.
+12h_1d_1w_CamarillaPivot_Breakout_TrendFilter_v1
+Hypothesis: Price breaking above Camarilla H3 resistance or below L3 support on 12h timeframe with daily volume expansion and weekly ADX trend filter captures institutional breakout moves. Camarilla levels derived from previous day's range provide institutional-grade support/resistance. Volume confirms breakout strength, ADX filters for trending conditions. Designed for 15-25 trades/year to avoid fee drag.
 """
 
 import numpy as np
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,21 +18,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for momentum and EMA
+    # Get daily data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # 50-day EMA for long-term trend
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Camarilla levels from previous day's range
+    # H3 = Close + 1.1 * (High - Low) / 4
+    # L3 = Close - 1.1 * (High - Low) / 4
+    range_1d = high_1d - low_1d
+    camarilla_h3 = close_1d + 1.1 * range_1d / 4
+    camarilla_l3 = close_1d - 1.1 * range_1d / 4
     
-    # Daily momentum: price above/below 50 EMA
-    momentum_long = close_1d > ema_50
-    momentum_short = close_1d < ema_50
-    
-    # Get weekly data for ADX trend filter
+    # Get weekly data for volume and ADX
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 30:
         return np.zeros(n)
@@ -40,8 +42,13 @@ def generate_signals(prices):
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # Calculate ADX (14-period) for trend strength
+    # Weekly volume expansion: current volume > 1.5x 8-period average
+    vol_ma_8 = pd.Series(volume_1w).rolling(window=8, min_periods=8).mean().values
+    volume_expansion = volume_1w > (vol_ma_8 * 1.5)
+    
+    # Calculate ADX (10-period) for trend strength
     tr1 = np.abs(high_1w - low_1w)
     tr2 = np.abs(high_1w - np.roll(close_1w, 1))
     tr3 = np.abs(low_1w - np.roll(close_1w, 1))
@@ -65,7 +72,7 @@ def generate_signals(prices):
                 result[i] = np.nan
         return result
     
-    period = 14
+    period = 10
     atr = wilders_smooth(tr, period)
     plus_dm = wilders_smooth(up_move, period)
     minus_dm = wilders_smooth(down_move, period)
@@ -74,62 +81,38 @@ def generate_signals(prices):
     minus_di = 100 * minus_dm / atr
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = wilders_smooth(dx, period)
-    strong_trend = adx > 20  # Moderate trend filter
+    strong_trend = adx > 25  # Strong trend filter
     
-    # Get 4-hour RSI for momentum timing
-    rsi_period = 14
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    avg_gain[rsi_period] = np.mean(gain[1:rsi_period+1])
-    avg_loss[rsi_period] = np.mean(loss[1:rsi_period+1])
-    
-    for i in range(rsi_period+1, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
-        avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # RSI momentum: rising RSI for long, falling RSI for short
-    rsi_rising = rsi > np.roll(rsi, 1)
-    rsi_falling = rsi < np.roll(rsi, 1)
-    rsi_rising[0] = False
-    rsi_falling[0] = False
-    
-    # Align all signals to 4h timeframe
-    momentum_long_aligned = align_htf_to_ltf(prices, df_1d, momentum_long.astype(float))
-    momentum_short_aligned = align_htf_to_ltf(prices, df_1d, momentum_short.astype(float))
+    # Align all signals to 12h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    volume_expansion_aligned = align_htf_to_ltf(prices, df_1w, volume_expansion.astype(float))
     strong_trend_aligned = align_htf_to_ltf(prices, df_1w, strong_trend.astype(float))
-    rsi_rising_aligned = align_htf_to_ltf(prices, None, rsi_rising.astype(float))  # Already LTF
-    rsi_falling_aligned = align_htf_to_ltf(prices, None, rsi_falling.astype(float))  # Already LTF
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% of capital
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(momentum_long_aligned[i]) or 
-            np.isnan(momentum_short_aligned[i]) or 
+        if (np.isnan(camarilla_h3_aligned[i]) or 
+            np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(volume_expansion_aligned[i]) or 
             np.isnan(strong_trend_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: Momentum alignment + RSI confirmation + trend filter
-        long_entry = (momentum_long_aligned[i] > 0.5 and 
-                     rsi_rising_aligned[i] > 0.5 and 
-                     strong_trend_aligned[i] > 0.5)
-        short_entry = (momentum_short_aligned[i] > 0.5 and 
-                      rsi_falling_aligned[i] > 0.5 and 
-                      strong_trend_aligned[i] > 0.5)
+        # Entry conditions: Break of Camarilla H3/L3 with volume and trend
+        long_break = close[i] > camarilla_h3_aligned[i]
+        short_break = close[i] < camarilla_l3_aligned[i]
         
-        # Exit when momentum reverses
-        exit_long = position == 1 and (momentum_long_aligned[i] < 0.5 or rsi_rising_aligned[i] < 0.5)
-        exit_short = position == -1 and (momentum_short_aligned[i] < 0.5 or rsi_falling_aligned[i] < 0.5)
+        long_entry = long_break and volume_expansion_aligned[i] > 0.5 and strong_trend_aligned[i] > 0.5
+        short_entry = short_break and volume_expansion_aligned[i] > 0.5 and strong_trend_aligned[i] > 0.5
+        
+        # Exit when price returns to previous day's close (mean reversion to equilibrium)
+        prev_close_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+        exit_long = position == 1 and close[i] <= prev_close_aligned[i]
+        exit_short = position == -1 and close[i] >= prev_close_aligned[i]
         
         # Execute signals
         if long_entry and position != 1:
@@ -152,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_1w_Momentum_Fusion_V1"
-timeframe = "4h"
+name = "12h_1d_1w_CamarillaPivot_Breakout_TrendFilter_v1"
+timeframe = "12h"
 leverage = 1.0
