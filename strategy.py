@@ -1,38 +1,36 @@
 #!/usr/bin/env python3
 """
-6h_1d_1w_Camarilla_Range_Bound
-Hypothesis: Uses Camarilla pivot levels from daily timeframe to identify range-bound conditions.
-In ranging markets (price between S3 and R3), fades extreme moves toward S1/R1 with confirmation from weekly trend filter.
-Weekly trend determines bias: only take long signals when weekly close > weekly open, short when weekly close < weekly open.
-Works in both bull and bear markets by adapting to ranging conditions which occur frequently during consolidation periods.
-Target: 10-25 trades/year on 6h (40-100 total over 4 years).
+6h_1d_Liquidity_Zone_Trend
+Hypothesis: Combines liquidity zones from daily timeframe (equal highs/lows) with 6h trend to capture breakouts.
+Liquidity zones act as support/resistance where stops accumulate. Breakouts from these zones with volume and 6h trend alignment
+provide high-probability trades. Works in both bull and bear markets by following the 6h trend direction.
+Target: 15-30 trades/year on 6h (60-120 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given high, low, close arrays."""
-    range_val = high - low
-    if np.any(range_val == 0):
-        range_val = np.where(range_val == 0, 1e-10, range_val)  # Avoid division by zero
+def find_liquidity_zones(high, low, window=20, tolerance=0.001):
+    """Find liquidity zones (equal highs/lows) within tolerance."""
+    n = len(high)
+    liquidity_high = np.full(n, np.nan)
+    liquidity_low = np.full(n, np.nan)
     
-    C = close
-    H = high
-    L = low
+    for i in range(window, n):
+        # Check for equal highs
+        high_window = high[i-window:i]
+        max_high = np.max(high_window)
+        if np.sum(np.abs(high_window - max_high) <= tolerance * max_high) >= 2:
+            liquidity_high[i] = max_high
+        
+        # Check for equal lows
+        low_window = low[i-window:i]
+        min_low = np.min(low_window)
+        if np.sum(np.abs(low_window - min_low) <= tolerance * min_low) >= 2:
+            liquidity_low[i] = min_low
     
-    # Camarilla levels
-    R4 = C + ((H - L) * 1.5000)
-    R3 = C + ((H - L) * 1.2500)
-    R2 = C + ((H - L) * 1.1666)
-    R1 = C + ((H - L) * 1.0833)
-    S1 = C - ((H - L) * 1.0833)
-    S2 = C - ((H - L) * 1.1666)
-    S3 = C - ((H - L) * 1.2500)
-    S4 = C - ((H - L) * 1.5000)
-    
-    return R1, R2, R3, R4, S1, S2, S3, S4
+    return liquidity_high, liquidity_low
 
 def generate_signals(prices):
     n = len(prices)
@@ -44,93 +42,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
+    # Get daily data for liquidity zones
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels on daily
-    R1_1d, R2_1d, R3_1d, R4_1d, S1_1d, S2_1d, S3_1d, S4_1d = calculate_camarilla(high_1d, low_1d, close_1d)
+    # Calculate liquidity zones on daily
+    liq_high_1d, liq_low_1d = find_liquidity_zones(high_1d, low_1d, window=20, tolerance=0.0005)
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # Align liquidity zones to 6h timeframe
+    liq_high_1d_aligned = align_htf_to_ltf(prices, df_1d, liq_high_1d)
+    liq_low_1d_aligned = align_htf_to_ltf(prices, df_1d, liq_low_1d)
     
-    # Weekly trend: bullish if weekly close > weekly open, bearish if weekly close < weekly open
-    weekly_open = df_1w['open'].values
-    weekly_close = df_1w['close'].values
-    weekly_bullish = weekly_close > weekly_open
+    # 6h trend: EMA(21) vs EMA(50)
+    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_up = ema_21 > ema_50
+    trend_down = ema_21 < ema_50
     
-    # Align all data to 6h timeframe
-    R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
-    R2_1d_aligned = align_htf_to_ltf(prices, df_1d, R2_1d)
-    R3_1d_aligned = align_htf_to_ltf(prices, df_1d, R3_1d)
-    R4_1d_aligned = align_htf_to_ltf(prices, df_1d, R4_1d)
-    S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
-    S2_1d_aligned = align_htf_to_ltf(prices, df_1d, S2_1d)
-    S3_1d_aligned = align_htf_to_ltf(prices, df_1d, S3_1d)
-    S4_1d_aligned = align_htf_to_ltf(prices, df_1d, S4_1d)
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 1.5)
+    # Volume confirmation: current volume > 1.3x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_expansion = volume > (vol_ma_20 * 1.3)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% of capital
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(R1_1d_aligned[i]) or np.isnan(R3_1d_aligned[i]) or 
-            np.isnan(S1_1d_aligned[i]) or np.isnan(S3_1d_aligned[i]) or
-            np.isnan(weekly_bullish_aligned[i]) or np.isnan(volume_expansion[i])):
+        if (np.isnan(liq_high_1d_aligned[i]) or np.isnan(liq_low_1d_aligned[i]) or
+            np.isnan(ema_21[i]) or np.isnan(ema_50[i]) or
+            np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Range condition: price between S3 and R3 (defines the trading range)
-        in_range = (low[i] >= S3_1d_aligned[i]) and (high[i] <= R3_1d_aligned[i])
+        # Breakout above liquidity high with uptrend and volume expansion
+        long_breakout = (high[i] > liq_high_1d_aligned[i]) and trend_up[i] and volume_expansion[i]
         
-        if in_range:
-            # Fade extreme moves toward S1/R1 with volume expansion and weekly trend filter
-            
-            # Long setup: price touches or goes below S1 with volume expansion, weekly bullish
-            long_condition = (low[i] <= S1_1d_aligned[i]) and volume_expansion[i] and weekly_bullish_aligned[i] > 0.5
-            
-            # Short setup: price touches or goes above R1 with volume expansion, weekly bearish
-            short_condition = (high[i] >= R1_1d_aligned[i]) and volume_expansion[i] and weekly_bullish_aligned[i] < 0.5
-            
-            if long_condition and position != 1:
-                position = 1
-                signals[i] = position_size
-            elif long_condition and position == 1:
-                signals[i] = position_size
-            elif short_condition and position != -1:
-                position = -1
-                signals[i] = -position_size
-            elif short_condition and position == -1:
-                signals[i] = -position_size
-            elif position == 1:
-                signals[i] = position_size
-            elif position == -1:
-                signals[i] = -position_size
-            else:
-                signals[i] = 0.0
+        # Breakdown below liquidity low with downtrend and volume expansion
+        short_breakdown = (low[i] < liq_low_1d_aligned[i]) and trend_down[i] and volume_expansion[i]
+        
+        if long_breakout and position != 1:
+            position = 1
+            signals[i] = position_size
+        elif long_breakout and position == 1:
+            signals[i] = position_size
+        elif short_breakdown and position != -1:
+            position = -1
+            signals[i] = -position_size
+        elif short_breakdown and position == -1:
+            signals[i] = -position_size
+        elif position == 1:
+            signals[i] = position_size
+        elif position == -1:
+            signals[i] = -position_size
         else:
-            # Outside range - exit any position
-            if position != 0:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.0
+            signals[i] = 0.0
     
     return signals
 
-name = "6h_1d_1w_Camarilla_Range_Bound"
+name = "6h_1d_Liquidity_Zone_Trend"
 timeframe = "6h"
 leverage = 1.0
