@@ -8,19 +8,18 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Elder Ray (Bull/Bear Power) + 1d regime filter.
-    # Bull Power = High - EMA13(close), Bear Power = EMA13(close) - Low
-    # Long when Bull Power > 0 AND Bear Power < 0 AND 1d ADX > 25 (trending market)
-    # Short when Bear Power > 0 AND Bull Power < 0 AND 1d ADX > 25
-    # Exit when Elder Power diverges (Bull Power <= 0 for long, Bear Power <= 0 for short) OR 1d ADX < 20 (range market)
-    # Uses Elder Ray to measure bull/bear strength relative to trend EMA, ADX to filter for trending regimes only.
-    # Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
+    # Hypothesis: 4h Camarilla H3/L3 breakout with 1d trend filter (EMA50) and volume confirmation.
+    # Long when price breaks above Camarilla H3 AND 1d close > 1d EMA50 AND 4h volume > 1.5x 20-period MA.
+    # Short when price breaks below Camarilla L3 AND 1d close < 1d EMA50 AND 4h volume > 1.5x 20-period MA.
+    # Exit when price re-enters H3-L3 range.
+    # Uses discrete position sizing (0.25) to minimize fee churn. Target: 75-200 total trades over 4 years.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get daily data for Elder Ray calculation and ADX regime filter
+    # Get daily data for Camarilla pivot calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -29,46 +28,36 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA13 for Elder Ray
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate Camarilla pivot levels from previous day
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Calculate Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low
-    bull_power_1d = high_1d - ema13_1d
-    bear_power_1d = ema13_1d - low_1d
+    h3_1d = pivot_1d + range_1d * 1.1 / 4
+    l3_1d = pivot_1d - range_1d * 1.1 / 4
+    h4_1d = pivot_1d + range_1d * 1.1 / 2
+    l4_1d = pivot_1d - range_1d * 1.1 / 2
     
-    # Calculate 1d ADX for regime filter
-    # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Directional Movement
-    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
+    # Align 1d indicators to 4h timeframe
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
+    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Smoothed TR, PlusDM, MinusDM (Wilder's smoothing = EMA with alpha=1/period)
-    atr_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Get 4h data for volume confirmation and price
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
     
-    # PlusDI and MinusDI
-    plus_di_1d = 100 * plus_dm_smooth / atr_1d
-    minus_di_1d = 100 * minus_dm_smooth / atr_1d
+    volume_4h = df_4h['volume'].values
+    vol_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
     
-    # DX and ADX
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    adx_1d = pd.Series(dx_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Align 1d indicators to 6h timeframe
-    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Align 4h close for price comparison
+    close_4h_aligned = align_htf_to_ltf(prices, df_4h, close)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -76,28 +65,34 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(bull_power_1d_aligned[i]) or np.isnan(bear_power_1d_aligned[i]) or 
-            np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_4h_aligned[i]) or 
+            np.isnan(close_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Elder Ray conditions
-        bull_power_pos = bull_power_1d_aligned[i] > 0
-        bear_power_pos = bear_power_1d_aligned[i] > 0
+        # Volume confirmation: current 4h volume > 1.5x 20-period average
+        volume_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_4h)
+        volume_spike = volume_4h_aligned[i] > 1.5 * vol_ma_4h_aligned[i]
         
-        # ADX regime filter: trending market
-        adx_trending = adx_1d_aligned[i] > 25
-        adx_ranging = adx_1d_aligned[i] < 20
+        # Price relative to Camarilla levels
+        price_above_h3 = close_4h_aligned[i] > h3_1d_aligned[i]
+        price_below_l3 = close_4h_aligned[i] < l3_1d_aligned[i]
+        price_in_range = (close_4h_aligned[i] >= l3_1d_aligned[i]) & (close_4h_aligned[i] <= h3_1d_aligned[i])
+        
+        # Trend filter: 1d close vs EMA50 (using 4h close as proxy for 1d close trend)
+        trend_bullish = close_4h_aligned[i] > ema50_1d_aligned[i]
+        trend_bearish = close_4h_aligned[i] < ema50_1d_aligned[i]
         
         # Entry conditions
-        if bull_power_pos and not bear_power_pos and adx_trending and position != 1:
+        if price_above_h3 and trend_bullish and volume_spike and position != 1:
             position = 1
             signals[i] = position_size
-        elif bear_power_pos and not bull_power_pos and adx_trending and position != -1:
+        elif price_below_l3 and trend_bearish and volume_spike and position != -1:
             position = -1
             signals[i] = -position_size
-        # Exit conditions: power divergence OR ranging market
-        elif (not bull_power_pos and position == 1) or (not bear_power_pos and position == -1) or adx_ranging:
+        # Exit conditions: price re-enters H3-L3 range
+        elif price_in_range and position != 0:
             position = 0
             signals[i] = 0.0
         # Hold current position
@@ -111,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_elder_ray_adx_regime_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_pivot_breakout_ema_volume_v2"
+timeframe = "4h"
 leverage = 1.0
