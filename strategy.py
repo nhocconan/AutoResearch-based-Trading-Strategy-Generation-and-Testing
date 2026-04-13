@@ -118,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_ema200_rsi_momentum_filter_v1"
-timeframe = "12h"
+name = "4h_1d_ema200_rsi_momentum_filter_v1"
+timeframe = "4h"
 leverage = 1.0
