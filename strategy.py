@@ -8,91 +8,88 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Camarilla H4/L4 breakout with 1d EMA34 trend filter and volume confirmation (>1.5x average)
-    # Primary timeframe: 12h for lower frequency (target: 12-37 trades/year)
-    # Camarilla H4/L4 levels from 1d provide strong intraday support/resistance
-    # 1d EMA34 filters for intermediate trend alignment to avoid counter-trend whipsaws
-    # Volume spike >1.5x 20-period average confirms institutional participation
-    # Exits on H4/L4 retest or trend reversal
-    # Target: 15-25 trades/year (60-100 total over 4 years) for minimal fee drag
+    # Hypothesis: 4h Camarilla H3/L3 breakout with 12h EMA50 trend filter and volume confirmation (>2.0x average)
+    # Camarilla pivot levels provide high-probability reversal/continuation points from intraday structure
+    # 12h EMA50 filters for intermediate trend alignment to avoid counter-trend whipsaws
+    # Volume spike >2.0x 20-period average confirms institutional participation
+    # Exits on H3/L3 retest or trend reversal
+    # Target: 20-30 trades/year (80-120 total over 4 years) for low fee drag
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 4h data for Camarilla calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate previous 1d bar's Camarilla levels (H4, L4)
-    # Based on previous 1d bar's range
-    camarilla_h4 = np.full(len(high_1d), np.nan)
-    camarilla_l4 = np.full(len(low_1d), np.nan)
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
     
-    for i in range(1, len(high_1d)):
+    close_12h = df_12h['close'].values
+    
+    # Calculate previous 4h bar's Camarilla levels (H3, L3)
+    # Based on previous 4h bar's range
+    camarilla_h3 = np.full(len(high_4h), np.nan)
+    camarilla_l3 = np.full(len(low_4h), np.nan)
+    
+    for i in range(1, len(high_4h)):
         # Use previous bar's high/low/close for Camarilla calculation
-        ph = high_1d[i-1]
-        pl = low_1d[i-1]
-        pc = close_1d[i-1]
+        ph = high_4h[i-1]
+        pl = low_4h[i-1]
+        pc = close_4h[i-1]
         rang = ph - pl
         
-        camarilla_h4[i] = pc + rang * 1.1 / 2  # H4 level
-        camarilla_l4[i] = pc - rang * 1.1 / 2  # L4 level
+        camarilla_h3[i] = pc + rang * 1.1 / 4  # H3 level
+        camarilla_l3[i] = pc - rang * 1.1 / 4  # L3 level
     
-    # Get 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Get 12h EMA50 for trend filter
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Get 1d volume for confirmation (>1.5x 20-period average)
-    vol_ma_1d = np.full(len(close_1d), np.nan)
-    for i in range(20, len(close_1d)):
-        vol_ma_1d[i] = np.mean(volume[i-20:i]) if i < len(volume) else np.nan
-    # For volume spike, we need to check if current 1d volume is > 1.5x MA
-    # But we need to align this to 12h timeframe, so we'll handle in loop
+    # Get 4h volume for confirmation (>2.0x 20-period average)
+    vol_ma_4h = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma_4h[i] = np.mean(volume[i-20:i])
+    volume_spike_4h = volume > (2.0 * vol_ma_4h)
     
-    # Align all indicators to LTF (12h)
-    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Align all indicators to LTF (4h)
+    h3_4h_aligned = align_htf_to_ltf(prices, df_4h, camarilla_h3)
+    l3_4h_aligned = align_htf_to_ltf(prices, df_4h, camarilla_l3)
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Precompute 12h volume moving average for efficiency
-    vol_ma_12h = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma_12h[i] = np.mean(volume[i-20:i])
-    
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_12h[i])):
+        if (np.isnan(h3_4h_aligned[i]) or np.isnan(l3_4h_aligned[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(volume_spike_4h[i])):
             signals[i] = 0.0
             continue
         
         # Breakout conditions
-        long_breakout = close[i] > h4_1d_aligned[i]
-        short_breakout = close[i] < l4_1d_aligned[i]
+        long_breakout = close[i] > h3_4h_aligned[i]
+        short_breakout = close[i] < l3_4h_aligned[i]
         
-        # 1d trend filter (EMA34)
-        bullish_trend = close[i] > ema34_1d_aligned[i]
-        bearish_trend = close[i] < ema34_1d_aligned[i]
-        
-        # Volume confirmation (>1.5x 20-period average)
-        volume_spike = volume[i] > (1.5 * vol_ma_12h[i])
+        # 12h trend filter (EMA50)
+        bullish_trend = close[i] > ema50_12h_aligned[i]
+        bearish_trend = close[i] < ema50_12h_aligned[i]
         
         # Entry logic: Breakout + trend alignment + volume confirmation
-        long_entry = long_breakout and bullish_trend and volume_spike
-        short_entry = short_breakout and bearish_trend and volume_spike
+        long_entry = long_breakout and bullish_trend and volume_spike_4h[i]
+        short_entry = short_breakout and bearish_trend and volume_spike_4h[i]
         
-        # Exit logic: price retests H4/L4 or trend reversal
-        long_exit = (close[i] <= h4_1d_aligned[i] * 1.001) or not bullish_trend  # Retest H4 or trend change
-        short_exit = (close[i] >= l4_1d_aligned[i] * 0.999) or not bearish_trend  # Retest L4 or trend change
+        # Exit logic: price retests H3/L3 or trend reversal
+        long_exit = (close[i] <= h3_4h_aligned[i] * 1.001) or not bullish_trend  # Retest H3 or trend change
+        short_exit = (close[i] >= l3_4h_aligned[i] * 0.999) or not bearish_trend  # Retest L3 or trend change
         
         if long_entry and position != 1:
             position = 1
@@ -117,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_camarilla_h4l4_ema34_volume_v1"
-timeframe = "12h"
+name = "4h_12h_camarilla_h3l3_ema50_volume_v1"
+timeframe = "4h"
 leverage = 1.0
