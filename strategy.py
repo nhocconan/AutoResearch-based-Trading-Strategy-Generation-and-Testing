@@ -5,99 +5,70 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h trend + 1h mean reversion in ranging markets.
-    # Long when 4h EMA20 uptrend, ADX < 20 (range), and price touches 1h VWAP with rejection.
-    # Short when 4h EMA20 downtrend, ADX < 20, and price rejects 1h VWAP.
-    # Uses 4h for trend filter, 1h for entry timing to reduce whipsaw.
-    # Target: 60-120 total trades over 4 years (15-30/year) to minimize fee drag.
+    # Hypothesis: 6h trend following with 1w EMA filter and volume spike confirmation.
+    # Long when price > 6h EMA(50) AND 1w EMA(34) rising AND volume > 1.5x 20-period average.
+    # Short when price < 6h EMA(50) AND 1w EMA(34) falling AND volume > 1.5x 20-period average.
+    # Uses 6h EMA for trend, 1w EMA for higher-timeframe bias, volume spike for momentum confirmation.
+    # Target: 80-160 total trades over 4 years (20-40/year) to balance opportunity and fee drag.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter (call ONCE before loop)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get 1w data for EMA filter (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 40:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 4h EMA20 for trend
-    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    # Calculate 1w EMA(34)
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align to 6h timeframe
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 1w EMA slope (rising/falling) - needs 2-bar lookback for confirmation
+    ema_34_1w_slope = np.diff(ema_34_1w_aligned, prepend=ema_34_1w_aligned[0])
+    ema_34_1w_rising = ema_34_1w_slope > 0
+    ema_34_1w_falling = ema_34_1w_slope < 0
     
-    # Calculate 1h ADX(14) for regime
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    # Directional Movement
-    up_move = high[1:] - high[:-1]
-    down_move = low[:-1] - low[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
-    # Smoothed TR, +DM, -DM (Wilder's smoothing = EMA with alpha=1/period)
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Calculate 6h EMA(50) for trend
+    ema_50_6h = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 1h VWAP
-    typical_price = (high + low + close) / 3
-    pv = typical_price * volume
-    cum_pv = np.cumsum(pv)
-    cum_vol = np.cumsum(volume)
-    vwap = cum_pv / cum_vol
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    position_size = 0.25  # Discrete level to minimize fee churn
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema20_4h_aligned[i]) or np.isnan(adx[i]) or np.isnan(vwap[i])):
+        if (np.isnan(ema_50_6h[i]) or np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: 4h EMA20 slope
-        if i >= 51:
-            ema20_prev = ema20_4h_aligned[i-1]
-            ema20_curr = ema20_4h_aligned[i]
-            trend_up = ema20_curr > ema20_prev
-            trend_down = ema20_curr < ema20_prev
-        else:
-            trend_up = False
-            trend_down = False
-        
-        # Regime filter: only trade in ranging markets (ADX < 20)
-        ranging = adx[i] < 20
-        
-        # VWAP rejection conditions (price touches VWAP and closes back inside range)
-        long_setup = (low[i] <= vwap[i]) and (close[i] > vwap[i]) and trend_up and ranging
-        short_setup = (high[i] >= vwap[i]) and (close[i] < vwap[i]) and trend_down and ranging
-        
-        # Exit conditions: price returns to 4h EMA20
-        long_exit = close[i] >= ema20_4h_aligned[i]
-        short_exit = close[i] <= ema20_4h_aligned[i]
-        
-        # Fixed position size (discrete levels to minimize fee churn)
-        position_size = 0.20
-        
         # Entry conditions
+        long_setup = (close[i] > ema_50_6h[i]) and ema_34_1w_rising[i] and volume_spike[i]
+        short_setup = (close[i] < ema_50_6h[i]) and ema_34_1w_falling[i] and volume_spike[i]
+        
+        # Exit conditions: reverse signal or volume dry-up
+        long_exit = (close[i] < ema_50_6h[i]) or not volume_spike[i]
+        short_exit = (close[i] > ema_50_6h[i]) or not volume_spike[i]
+        
+        # Entry logic
         if long_setup and position != 1:
             position = 1
             signals[i] = position_size
         elif short_setup and position != -1:
             position = -1
             signals[i] = -position_size
-        # Exit conditions
+        # Exit logic
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -115,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1h_ema20_vwap_rejection_v1"
-timeframe = "1h"
+name = "6h_1w_ema_trend_volume_spike_v1"
+timeframe = "6h"
 leverage = 1.0
