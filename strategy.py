@@ -8,11 +8,11 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian(20) breakout + 1d ATR volatility filter + volume confirmation
+    # Hypothesis: 12h Donchian(20) breakout + 1d ATR-based volatility filter + volume confirmation
     # Long when: price breaks above 12h Donchian upper (20) AND 1d ATR(14) < 1d ATR(50) AND volume > 1.5x 20-bar avg
     # Short when: price breaks below 12h Donchian lower (20) AND 1d ATR(14) < 1d ATR(50) AND volume > 1.5x 20-bar avg
     # Exit when: price crosses 12h Donchian midpoint
-    # Uses discrete sizing (0.25) targeting 50-150 total trades over 4 years (12-37/year).
+    # Uses discrete sizing (0.25) targeting 75-200 total trades over 4 years (19-50/year).
     # ATR filter ensures breakouts occur during low volatility (pre-breakout compression) to avoid false breakouts in high volatility.
     # Works in bull (breakouts with trend) and bear (only volatility-aligned breaks taken).
     
