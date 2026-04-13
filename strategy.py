@@ -8,25 +8,17 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Hypothesis: 1d primary with 1w HTF - 1w Donchian breakout with 1d volume confirmation and ATR filter
-    # Designed to capture strong weekly trends with institutional volume, avoiding choppy/low-volume false breakouts
-    # Target: 30-100 trades over 4 years (7-25/year) for low fee drag and good generalization in bull/bear markets
+    # Hypothesis: 6h primary with 1d HTF - 6h Bollinger Breakout with 1d Volume Regime Filter
+    # Designed to capture volatility expansion moves in both bull and bear markets
+    # Volume regime filter avoids low-volume false breakouts; Bollinger bands provide dynamic support/resistance
+    # Target: 50-150 total trades over 4 years (12-37/year) for low fee drag
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values if 'volume' in prices.columns else np.ones(len(prices))
     
-    # Get 1w data for HTF Donchian channels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Get 1d data for volume confirmation and ATR
+    # Get 1d data for HTF volume regime and Bollinger context
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -36,30 +28,17 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values if 'volume' in df_1d.columns else np.ones(len(df_1d))
     
-    # Calculate 1w Donchian channels (20-period)
-    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # Calculate 6h Bollinger Bands (20-period, 2 std)
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_band = sma_20 + 2 * std_20
+    lower_band = sma_20 - 2 * std_20
     
-    # Calculate 1d ATR (14-period) for volatility filter
-    def calculate_atr(high, low, close, window=14):
-        tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - np.roll(close, 1)[1:]))
-        tr1 = np.maximum(tr1, np.abs(low[1:] - np.roll(close, 1)[1:]))
-        tr = np.concatenate([[np.nan], tr1])
-        return pd.Series(tr).rolling(window=window, min_periods=window).mean().values
+    # Calculate 1d Volume 20-period average for regime filter
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    atr_1d = calculate_atr(high_1d, low_1d, close_1d, window=14)
-    atr_ma_10 = pd.Series(atr_1d).rolling(window=10, min_periods=10).mean().values
-    
-    # Calculate 1d volume average (20-period)
-    vol_avg_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all HTF/LTF indicators to 1d primary timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid)
-    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
-    atr_ma_10_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_10)
+    # Align HTF indicators to 6h timeframe
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -67,31 +46,30 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(donchian_mid_aligned[i]) or 
-            np.isnan(vol_avg_20_aligned[i]) or
-            np.isnan(atr_ma_10_aligned[i])):
+        if (np.isnan(sma_20[i]) or 
+            np.isnan(std_20[i]) or 
+            np.isnan(upper_band[i]) or 
+            np.isnan(lower_band[i]) or
+            np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmed = volume_1d[i] > 1.5 * vol_avg_20_aligned[i]
+        # Volume regime: current 1d volume > 1.2x 20-period average (avoid low-volume breakouts)
+        # We need to map current 6h bar to its corresponding 1d bar for volume check
+        # Since we aligned the 1d volume MA, we can use it directly
+        vol_regime = volume_1d[i // 24] > 1.2 * vol_ma_20_1d_aligned[i] if i // 24 < len(volume_1d) else False
         
-        # Volatility filter: avoid extremely low volatility (choppy markets)
-        vol_filter = atr_1d[i] > 0.3 * atr_ma_10_aligned[i]
+        # Bollinger breakout conditions
+        breakout_up = close[i] > upper_band[i]
+        breakout_down = close[i] < lower_band[i]
         
-        # Breakout conditions
-        breakout_up = close_1d[i] > donchian_high_aligned[i]
-        breakout_down = close_1d[i] < donchian_low_aligned[i]
+        # Entry conditions: breakout + volume regime
+        enter_long = breakout_up and vol_regime
+        enter_short = breakout_down and vol_regime
         
-        # Entry conditions
-        enter_long = breakout_up and volume_confirmed and vol_filter
-        enter_short = breakout_down and volume_confirmed and vol_filter
-        
-        # Exit conditions: price returns to 1w Donchian middle
-        exit_long = position == 1 and close_1d[i] <= donchian_mid_aligned[i]
-        exit_short = position == -1 and close_1d[i] >= donchian_mid_aligned[i]
+        # Exit conditions: return to Bollinger middle (mean reversion)
+        exit_long = position == 1 and close[i] <= sma_20[i]
+        exit_short = position == -1 and close[i] >= sma_20[i]
         
         # Execute signals
         if enter_long and position != 1:
@@ -117,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_donchian_breakout_volume_atr_v1"
-timeframe = "1d"
+name = "6h_1d_bollinger_breakout_volume_regime_v1"
+timeframe = "6h"
 leverage = 1.0
