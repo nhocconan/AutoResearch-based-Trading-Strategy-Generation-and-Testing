@@ -8,27 +8,21 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1d Donchian(20) breakout with 1w trend filter and ATR-based position sizing.
+    # Hypothesis: 12h Donchian(20) breakout with 1d volume spike filter and ATR-based position sizing.
     # Donchian breakouts capture momentum in both bull and bear markets.
-    # 1w EMA(21) filter ensures we only trade in the direction of the weekly trend.
+    # Volume spike (current volume > 1.5 * 20-period MA) confirms breakout validity.
     # Position size scales with volatility: size = 0.25 * (ATR(14) / price) normalized to max 0.30.
     # Uses discrete position sizes (0.0, ±0.25) to minimize fee churn.
-    # Target: 30-100 total trades over 4 years (7-25/year).
+    # Target: 50-150 total trades over 4 years (12-37/year).
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Get 1d data for ATR and Donchian calculation (call ONCE before loop)
+    # Get 1d data for ATR calculation (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
-        return np.zeros(n)
-    
-    # Get 1w data for trend filter (call ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
         return np.zeros(n)
     
     # Calculate 1d ATR(14) for volatility scaling
@@ -51,19 +45,15 @@ def generate_signals(prices):
     for i in range(14, len(tr)):
         atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # Align 1d ATR to 1d timeframe (no alignment needed as we're already on 1d)
-    atr_1d_aligned = atr_1d  # Already on 1d timeframe
+    # Align 1d ATR to 12h timeframe
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate 1d Donchian channels (20-period)
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate 12h Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1w EMA(21) for trend filter
-    close_1w = df_1w['close'].values
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # Align 1w EMA to 1d timeframe
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Calculate 12h volume MA(20) for confirmation
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -71,17 +61,16 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if data not ready
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(atr_1d_aligned[i]) or np.isnan(ema_21_1w_aligned[i])):
+            np.isnan(volume_ma[i]) or np.isnan(atr_1d_aligned[i])):
             signals[i] = 0.0
             continue
+        
+        # Volume filter: current volume > 1.5 * 20-period MA
+        volume_filter = volume[i] > 1.5 * volume_ma[i]
         
         # Breakout conditions
         long_breakout = close[i] > donchian_high[i-1]  # Break above prior period's high
         short_breakout = close[i] < donchian_low[i-1]  # Break below prior period's low
-        
-        # Trend filter: price above/below weekly EMA(21)
-        uptrend = close[i] > ema_21_1w_aligned[i]
-        downtrend = close[i] < ema_21_1w_aligned[i]
         
         # Dynamic position size based on volatility (ATR/price ratio)
         # Normalize ATR ratio to target size 0.25, max 0.30
@@ -90,9 +79,9 @@ def generate_signals(prices):
         vol_scaled_size = base_size * (atr_ratio / 0.01)  # Normalize to 1% ATR/price
         position_size = np.clip(vol_scaled_size, 0.0, 0.30)
         
-        # Entry conditions: breakout in direction of weekly trend
-        long_entry = long_breakout and uptrend
-        short_entry = short_breakout and downtrend
+        # Entry conditions: breakout with volume confirmation
+        long_entry = long_breakout and volume_filter
+        short_entry = short_breakout and volume_filter
         
         # Exit conditions: opposite breakout
         long_exit = short_breakout
@@ -121,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_donchian_ema_trend_v1"
-timeframe = "1d"
+name = "12h_1d_donchian_volume_atr_size_v1"
+timeframe = "12h"
 leverage = 1.0
