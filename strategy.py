@@ -8,11 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian(20) breakout with 1w EMA50 trend filter + volume confirmation
+    # Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter + volume confirmation
     # Long: price > Donchian(20) high + price > 1w EMA50 + volume > 2.0x 20-period average
     # Short: price < Donchian(20) low + price < 1w EMA50 + volume > 2.0x 20-period average
     # Exit: opposite Donchian breakout OR price crosses 1w EMA50
-    # Using 12h timeframe for low trade frequency, 1w EMA50 for strong trend filter,
+    # Using 1d timeframe for lower trade frequency, 1w EMA50 for strong trend filter,
     # and volume spike confirmation to avoid false breakouts in choppy markets.
     # Discrete position sizing (0.25) to minimize fee churn.
     
@@ -36,7 +36,7 @@ def generate_signals(prices):
         for i in range(50, len(close_1w)):
             ema_1w[i] = (close_1w[i] * multiplier) + (ema_1w[i-1] * (1 - multiplier))
     
-    # Get 12h Donchian(20) for breakout with min_periods
+    # Get 1d Donchian(20) for breakout with min_periods
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     
@@ -44,13 +44,13 @@ def generate_signals(prices):
         donchian_high[i] = np.max(high[i-20:i])
         donchian_low[i] = np.min(low[i-20:i])
     
-    # Get 12h volume for confirmation (>2.0x 20-period average)
+    # Get 1d volume for confirmation (>2.0x 20-period average)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     volume_spike = volume > (2.0 * vol_ma)
     
-    # Align 1w EMA50 to 12h
+    # Align 1w EMA50 to 1d
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     signals = np.zeros(n)
@@ -102,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1w_donchian_breakout_ema50_volume_v1"
-timeframe = "12h"
+name = "1d_1w_donchian_breakout_ema50_volume_v1"
+timeframe = "1d"
 leverage = 1.0
