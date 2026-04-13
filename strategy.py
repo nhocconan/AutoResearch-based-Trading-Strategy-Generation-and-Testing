@@ -8,69 +8,59 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Camarilla pivot levels (from 1d) + 1d volume spike + 1d chop regime filter
-    # Long: price touches Camarilla L3 support AND 1d volume > 1.8 * 20-period average AND chop > 61.8 (range)
-    # Short: price touches Camarilla H3 resistance AND 1d volume > 1.8 * 20-period average AND chop > 61.8 (range)
-    # Exit: price reverts to Camarilla pivot point (mid) OR chop < 38.2 (trending)
-    # Using 1d for Camarilla calculation, volume, and chop to avoid look-ahead
+    # Hypothesis: 1d Donchian(20) breakout + 1w volume spike + 1w chop regime filter
+    # Long: price breaks above Donchian(20) high AND 1w volume > 1.5 * 20-period average AND chop > 61.8 (range)
+    # Short: price breaks below Donchian(20) low AND 1w volume > 1.5 * 20-period average AND chop > 61.8 (range)
+    # Exit: price reverts to Donchian(20) midpoint OR chop < 38.2 (trending)
+    # Using 1w for volume and chop to avoid look-ahead, 1d for price action
     # Discrete position sizing (0.25) to minimize fee churn
-    # Target: 25-50 trades/year (~100-200 over 4 years) to stay within fee drag limits
+    # Target: 20-50 trades/year (~80-200 over 4 years) to stay within fee drag limits
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get 1d data for Camarilla pivots, volume, and chop (call ONCE before loop)
+    # Get 1d data for Donchian channels (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla levels (based on previous day's OHLC)
+    # Get 1w data for volume and chop (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
+    # Calculate 1d Donchian channels (20-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Camarilla levels: based on previous day's range
-    # H4 = close + 1.5 * (high - low)
-    # H3 = close + 1.1 * (high - low)
-    # H2 = close + 0.75 * (high - low)
-    # H1 = close + 0.5 * (high - low)
-    # L1 = close - 0.5 * (high - low)
-    # L2 = close - 0.75 * (high - low)
-    # L3 = close - 1.1 * (high - low)
-    # L4 = close - 1.5 * (high - low)
-    # MPP = (high + low + close) / 3
+    # Donchian high: rolling max of high
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    # Donchian low: rolling min of low
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Donchian midpoint: average of high and low
+    donchian_mid = (donchian_high + donchian_low) / 2.0
     
-    # Previous day's values (shift by 1 to avoid look-ahead)
-    prev_high = np.concatenate([[np.nan], high_1d[:-1]])
-    prev_low = np.concatenate([[np.nan], low_1d[:-1]])
-    prev_close = np.concatenate([[np.nan], close_1d[:-1]])
+    # Align 1d Donchian to 1d timeframe (no additional delay needed for price channels)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid)
     
-    # Calculate Camarilla levels
-    camarilla_mpp = (prev_high + prev_low + prev_close) / 3.0
-    camarilla_h3 = prev_close + 1.1 * (prev_high - prev_low)
-    camarilla_l3 = prev_close - 1.1 * (prev_high - prev_low)
+    # Calculate 1w volume spike filter: volume > 1.5 * 20-period average
+    volume_1w = df_1w['volume'].values
+    vol_ma_20 = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume_1w > (1.5 * vol_ma_20)
     
-    # Align 1d Camarilla to 4h (wait for completed 1d bar)
-    camarilla_mpp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_mpp)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    
-    # Calculate 1d volume spike filter: volume > 1.8 * 20-period average
-    volume_1d = df_1d['volume'].values
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume_1d > (1.8 * vol_ma_20)
-    
-    # Calculate 1d Choppiness Index (CHOP) - range/trend regime filter
+    # Calculate 1w Choppiness Index (CHOP) - range/trend regime filter
     # CHOP = 100 * log10(sum(ATR(14)) / (log10(n) * (max(high) - min(low)))) over period
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # True Range for 1d
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    # True Range for 1w
+    tr1 = np.abs(high_1w[1:] - low_1w[1:])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
     tr = np.concatenate([[np.nan], tr])  # align with index 0
     
@@ -85,40 +75,40 @@ def generate_signals(prices):
                 result[i] = (result[i-1] * (period-1) + data[i]) / period
         return result
     
-    atr_1d = wilders_smoothing(tr, 14)
+    atr_1w = wilders_smoothing(tr, 14)
     
     # Choppiness Index (14-period)
     chop_period = 14
-    sum_atr = np.full_like(atr_1d, np.nan)
-    highest_high = np.full_like(high_1d, np.nan)
-    lowest_low = np.full_like(low_1d, np.nan)
+    sum_atr = np.full_like(atr_1w, np.nan)
+    highest_high = np.full_like(high_1w, np.nan)
+    lowest_low = np.full_like(low_1w, np.nan)
     
-    for i in range(len(atr_1d)):
+    for i in range(len(atr_1w)):
         if i < chop_period - 1:
             continue
-        if np.isnan(atr_1d[i-chop_period+1:i+1]).any():
+        if np.isnan(atr_1w[i-chop_period+1:i+1]).any():
             continue
-        sum_atr[i] = np.nansum(atr_1d[i-chop_period+1:i+1])
-        highest_high[i] = np.nanmax(high_1d[i-chop_period+1:i+1])
-        lowest_low[i] = np.nanmin(low_1d[i-chop_period+1:i+1])
+        sum_atr[i] = np.nansum(atr_1w[i-chop_period+1:i+1])
+        highest_high[i] = np.nanmax(high_1w[i-chop_period+1:i+1])
+        lowest_low[i] = np.nanmin(low_1w[i-chop_period+1:i+1])
     
     # Avoid division by zero
-    range_1d = highest_high - lowest_low
-    chop = np.full_like(atr_1d, 50.0)  # default to neutral
-    mask = (range_1d > 0) & ~np.isnan(sum_atr)
-    chop[mask] = 100 * np.log10(sum_atr[mask] / (np.log10(chop_period) * range_1d[mask]))
+    range_1w = highest_high - lowest_low
+    chop = np.full_like(atr_1w, 50.0)  # default to neutral
+    mask = (range_1w > 0) & ~np.isnan(sum_atr)
+    chop[mask] = 100 * np.log10(sum_atr[mask] / (np.log10(chop_period) * range_1w[mask]))
     
-    # Align 1d indicators to 4h (wait for completed 1d bar)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Align 1w indicators to 1d (wait for completed 1w bar)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1w, volume_spike.astype(float))
+    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_mpp_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i]) or np.isnan(volume_spike_aligned[i]) or 
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(donchian_mid_aligned[i]) or np.isnan(volume_spike_aligned[i]) or 
             np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
@@ -128,18 +118,20 @@ def generate_signals(prices):
         # Exit regime: chop < 38.2 (trending market) - exit positions
         in_trend = chop_aligned[i] < 38.2
         
-        # Volume confirmation: 1d volume spike
+        # Volume confirmation: 1w volume spike
         vol_confirmed = volume_spike_aligned[i] > 0.5  # boolean as float
         
-        # Entry conditions: price touches Camarilla levels with volume and range regime
-        # Allow small tolerance for touching levels (0.1% of price)
-        tolerance = 0.001 * close[i]
-        long_entry = (close[i] <= camarilla_l3_aligned[i] + tolerance) and vol_confirmed and in_range
-        short_entry = (close[i] >= camarilla_h3_aligned[i] - tolerance) and vol_confirmed and in_range
+        # Breakout conditions
+        long_breakout = close[i] > donchian_high_aligned[i]
+        short_breakout = close[i] < donchian_low_aligned[i]
         
-        # Exit logic: price reverts to Camarilla pivot point OR regime shifts to trending
-        long_exit = (close[i] > camarilla_mpp_aligned[i]) or in_trend
-        short_exit = (close[i] < camarilla_mpp_aligned[i]) or in_trend
+        # Entry logic: Donchian breakout + volume spike + range regime
+        long_entry = long_breakout and vol_confirmed and in_range
+        short_entry = short_breakout and vol_confirmed and in_range
+        
+        # Exit logic: price reverts to midpoint OR regime shifts to trending
+        long_exit = (close[i] < donchian_mid_aligned[i]) or in_trend
+        short_exit = (close[i] > donchian_mid_aligned[i]) or in_trend
         
         if long_entry and position != 1:
             position = 1
@@ -164,6 +156,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_camarilla_volume_chop_regime_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_volume_chop_regime_v1"
+timeframe = "1d"
 leverage = 1.0
