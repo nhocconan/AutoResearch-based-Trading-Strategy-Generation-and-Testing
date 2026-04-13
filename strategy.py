@@ -8,79 +8,66 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Camarilla pivot breakout from 1d with volume confirmation.
-    # Long when price breaks above Camarilla H3 level with volume spike.
-    # Short when price breaks below Camarilla L3 level with volume spike.
-    # Exit when price returns to Camarilla pivot point (mean reversion).
-    # Uses 1d Camarilla levels aligned to 12h bars. Discrete size 0.25 to minimize fee churn.
-    # Target: 50-150 total trades over 4 years (12-37/year).
+    # Hypothesis: 4h Donchian(20) breakout with volume confirmation and ATR filter.
+    # Long when price breaks above 20-period high with volume spike and ATR > ATR MA.
+    # Short when price breaks below 20-period low with volume spike and ATR > ATR MA.
+    # Exit when price crosses 10-period EMA in opposite direction.
+    # Uses discrete size 0.25 to minimize fee churn.
+    # Target: 75-200 total trades over 4 years (19-50/year).
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data (call ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
+    # Calculate indicators (vectorized)
+    close_s = pd.Series(close)
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    volume_s = pd.Series(volume)
     
-    # Calculate 1d OHLC for Camarilla pivots
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    open_1d = df_1d['open'].values
+    # Donchian channels (20-period)
+    donchian_high = high_s.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_s.rolling(window=20, min_periods=20).min().values
     
-    # Camarilla pivot levels (based on previous day)
-    # Pivot = (High + Low + Close) / 3
-    # Range = High - Low
-    # H3 = Close + Range * 1.1 / 4
-    # L3 = Close - Range * 1.1 / 4
-    # H4 = Close + Range * 1.1 / 2
-    # L4 = Close - Range * 1.1 / 2
+    # EMA(10) for exit
+    ema_10 = close_s.ewm(span=10, min_periods=10, adjust=False).mean().values
     
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    rng = high_1d - low_1d
+    # ATR(14) for volatility filter
+    tr1 = high_s - low_s
+    tr2 = abs(high_s - close_s.shift(1))
+    tr3 = abs(low_s - close_s.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean().values
+    atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
     
-    # H3 and L3 are the key breakout levels
-    camarilla_h3 = close_1d + rng * 1.1 / 4.0
-    camarilla_l3 = close_1d - rng * 1.1 / 4.0
-    camarilla_pivot = pivot  # Exit level
-    
-    # Calculate 1d volume mean (20-period) with min_periods
-    volume_1d = df_1d['volume'].values
-    volume_series = pd.Series(volume_1d)
-    vol_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    
-    # Align HTF indicators to 12h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Volume confirmation (20-period mean)
+    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(ema_10[i]) or np.isnan(atr[i]) or np.isnan(atr_ma[i]) or
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Get current 1d volume (aligned)
-        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+        # Volume filter: current volume > 1.5 * 20-period mean
+        volume_confirmation = volume[i] > 1.5 * volume_ma[i]
         
-        # Volume filter: current 1d volume > 1.5 * 20-period mean (volume spike)
-        volume_confirmation = vol_1d_aligned[i] > 1.5 * vol_ma_aligned[i]
+        # ATR filter: current ATR > 20-period ATR mean (ensures sufficient volatility)
+        atr_filter = atr[i] > atr_ma[i]
         
-        # Entry conditions: price breaks Camarilla H3/L3 levels with volume confirmation
-        long_entry = (close[i] > camarilla_h3_aligned[i] and volume_confirmation)
-        short_entry = (close[i] < camarilla_l3_aligned[i] and volume_confirmation)
+        # Entry conditions: Donchian breakout with volume and ATR confirmation
+        long_entry = (close[i] > donchian_high[i] and volume_confirmation and atr_filter)
+        short_entry = (close[i] < donchian_low[i] and volume_confirmation and atr_filter)
         
-        # Exit conditions: price returns to Camarilla pivot point (mean reversion)
-        long_exit = close[i] < camarilla_pivot_aligned[i]
-        short_exit = close[i] > camarilla_pivot_aligned[i]
+        # Exit conditions: price crosses 10-period EMA in opposite direction
+        long_exit = (position == 1 and close[i] < ema_10[i])
+        short_exit = (position == -1 and close[i] > ema_10[i])
         
         if long_entry and position != 1:
             position = 1
@@ -88,10 +75,10 @@ def generate_signals(prices):
         elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
-        elif position == 1 and long_exit:
+        elif long_exit:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and short_exit:
+        elif short_exit:
             position = 0
             signals[i] = 0.0
         else:
@@ -105,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_camarilla_breakout_volume_v1"
-timeframe = "12h"
+name = "4h_donchian_breakout_volume_atr_filter_v1"
+timeframe = "4h"
 leverage = 1.0
