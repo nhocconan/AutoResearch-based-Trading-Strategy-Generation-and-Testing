@@ -5,15 +5,14 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian breakout + 1d volume spike + 1w chop regime filter
-    # Long: price > Donchian(20) high AND 1d volume > 2.0 * 20-period avg volume AND 1w Chop > 61.8 (ranging market)
-    # Short: price < Donchian(20) low AND 1d volume > 2.0 * 20-period avg volume AND 1w Chop > 61.8 (ranging market)
+    # Hypothesis: 12h Donchian breakout with 1d volume spike and 1w chop regime filter
+    # Long: price > Donchian(20) high AND 1d volume > 1.5 * 20-period avg volume AND 1w Chop > 61.8 (ranging)
+    # Short: price < Donchian(20) low AND 1d volume > 1.5 * 20-period avg volume AND 1w Chop > 61.8 (ranging)
     # Exit: price crosses Donchian midpoint OR Chop < 38.2 (trending market begins)
-    # Uses 12h for Donchian breakout, 1d for volume confirmation, 1w for chop regime
-    # Discrete position sizing (0.25) to minimize fee churn
+    # Uses discrete position sizing (0.25) to minimize fee churn
     # Target: 50-150 total trades over 4 years (~12-37/year) to stay within limits
     
     close = prices['close'].values
@@ -136,11 +135,10 @@ def generate_signals(prices):
         # Exit regime: Chop < 38.2 (trending market begins)
         trending_market = chop_aligned[i] < 38.2
         
-        # Volume confirmation: current 1d volume > 2.0 * 20-period average
-        # Get current 1d volume (need to align 1d volume to 12h timeframe)
+        # Volume confirmation: current 1d volume > 1.5 * 20-period average
         vol_1d_current = df_1d['volume'].values
         vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d_current)
-        volume_confirm = vol_1d_aligned[i] > 2.0 * vol_ma_aligned[i]
+        volume_confirm = vol_1d_aligned[i] > 1.5 * vol_ma_aligned[i]
         
         # Donchian breakout signals
         long_breakout = close[i] > donchian_high_aligned[i]
@@ -177,6 +175,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_1w_donchian_volume_chop_v1"
+name = "12h_1d_1w_donchian_volume_chop_v2"
 timeframe = "12h"
 leverage = 1.0
