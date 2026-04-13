@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Hypothesis: 4h Camarilla pivot breakout from 1d + volume spike + ADX regime filter
@@ -87,7 +87,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
         if (np.isnan(PP_1d_aligned[i]) or np.isnan(H3_1d_aligned[i]) or np.isnan(L3_1d_aligned[i]) or
             np.isnan(adx[i]) or np.isnan(avg_volume[i])):
