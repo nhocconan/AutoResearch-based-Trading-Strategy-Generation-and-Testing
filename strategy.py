@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d timeframe with 1w Donchian breakout and 1d volume confirmation.
-# Long: Price breaks above 1w Donchian upper (20-period) + volume > 1.5x average volume (10-period).
-# Short: Price breaks below 1w Donchian lower (20-period) + volume > 1.5x average volume.
-# Exit: Close below/above Donchian opposite band or volume < average volume.
-# Uses 1w for breakout structure, 1d for volume confirmation and exit.
-# Position size: 0.25 (25%) to balance risk and return.
-# Target: 20-50 total trades over 4 years (5-12.5/year) for 1d timeframe.
+# Hypothesis: 6h timeframe with 1d Bollinger Band squeeze + volume spike + 1w trend filter.
+# Long: Price below BB lower (20,2) + volume > 2x avg volume (20) + price > 1w EMA50
+# Short: Price above BB upper (20,2) + volume > 2x avg volume (20) + price < 1w EMA50
+# Uses 1d for mean reversion setup, 1w for trend filter, 6h for execution.
+# Bollinger squeeze identifies low volatility compression; volume spike breaksout.
+# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,29 +20,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1w data for Donchian channels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # 1d data for Bollinger Bands and volume average
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # 1w Donchian channels (20-period)
-    donchian_high = np.full(len(high_1w), np.nan)
-    donchian_low = np.full(len(low_1w), np.nan)
-    for i in range(20, len(high_1w)):
-        donchian_high[i] = np.max(high_1w[i-20:i])
-        donchian_low[i] = np.min(low_1w[i-20:i])
+    # Bollinger Bands (20,2)
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    bb_upper = sma_20 + 2 * std_20
+    bb_lower = sma_20 - 2 * std_20
     
-    # Average volume (10-period) for volume confirmation
-    avg_volume = np.full(n, np.nan)
-    for i in range(10, n):
-        avg_volume[i] = np.mean(volume[i-10:i])
+    # Average volume (20-period) for volume spike detection
+    avg_volume_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align 1w Donchian to 1d
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    # 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 1d Bollinger Bands to 6h
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
+    
+    # Align 1d average volume to 6h
+    avg_volume_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
+    
+    # Align 1w EMA50 to 6h
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -51,43 +63,50 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(avg_volume[i])):
+        if (np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or 
+            np.isnan(avg_volume_aligned[i]) or np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        avg_vol = avg_volume[i]
-        upper = donchian_high_aligned[i]
-        lower = donchian_low_aligned[i]
+        avg_vol = avg_volume_aligned[i]
+        upper = bb_upper_aligned[i]
+        lower = bb_lower_aligned[i]
+        ema_trend = ema_50_1w_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirm = vol > 1.5 * avg_vol
-        # Volume exit: current volume < average volume
-        volume_exit = vol < avg_vol
+        # Volume spike: current volume > 2x average volume
+        volume_spike = vol > 2.0 * avg_vol
         
         if position == 0:
-            # Long: break above Donchian high + volume confirmation
-            if price > upper and volume_confirm:
+            # Long: price below BB lower + volume spike + above weekly EMA50
+            if (price < lower and 
+                volume_spike and
+                price > ema_trend):
                 position = 1
                 signals[i] = position_size
-            # Short: break below Donchian low + volume confirmation
-            elif price < lower and volume_confirm:
+            # Short: price above BB upper + volume spike + below weekly EMA50
+            elif (price > upper and 
+                  volume_spike and
+                  price < ema_trend):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below Donchian low or volume < average
-            if price < lower or volume_exit:
+            # Exit long: price crosses above SMA20 (mean reversion target)
+            sma_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+            sma_20_aligned = align_htf_to_ltf(prices, df_1d, sma_20_1d)
+            if price > sma_20_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes above Donchian high or volume < average
-            if price > upper or volume_exit:
+            # Exit short: price crosses below SMA20
+            sma_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+            sma_20_aligned = align_htf_to_ltf(prices, df_1d, sma_20_1d)
+            if price < sma_20_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -95,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_Donchian_Volume"
-timeframe = "1d"
+name = "6h_1d_1w_Bollinger_Squeeze_Volume"
+timeframe = "6h"
 leverage = 1.0
