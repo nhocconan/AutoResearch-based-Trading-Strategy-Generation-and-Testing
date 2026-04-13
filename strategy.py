@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1-day EMA200 filter and volume confirmation.
-Uses Elder Ray to measure bull/bear power relative to EMA13, enters long when bull power > 0 and price > EMA200(1d),
-short when bear power < 0 and price < EMA200(1d). Volume confirmation filters low-momentum entries.
-Trades only in alignment with higher timeframe trend (1-day EMA200) to avoid counter-trend whipsaws.
-Targets 60-120 total trades over 4 years (15-30/year) with controlled risk via trend alignment.
+12h Bollinger Band Squeeze Breakout with Volume Confirmation and 1-day ADX Trend Filter.
+Trades breakouts from low volatility (Bollinger Band squeeze) confirmed by volume spikes,
+only in trending markets (1-day ADX > 25) to avoid false breakouts in ranging conditions.
+Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year).
+Works in both bull and bear markets by trading breakouts in the direction of the trend.
 """
 
 import numpy as np
@@ -21,32 +21,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate EMA13 for Elder Ray (6-period EMA equivalent for 6h? Actually use 13)
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).values
-    
-    # Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema13
-    bear_power = low - ema13
-    
-    # Get 1d data for EMA200 trend filter and volume
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for Bollinger Bands
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    
+    # Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
+    sma = pd.Series(close_12h).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std = pd.Series(close_12h).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper = sma + (bb_std * std)
+    lower = sma - (bb_std * std)
+    bb_width = upper - lower
+    
+    # Bollinger Band Squeeze: width < 20-period average width
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    squeeze = bb_width < bb_width_ma
+    
+    # Breakout: close > upper band (long) or close < lower band (short)
+    breakout_up = close_12h > upper
+    breakout_down = close_12h < lower
+    
+    # Align to 12h timeframe (primary)
+    squeeze_aligned = align_htf_to_ltf(prices, df_12h, squeeze.astype(float))
+    breakout_up_aligned = align_htf_to_ltf(prices, df_12h, breakout_up.astype(float))
+    breakout_down_aligned = align_htf_to_ltf(prices, df_12h, breakout_down.astype(float))
+    
+    # Get 1d data for volume and ADX
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
     volume_1d = df_1d['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1-day EMA200 for trend filter
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).values
-    
-    # Calculate 1-day volume spike (volume > 1.5x 20-period average)
+    # Volume spike: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume_1d > (vol_ma_20 * 1.5)
-    
-    # Align 1d indicators to 6h timeframe
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
+    
+    # 1-day ADX (14-period) for trend filter
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], 
+                        np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # ADX > 25 = trending market (good for breakouts)
+    trending = adx > 25
+    trending_aligned = align_htf_to_ltf(prices, df_1d, trending.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -54,22 +106,26 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema200_1d_aligned[i]) or 
-            np.isnan(vol_spike_aligned[i])):
+        if (np.isnan(squeeze_aligned[i]) or 
+            np.isnan(breakout_up_aligned[i]) or 
+            np.isnan(breakout_down_aligned[i]) or 
+            np.isnan(vol_spike_aligned[i]) or 
+            np.isnan(trending_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: Elder Ray power aligned with 1d trend + volume
-        bullish = bull_power[i] > 0 and close[i] > ema200_1d_aligned[i]
-        bearish = bear_power[i] < 0 and close[i] < ema200_1d_aligned[i]
-        vol_confirm = vol_spike_aligned[i] > 0.5  # True if volume spike
+        # Entry conditions: Bollinger breakout + volume spike + trending market
+        long_entry = (breakout_up_aligned[i] > 0.5 and 
+                      vol_spike_aligned[i] > 0.5 and 
+                      trending_aligned[i] > 0.5)
+        short_entry = (breakout_down_aligned[i] > 0.5 and 
+                       vol_spike_aligned[i] > 0.5 and 
+                       trending_aligned[i] > 0.5)
         
-        long_entry = bullish and vol_confirm
-        short_entry = bearish and vol_confirm
-        
-        # Exit when Elder Ray power reverses
-        exit_long = position == 1 and bull_power[i] <= 0
-        exit_short = position == -1 and bear_power[i] >= 0
+        # Exit when price returns to middle Bollinger Band (SMA)
+        sma_aligned = align_htf_to_ltf(prices, df_12h, sma)
+        exit_long = position == 1 and close[i] <= sma_aligned[i]
+        exit_short = position == -1 and close[i] >= sma_aligned[i]
         
         # Execute signals
         if long_entry and position != 1:
@@ -92,6 +148,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_elder_ray_power_volume"
-timeframe = "6h"
+name = "12h_bb_squeeze_breakout_volume_trend"
+timeframe = "12h"
 leverage = 1.0
