@@ -5,46 +5,59 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Williams %R mean reversion with 1d volume spike and trend filter
-    # Long: Williams %R < -80 (oversold) + volume > 1.5x 20-period average + 1d close > 1d EMA20
-    # Short: Williams %R > -20 (overbought) + volume > 1.5x 20-period average + 1d close < 1d EMA20
+    # Hypothesis: 4h Camarilla pivot breakout with 4h volume confirmation and 1d trend filter
+    # Long: price breaks above H3 level + volume > 1.5x 20-period average + 1d close > 1d EMA50
+    # Short: price breaks below L3 level + volume > 1.5x 20-period average + 1d close < 1d EMA50
     # Uses discrete sizing (0.25) to minimize fee drag and ATR-based stoploss
-    # Target: 12-37 trades/year to stay within 12h optimal range
+    # Target: 20-50 trades/year to stay within 4h optimal range
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time']
     
-    # Get 1d data for Williams %R, volume confirmation, and trend filter
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Williams %R (14-period)
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14) * -100
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 1d volume average (20-period) for confirmation
-    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate 4h Camarilla pivots (based on previous 4h bar)
+    # We'll calculate these on 4h data and align to 4h timeframe
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
     
-    # Calculate 1d EMA20 for trend filter
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Align all indicators to 12h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    # Calculate 4h Camarilla levels (based on previous 4h bar)
+    # Pivot = (H+L+C)/3
+    # H3 = Pivot + 1.1*(H-L)
+    # L3 = Pivot - 1.1*(H-L)
+    pivot_4h = (high_4h + low_4h + close_4h) / 3.0
+    hl_range_4h = high_4h - low_4h
+    h3_4h = pivot_4h + 1.1 * hl_range_4h
+    l3_4h = pivot_4h - 1.1 * hl_range_4h
+    
+    # Calculate 4h volume average (20-period) for confirmation
+    volume_4h = df_4h['volume'].values
+    vol_avg_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all 4h indicators to 4h timeframe (no additional delay needed for breakout levels)
+    h3_aligned = align_htf_to_ltf(prices, df_4h, h3_4h)
+    l3_aligned = align_htf_to_ltf(prices, df_4h, l3_4h)
+    vol_avg_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_avg_20_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -53,8 +66,8 @@ def generate_signals(prices):
     # Track entry price for stoploss
     entry_price = np.full(n, np.nan)
     
-    # Calculate ATR using true range approximation for 12h timeframe
-    atr_12h = np.zeros(n)
+    # Calculate ATR using true range approximation for 4h timeframe
+    atr_4h = np.zeros(n)
     for i in range(1, n):
         tr = max(
             high[i] - low[i],
@@ -62,46 +75,40 @@ def generate_signals(prices):
             abs(low[i] - close[i-1])
         )
         if i < 14:
-            atr_12h[i] = tr  # Simple average for warmup
+            atr_4h[i] = tr  # Simple average for warmup
         else:
-            atr_12h[i] = 0.93 * atr_12h[i-1] + 0.07 * tr  # Wilder's smoothing
+            atr_4h[i] = 0.93 * atr_4h[i-1] + 0.07 * tr  # Wilder's smoothing
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(williams_r_aligned[i]) or 
-            np.isnan(vol_avg_20_1d_aligned[i]) or
-            np.isnan(ema_20_1d_aligned[i])):
+        if (np.isnan(h3_aligned[i]) or 
+            np.isnan(l3_aligned[i]) or
+            np.isnan(vol_avg_20_4h_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x 20-period average
-        vol_avg_20_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        if np.isnan(vol_avg_20_12h[i]):
-            signals[i] = 0.0
-            continue
-        volume_confirmed = volume[i] > 1.5 * vol_avg_20_12h[i]
+        # Volume confirmation: current 4h volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * vol_avg_20_4h_aligned[i]
         
-        # Trend filter: 12h close above/below EMA20
-        uptrend = close[i] > ema_20_1d_aligned[i]
-        downtrend = close[i] < ema_20_1d_aligned[i]
+        # Trend filter: 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Mean reversion conditions: Williams %R extremes with volume and trend
-        oversold = williams_r_aligned[i] < -80
-        overbought = williams_r_aligned[i] > -20
-        
-        mean_revert_long = oversold and volume_confirmed and uptrend
-        mean_revert_short = overbought and volume_confirmed and downtrend
+        # Breakout conditions: price breaks Camarilla levels with volume and trend
+        breakout_long = (close[i] > h3_aligned[i]) and volume_confirmed and uptrend
+        breakout_short = (close[i] < l3_aligned[i]) and volume_confirmed and downtrend
         
         # Stoploss: 2x ATR below/above entry
-        exit_long = position == 1 and not np.isnan(entry_price[i-1]) and close[i] < entry_price[i-1] - 2.0 * atr_12h[i]
-        exit_short = position == -1 and not np.isnan(entry_price[i-1]) and close[i] > entry_price[i-1] + 2.0 * atr_12h[i]
+        exit_long = position == 1 and not np.isnan(entry_price[i-1]) and close[i] < entry_price[i-1] - 2.0 * atr_4h[i]
+        exit_short = position == -1 and not np.isnan(entry_price[i-1]) and close[i] > entry_price[i-1] + 2.0 * atr_4h[i]
         
         # Execute signals
-        if mean_revert_long and position != 1:
+        if breakout_long and position != 1:
             position = 1
             signals[i] = position_size
             entry_price[i] = close[i]
-        elif mean_revert_short and position != -1:
+        elif breakout_short and position != -1:
             position = -1
             signals[i] = -position_size
             entry_price[i] = close[i]
@@ -127,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_williams_r_mean_reversion_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_volume_trend_v3"
+timeframe = "4h"
 leverage = 1.0
