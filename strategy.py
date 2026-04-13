@@ -8,12 +8,12 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian(20) breakout with 1d volume spike (1.5x average) and ADX > 25 trend filter
+    # Hypothesis: 4h Donchian(20) breakout with 1d volume spike (1.5x average) and ADX > 25 trend filter
     # Long when price > upper Donchian + volume spike + ADX > 25
     # Short when price < lower Donchian + volume spike + ADX > 25
     # Exit when price crosses middle Donchian (mean) or ADX < 20
-    # Uses discrete position sizing (0.25) to minimize fee churn
-    # Target: 50-150 total trades over 4 years (~12-37/year)
+    # Uses discrete position sizing (0.30) to minimize fee churn
+    # Target: 75-200 total trades over 4 years (~19-50/year)
     # Donchian provides structure, volume confirms conviction, ADX filters ranging markets
     
     close = prices['close'].values
@@ -37,7 +37,7 @@ def generate_signals(prices):
     # Middle channel: average of upper and lower
     middle = (upper + lower) / 2
     
-    # Align 1d Donchian levels to 12h (wait for completed 1d bar)
+    # Align 1d Donchian levels to 4h (wait for completed 1d bar)
     upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
     lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
     middle_aligned = align_htf_to_ltf(prices, df_1d, middle)
@@ -128,10 +128,10 @@ def generate_signals(prices):
         
         if bullish_breakout and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.30
         elif bearish_breakout and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.30
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -141,14 +141,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_1d_donchian_breakout_volume_adx_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_breakout_volume_adx_v1"
+timeframe = "4h"
 leverage = 1.0
