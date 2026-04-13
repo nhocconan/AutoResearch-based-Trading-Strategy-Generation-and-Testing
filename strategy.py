@@ -8,13 +8,12 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout + 1d ATR-based volatility filter + volume confirmation
-    # Long when: price breaks above 4h Donchian upper (20) AND 1d ATR(14) < 1d ATR(50) AND volume > 1.5x 20-bar avg
-    # Short when: price breaks below 4h Donchian lower (20) AND 1d ATR(14) < 1d ATR(50) AND volume > 1.5x 20-bar avg
-    # Exit when: price crosses 4h Donchian midpoint
-    # Uses discrete sizing (0.25) targeting 75-200 total trades over 4 years (19-50/year).
-    # ATR filter ensures breakouts occur during low volatility (pre-breakout compression) to avoid false breakouts in high volatility.
+    # Hypothesis: 4h Donchian(20) breakout + 1d ATR(14) < ATR(50) volatility filter + volume > 1.5x 20-bar avg
+    # Enter long on breakout above Donchian high, short on breakout below Donchian low
+    # Exit when price crosses Donchian midpoint
+    # Volatility filter ensures breakouts occur during low volatility (pre-breakout compression)
     # Works in bull (breakouts with trend) and bear (only volatility-aligned breaks taken).
+    # Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
     
     close = prices['close'].values
     high = prices['high'].values
@@ -36,7 +35,7 @@ def generate_signals(prices):
     donchian_low_4h = pd.Series(low_4h).rolling(window=donchian_window, min_periods=donchian_window).min().values
     donchian_mid_4h = (donchian_high_4h + donchian_low_4h) / 2.0
     
-    # Align 4h Donchian levels to 15m timeframe
+    # Align 4h Donchian levels to 4h timeframe (no-op but for consistency)
     donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_4h)
     donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_4h)
     donchian_mid_aligned = align_htf_to_ltf(prices, df_4h, donchian_mid_4h)
