@@ -8,18 +8,19 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Camarilla H3/L3 breakout with 1d ADX regime filter and volume confirmation
-    # Long: price breaks above H3 AND ADX(14) > 25 (trending) AND volume > 1.5x avg
-    # Short: price breaks below L3 AND ADX(14) > 25 (trending) AND volume > 1.5x avg
-    # Exit: price touches H4 (for longs) or L4 (for shorts) OR opposite Camarilla level touch
-    # Using 12h timeframe for optimal trade frequency (target 12-37/year), Camarilla levels for intraday structure,
-    # ADX to filter ranging markets, and volume confirmation to avoid false breakouts.
+    # Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d regime filter (ADX) and volume confirmation
+    # Long: Bull Power > 0 AND ADX(14) > 20 (trending) AND volume > 1.5x avg
+    # Short: Bear Power < 0 AND ADX(14) > 20 (trending) AND volume > 1.5x avg
+    # Exit: Opposite power signal OR ADX < 15 (range) OR volume < avg
+    # Using 6h timeframe for balanced trade frequency (target 12-37/year), Elder Ray for momentum,
+    # ADX to filter weak trends, and volume confirmation to avoid false signals.
     # Discrete position sizing (0.25) to minimize fee churn.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    ema13 = None  # Will compute below
     
     # Get daily data for ADX regime filter
     df_1d = get_htf_data(prices, '1d')
@@ -71,37 +72,18 @@ def generate_signals(prices):
                   np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14) * 100, 0)
     adx = wilders_smoothing(dx, 14)
     
-    # Align daily ADX to 12h
+    # Align daily ADX to 6h
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Calculate 12h Camarilla levels (based on previous day's OHLC)
-    # We need to get daily OHLC and align it to 12h bars
-    df_1d_ohlc = get_htf_data(prices, '1d')
-    if len(df_1d_ohlc) < 2:
-        return np.zeros(n)
+    # Calculate 13-period EMA for Elder Ray (primary timeframe)
+    close_series = pd.Series(close)
+    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_close = df_1d_ohlc['close'].shift(1).values
-    prev_high = df_1d_ohlc['high'].shift(1).values
-    prev_low = df_1d_ohlc['low'].shift(1).values
+    # Calculate Elder Ray components
+    bull_power = high - ema13  # Bull Power = High - EMA13
+    bear_power = low - ema13   # Bear Power = Low - EMA13
     
-    # Camarilla levels: H4, H3, H2, H1, L1, L2, L3, L4
-    # H4 = close + 1.5 * (high - low)
-    # H3 = close + 1.25 * (high - low)
-    # L3 = close - 1.25 * (high - low)
-    # L4 = close - 1.5 * (high - low)
-    camarilla_h3 = prev_close + 1.25 * (prev_high - prev_low)
-    camarilla_l3 = prev_close - 1.25 * (prev_high - prev_low)
-    camarilla_h4 = prev_close + 1.5 * (prev_high - prev_low)
-    camarilla_l4 = prev_close - 1.5 * (prev_high - prev_low)
-    
-    # Align Camarilla levels to 12h
-    h3_aligned = align_htf_to_ltf(prices, df_1d_ohlc, camarilla_h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d_ohlc, camarilla_l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d_ohlc, camarilla_h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d_ohlc, camarilla_l4)
-    
-    # Get 12h volume for confirmation (>1.5x 20-period average)
+    # Get 6h volume for confirmation (>1.5x 20-period average)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -110,33 +92,27 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(13, n):
         # Skip if data not ready
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(ema13[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: ADX > 25 indicates trending market
-        trending_market = adx_1d_aligned[i] > 25
+        # Regime filter: ADX > 20 indicates trending market (avoid choppy markets)
+        trending_market = adx_1d_aligned[i] > 20
         
-        # Camarilla breakout conditions
-        breakout_h3 = close[i] > h3_aligned[i]
-        breakout_l3 = close[i] < l3_aligned[i]
+        # Elder Ray signals
+        bull_signal = bull_power[i] > 0
+        bear_signal = bear_power[i] < 0
         
-        # Exit conditions: touch H4/L4 or opposite level
-        touch_h4 = close[i] >= h4_aligned[i]
-        touch_l4 = close[i] <= l4_aligned[i]
-        touch_opposite_h3 = close[i] < h3_aligned[i] and position == 1  # Long exit on H3 retest
-        touch_opposite_l3 = close[i] > l3_aligned[i] and position == -1  # Short exit on L3 retest
+        # Exit conditions: Opposite signal OR weak trend OR low volume
+        exit_long = bear_signal or (adx_1d_aligned[i] < 15) or not volume_spike[i]
+        exit_short = bull_signal or (adx_1d_aligned[i] < 15) or not volume_spike[i]
         
-        # Entry logic: Camarilla breakout + trending market + volume confirmation
-        long_entry = breakout_h3 and trending_market and volume_spike[i]
-        short_entry = breakout_l3 and trending_market and volume_spike[i]
-        
-        # Exit logic: H4/L4 touch or opposite level retest
-        long_exit = touch_h4 or touch_opposite_l3
-        short_exit = touch_l4 or touch_opposite_h3
+        # Entry logic: Elder Ray signal + trending market + volume confirmation
+        long_entry = bull_signal and trending_market and volume_spike[i]
+        short_entry = bear_signal and trending_market and volume_spike[i]
         
         if long_entry and position != 1:
             position = 1
@@ -144,10 +120,10 @@ def generate_signals(prices):
         elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
-        elif position == 1 and long_exit:
+        elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and short_exit:
+        elif position == -1 and exit_short:
             position = 0
             signals[i] = 0.0
         else:
@@ -161,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_camarilla_h3l3_breakout_adx_volume_v1"
-timeframe = "12h"
+name = "6h_1d_elder_ray_adx_volume_v1"
+timeframe = "6h"
 leverage = 1.0
