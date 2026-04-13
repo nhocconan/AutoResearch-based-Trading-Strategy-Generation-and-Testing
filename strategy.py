@@ -8,54 +8,56 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Camarilla pivot breakout with volume confirmation and 1d trend filter
-    # Long: price breaks above H3 (resistance) AND volume > 1.5x 20-period average AND price > 1d EMA50
-    # Short: price breaks below L3 (support) AND volume > 1.5x 20-period average AND price < 1d EMA50
-    # Exit: price returns to PIVOT point
-    # Using 4h for Camarilla pivots and 1d for trend direction
-    # Discrete position sizing (0.25) to balance return and risk
+    # Hypothesis: Daily Donchian(20) breakout with weekly trend filter and volume confirmation
+    # Long: price breaks above 20-day high AND price > weekly EMA50 AND volume > 1.5x 20-day avg
+    # Short: price breaks below 20-day low AND price < weekly EMA50 AND volume > 1.5x 20-day avg
+    # Exit: price returns to 10-day midpoint or volume drops below average
+    # Using 1d/1w for signal structure, with volume confirmation to reduce false breakouts
+    # Discrete position sizing (0.25) to balance return and drawdown
+    # Target: 20-60 trades/year on 1d timeframe (~80-240 total over 4 years)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Get 4h data for Camarilla pivots (call ONCE before loop)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
+    # Pre-compute session filter (08-20 UTC) - reduced session to avoid overtrading
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate 4h Camarilla pivots (based on previous 4h bar)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # PIVOT = (H + L + C) / 3
-    pivot_4h = (high_4h + low_4h + close_4h) / 3
-    # RANGE = H - L
-    range_4h = high_4h - low_4h
-    
-    # Camarilla levels:
-    # H3 = C + RANGE * 1.1/4
-    # L3 = C - RANGE * 1.1/4
-    h3_4h = close_4h + range_4h * 1.1 / 4
-    l3_4h = close_4h - range_4h * 1.1 / 4
-    
-    # Align 4h Camarilla levels to 1h (wait for completed 4h bar)
-    h3_4h_aligned = align_htf_to_ltf(prices, df_4h, h3_4h)
-    l3_4h_aligned = align_htf_to_ltf(prices, df_4h, l3_4h)
-    pivot_4h_aligned = align_htf_to_ltf(prices, df_4h, pivot_4h)
-    
-    # Get 1d data for trend filter (EMA50)
+    # Get 1d data for Donchian channels (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
+    # Calculate 1d Donchian channels (based on previous 20 days)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Volume confirmation: >1.5x 20-period average (vectorized)
+    # Donchian(20): upper = max(high of last 20 days), lower = min(low of last 20 days)
+    # Using rolling window with min_periods
+    high_ma = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_ma = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Align 1d Donchian levels to 1d timeframe (no alignment needed for same timeframe)
+    donch_high = high_ma  # Already aligned to 1d bars
+    donch_low = low_ma
+    
+    # Get weekly data for trend filter (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        # Fallback to just 1d if 1w not enough data
+        ema_1w = np.full(len(close_1d), np.nan)
+    else:
+        close_1w = df_1w['close'].values
+        ema_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align weekly EMA to 1d timeframe (wait for completed weekly bar)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w) if len(df_1w) >= 50 else np.full(len(prices), np.nan)
+    
+    # Volume confirmation: >1.5x 20-day average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -64,27 +66,43 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    # Warmup period: need at least 20 days for Donchian + 50 for weekly EMA
+    start_idx = max(100, 70)  # Ensure we have enough history
+    
+    for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(h3_4h_aligned[i]) or np.isnan(l3_4h_aligned[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(volume_spike[i]) or np.isnan(ema_1w_aligned[i])):
             signals[i] = 0.0
+            continue
+        
+        # Session filter: only trade 08-20 UTC (reduced to avoid Asian session noise)
+        if not in_session[i]:
+            # Force flat outside session
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
             continue
         
         # Volume confirmation
         vol_confirm = volume_spike[i]
         
-        # Trend filter: only long if price > 1d EMA50, only short if price < 1d EMA50
-        long_trend_ok = close[i] > ema_1d_aligned[i]
-        short_trend_ok = close[i] < ema_1d_aligned[i]
+        # Trend filter: only long if price > weekly EMA50, only short if price < weekly EMA50
+        long_trend_ok = close[i] > ema_1w_aligned[i]
+        short_trend_ok = close[i] < ema_1w_aligned[i]
         
-        # Entry logic: Camarilla breakout + volume + trend
-        long_entry = (close[i] > h3_4h_aligned[i]) and vol_confirm and long_trend_ok
-        short_entry = (close[i] < l3_4h_aligned[i]) and vol_confirm and short_trend_ok
+        # Entry logic: Donchian breakout + volume + trend + session
+        # Note: using strict breakout (close outside channel) to avoid whipsaws
+        long_entry = (close[i] > donch_high[i]) and vol_confirm and long_trend_ok
+        short_entry = (close[i] < donch_low[i]) and vol_confirm and short_trend_ok
         
-        # Exit logic: return to pivot
-        long_exit = close[i] < pivot_4h_aligned[i]
-        short_exit = close[i] > pivot_4h_aligned[i]
+        # Exit logic: return to midpoint (10-day average of channel) or volume dry-up
+        # Midpoint = (donch_high + donch_low) / 2
+        midpoint = (donch_high[i] + donch_low[i]) / 2
+        long_exit = (close[i] < midpoint) or not vol_confirm
+        short_exit = (close[i] > midpoint) or not vol_confirm
         
         if long_entry and position != 1:
             position = 1
@@ -109,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_camarilla_breakout_volume_trend_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_breakout_weekly_trend_volume_session_v1"
+timeframe = "1d"
 leverage = 1.0
