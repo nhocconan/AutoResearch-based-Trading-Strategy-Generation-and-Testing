@@ -1,33 +1,19 @@
-# 12h_1d_1w_Camarilla_Pivot_Breakout_Volume
-# Hypothesis: Combines Camarilla pivot levels from daily with weekly trend filter and volume confirmation on 12h.
-# In bull markets, buys near S3/S4 with stop at S5; in bear markets, sells near R3/R4 with stop at R5.
-# Uses weekly trend to filter direction (only long when weekly close > weekly open, short when weekly close < weekly open).
-# Volume confirmation requires 12h volume > 1.5x 20-period average.
-# Target: 15-37 trades/year on 12h (60-150 total over 4 years).
+#!/usr/bin/env python3
+"""
+4h_12h_Medium_Term_Trend_With_Volume_And_Regime_Filter
+Hypothesis: Combines 12h EMA trend filter with 4h Donchian breakout and volume confirmation for medium-term trend following.
+Uses 12h EMA(50) for trend direction, 4h Donchian(20) breakout for entry timing, volume > 1.5x 20-period average for confirmation,
+and avoids choppy markets with 12h Choppiness Index > 61.8. Works in both bull and bear markets by following established trends
+with volatility-based exits. Target: 20-50 trades/year on 4h (80-200 total over 4 years).
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels"""
-    range_val = high - low
-    if range_val == 0:
-        return close, close, close, close, close, close, close, close
-    close_val = close
-    S1 = close - (range_val * 1.1 / 12)
-    S2 = close - (range_val * 1.1 / 6)
-    S3 = close - (range_val * 1.1 / 4)
-    S4 = close - (range_val * 1.1 / 2)
-    R1 = close + (range_val * 1.1 / 12)
-    R2 = close + (range_val * 1.1 / 6)
-    R3 = close + (range_val * 1.1 / 4)
-    R4 = close + (range_val * 1.1 / 2)
-    return S1, S2, S3, S4, R1, R2, R3, R4
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -35,133 +21,115 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels for each daily bar
-    S1_1d = np.full(len(close_1d), np.nan)
-    S2_1d = np.full(len(close_1d), np.nan)
-    S3_1d = np.full(len(close_1d), np.nan)
-    S4_1d = np.full(len(close_1d), np.nan)
-    R1_1d = np.full(len(close_1d), np.nan)
-    R2_1d = np.full(len(close_1d), np.nan)
-    R3_1d = np.full(len(close_1d), np.nan)
-    R4_1d = np.full(len(close_1d), np.nan)
-    
-    for i in range(len(close_1d)):
-        S1, S2, S3, S4, R1, R2, R3, R4 = calculate_camarilla(high_1d[i], low_1d[i], close_1d[i])
-        S1_1d[i] = S1
-        S2_1d[i] = S2
-        S3_1d[i] = S3
-        S4_1d[i] = S4
-        R1_1d[i] = R1
-        R2_1d[i] = R2
-        R3_1d[i] = R3
-        R4_1d[i] = R4
-    
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    open_1w = df_1w['open'].values
-    close_1w = df_1w['close'].values
-    
-    # Weekly trend: 1 = bullish (close > open), -1 = bearish (close < open)
-    weekly_trend = np.where(close_1w > open_1w, 1, -1)
-    
-    # Get 12h data for volume confirmation
+    # Get 12h data for trend filter and regime
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    if len(df_12h) < 60:
         return np.zeros(n)
     
-    volume_12h = df_12h['volume'].values
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate 20-period volume average on 12h
-    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean()
-    volume_expansion_12h = volume_12h > (vol_ma_20_12h * 1.5)
+    # 12h EMA(50) for trend direction
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align all signals to 12h timeframe (which is our primary timeframe)
-    S1_12h = align_htf_to_ltf(prices, df_1d, S1_1d)
-    S2_12h = align_htf_to_ltf(prices, df_1d, S2_1d)
-    S3_12h = align_htf_to_ltf(prices, df_1d, S3_1d)
-    S4_12h = align_htf_to_ltf(prices, df_1d, S4_1d)
-    R1_12h = align_htf_to_ltf(prices, df_1d, R1_1d)
-    R2_12h = align_htf_to_ltf(prices, df_1d, R2_1d)
-    R3_12h = align_htf_to_ltf(prices, df_1d, R3_1d)
-    R4_12h = align_htf_to_ltf(prices, df_1d, R4_1d)
-    weekly_trend_12h = align_htf_to_ltf(prices, df_1w, weekly_trend)
-    volume_expansion_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_expansion_12h)
+    # 12h Choppiness Index for regime filter
+    atr_period = 14
+    tr_12h = np.maximum(high_12h - low_12h,
+                        np.maximum(np.abs(high_12h - np.roll(close_12h, 1)),
+                                   np.abs(low_12h - np.roll(close_12h, 1))))
+    tr_12h[0] = high_12h[0] - low_12h[0]
+    atr_12h = pd.Series(tr_12h).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
     
-    # Session filter: 00:00-23:00 UTC (trade all hours for 12h)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_mask = (hours >= 0) & (hours <= 23)
+    highest_12h = pd.Series(high_12h).rolling(window=atr_period, min_periods=atr_period).max().values
+    lowest_12h = pd.Series(low_12h).rolling(window=atr_period, min_periods=atr_period).min().values
+    
+    sum_atr_12h = pd.Series(atr_12h).rolling(window=atr_period, min_periods=atr_period).sum().values
+    range_12h = highest_12h - lowest_12h
+    
+    chop_12h = 100 * np.log10(sum_atr_12h / np.maximum(range_12h, 1e-10)) / np.log10(atr_period)
+    chop_12h = np.where(range_12h == 0, 100, chop_12h)
+    
+    # Get 4h data for entry signals
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
+        return np.zeros(n)
+    
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    volume_4h = df_4h['volume'].values
+    
+    # 4h Donchian(20) channels
+    highest_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lowest_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    
+    # Volume confirmation: > 1.5x 20-period average
+    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    volume_expansion_4h = volume_4h > (vol_ma_20_4h * 1.5)
+    
+    # Align all signals to 4h timeframe
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    chop_12h_aligned = align_htf_to_ltf(prices, df_12h, chop_12h)
+    highest_4h_aligned = align_htf_to_ltf(prices, df_4h, highest_4h)
+    lowest_4h_aligned = align_htf_to_ltf(prices, df_4h, lowest_4h)
+    volume_expansion_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_expansion_4h)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% of capital
     
-    for i in range(50, n):
-        # Skip if not in session or data not ready
-        if not session_mask[i] or \
-           np.isnan(S3_12h[i]) or np.isnan(S4_12h[i]) or \
-           np.isnan(R3_12h[i]) or np.isnan(R4_12h[i]) or \
-           np.isnan(weekly_trend_12h[i]) or \
-           np.isnan(volume_expansion_12h_aligned[i]):
+    for i in range(100, n):
+        # Skip if any data not ready
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(chop_12h_aligned[i]) or
+            np.isnan(highest_4h_aligned[i]) or np.isnan(lowest_4h_aligned[i]) or
+            np.isnan(volume_expansion_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions: weekly bullish + price at S3/S4 level + volume expansion
-        if (weekly_trend_12h[i] == 1 and 
-            volume_expansion_12h_aligned[i] and
-            ((abs(close[i] - S3_12h[i]) / close[i] < 0.005) or  # Near S3
-             (abs(close[i] - S4_12h[i]) / close[i] < 0.005))):  # Near S4
-            if position != 1:
-                position = 1
-                signals[i] = position_size
-            else:
-                signals[i] = position_size
+        # Trend filter: price above/below 12h EMA50
+        uptrend = close[i] > ema_50_12h_aligned[i]
+        downtrend = close[i] < ema_50_12h_aligned[i]
         
-        # Short conditions: weekly bearish + price at R3/R4 level + volume expansion
-        elif (weekly_trend_12h[i] == -1 and 
-              volume_expansion_12h_aligned[i] and
-              ((abs(close[i] - R3_12h[i]) / close[i] < 0.005) or  # Near R3
-               (abs(close[i] - R4_12h[i]) / close[i] < 0.005))):  # Near R4
-            if position != -1:
-                position = -1
-                signals[i] = -position_size
-            else:
-                signals[i] = -position_size
+        # Regime filter: avoid choppy markets (Choppiness Index > 61.8 = range)
+        not_choppy = chop_12h_aligned[i] <= 61.8
         
-        # Hold current position
+        # Entry conditions
+        long_entry = (uptrend and 
+                      close[i] > highest_4h_aligned[i] and 
+                      volume_expansion_4h_aligned[i] and
+                      not_choppy)
+        
+        short_entry = (downtrend and 
+                       close[i] < lowest_4h_aligned[i] and 
+                       volume_expansion_4h_aligned[i] and
+                       not_choppy)
+        
+        # Exit conditions: reverse signal or loss of trend/regime
+        long_exit = (not uptrend or not not_choppy)
+        short_exit = (not downtrend or not not_choppy)
+        
+        if long_entry and position != 1:
+            position = 1
+            signals[i] = position_size
+        elif short_entry and position != -1:
+            position = -1
+            signals[i] = -position_size
+        elif position == 1 and long_exit:
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and short_exit:
+            position = 0
+            signals[i] = 0.0
         elif position == 1:
             signals[i] = position_size
         elif position == -1:
             signals[i] = -position_size
-        
-        # Exit conditions: price reaches S5/R5 levels or weekly trend changes
-        elif position == 1:
-            # Exit long if price reaches S5 or weekly trend turns bearish
-            S5_12h = S4_12h[i] - ((R4_12h[i] - S4_12h[i]) * 1.1 / 2)  # S5 = S4 - (R4-S4)*1.1/2
-            if close[i] <= S5_12h or weekly_trend_12h[i] == -1:
-                position = 0
-                signals[i] = 0.0
-        
-        elif position == -1:
-            # Exit short if price reaches R5 or weekly trend turns bullish
-            R5_12h = R4_12h[i] + ((R4_12h[i] - S4_12h[i]) * 1.1 / 2)  # R5 = R4 + (R4-S4)*1.1/2
-            if close[i] >= R5_12h or weekly_trend_12h[i] == 1:
-                position = 0
-                signals[i] = 0.0
+        else:
+            signals[i] = 0.0
     
     return signals
 
-name = "12h_1d_1w_Camarilla_Pivot_Breakout_Volume"
-timeframe = "12h"
+name = "4h_12h_Medium_Term_Trend_With_Volume_And_Regime_Filter"
+timeframe = "4h"
 leverage = 1.0
