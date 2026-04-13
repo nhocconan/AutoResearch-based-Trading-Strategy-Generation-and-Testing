@@ -32,10 +32,20 @@ def generate_signals(prices):
     close_1d_series = pd.Series(close_1d)
     ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align indicators to 12h timeframe
+    # Calculate daily volume average for volume confirmation
+    volume_1d = df_1d['volume'].values
+    vol_avg_20 = np.full(len(volume_1d), np.nan)
+    for i in range(20, len(volume_1d)):
+        vol_avg_20[i] = np.mean(volume_1d[i-20:i])
+    
+    # Align indicators to 4h timeframe
     high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
     low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
+    
+    # Get current volume for comparison
+    volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -45,7 +55,8 @@ def generate_signals(prices):
         # Skip if data not ready
         if (np.isnan(high_20_aligned[i]) or 
             np.isnan(low_20_aligned[i]) or 
-            np.isnan(ema_50_aligned[i])):
+            np.isnan(ema_50_aligned[i]) or 
+            np.isnan(vol_avg_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -57,9 +68,12 @@ def generate_signals(prices):
         long_breakout = close[i] > high_20_aligned[i]
         short_breakout = close[i] < low_20_aligned[i]
         
-        # Entry conditions: breakout in direction of trend
-        long_entry = long_breakout and above_ema
-        short_entry = short_breakout and below_ema
+        # Volume confirmation: current volume > 1.5x daily average
+        volume_confirm = volume[i] > 1.5 * vol_avg_aligned[i]
+        
+        # Entry conditions: breakout in direction of trend with volume confirmation
+        long_entry = long_breakout and above_ema and volume_confirm
+        short_entry = short_breakout and below_ema and volume_confirm
         
         # Exit conditions: opposite breakout or trend reversal
         exit_long = position == 1 and (short_breakout or below_ema)
@@ -86,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_donchian_ema50_breakout"
-timeframe = "12h"
+name = "4h_1d_donchian_ema50_volume_breakout"
+timeframe = "4h"
 leverage = 1.0
