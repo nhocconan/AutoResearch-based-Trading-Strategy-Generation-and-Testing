@@ -5,83 +5,90 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 4h data for trend direction
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly data for pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Calculate weekly pivot points (standard formula)
+    high_w = df_1w['high'].values
+    low_w = df_1w['low'].values
+    close_w = df_1w['close'].values
     
-    # Get 1d data for regime filter
+    # Pivot Point = (H + L + C)/3
+    pivot = (high_w + low_w + close_w) / 3
+    # Support 1 = (2*P) - H
+    s1 = (2 * pivot) - high_w
+    # Resistance 1 = (2*P) - L
+    r1 = (2 * pivot) - low_w
+    # Support 2 = P - (H - L)
+    s2 = pivot - (high_w - low_w)
+    # Resistance 2 = P + (H - L)
+    r2 = pivot + (high_w - low_w)
+    
+    # Get daily data for volume and price action
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    vol_d = df_1d['volume'].values
+    close_d = df_1d['close'].values
     
-    # 4h Donchian Channel (20) - trend direction
-    high_series_4h = pd.Series(high_4h)
-    low_series_4h = pd.Series(low_4h)
-    donchian_high_4h = high_series_4h.rolling(window=20, min_periods=20).max().values
-    donchian_low_4h = low_series_4h.rolling(window=20, min_periods=20).min().values
+    # Volume spike detection (current day > 1.5x 20-day average)
+    vol_series = pd.Series(vol_d)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_spike = vol_d > (vol_ma * 1.5)
     
-    # 1d ATR for volatility filter
-    close_series_1d = pd.Series(close_1d)
-    high_series_1d = pd.Series(high_1d)
-    low_series_1d = pd.Series(low_1d)
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Align weekly pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
     
-    # Align indicators to 1h timeframe
-    donchian_high_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_4h)
-    donchian_low_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_4h)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # Calculate 1h session filter (08-20 UTC) - precompute before loop
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Align daily volume spike to 6h timeframe
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.20  # 20% position size
+    position_size = 0.25
     
-    for i in range(100, n):
-        # Skip if data not ready or outside session
-        if (np.isnan(donchian_high_4h_aligned[i]) or 
-            np.isnan(donchian_low_4h_aligned[i]) or
-            np.isnan(atr_1d_aligned[i]) or
-            not in_session[i]):
+    for i in range(200, n):
+        # Skip if data not ready
+        if (np.isnan(pivot_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or
+            np.isnan(s2_aligned[i]) or
+            np.isnan(vol_spike_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Breakout conditions
-        bullish_breakout = close[i] > donchian_high_4h_aligned[i]
-        bearish_breakout = close[i] < donchian_low_4h_aligned[i]
+        # Price relative to weekly pivot levels
+        at_pivot = abs(close[i] - pivot_aligned[i]) < (pivot_aligned[i] * 0.005)  # Within 0.5% of pivot
+        near_r1 = abs(close[i] - r1_aligned[i]) < (r1_aligned[i] * 0.005)  # Within 0.5% of R1
+        near_s1 = abs(close[i] - s1_aligned[i]) < (s1_aligned[i] * 0.005)  # Within 0.5% of S1
+        near_r2 = abs(close[i] - r2_aligned[i]) < (r2_aligned[i] * 0.005)  # Within 0.5% of R2
+        near_s2 = abs(close[i] - s2_aligned[i]) < (s2_aligned[i] * 0.005)  # Within 0.5% of S2
         
-        # Volatility filter: only trade when volatility is elevated
-        vol_filter = atr_1d_aligned[i] > np.nanpercentile(atr_1d_aligned[:i+1], 50)
+        # Volume confirmation
+        vol_confirmed = vol_spike_aligned[i]
         
-        # Entry conditions
-        long_entry = bullish_breakout and vol_filter
-        short_entry = bearish_breakout and vol_filter
+        # Entry logic: fade at S1/R1, breakout at S2/R2 with volume
+        long_entry = (near_s1 or near_s2) and vol_confirmed and close[i] > close[i-1]  # Bounce off support with volume
+        short_entry = (near_r1 or near_r2) and vol_confirmed and close[i] < close[i-1]  # Reject resistance with volume
         
-        # Exit conditions: opposite breakout or time-based
-        exit_long = position == 1 and bearish_breakout
-        exit_short = position == -1 and bullish_breakout
+        # Exit on opposite signal or when price moves away from pivot area
+        exit_long = position == 1 and (close[i] < pivot_aligned[i] * 0.995 or close[i] > r2_aligned[i] * 1.005)
+        exit_short = position == -1 and (close[i] > pivot_aligned[i] * 1.005 or close[i] < s2_aligned[i] * 0.995)
         
         # Execute signals
         if long_entry and position != 1:
@@ -104,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4h_1d_donchian_breakout_vol_filter"
-timeframe = "1h"
+name = "6h_weekly_pivot_volume_reversion"
+timeframe = "6h"
 leverage = 1.0
