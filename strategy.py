@@ -8,21 +8,21 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Camarilla pivot breakout with 1d volume spike and chop regime filter.
-    # Long when price breaks above Camarilla H3 level AND 1d volume > 1.5x 20-period MA AND chop > 61.8 (range regime).
-    # Short when price breaks below Camarilla L3 level AND 1d volume > 1.5x 20-period MA AND chop > 61.8.
-    # Exit when price returns to Camarilla pivot point (midpoint).
+    # Hypothesis: 4h Donchian(20) breakout with 1d ATR regime filter and volume confirmation.
+    # Long when price breaks above 20-period Donchian high AND 1d ATR ratio < 0.8 (low volatility regime) AND volume > 1.2x 20-period MA.
+    # Short when price breaks below 20-period Donchian low AND same filters.
+    # Exit when price crosses 20-period Donchian midpoint.
     # Uses discrete position sizing (0.25) to target 50-150 trades over 4 years.
-    # Works in bull/bear via chop filter avoiding trend-following false signals in ranging markets.
+    # Works in bull/bear via volatility regime filter avoiding false breakouts in choppy markets.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for volume and chop
+    # Get daily data for ATR and volume
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -30,10 +30,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d volume 20-period MA
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate True Range for chop calculation
+    # Calculate 1d ATR(14)
     tr1 = np.abs(high_1d - low_1d)
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
@@ -41,65 +38,56 @@ def generate_signals(prices):
     tr2[0] = 0
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1d chop regime: ATR(14) / (highest high - lowest low over 14) * 100 * log10(sqrt(14))/log10(10)
-    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    # Avoid division by zero
-    range_14 = hh_14 - ll_14
-    chop = np.where(range_14 > 0, 100 * np.log10(atr_14 * np.sqrt(14) / range_14) / np.log10(10), 50)
+    # Calculate 1d ATR ratio: current ATR / 20-period ATR MA (to detect volatility regime)
+    atr_ma_20 = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
+    atr_ratio = np.where(atr_ma_20 > 0, atr_1d / atr_ma_20, 1.0)
+    
+    # Calculate 1d volume 20-period MA
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
     # Align 1d indicators to 4h timeframe
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
     
-    # Calculate 4h Camarilla pivot levels from previous day
-    # Camarilla levels: H4 = close + 1.5*(high-low), H3 = close + 1.125*(high-low), 
-    # L3 = close - 1.125*(high-low), L4 = close - 1.5*(high-low)
-    # Pivot point = (high + low + close) / 3
-    pp_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    h3_1d = close_1d + 1.125 * range_1d
-    l3_1d = close_1d - 1.125 * range_1d
-    
-    # Align Camarilla levels to 4h timeframe
-    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
-    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    # Calculate 4h Donchian channels (20-period)
+    hh_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    ll_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (hh_20 + ll_20) / 2
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
     
-    for i in range(100, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or 
-            np.isnan(pp_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(hh_20[i]) or np.isnan(ll_20[i]) or np.isnan(donchian_mid[i]) or
+            np.isnan(atr_ratio_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or
+            np.isnan(volume_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x 20-period average
-        volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-        volume_spike = volume_1d_aligned[i] > 1.5 * vol_ma_1d_aligned[i]
+        # Volume confirmation: current 1d volume > 1.2x 20-period average
+        volume_spike = volume_1d_aligned[i] > 1.2 * vol_ma_1d_aligned[i]
         
-        # Chop regime filter: only trade in ranging markets (chop > 61.8)
-        chop_filter = chop_aligned[i] > 61.8
+        # Volatility regime filter: only trade in low volatility (atr_ratio < 0.8)
+        vol_filter = atr_ratio_aligned[i] < 0.8
         
-        # Camarilla breakout conditions
-        breakout_long = close[i] > h3_1d_aligned[i-1]  # Break above previous period H3
-        breakout_short = close[i] < l3_1d_aligned[i-1]  # Break below previous period L3
+        # Donchian breakout conditions
+        breakout_long = close[i] > hh_20[i-1]  # Break above previous period high
+        breakout_short = close[i] < ll_20[i-1]  # Break below previous period low
         
-        # Exit conditions: price returns to Camarilla pivot point
-        exit_long = close[i] < pp_1d_aligned[i]
-        exit_short = close[i] > pp_1d_aligned[i]
+        # Exit conditions: price crosses Donchian midpoint
+        exit_long = close[i] < donchian_mid[i]
+        exit_short = close[i] > donchian_mid[i]
         
         # Entry conditions
-        if breakout_long and volume_spike and chop_filter and position != 1:
+        if breakout_long and volume_spike and vol_filter and position != 1:
             position = 1
             signals[i] = position_size
-        elif breakout_short and volume_spike and chop_filter and position != -1:
+        elif breakout_short and volume_spike and vol_filter and position != -1:
             position = -1
             signals[i] = -position_size
         # Exit conditions
@@ -120,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_camarilla_breakout_volume_chop_v1"
+name = "4h_1d_donchian_breakout_atr_vol_filter_v1"
 timeframe = "4h"
 leverage = 1.0
