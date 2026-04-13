@@ -8,104 +8,105 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian(20) breakout with 1d ATR volume confirmation and chop regime filter
-    # Long when price breaks above Donchian upper + 1d ATR(14)/ATR(50) > 1.2 + chop > 61.8 (range)
-    # Short when price breaks below Donchian lower + 1d ATR(14)/ATR(50) > 1.2 + chop > 61.8 (range)
-    # Exit when price returns to Donchian midpoint or opposite breakout level
-    # Uses discrete position sizing (0.25) to minimize fee churn and manage drawdown
-    # Target: 50-150 total trades over 4 years (~12-37/year) to avoid fee drag
-    # ATR ratio filter ensures breakouts occur during expansion phases
-    # Chop filter ensures we only trade in ranging markets where mean reversion works
+    # Hypothesis: 1h Camarilla pivot breakout with 4h trend filter and 1d volume confirmation
+    # Long when price breaks above R4 + 4h close > 4h EMA50 + 1d volume > 1.2x 20-day average
+    # Short when price breaks below S4 + 4h close < 4h EMA50 + 1d volume > 1.2x 20-day average
+    # Exit when price returns to R3/S3 or opposite pivot level
+    # Uses discrete position sizing (0.20) to minimize fee churn
+    # Target: 60-150 total trades over 4 years (~15-37/year) to avoid fee drag
+    # Session filter: 08-20 UTC to reduce noise trades
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data (call ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 4h data for trend (call ONCE before loop)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ATR(14) and ATR(50) for volatility expansion filter
+    # Get 1d data for volume regime (call ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    # Calculate 4h EMA50 for trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    
+    # Calculate 1d Camarilla pivot levels (based on previous day)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # First period
-    tr2[0] = np.abs(high_1d[0] - close_1d[0])
-    tr3[0] = np.abs(low_1d[0] - close_1d[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r3 = pivot + (range_1d * 1.1 / 4)
+    r4 = pivot + (range_1d * 1.1 / 2)
+    s3 = pivot - (range_1d * 1.1 / 4)
+    s4 = pivot - (range_1d * 1.1 / 2)
     
-    # ATR calculations with min_periods
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = np.divide(atr_14, atr_50, out=np.full_like(atr_14, np.nan), where=atr_50!=0)
+    # Calculate 1d volume average (20-period) with min_periods
+    volume_1d = df_1d['volume'].values
+    volume_series = pd.Series(volume_1d)
+    vol_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1d Chopiness Index (CHOP) for regime filter
-    # CHOP = 100 * log10(sum(ATR(14)) / (n * log10(highest_high - lowest_low)))
-    # CHOP > 61.8 = ranging market (good for mean reversion/breakout fade)
-    # CHOP < 38.2 = trending market
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    range_max_min = highest_high - lowest_low
-    # Avoid division by zero and log of zero/negative
-    log_range = np.log10(np.maximum(range_max_min, 1e-10))
-    chop = np.divide(100 * np.log10(atr_sum), log_range, out=np.full_like(atr_sum, np.nan), where=log_range!=0)
-    # CHOP is bounded between 0 and 100, but we'll use > 61.8 for ranging
+    # Align all 1d indicators to 1h
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
-    # Align all 1d indicators to 12h
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Calculate 12h Donchian channels (20-period)
-    # Use rolling window on the 12h data directly
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_upper + donchian_lower) / 2
+    # Pre-compute session filter (08-20 UTC)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
+        # Skip if not in trading session
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
+            
         # Skip if data not ready
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(donchian_mid[i]) or np.isnan(atr_ratio_aligned[i]) or
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(vol_ma_aligned[i]) or np.isnan(ema_50_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume/volatility filter: 1d ATR ratio > 1.2 (expansion)
-        vol_expansion = atr_ratio_aligned[i] > 1.2
+        # Volume filter: current 1d volume > 1.2 * 20-period average
+        vol_1d_current = df_1d['volume'].values
+        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d_current)
+        volume_confirmation = vol_1d_aligned[i] > 1.2 * vol_ma_aligned[i]
         
-        # Regime filter: Chop > 61.8 (ranging market)
-        ranging_market = chop_aligned[i] > 61.8
+        # Trend filter: 4h close above/below EMA50
+        trend_up = close[i] > ema_50_4h_aligned[i]
+        trend_down = close[i] < ema_50_4h_aligned[i]
         
         # Breakout conditions
-        bullish_breakout = (close[i] > donchian_upper[i] and 
-                           vol_expansion and 
-                           ranging_market)
-        bearish_breakout = (close[i] < donchian_lower[i] and 
-                           vol_expansion and 
-                           ranging_market)
+        bullish_breakout = (close[i] > r4_aligned[i] and 
+                           volume_confirmation and 
+                           trend_up)
+        bearish_breakout = (close[i] < s4_aligned[i] and 
+                           volume_confirmation and 
+                           trend_down)
         
-        # Exit conditions: return to midpoint or opposite breakout level
-        long_exit = close[i] < donchian_mid[i]
-        short_exit = close[i] > donchian_mid[i]
+        # Exit conditions: return to R3/S3 or opposite pivot
+        long_exit = close[i] < r3_aligned[i]
+        short_exit = close[i] > s3_aligned[i]
         
         if bullish_breakout and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif bearish_breakout and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.20
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -115,14 +116,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_1d_donchian_breakout_atr_chop_v1"
-timeframe = "12h"
+name = "1h_4h_1d_camarilla_breakout_trend_volume_v1"
+timeframe = "1h"
 leverage = 1.0
