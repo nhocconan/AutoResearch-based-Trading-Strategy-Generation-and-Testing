@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Choppiness Index regime filter with 12h ADX trend strength and volume confirmation.
-# Choppiness Index (CHOP) identifies ranging (CHOP > 61.8) vs trending (CHOP < 38.2) markets.
-# In trending regimes (CHOP < 38.2), we follow 12h ADX trend direction (ADX > 25).
-# In ranging regimes (CHOP > 61.8), we mean-revert at Bollinger Band extremes (20, 2.0).
-# Volume confirmation filters low-quality breakouts.
-# Target: 20-50 trades per year (80-200 total over 4 years) for 4h timeframe.
+# Hypothesis: 4h/1d combined RSI mean reversion with volatility filter and session timing
+# RSI on 4h and 1d timeframes with smoothed values for trend context
+# Mean reversion entries when RSI is oversold/overbought on both timeframes
+# Volatility filter using ATR ratio to avoid low volatility whipsaws
+# Session filter (08-20 UTC) to focus on active trading hours
+# Conservative position sizing to limit drawdown
+# Target: 15-25 trades per year (60-100 total over 4 years) for 1h timeframe
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,198 +21,116 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12-hour data for trend filter (ADX)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Calculate 4h RSI (14-period)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 14:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    close_4h = df_4h['close'].values
+    delta_4h = np.diff(close_4h, prepend=close_4h[0])
+    gain_4h = np.where(delta_4h > 0, delta_4h, 0)
+    loss_4h = np.where(delta_4h < 0, -delta_4h, 0)
     
-    # Calculate ADX components for 12h
-    def calculate_atr(high, low, close, period):
-        tr = np.zeros(len(high))
-        tr[0] = high[0] - low[0]
-        for i in range(1, len(high)):
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        atr = np.zeros(len(high))
-        if len(high) < period:
-            return atr
-        atr[period-1] = np.mean(tr[:period])
-        for i in range(period, len(high)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        return atr
+    avg_gain_4h = np.zeros_like(gain_4h)
+    avg_loss_4h = np.zeros_like(loss_4h)
+    avg_gain_4h[13] = np.mean(gain_4h[:14])
+    avg_loss_4h[13] = np.mean(loss_4h[:14])
+    for i in range(14, len(gain_4h)):
+        avg_gain_4h[i] = (avg_gain_4h[i-1] * 13 + gain_4h[i]) / 14
+        avg_loss_4h[i] = (avg_loss_4h[i-1] * 13 + loss_4h[i]) / 14
     
-    def calculate_dmi(high, low, close, period):
-        if len(high) < period:
-            return np.zeros(len(high)), np.zeros(len(high)), np.zeros(len(high))
-        
-        up_move = high[1:] - high[:-1]
-        down_move = low[:-1] - low[1:]
-        
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        
-        # Pad to same length
-        plus_dm = np.concatenate([[0], plus_dm])
-        minus_dm = np.concatenate([[0], minus_dm])
-        
-        atr = calculate_atr(high, low, close, period)
-        
-        # Avoid division by zero
-        plus_di = np.full(len(high), np.nan)
-        minus_di = np.full(len(high), np.nan)
-        for i in range(period, len(high)):
-            if atr[i] != 0:
-                plus_di[i] = (np.mean(plus_dm[i-period+1:i+1]) / atr[i]) * 100
-                minus_di[i] = (np.mean(minus_dm[i-period+1:i+1]) / atr[i]) * 100
-        
-        dx = np.full(len(high), np.nan)
-        for i in range(period, len(high)):
-            di_sum = plus_di[i] + minus_di[i]
-            if di_sum != 0:
-                dx[i] = abs(plus_di[i] - minus_di[i]) / di_sum * 100
-        
-        adx = np.full(len(high), np.nan)
-        if len(high) >= 2*period-1:
-            adx[2*period-2] = np.mean(dx[period-1:2*period-1])
-            for i in range(2*period-1, len(high)):
-                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx, plus_di, minus_di
+    rs_4h = np.divide(avg_gain_4h, avg_loss_4h, out=np.zeros_like(avg_gain_4h), where=avg_loss_4h!=0)
+    rsi_4h = 100 - (100 / (1 + rs_4h))
+    rsi_4h_smoothed = np.convolve(rsi_4h, np.ones(3)/3, mode='same')
+    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h_smoothed)
     
-    adx_12h, plus_di_12h, minus_di_12h = calculate_dmi(high_12h, low_12h, close_12h, 14)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
-    plus_di_12h_aligned = align_htf_to_ltf(prices, df_12h, plus_di_12h)
-    minus_di_12h_aligned = align_htf_to_ltf(prices, df_12h, minus_di_12h)
+    # Calculate 1d RSI (14-period)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
     
-    # Choppiness Index on 4h (14-period)
-    def calculate_chop(high, low, close, period):
-        atr = calculate_atr(high, low, close, 1)
-        if len(high) < period:
-            return np.full(len(high), np.nan)
-        
-        # True range sum over period
-        tr_sum = np.zeros(len(high))
-        for i in range(period-1, len(high)):
-            tr_sum[i] = np.sum(atr[i-period+1:i+1])
-        
-        # Highest high and lowest low over period
-        highest_high = np.full(len(high), np.nan)
-        lowest_low = np.full(len(high), np.nan)
-        for i in range(period-1, len(high)):
-            highest_high[i] = np.max(high[i-period+1:i+1])
-            lowest_low[i] = np.min(low[i-period+1:i+1])
-        
-        chop = np.full(len(high), np.nan)
-        for i in range(period-1, len(high)):
-            if highest_high[i] != lowest_low[i] and tr_sum[i] > 0:
-                chop[i] = 100 * np.log10(tr_sum[i] / (highest_high[i] - lowest_low[i])) / np.log10(period)
-        return chop
+    close_1d = df_1d['close'].values
+    delta_1d = np.diff(close_1d, prepend=close_1d[0])
+    gain_1d = np.where(delta_1d > 0, delta_1d, 0)
+    loss_1d = np.where(delta_1d < 0, -delta_1d, 0)
     
-    chop = calculate_chop(high, low, close, 14)
+    avg_gain_1d = np.zeros_like(gain_1d)
+    avg_loss_1d = np.zeros_like(loss_1d)
+    avg_gain_1d[13] = np.mean(gain_1d[:14])
+    avg_loss_1d[13] = np.mean(loss_1d[:14])
+    for i in range(14, len(gain_1d)):
+        avg_gain_1d[i] = (avg_gain_1d[i-1] * 13 + gain_1d[i]) / 14
+        avg_loss_1d[i] = (avg_loss_1d[i-1] * 13 + loss_1d[i]) / 14
     
-    # Bollinger Bands for mean reversion in ranging markets (20, 2.0)
-    def calculate_bb(close, period, std_dev):
-        if len(close) < period:
-            return np.full(len(close), np.nan), np.full(len(close), np.nan), np.full(len(close), np.nan)
-        
-        sma = np.zeros(len(close))
-        sma[:period-1] = np.nan
-        sma[period-1] = np.mean(close[:period])
-        for i in range(period, len(close)):
-            sma[i] = sma[i-1] + (close[i] - close[i-period]) / period
-        
-        # Standard deviation
-        bb_std = np.zeros(len(close))
-        bb_std[:period-1] = np.nan
-        for i in range(period-1, len(close)):
-            bb_std[i] = np.std(close[i-period+1:i+1])
-        
-        upper = sma + (bb_std * std_dev)
-        lower = sma - (bb_std * std_dev)
-        return upper, sma, lower
+    rs_1d = np.divide(avg_gain_1d, avg_loss_1d, out=np.zeros_like(avg_gain_1d), where=avg_loss_1d!=0)
+    rsi_1d = 100 - (100 / (1 + rs_1d))
+    rsi_1d_smoothed = np.convolve(rsi_1d, np.ones(3)/3, mode='same')
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d_smoothed)
     
-    bb_upper, bb_middle, bb_lower = calculate_bb(close, 20, 2.0)
+    # Calculate ATR (14-period) for volatility filter
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[high[0] - low[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Average volume (20-period) for volume confirmation
-    avg_volume = np.full(n, np.nan)
-    for i in range(20, n):
-        avg_volume[i] = np.mean(volume[i-20:i])
+    atr = np.zeros(n)
+    atr[13] = np.mean(tr[:14])
+    for i in range(14, n):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    
+    # ATR ratio (current ATR / 50-period average ATR) for volatility filter
+    atr_ma = np.zeros(n)
+    for i in range(49, n):
+        atr_ma[i] = np.mean(atr[i-49:i])
+    atr_ratio = np.divide(atr, atr_ma, out=np.ones_like(atr), where=atr_ma!=0)
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.25  # 25% position size
+    position_size = 0.20  # 20% position size
     
-    for i in range(30, n):
-        # Skip if any required data is not ready
-        if (np.isnan(chop[i]) or np.isnan(adx_12h_aligned[i]) or 
-            np.isnan(plus_di_12h_aligned[i]) or np.isnan(minus_di_12h_aligned[i]) or
-            np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(avg_volume[i])):
+    for i in range(50, n):
+        if not in_session[i]:
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        vol = volume[i]
-        avg_vol = avg_volume[i]
-        chop_val = chop[i]
-        adx_val = adx_12h_aligned[i]
-        plus_di_val = plus_di_12h_aligned[i]
-        minus_di_val = minus_di_12h_aligned[i]
-        bb_upper_val = bb_upper[i]
-        bb_lower_val = bb_lower[i]
+        # Skip if any required data is not ready
+        if (np.isnan(rsi_4h_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(atr_ratio[i])):
+            signals[i] = 0.0
+            continue
         
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirm = vol > 1.5 * avg_vol
+        rsi_4h_val = rsi_4h_aligned[i]
+        rsi_1d_val = rsi_1d_aligned[i]
+        vol_ratio = atr_ratio[i]
+        
+        # Volatility filter: avoid low volatility (ratio < 0.8) and extreme volatility (ratio > 2.0)
+        volatility_filter = 0.8 <= vol_ratio <= 2.0
         
         if position == 0:
-            # Trending regime: CHOP < 38.2
-            if chop_val < 38.2:
-                # Strong trend: ADX > 25
-                if adx_val > 25:
-                    # Long: +DI > -DI
-                    if plus_di_val > minus_di_val and volume_confirm:
-                        position = 1
-                        signals[i] = position_size
-                    # Short: -DI > +DI
-                    elif minus_di_val > plus_di_val and volume_confirm:
-                        position = -1
-                        signals[i] = -position_size
-            # Ranging regime: CHOP > 61.8
-            elif chop_val > 61.8:
-                # Mean reversion at Bollinger Bands
-                if price <= bb_lower_val and volume_confirm:
-                    position = 1
-                    signals[i] = position_size
-                elif price >= bb_upper_val and volume_confirm:
-                    position = -1
-                    signals[i] = -position_size
+            # Long: RSI oversold on both timeframes + volatility filter
+            if (rsi_4h_val < 30 and rsi_1d_val < 30 and volatility_filter):
+                position = 1
+                signals[i] = position_size
+            # Short: RSI overbought on both timeframes + volatility filter
+            elif (rsi_4h_val > 70 and rsi_1d_val > 70 and volatility_filter):
+                position = -1
+                signals[i] = -position_size
+            else:
+                signals[i] = 0.0
         elif position == 1:
-            # Exit long: regime change to ranging or mean reversion signal
-            if chop_val > 61.8 and price >= bb_middle[i]:
-                position = 0
-                signals[i] = 0.0
-            # Exit long in trend: ADX weakens or DI crossover
-            elif chop_val < 38.2 and adx_val < 20:
-                position = 0
-                signals[i] = 0.0
-            elif chop_val < 38.2 and minus_di_val > plus_di_val:
+            # Exit long: RSI returns to neutral or overbought on either timeframe
+            if (rsi_4h_val > 50 or rsi_1d_val > 50):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: regime change to ranging or mean reversion signal
-            if chop_val > 61.8 and price <= bb_middle[i]:
-                position = 0
-                signals[i] = 0.0
-            # Exit short in trend: ADX weakens or DI crossover
-            elif chop_val < 38.2 and adx_val < 20:
-                position = 0
-                signals[i] = 0.0
-            elif chop_val < 38.2 and plus_di_val > minus_di_val:
+            # Exit short: RSI returns to neutral or oversold on either timeframe
+            if (rsi_4h_val < 50 or rsi_1d_val < 50):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -219,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_Choppiness_ADX_BB_Volume"
-timeframe = "4h"
+name = "1h_4h_1d_RSI_MeanReversion_VolatilityFilter"
+timeframe = "1h"
 leverage = 1.0
