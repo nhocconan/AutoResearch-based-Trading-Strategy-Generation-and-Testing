@@ -8,19 +8,19 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with 1d ADX trend filter and volume confirmation.
-    # Long when price breaks above upper channel with ADX > 25 and volume > 1.5x average.
-    # Short when price breaks below lower channel with ADX > 25 and volume > 1.5x average.
-    # Exit when price returns to middle of channel (20-period SMA).
+    # Hypothesis: 12h Donchian channel breakout with 1d ADX trend filter and volume confirmation.
+    # Long when price breaks above 20-period upper Donchian with ADX > 25 and volume > 1.5x average.
+    # Short when price breaks below 20-period lower Donchian with ADX > 25 and volume > 1.5x average.
+    # Exit when price returns to the midpoint of the Donchian channel.
     # Uses breakouts in trending markets to capture momentum, avoids false breakouts in ranging markets.
-    # Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
+    # Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX (call ONCE before loop)
+    # Get 1d data for ADX trend filter (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -49,15 +49,20 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Align HTF indicators to 4h timeframe
+    # Align HTF ADX to 12h timeframe
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Calculate Donchian channels (20-period) on 4h
-    high_ma = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_ma = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    mid_ma = (high_ma + low_ma) / 2
+    # Calculate 20-period Donchian channel on 12h
+    # Upper band: highest high of last 20 periods
+    # Lower band: lowest low of last 20 periods
+    # Middle band: (upper + lower) / 2
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper_donchian = high_series.rolling(window=20, min_periods=20).max().values
+    lower_donchian = low_series.rolling(window=20, min_periods=20).min().values
+    middle_donchian = (upper_donchian + lower_donchian) / 2
     
-    # Calculate volume average (20-period) on 4h
+    # Calculate volume average (20-period) on 12h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -65,8 +70,9 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(high_ma[i]) or 
-            np.isnan(low_ma[i]) or np.isnan(mid_ma[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(upper_donchian[i]) or 
+            np.isnan(lower_donchian[i]) or np.isnan(middle_donchian[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -77,12 +83,12 @@ def generate_signals(prices):
         volume_confirm = volume[i] > 1.5 * vol_ma[i]
         
         # Breakout conditions
-        long_breakout = (high[i] > high_ma[i]) and trending and volume_confirm
-        short_breakout = (low[i] < low_ma[i]) and trending and volume_confirm
+        long_breakout = (high[i] > upper_donchian[i]) and trending and volume_confirm
+        short_breakout = (low[i] < lower_donchian[i]) and trending and volume_confirm
         
-        # Exit conditions: price returns to middle of channel
-        long_exit = close[i] < mid_ma[i]
-        short_exit = close[i] > mid_ma[i]
+        # Exit conditions: price returns to midpoint of Donchian channel
+        long_exit = close[i] < middle_donchian[i]
+        short_exit = close[i] > middle_donchian[i]
         
         # Fixed position size (discrete levels to minimize fee churn)
         position_size = 0.25
@@ -112,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_breakout_adx_volume_v1"
-timeframe = "4h"
+name = "12h_1d_donchian_breakout_adx_volume_v1"
+timeframe = "12h"
 leverage = 1.0
