@@ -3,51 +3,54 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h timeframe with weekly pivot-based breakout and volume confirmation.
-# Long: Price breaks above weekly R4 pivot + volume > 1.5x 6h avg volume (20-period).
-# Short: Price breaks below weekly S4 pivot + volume > 1.5x 6h avg volume.
-# Uses weekly pivot levels for structural breakouts, 6h for entry timing with volume confirmation.
-# No trend filter to avoid whipsaw in sideways markets. Weekly pivots act as dynamic support/resistance.
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
+# Hypothesis: 4h timeframe with 1d Camarilla pivot levels (R3/S3) and volume confirmation.
+# Long: Price crosses above S3 level (support) + volume > 1.5x 20-period average volume.
+# Short: Price crosses below R3 level (resistance) + volume > 1.5x 20-period average volume.
+# Uses Camarilla levels for mean-reversion in ranging markets and breakout detection in trends.
+# Volume filter ensures participation. Position size 0.25 to balance risk and return.
+# Target: 20-50 trades per year (~80-200 total over 4 years) to stay within fee limits.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for pivot points
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    # 1d data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (standard formula)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    pivot = (high_1w + low_1w + close_1w) / 3.0
-    r1 = 2 * pivot - low_1w
-    s1 = 2 * pivot - high_1w
-    r2 = pivot + (high_1w - low_1w)
-    s2 = pivot - (high_1w - low_1w)
-    r3 = high_1w + 2 * (pivot - low_1w)
-    s3 = low_1w - 2 * (high_1w - pivot)
-    r4 = r3 + (high_1w - low_1w)
-    s4 = s3 - (high_1w - low_1w)
+    # Calculate Camarilla levels for each day (based on previous day)
+    camarilla_s3 = np.full(len(close_1d), np.nan)
+    camarilla_r3 = np.full(len(close_1d), np.nan)
+    
+    for i in range(1, len(close_1d)):
+        # Previous day's OHLC
+        ph = high_1d[i-1]
+        pl = low_1d[i-1]
+        pc = close_1d[i-1]
+        
+        # Camarilla equations
+        camarilla_s3[i] = pc - (ph - pl) * 1.1 / 6
+        camarilla_r3[i] = pc + (ph - pl) * 1.1 / 6
     
     # Average volume (20-period) for volume confirmation
     avg_volume = np.full(n, np.nan)
     for i in range(20, n):
         avg_volume[i] = np.mean(volume[i-20:i])
     
-    # Align weekly pivot levels to 6h
-    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
+    # Align Camarilla levels to 4h timeframe
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -55,40 +58,43 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is not ready
-        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        r4_level = r4_aligned[i]
-        s4_level = s4_aligned[i]
+        s3 = s3_aligned[i]
+        r3 = r3_aligned[i]
         
         # Volume confirmation: current volume > 1.5x average volume
         volume_confirm = vol > 1.5 * avg_vol
         
         if position == 0:
-            # Long: break above weekly R4 + volume confirmation
-            if price > r4_level and volume_confirm:
+            # Long: price crosses above S3 (support bounce) + volume confirmation
+            if price > s3 and price <= s3 + (r3 - s3) * 0.05 and volume_confirm:  # near S3 with small buffer
                 position = 1
                 signals[i] = position_size
-            # Short: break below weekly S4 + volume confirmation
-            elif price < s4_level and volume_confirm:
+            # Short: price crosses below R3 (resistance rejection) + volume confirmation
+            elif price < r3 and price >= r3 - (r3 - s3) * 0.05 and volume_confirm:  # near R3 with small buffer
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below weekly S4 (mean reversion)
-            if price < s4_level:
+            # Exit long: price reaches midpoint or shows resistance
+            midpoint = (r3 + s3) / 2
+            if price >= midpoint:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes above weekly R4 (mean reversion)
-            if price > r4_level:
+            # Exit short: price reaches midpoint or shows support
+            midpoint = (r3 + s3) / 2
+            if price <= midpoint:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -96,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_Pivot_R4S4_Volume"
-timeframe = "6h"
+name = "4h_1d_Camarilla_R3S3_Volume"
+timeframe = "4h"
 leverage = 1.0
