@@ -8,13 +8,12 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout + 1d Camarilla H3/L3 filter + volume spike confirmation
-    # Long when: price breaks above Donchian(20) high AND price > Camarilla H3 (1d) AND volume > 2.0x avg volume
-    # Short when: price breaks below Donchian(20) low AND price < Camarilla L3 (1d) AND volume > 2.0x avg volume
-    # Exit when: price crosses Donchian midpoint
+    # Hypothesis: 12h Donchian(20) breakout + 1d Camarilla pivot structure + volume confirmation
+    # Long when: price breaks above Donchian(20) high AND price > Camarilla H3 (1d) AND volume > 1.5x avg volume
+    # Short when: price breaks below Donchian(20) low AND price < Camarilla L3 (1d) AND volume > 1.5x avg volume
+    # Exit when: price crosses Donchian midpoint OR volume drops below average
     # Uses discrete sizing (0.25) targeting 50-150 trades over 4 years.
-    # Camarilla pivot structure provides dynamic support/resistance that adapts to volatility,
-    # working in both bull and bear markets by filtering breakouts against meaningful levels.
+    # Works in bull/bear via Camarilla pivot structure providing dynamic support/resistance levels.
     
     close = prices['close'].values
     high = prices['high'].values
@@ -31,23 +30,30 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate 1d Camarilla pivots (using previous day's range)
+    # Camarilla levels: H4 = close + 1.5*(high-low), H3 = close + 1.125*(high-low)
+    #                 L3 = close - 1.125*(high-low), L4 = close - 1.5*(high-low)
+    # We'll use H3/L3 as entry filters and H4/L4 as stop levels
     range_1d = high_1d - low_1d
     h3_1d = close_1d + 1.125 * range_1d
     l3_1d = close_1d - 1.125 * range_1d
+    h4_1d = close_1d + 1.5 * range_1d
+    l4_1d = close_1d - 1.5 * range_1d
     
-    # Align 1d Camarilla levels to 4h timeframe
+    # Align 1d Camarilla levels to 12h timeframe
     h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
     l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
+    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
     
-    # Calculate Donchian(20) channels on 4h
+    # Calculate Donchian(20) channels on 12h
     lookback = 20
     donchian_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     donchian_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Volume confirmation: volume > 2.0x 20-period average (stricter to reduce trades)
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_threshold = vol_ma * 2.0
+    vol_threshold = vol_ma * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -76,9 +82,9 @@ def generate_signals(prices):
         long_entry = long_breakout and long_filter and vol_ok and position != 1
         short_entry = short_breakout and short_filter and vol_ok and position != -1
         
-        # Exit conditions: price crosses Donchian midpoint
-        exit_long = close[i] < donchian_mid[i]
-        exit_short = close[i] > donchian_mid[i]
+        # Exit conditions: price crosses Donchian midpoint OR volume drops below average
+        exit_long = close[i] < donchian_mid[i] or volume[i] < vol_ma[i]
+        exit_short = close[i] > donchian_mid[i] or volume[i] < vol_ma[i]
         
         # Execute signals
         if long_entry:
@@ -104,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_camarilla_volume_filter_v1"
-timeframe = "4h"
+name = "12h_1d_donchian_camarilla_volume_v1"
+timeframe = "12h"
 leverage = 1.0
