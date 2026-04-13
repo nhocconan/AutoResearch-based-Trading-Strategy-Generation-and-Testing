@@ -8,12 +8,12 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with 1d volume spike (current volume > 2.0 * 20-period mean) 
-    # and 1d ADX regime filter (ADX > 25). Long on bullish breakout, short on bearish breakout.
-    # Exit when price crosses the 4h Donchian middle. Uses discrete position sizing (0.25).
-    # Volume spike filter ensures breakouts have strong participation, reducing false signals.
-    # ADX filter ensures we only trade in trending regimes on higher timeframe.
-    # Target: 80-150 total trades over 4 years to avoid excessive fee drag.
+    # Hypothesis: 4h price action above/below 1d VWAP with volume spike and ADX trend filter.
+    # Long when price > 1d VWAP + volume confirmation + ADX>25, short when price < 1d VWAP + volume confirmation + ADX>25.
+    # Exit on VWAP cross. Uses discrete sizing (0.25) to minimize fee churn.
+    # VWAP acts as dynamic fair value, volume spike confirms institutional participation,
+    # ADX ensures trending conditions to avoid chop whipsaws.
+    # Target: 60-120 total trades over 4 years to avoid excessive fee drag.
     
     close = prices['close'].values
     high = prices['high'].values
@@ -26,19 +26,14 @@ def generate_signals(prices):
     if len(df_4h) < 20 or len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 4h Donchian channels (20-period)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    
-    high_series = pd.Series(high_4h)
-    low_series = pd.Series(low_4h)
-    
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
-    donchian_middle = (donchian_upper + donchian_lower) / 2.0
+    # Calculate 1d VWAP (typical price * volume cumsum / volume cumsum)
+    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
+    volume_1d = df_1d['volume'].values
+    vwap_num = np.cumsum(typical_price_1d * volume_1d)
+    vwap_den = np.cumsum(volume_1d)
+    vwap_1d = np.where(vwap_den != 0, vwap_num / vwap_den, typical_price_1d)
     
     # Calculate 1d volume mean (20-period) with min_periods
-    volume_1d = df_1d['volume'].values
     volume_series = pd.Series(volume_1d)
     vol_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     
@@ -84,9 +79,7 @@ def generate_signals(prices):
     adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
     
     # Align HTF indicators to 4h timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
-    donchian_middle_aligned = align_htf_to_ltf(prices, df_4h, donchian_middle)
+    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
     vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
@@ -95,38 +88,36 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
-            np.isnan(donchian_middle_aligned[i]) or np.isnan(vol_ma_aligned[i]) or
+        if (np.isnan(vwap_aligned[i]) or np.isnan(vol_ma_aligned[i]) or
             np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Get current 1d volume (aligned)
-        volume_1d_current = df_1d['volume'].values
-        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d_current)
+        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
         
-        # Volume filter: current 1d volume > 2.0 * 20-period mean (spike filter)
-        volume_confirmation = vol_1d_aligned[i] > 2.0 * vol_ma_aligned[i]
+        # Volume filter: current 1d volume > 1.5 * 20-period mean (spike filter)
+        volume_confirmation = vol_1d_aligned[i] > 1.5 * vol_ma_aligned[i]
         
-        # ADX filter: trending market (ADX > 25)
-        trending_market = adx_aligned[i] > 25
+        # ADX filter: trending market (ADX > 20 - lowered to increase trades slightly)
+        trending_market = adx_aligned[i] > 20
         
-        # Breakout conditions with filters
-        bullish_breakout = (close[i] > donchian_upper_aligned[i] and 
-                           volume_confirmation and 
-                           trending_market)
-        bearish_breakout = (close[i] < donchian_lower_aligned[i] and 
-                           volume_confirmation and 
-                           trending_market)
+        # Entry conditions: price vs VWAP with filters
+        long_entry = (close[i] > vwap_aligned[i] and 
+                     volume_confirmation and 
+                     trending_market)
+        short_entry = (close[i] < vwap_aligned[i] and 
+                      volume_confirmation and 
+                      trending_market)
         
-        # Exit conditions: return to Donchian middle
-        long_exit = close[i] < donchian_middle_aligned[i]
-        short_exit = close[i] > donchian_middle_aligned[i]
+        # Exit conditions: VWAP cross
+        long_exit = close[i] < vwap_aligned[i]
+        short_exit = close[i] > vwap_aligned[i]
         
-        if bullish_breakout and position != 1:
+        if long_entry and position != 1:
             position = 1
             signals[i] = 0.25
-        elif bearish_breakout and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
@@ -146,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_breakout_volume_spike_adx_v1"
+name = "4h_1d_vwap_volume_adx_v1"
 timeframe = "4h"
 leverage = 1.0
