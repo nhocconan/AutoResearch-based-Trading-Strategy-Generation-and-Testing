@@ -3,74 +3,67 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d/1w strategy using weekly Donchian breakout with daily trend filter
-# In bull markets: buy weekly highs above weekly EMA, sell on weekly lows
-# In bear markets: sell weekly lows below weekly EMA, buy on weekly highs
-# Weekly timeframe reduces noise and whipsaw, daily trend filter adds confirmation
-# Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag
-# Works in both regimes by following weekly momentum with daily trend confirmation
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get weekly data for HTF calculations
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 12h data for HTF calculations
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 20-week Donchian channels
-    high_20w = np.full(len(close_1w), np.nan)
-    low_20w = np.full(len(close_1w), np.nan)
-    for i in range(20, len(close_1w)):
-        high_20w[i] = np.max(high_1w[i-20:i])
-        low_20w[i] = np.min(low_1w[i-20:i])
+    # Calculate 20-period Donchian channels on 12h
+    high_20 = np.full(len(close_12h), np.nan)
+    low_20 = np.full(len(close_12h), np.nan)
+    for i in range(20, len(close_12h)):
+        high_20[i] = np.max(high_12h[i-20:i])
+        low_20[i] = np.min(low_12h[i-20:i])
     
-    # Calculate 50-week EMA for trend filter
-    close_1w_series = pd.Series(close_1w)
-    ema_50w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 50-period EMA on 12h (trend filter)
+    close_12h_series = pd.Series(close_12h)
+    ema_50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align weekly indicators to daily timeframe
-    high_20w_aligned = align_htf_to_ltf(prices, df_1w, high_20w)
-    low_20w_aligned = align_htf_to_ltf(prices, df_1w, low_20w)
-    ema_50w_aligned = align_htf_to_ltf(prices, df_1w, ema_50w)
+    # Align indicators to 4h timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_12h, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_12h, low_20)
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% of capital
     
-    for i in range(60, n):  # Start after sufficient data
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(high_20w_aligned[i]) or 
-            np.isnan(low_20w_aligned[i]) or 
-            np.isnan(ema_50w_aligned[i])):
+        if (np.isnan(high_20_aligned[i]) or 
+            np.isnan(low_20_aligned[i]) or 
+            np.isnan(ema_50_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Daily trend filter: price above/below weekly EMA
-        above_weekly_ema = close[i] > ema_50w_aligned[i]
-        below_weekly_ema = close[i] < ema_50w_aligned[i]
+        # Trend filter: price above/below EMA50
+        above_ema = close[i] > ema_50_aligned[i]
+        below_ema = close[i] < ema_50_aligned[i]
         
-        # Weekly Donchian breakout conditions
-        weekly_high_break = close[i] > high_20w_aligned[i]
-        weekly_low_break = close[i] < low_20w_aligned[i]
+        # Donchian breakout conditions
+        long_breakout = close[i] > high_20_aligned[i]
+        short_breakout = close[i] < low_20_aligned[i]
         
-        # Entry: breakout in direction of weekly trend
-        long_entry = weekly_high_break and above_weekly_ema
-        short_entry = weekly_low_break and below_weekly_ema
+        # Entry conditions: breakout in direction of trend
+        long_entry = long_breakout and above_ema
+        short_entry = short_breakout and below_ema
         
-        # Exit: opposite breakout or trend reversal
-        exit_long = position == 1 and (weekly_low_break or below_weekly_ema)
-        exit_short = position == -1 and (weekly_high_break or above_weekly_ema)
+        # Exit conditions: opposite breakout or trend reversal
+        exit_long = position == 1 and (short_breakout or below_ema)
+        exit_short = position == -1 and (long_breakout or above_ema)
         
         # Execute signals
         if long_entry and position != 1:
@@ -93,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_donchian_ema50_breakout"
-timeframe = "1d"
+name = "12h_1d_donchian_ema50_breakout"
+timeframe = "12h"
 leverage = 1.0
