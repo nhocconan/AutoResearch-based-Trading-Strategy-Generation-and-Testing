@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-1h_4h_1d_Momentum_Pullback_V2
-Hypothesis: Combines 1d trend filter (price > SMA200) with 4h momentum (RSI > 55 for long, < 45 for short) and precise 1h entry on pullback to EMA21.
-Works in bull markets via momentum continuation and in bear via mean-reversion bounces off EMA21 during strong trends.
-Target: 15-37 trades/year on 1h (60-150 total over 4 years).
+12h_1d_Camarilla_Breakout_Target_V1
+Hypothesis: Combines daily Camarilla pivot levels with 12h breakouts and volume confirmation.
+In trending markets, price breaks above/below key Camarilla levels (H4/L4) with volume expansion.
+During ranging markets (Choppiness Index > 61.8), avoids false breakouts.
+Target: 15-35 trades/year on 12h (60-140 total over 4 years).
+Works in both bull and bear markets by filtering trades with regime and volume.
 """
 
 import numpy as np
@@ -20,42 +22,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
+    # Get daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    # Calculate Camarilla pivot levels from previous day
+    # Formula: H4 = C + 1.5*(H-L), L4 = C - 1.5*(H-L)
+    # where C = (H+L+C)/3 (typical price)
+    # Using previous day's data to avoid lookahead
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # Daily SMA200 for trend filter
-    sma_200_1d = pd.Series(close_1d).rolling(window=200, min_periods=200).mean()
-    trend_up = close_1d > sma_200_1d
-    trend_down = close_1d < sma_200_1d
     
-    # Get 4h data for momentum
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
+    # Calculate pivot using previous day's OHLC
+    typical_price = (high_1d + low_1d + close_1d) / 3.0
+    cam_h4 = typical_price + 1.5 * (high_1d - low_1d)
+    cam_l4 = typical_price - 1.5 * (high_1d - low_1d)
     
-    close_4h = df_4h['close'].values
-    # 4h RSI(14)
-    delta = pd.Series(close_4h).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_14 = 100 - (100 / (1 + rs))
-    rsi_long = rsi_14 > 55
-    rsi_short = rsi_14 < 45
+    # Align Camarilla levels to 12h timeframe (using previous day's values)
+    cam_h4_aligned = align_htf_to_ltf(prices, df_1d, cam_h4)
+    cam_l4_aligned = align_htf_to_ltf(prices, df_1d, cam_l4)
     
-    # Align 1d and 4h signals to 1h
-    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up)
-    trend_down_aligned = align_htf_to_ltf(prices, df_1d, trend_down)
-    rsi_long_aligned = align_htf_to_ltf(prices, df_4h, rsi_long)
-    rsi_short_aligned = align_htf_to_ltf(prices, df_4h, rsi_short)
+    # Calculate 12h Choppiness Index for regime filtering
+    # Chop = 100 * log10(sum(ATR) / (max(high) - min(low))) / log10(n)
+    period = 14
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[0], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=period, min_periods=period).mean()
     
-    # 1h EMA21 for pullback entry
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    max_high = pd.Series(high).rolling(window=period, min_periods=period).max()
+    min_low = pd.Series(low).rolling(window=period, min_periods=period).min()
+    
+    chop = 100 * np.log10(atr.rolling(window=period, min_periods=period).sum() / (max_high - min_low)) / np.log10(period)
+    chop = chop.fillna(50).values  # neutral when undefined
+    
+    # Chop > 61.8 = ranging market (avoid breakouts)
+    chop_filter = chop < 61.8  # only trade when NOT ranging
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volume_expansion = volume > (vol_ma_20 * 1.5)
     
     # Session filter: 08:00-20:00 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -63,54 +72,44 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.20  # 20% of capital
+    position_size = 0.25  # 25% of capital
     
     for i in range(50, n):
         # Skip if not in session or data not ready
         if not session_mask[i] or \
-           np.isnan(trend_up_aligned[i]) or \
-           np.isnan(trend_down_aligned[i]) or \
-           np.isnan(rsi_long_aligned[i]) or \
-           np.isnan(rsi_short_aligned[i]) or \
-           np.isnan(ema_21[i]):
+           np.isnan(cam_h4_aligned[i]) or \
+           np.isnan(cam_l4_aligned[i]) or \
+           np.isnan(chop_filter[i]) or \
+           np.isnan(volume_expansion[i]):
             signals[i] = 0.0
             continue
         
-        # Entry logic
-        if trend_up_aligned[i] and rsi_long_aligned[i]:
-            # Bullish setup: buy on pullback to EMA21
-            if close[i] <= ema_21[i] * 1.002:  # Within 0.2% of EMA21
-                if position != 1:
-                    position = 1
-                    signals[i] = position_size
-                else:
-                    signals[i] = position_size
-            elif position == 1:
-                signals[i] = position_size
-            else:
-                signals[i] = 0.0
-        elif trend_down_aligned[i] and rsi_short_aligned[i]:
-            # Bearish setup: sell on bounce to EMA21
-            if close[i] >= ema_21[i] * 0.998:  # Within 0.2% of EMA21
-                if position != -1:
-                    position = -1
-                    signals[i] = -position_size
-                else:
-                    signals[i] = -position_size
-            elif position == -1:
-                signals[i] = -position_size
-            else:
-                signals[i] = 0.0
+        # Entry conditions
+        long_entry = (close[i] > cam_h4_aligned[i]) and volume_expansion[i] and chop_filter[i]
+        short_entry = (close[i] < cam_l4_aligned[i]) and volume_expansion[i] and chop_filter[i]
+        
+        # Exit conditions: reverse signal or loss of momentum
+        long_exit = (position == 1) and (close[i] < cam_l4_aligned[i])
+        short_exit = (position == -1) and (close[i] > cam_h4_aligned[i])
+        
+        if long_entry and position != 1:
+            position = 1
+            signals[i] = position_size
+        elif short_entry and position != -1:
+            position = -1
+            signals[i] = -position_size
+        elif long_exit or short_exit:
+            position = 0
+            signals[i] = 0.0
+        elif position == 1:
+            signals[i] = position_size
+        elif position == -1:
+            signals[i] = -position_size
         else:
-            # No clear setup - flat
-            if position != 0:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.0
+            signals[i] = 0.0
     
     return signals
 
-name = "1h_4h_1d_Momentum_Pullback_V2"
-timeframe = "1h"
+name = "12h_1d_Camarilla_Breakout_Target_V1"
+timeframe = "12h"
 leverage = 1.0
