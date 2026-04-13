@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-1h_4h_1d_Range_Breakout_With_Volume_Confirmation_and_Range_Filter
-Hypothesis: In ranging markets (identified by low ADX and high Bollinger Band width percentile), 
-breakouts from the previous 4-hour range with volume confirmation provide high-probability entries.
-Use 1d ADX for regime filter (ADX < 25 = range), 4h range for breakout levels, and 1h for entry timing.
-Volume > 1.5x 20-period average confirms institutional participation. Works in both bull and bear markets
-by capturing volatility expansions after consolidation periods. Target: 15-30 trades/year per symbol.
+6h_1w_MultiFactor_Position_Sizing
+Hypothesis: Combines weekly trend filter (EMA50), 6h momentum (RSI divergence), and volatility expansion (ATR ratio) for high-probability entries. 
+Weekly EMA50 defines structural trend, RSI divergence identifies exhaustion points, ATR ratio >1.5 confirms momentum breakout. 
+Works in bull markets via trend continuation and in bear markets via counter-trend reversals at key levels. 
+Target: 15-25 trades/year per symbol with disciplined position sizing.
 """
 
 import numpy as np
@@ -22,115 +21,58 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate ADX for regime filtering (1d timeframe)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        adx_1d = np.full(len(prices), 100.0)  # Default to trending to avoid false signals
-    else:
-        high_1d = df_1d['high'].values
-        low_1d = df_1d['low'].values
-        close_1d = df_1d['close'].values
-        
-        # True Range
-        tr1 = high_1d[1:] - low_1d[1:]
-        tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-        tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-        tr_1d = np.concatenate([[0], np.maximum(tr1, np.maximum(tr2, tr3))])
-        
-        # Directional Movement
-        dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                           np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-        dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                            np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-        
-        # Smooth TR, DM+, DM- with Wilder's smoothing (alpha = 1/period)
-        def wilder_smooth(data, period):
-            result = np.full_like(data, np.nan)
-            if len(data) < period:
-                return result
-            # First value is simple average
-            result[period-1] = np.mean(data[:period])
-            # Subsequent values: smoothed = prev * (1 - 1/period) + current * (1/period)
-            for i in range(period, len(data)):
-                result[i] = result[i-1] * (1 - 1/period) + data[i] * (1/period)
-            return result
-        
-        atr_1d = wilder_smooth(tr_1d, 14)
-        dm_plus_smooth = wilder_smooth(dm_plus, 14)
-        dm_minus_smooth = wilder_smooth(dm_minus, 14)
-        
-        # Avoid division by zero
-        dx = np.where(atr_1d != 0, 
-                      np.abs(dm_plus_smooth - dm_minus_smooth) / (dm_plus_smooth + dm_minus_smooth) * 100, 
-                      0)
-        adx_1d_raw = wilder_smooth(dx, 14)
-        adx_1d = align_htf_to_ltf(prices, df_1d, adx_1d_raw)
+    # 60-period ATR for volatility measurement
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[0], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=60, min_periods=60).mean().values
+    atr_ma = pd.Series(atr).rolling(window=30, min_periods=30).mean().values
+    atr_ratio = atr / atr_ma  # Current volatility vs recent average
     
-    # Bollinger Band Width for range identification (1d timeframe)
-    if len(df_1d) < 20:
-        bb_width_pct_1d = np.full(len(prices), 50.0)  # Default to middle
-    else:
-        close_1d = df_1d['close'].values
-        bb_middle = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-        bb_std = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-        bb_upper = bb_middle + 2 * bb_std
-        bb_lower = bb_middle - 2 * bb_std
-        bb_width = bb_upper - bb_lower
-        bb_width_pct = bb_width / bb_middle * 100
-        # Percentile of current BB width over 50-period lookback
-        bb_width_pct_1d_raw = pd.Series(bb_width_pct).rolling(window=50, min_periods=1).apply(
-            lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100 if len(x) > 0 else 50, raw=False)
-        bb_width_pct_1d = align_htf_to_ltf(prices, df_1d, bb_width_pct_1d_raw.values)
+    # 6-period RSI for momentum exhaustion
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    gain_ma = pd.Series(gain).ewm(alpha=1/6, adjust=False, min_periods=6).mean().values
+    loss_ma = pd.Series(loss).ewm(alpha=1/6, adjust=False, min_periods=6).mean().values
+    rs = gain_ma / (loss_ma + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 1.5)
-    
-    # 4h range for breakout levels
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
-        range_high_4h = np.full(len(prices), np.nan)
-        range_low_4h = np.full(len(prices), np.nan)
+    # Weekly EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        ema50_1w = np.full(len(prices), np.nan)
     else:
-        high_4h = df_4h['high'].values
-        low_4h = df_4h['low'].values
-        # Previous 4h bar's high/low
-        prev_high_4h = np.roll(high_4h, 1)
-        prev_low_4h = np.roll(low_4h, 1)
-        prev_high_4h[0] = np.nan
-        prev_low_4h[0] = np.nan
-        range_high_4h = align_htf_to_ltf(prices, df_4h, prev_high_4h)
-        range_low_4h = align_htf_to_ltf(prices, df_4h, prev_low_4h)
+        close_1w = df_1w['close'].values
+        ema50_1w_raw = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema50_1w = align_htf_to_ltf(prices, df_1w, ema50_1w_raw)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
     for i in range(100, n):  # warmup period
         # Skip if any required data is not ready
-        if (np.isnan(adx_1d[i]) or np.isnan(bb_width_pct_1d[i]) or 
-            np.isnan(range_high_4h[i]) or np.isnan(range_low_4h[i]) or 
-            np.isnan(volume_expansion[i])):
+        if (np.isnan(ema50_1w[i]) or np.isnan(rsi[i]) or 
+            np.isnan(atr_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Range filter: ADX < 25 (ranging) AND BB width percentile > 50 (expanded range)
-        range_condition = (adx_1d[i] < 25) and (bb_width_pct_1d[i] > 50)
+        # Long conditions: weekly uptrend + RSI oversold + volatility expansion
+        long_condition = (close[i] > ema50_1w[i] and 
+                         rsi[i] < 30 and 
+                         atr_ratio[i] > 1.5)
         
-        if not range_condition:
-            signals[i] = 0.0
-            continue
+        # Short conditions: weekly downtrend + RSI overbought + volatility expansion
+        short_condition = (close[i] < ema50_1w[i] and 
+                          rsi[i] > 70 and 
+                          atr_ratio[i] > 1.5)
         
-        # Long signal: break above 4h range with volume expansion
-        long_signal = (close[i] > range_high_4h[i]) and volume_expansion[i]
-        
-        # Short signal: break below 4h range with volume expansion
-        short_signal = (close[i] < range_low_4h[i]) and volume_expansion[i]
-        
-        if long_signal and position != 1:
+        if long_condition and position != 1:
             position = 1
             signals[i] = position_size
-        elif short_signal and position != -1:
+        elif short_condition and position != -1:
             position = -1
             signals[i] = -position_size
         else:
@@ -139,6 +81,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4h_1d_Range_Breakout_With_Volume_Confirmation_and_Range_Filter"
-timeframe = "1h"
+name = "6h_1w_MultiFactor_Position_Sizing"
+timeframe = "6h"
 leverage = 1.0
