@@ -8,69 +8,117 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1h primary timeframe with 4h/1d HTF filters
-    # Long: 4h EMA21 uptrend + 1d close > SMA50 + 1h bullish engulfing candle + session 08-20 UTC
-    # Short: 4h EMA21 downtrend + 1d close < SMA50 + 1h bearish engulfing candle + session 08-20 UTC
-    # Exit: opposite engulfing candle or 4h EMA cross reversal
-    # Target: 60-150 total trades over 4 years (15-37/year) to minimize fee drag
-    # Uses HTF for direction, 1h for precise timing, session filter to reduce noise
-    # Discrete position sizing: 0.20 to minimize fee churn
+    # Hypothesis: 6h primary timeframe with 1w HTF filter
+    # Long: price breaks above 1w Donchian(20) high + volume > 1.5x 20-period avg + ADX > 25 (strong trend)
+    # Short: price breaks below 1w Donchian(20) low + volume > 1.5x 20-period avg + ADX > 25 (strong trend)
+    # Exit: price returns to 1w Donchian middle (10-period average of high/low)
+    # Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and fee drag
+    # Weekly Donchian breakouts with volume/ADX confirmation work in both bull/bear markets by capturing strong trends
+    # Using 6h timeframe reduces trade frequency vs lower TFs while capturing major trends
+    # Added: ADX filter to avoid choppy markets and reduce false breakouts
     
     close = prices['close'].values
-    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values if 'volume' in prices.columns else np.ones(len(prices))
     
-    # Get 4h data for trend filter (EMA21)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1w data for primary timeframe (weekly Donchian channels)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema_4h_21 = pd.Series(close_4h).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_4h_21_aligned = align_htf_to_ltf(prices, df_4h, ema_4h_21)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values if 'volume' in df_1w.columns else np.ones(len(df_1w))
     
-    # Get 1d data for trend filter (SMA50)
+    # Get 1d data for ADX calculation (MTF)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    sma_1d_50 = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
-    sma_1d_50_aligned = align_htf_to_ltf(prices, df_1d, sma_1d_50)
+    volume_1d = df_1d['volume'].values if 'volume' in df_1d.columns else np.ones(len(df_1d))
     
-    # Calculate 1h engulfing candles
-    bullish_engulfing = (close > open_price) & (open_price <= np.roll(close, 1)) & (close >= np.roll(open_price, 1)) & ((close - open_price) > (np.roll(close, 1) - np.roll(open_price, 1)))
-    bearish_engulfing = (close < open_price) & (open_price >= np.roll(close, 1)) & (close <= np.roll(open_price, 1)) & ((open_price - close) > (np.roll(open_price, 1) - np.roll(close, 1)))
+    # Calculate Donchian channels on 1w data (20-period)
+    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour  # open_time is already datetime64[ms]
-    in_session = (hours >= 8) & (hours <= 20)
+    # Calculate ADX on 1d data (14-period)
+    def calculate_adx(high, low, close, window=14):
+        # True Range
+        tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - np.roll(close, 1)[1:]))
+        tr1 = np.maximum(tr1, np.abs(low[1:] - np.roll(close, 1)[1:]))
+        tr = np.concatenate([[np.nan], tr1])
+        
+        # +DM and -DM
+        up_move = high[1:] - high[:-1]
+        down_move = low[:-1] - low[1:]
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        plus_dm = np.concatenate([[0.0], plus_dm])
+        minus_dm = np.concatenate([[0.0], minus_dm])
+        
+        # Smoothed values
+        atr = pd.Series(tr).rolling(window=window, min_periods=window).mean().values
+        smoothed_plus_dm = pd.Series(plus_dm).rolling(window=window, min_periods=window).mean().values
+        smoothed_minus_dm = pd.Series(minus_dm).rolling(window=window, min_periods=window).mean().values
+        
+        # Directional Indicators
+        plus_di = 100 * smoothed_plus_dm / atr
+        minus_di = 100 * smoothed_minus_dm / atr
+        
+        # DX and ADX
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        adx = pd.Series(dx).rolling(window=window, min_periods=window).mean().values
+        return adx
+    
+    adx = calculate_adx(high_1d, low_1d, close_1d, window=14)
+    
+    # Volume averages on 1d data (20-period)
+    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all indicators to 6h timeframe (primary)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
     for i in range(50, n):  # start from 50 to have enough data for calculations
         # Skip if data not ready
-        if (np.isnan(ema_4h_21_aligned[i]) or 
-            np.isnan(sma_1d_50_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(donchian_mid_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or
+            np.isnan(vol_avg_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # HTF trend conditions
-        ema_uptrend = ema_4h_21_aligned[i] > ema_4h_21_aligned[i-1] if i > 0 else False
-        ema_downtrend = ema_4h_21_aligned[i] < ema_4h_21_aligned[i-1] if i > 0 else False
-        price_above_sma = close_1d[i] > sma_1d_50_aligned[i]
-        price_below_sma = close_1d[i] < sma_1d_50_aligned[i]
+        # ADX filter: adx > 25 indicates strong trend (good for breakouts)
+        is_strong_trend = adx_aligned[i] > 25
+        
+        # Volume confirmation: current 1d volume > 1.5x 20-day average
+        volume_confirmed = volume_1d[i] > 1.5 * vol_avg_20_1d_aligned[i]
+        
+        # Breakout conditions
+        breakout_up = close_1d[i] > donchian_high_aligned[i]
+        breakout_down = close_1d[i] < donchian_low_aligned[i]
         
         # Entry conditions
-        enter_long = ema_uptrend and price_above_sma and bullish_engulfing[i] and in_session[i]
-        enter_short = ema_downtrend and price_below_sma and bearish_engulfing[i] and in_session[i]
+        enter_long = is_strong_trend and breakout_up and volume_confirmed
+        enter_short = is_strong_trend and breakout_down and volume_confirmed
         
-        # Exit conditions: opposite engulfing or HTF trend reversal
-        exit_long = position == 1 and (bearish_engulfing[i] or not ema_uptrend)
-        exit_short = position == -1 and (bullish_engulfing[i] or not ema_downtrend)
+        # Exit conditions: price returns to 1w Donchian middle
+        exit_long = position == 1 and close_1d[i] <= donchian_mid_aligned[i]
+        exit_short = position == -1 and close_1d[i] >= donchian_mid_aligned[i]
         
         # Execute signals
         if enter_long and position != 1:
@@ -96,6 +144,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4h_1d_ema_sma_engulfing_session_v1"
-timeframe = "1h"
+name = "6h_1w_donchian_breakout_volume_adx_v1"
+timeframe = "6h"
 leverage = 1.0
