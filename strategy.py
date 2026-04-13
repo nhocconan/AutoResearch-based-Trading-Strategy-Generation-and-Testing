@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
 """
-1d_1w_Momentum_Reversal
-Hypothesis: Capture reversals at weekly extremes using 1d RSI and volume confirmation.
-In bull markets, buy dips when weekly trend is up but daily RSI is oversold.
-In bear markets, sell rallies when weekly trend is down but daily RSI is overbought.
-Weekly trend filter avoids counter-trend trades. Target: 15-25 trades/year.
+4h_1d_Volume_Weighted_Pivot_Breakout
+Hypothesis: Trade breakouts from 1d Volume Weighted Average Price (VWAP) on 4h timeframe with volume confirmation and volatility filter.
+VWAP acts as dynamic support/resistance where institutional traders operate. Breakouts above VWAP with volume expansion indicate
+bullish momentum; breakdowns below VWAP indicate bearish momentum. Volatility filter avoids low-momentum chop. Designed to work
+in both bull and bear markets by following momentum. Target: 25-35 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_vwap(high, low, close, volume):
+    """Calculate VWAP for given period."""
+    typical_price = (high + low + close) / 3.0
+    vwap_numerator = typical_price * volume
+    vwap_denominator = volume
+    vwap = np.cumsum(vwap_numerator) / np.cumsum(vwap_denominator)
+    return vwap
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,29 +29,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for VWAP calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Weekly EMA for trend (50-period)
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Daily RSI for entry signal (14-period)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Calculate 1d VWAP
+    vwap_1d = calculate_vwap(high_1d, low_1d, close_1d, volume_1d)
+    vwap_1d_last = vwap_1d[-1] if len(vwap_1d) > 0 else np.nan
     
-    # Volume confirmation: current volume > 1.5x 20-day average
+    # Align VWAP to 4h timeframe
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, np.full_like(close_1d, vwap_1d_last))
+    
+    # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 1.5)
+    volume_expansion = volume > (vol_ma_20 * 2.0)
+    
+    # Volatility filter: ATR ratio > 0.8 (avoid low volatility chop)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ma_50 = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    volatility_filter = atr > (atr_ma_50 * 0.8)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -51,16 +66,17 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(volume_expansion[i])):
+        if (np.isnan(vwap_1d_aligned[i]) or 
+            np.isnan(volume_expansion[i]) or 
+            np.isnan(volatility_filter[i])):
             signals[i] = 0.0
             continue
         
-        # Long: weekly uptrend + daily oversold + volume
-        long_condition = (close[i] > ema_50_1w_aligned[i]) and (rsi[i] < 30) and volume_expansion[i]
+        # Long: price above VWAP with volume expansion and sufficient volatility
+        long_condition = (close[i] > vwap_1d_aligned[i]) and volume_expansion[i] and volatility_filter[i]
         
-        # Short: weekly downtrend + daily overbought + volume
-        short_condition = (close[i] < ema_50_1w_aligned[i]) and (rsi[i] > 70) and volume_expansion[i]
+        # Short: price below VWAP with volume expansion and sufficient volatility
+        short_condition = (close[i] < vwap_1d_aligned[i]) and volume_expansion[i] and volatility_filter[i]
         
         if long_condition and position != 1:
             position = 1
@@ -74,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_Momentum_Reversal"
-timeframe = "1d"
+name = "4h_1d_Volume_Weighted_Pivot_Breakout"
+timeframe = "4h"
 leverage = 1.0
