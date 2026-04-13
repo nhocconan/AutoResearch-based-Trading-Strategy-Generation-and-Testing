@@ -8,13 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout + 1d volume spike (2.0x) + 1d ADX>25.
+    # Hypothesis: 4h Donchian(20) breakout + 1d volume spike (1.8x) + 1d ADX>20.
     # Long when price breaks above upper Donchian with volume and trend confirmation.
     # Short when price breaks below lower Donchian with volume and trend confirmation.
-    # Exit on opposite Donchian level or close below/above open.
-    # Donchian provides clear breakout levels, volume confirms institutional participation,
-    # ADX filters choppy markets. Discrete size 0.25 minimizes fee churn.
-    # Target: 100-180 total trades over 4 years (25-45/year) to balance opportunity and cost.
+    # Exit on opposite Donchian level.
+    # Discrete size 0.25 to minimize fee churn. Target: 80-150 total trades over 4 years.
     
     close = prices['close'].values
     high = prices['high'].values
@@ -105,11 +103,11 @@ def generate_signals(prices):
         # Get current 1d volume (aligned)
         vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
         
-        # Volume filter: current 1d volume > 2.0 * 20-period mean (volume spike)
-        volume_confirmation = vol_1d_aligned[i] > 2.0 * vol_ma_aligned[i]
+        # Volume filter: current 1d volume > 1.8 * 20-period mean (volume spike)
+        volume_confirmation = vol_1d_aligned[i] > 1.8 * vol_ma_aligned[i]
         
-        # ADX filter: trending market (ADX > 25)
-        trending_market = adx_aligned[i] > 25
+        # ADX filter: trending market (ADX > 20)
+        trending_market = adx_aligned[i] > 20
         
         # Entry conditions: price breaks Donchian channel with filters
         long_entry = (close[i] > upper_aligned[i] and 
@@ -146,6 +144,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_breakout_volume_adx_v1"
+name = "4h_1d_donchian_breakout_volume_adx_v2"
 timeframe = "4h"
 leverage = 1.0
