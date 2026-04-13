@@ -1,3 +1,13 @@
+# 12h_1d_wr_breakout_v1
+# WR(10) breakout with volume filter and ADX regime filter
+# WR measures overbought/oversold conditions
+# Long when WR crosses above -50 from oversold in trending market
+# Short when WR crosses below -50 from overbought in trending market
+# Uses 1d timeframe for WR calculation, aligned to 12h chart
+# Volume confirmation reduces false breakouts
+# ADX filter ensures we only trade in trending regimes
+# Target: 15-25 trades/year, balanced long/short
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 500:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,125 +25,148 @@ def generate_signals(prices):
     
     # Get daily data for indicator calculations
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 100:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate daily ATR for volatility filter
-    tr_1d = np.maximum(
-        high_1d - low_1d,
-        np.maximum(
-            np.abs(high_1d - np.roll(close_1d, 1)),
-            np.abs(low_1d - np.roll(close_1d, 1))
-        )
-    )
-    tr_1d[0] = high_1d[0] - low_1d[0]
-    atr_1d = np.zeros_like(tr_1d)
-    for i in range(len(tr_1d)):
-        if i < 14:
-            atr_1d[i] = np.mean(tr_1d[:i+1]) if i > 0 else tr_1d[i]
-        else:
-            atr_1d[i] = 0.93 * atr_1d[i-1] + 0.07 * tr_1d[i]
+    # Calculate Williams %R (14-period)
+    def calculate_williams_r(high, low, close, period=14):
+        highest_high = np.full_like(high, np.nan)
+        lowest_low = np.full_like(low, np.nan)
+        
+        for i in range(len(high)):
+            if i >= period - 1:
+                start_idx = i - period + 1
+                highest_high[i] = np.max(high[start_idx:i+1])
+                lowest_low[i] = np.min(low[start_idx:i+1])
+        
+        wr = np.full_like(close, np.nan)
+        for i in range(len(close)):
+            if not np.isnan(highest_high[i]) and not np.isnan(lowest_low[i]):
+                if highest_high[i] != lowest_low[i]:
+                    wr[i] = -100 * (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i])
+                else:
+                    wr[i] = -50  # Avoid division by zero
+        return wr
     
-    # Calculate daily EMA200 for trend filter
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate WR
+    wr_1d = calculate_williams_r(high_1d, low_1d, close_1d, 14)
     
-    # Calculate daily RSI for momentum filter
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    for i in range(len(gain)):
-        if i < 14:
-            avg_gain[i] = np.mean(gain[:i+1]) if i > 0 else gain[i]
-            avg_loss[i] = np.mean(loss[:i+1]) if i > 0 else loss[i]
-        else:
-            avg_gain[i] = 0.92 * avg_gain[i-1] + 0.08 * gain[i]
-            avg_loss[i] = 0.92 * avg_loss[i-1] + 0.08 * loss[i]
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi_1d = 100 - (100 / (1 + rs))
+    # Calculate ADX for trend strength (14-period)
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr = np.full_like(high, np.nan)
+        for i in range(len(high)):
+            if i == 0:
+                tr[i] = high[i] - low[i]
+            else:
+                tr[i] = max(high[i] - low[i], 
+                           abs(high[i] - close[i-1]), 
+                           abs(low[i] - close[i-1]))
+        
+        # Directional Movement
+        plus_dm = np.full_like(high, np.nan)
+        minus_dm = np.full_like(high, np.nan)
+        for i in range(1, len(high)):
+            up_move = high[i] - high[i-1]
+            down_move = low[i-1] - low[i]
+            
+            if up_move > down_move and up_move > 0:
+                plus_dm[i] = up_move
+            else:
+                plus_dm[i] = 0
+                
+            if down_move > up_move and down_move > 0:
+                minus_dm[i] = down_move
+            else:
+                minus_dm[i] = 0
+        
+        # Smoothed values
+        atr = np.full_like(tr, np.nan)
+        plus_dm_smooth = np.full_like(plus_dm, np.nan)
+        minus_dm_smooth = np.full_like(minus_dm, np.nan)
+        
+        # Initial values
+        if len(tr) >= period:
+            atr[period-1] = np.nanmean(tr[:period])
+            plus_dm_smooth[period-1] = np.nanmean(plus_dm[:period])
+            minus_dm_smooth[period-1] = np.nanmean(minus_dm[:period])
+            
+            # Wilder's smoothing
+            for i in range(period, len(tr)):
+                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+                plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
+                minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
+        
+        # Directional Indicators
+        plus_di = np.full_like(close, np.nan)
+        minus_di = np.full_like(close, np.nan)
+        dx = np.full_like(close, np.nan)
+        
+        for i in range(len(atr)):
+            if not np.isnan(atr[i]) and atr[i] != 0:
+                plus_di[i] = 100 * plus_dm_smooth[i] / atr[i]
+                minus_di[i] = 100 * minus_dm_smooth[i] / atr[i]
+                if plus_di[i] + minus_di[i] != 0:
+                    dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+        
+        # ADX (smoothed DX)
+        adx = np.full_like(close, np.nan)
+        if len(dx) >= period:
+            valid_dx = dx[~np.isnan(dx)]
+            if len(valid_dx) >= period:
+                adx[period-1] = np.nanmean(valid_dx[:period])
+                for i in range(period, len(dx)):
+                    if not np.isnan(dx[i]):
+                        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    # Calculate daily volume moving average
-    vol_ma_20_1d = np.convolve(volume_1d, np.ones(20)/20, mode='same')
-    vol_ma_20_1d[:10] = np.nan
-    vol_ma_20_1d[-10:] = np.nan
+    # Calculate ADX
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     
-    # Align indicators to 6h timeframe
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Align indicators to 12h timeframe
+    wr_1d_aligned = align_htf_to_ltf(prices, df_1d, wr_1d)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Calculate 6h Donchian channels (20-period)
-    donchian_high = np.zeros(n)
-    donchian_low = np.zeros(n)
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
-    donchian_high[:20] = np.nan
-    donchian_low[:20] = np.nan
-    
-    # Calculate 6h ATR for volatility filter
-    tr_6h = np.maximum(
-        high - low,
-        np.maximum(
-            np.abs(high - np.roll(close, 1)),
-            np.abs(low - np.roll(close, 1))
-        )
-    )
-    tr_6h[0] = high[0] - low[0]
-    atr_6h = np.zeros_like(tr_6h)
-    for i in range(len(tr_6h)):
-        if i < 14:
-            atr_6h[i] = np.mean(tr_6h[:i+1]) if i > 0 else tr_6h[i]
-        else:
-            atr_6h[i] = 0.93 * atr_6h[i-1] + 0.07 * tr_6h[i]
+    # Volume average (20-period)
+    volume_ma = np.full_like(volume, np.nan)
+    for i in range(len(volume)):
+        if i >= 19:
+            volume_ma[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.25
+    position_size = 0.25  # 25% position size
     
-    for i in range(200, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema_200_1d_aligned[i]) or 
-            np.isnan(rsi_1d_aligned[i]) or
-            np.isnan(atr_1d_aligned[i]) or
-            np.isnan(vol_ma_20_1d_aligned[i]) or
-            np.isnan(donchian_high[i]) or
-            np.isnan(donchian_low[i]) or
-            np.isnan(atr_6h[i])):
+        if (np.isnan(wr_1d_aligned[i]) or 
+            np.isnan(adx_1d_aligned[i]) or
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: avoid extremely high volatility periods
-        volatility_filter = atr_6h[i] < (atr_1d_aligned[i] * 4.0)
+        # Volume confirmation: above average volume
+        volume_confirm = volume[i] > volume_ma[i]
         
-        # Volume filter: current volume above daily average
-        volume_filter = volume[i] > vol_ma_20_1d_aligned[i]
+        # Trend filter: ADX > 25 indicates trending market
+        trending = adx_1d_aligned[i] > 25
         
-        # Trend and momentum filters from daily
-        uptrend = close[i] > ema_200_1d_aligned[i]
-        strong_momentum = rsi_1d_aligned[i] > 50
-        
-        downtrend = close[i] < ema_200_1d_aligned[i]
-        weak_momentum = rsi_1d_aligned[i] < 50
-        
-        # Breakout conditions
-        bullish_breakout = close[i] > donchian_high[i-1]
-        bearish_breakout = close[i] < donchian_low[i-1]
+        # WR signals: crossing -50 level
+        wr_cross_up = (wr_1d_aligned[i] > -50) and (i > 0 and wr_1d_aligned[i-1] <= -50)
+        wr_cross_down = (wr_1d_aligned[i] < -50) and (i > 0 and wr_1d_aligned[i-1] >= -50)
         
         # Entry conditions
-        long_entry = uptrend and strong_momentum and bullish_breakout and volatility_filter and volume_filter
-        short_entry = downtrend and weak_momentum and bearish_breakout and volatility_filter and volume_filter
+        long_entry = wr_cross_up and volume_confirm and trending
+        short_entry = wr_cross_down and volume_confirm and trending
         
-        # Exit conditions: trend reversal or momentum loss
-        exit_long = position == 1 and (not uptrend or not strong_momentum)
-        exit_short = position == -1 and (not downtrend or not weak_momentum)
+        # Exit conditions: opposite WR cross
+        exit_long = position == 1 and wr_cross_down
+        exit_short = position == -1 and wr_cross_up
         
         # Execute signals
         if long_entry and position != 1:
@@ -156,6 +189,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_donchian_breakout_volume_filter_v1"
-timeframe = "6h"
+name = "12h_1d_wr_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
