@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_12h_Camarilla_Breakout_Volume
-Hypothesis: Combines Camarilla pivot levels from 12h with breakout confirmation on 4h.
-In trending markets (ADX > 25), buys when price breaks above Camarilla H4 level with volume > 1.5x average,
-sells when breaks below L4 level. Uses volume confirmation to avoid false breakouts.
-Designed to work in both bull and bear markets by trading momentum after consolidation.
-Target: 20-50 trades/year on 4h (80-200 total over 4 years).
+1h_4h_1d_Squeeze_Breakout_Volume
+Hypothesis: Combines Bollinger Band squeeze detection on 1d with breakout confirmation on 4h and precise entry on 1h.
+In low volatility (BB width < 20th percentile), waits for 4h close outside Bollinger Bands with volume > 1.5x 20-period average.
+Enters on 1h break of the 4h breakout candle's high/low with volume confirmation.
+Works in both bull and bear markets by trading volatility expansion after contraction.
+Target: 15-37 trades/year on 1h (60-150 total over 4 years).
 """
 
 import numpy as np
@@ -22,86 +22,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla pivot calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get daily data for Bollinger Bands and squeeze detection
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla levels for each 12h bar
-    # H4 = close + 1.1*(high-low)*1.1/2
-    # L4 = close - 1.1*(high-low)*1.1/2
-    rang = high_12h - low_12h
-    H4 = close_12h + 1.1 * rang * 1.1 / 2
-    L4 = close_12h - 1.1 * rang * 1.1 / 2
+    # Calculate Bollinger Bands (20, 2.0) on daily
+    ma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean()
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std()
+    upper_bb = ma_20 + (2.0 * std_20)
+    lower_bb = ma_20 - (2.0 * std_20)
+    bb_width = upper_bb - lower_bb
     
-    # Get 4h data for trend filter (ADX)
+    # Calculate 20-period percentile of BB width for squeeze detection (20th percentile)
+    bb_width_series = pd.Series(bb_width.values)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=20).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
+    
+    # Squeeze condition: BB width < 20th percentile
+    squeeze = bb_width_percentile < 20.0
+    
+    # Get 4h data for breakout direction
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    if len(df_4h) < 20:
         return np.zeros(n)
     
+    close_4h = df_4h['close'].values
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # Calculate ADX(14) on 4h for trend filter
-    # True Range
-    tr1 = high_4h[1:] - low_4h[1:]
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align to same length
-    
-    # Directional Movement
-    dm_plus = np.where((high_4h[1:] - high_4h[:-1]) > (low_4h[:-1] - low_4h[1:]), 
-                       np.maximum(high_4h[1:] - high_4h[:-1], 0), 0)
-    dm_minus = np.where((low_4h[:-1] - low_4h[1:]) > (high_4h[1:] - high_4h[:-1]), 
-                        np.maximum(low_4h[:-1] - low_4h[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smooth TR, DM+ and DM- with Welles Wilder smoothing (alpha = 1/period)
-    def wilders_smoothing(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(arr[1:period])
-        # Subsequent values
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
-    
-    atr = wilders_smoothing(tr, 14)
-    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
-    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.where(atr > 0, dm_plus_smooth / atr * 100, 0)
-    di_minus = np.where(atr > 0, dm_minus_smooth / atr * 100, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) > 0, np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
-    adx = np.full_like(dx, np.nan)
-    for i in range(27, len(dx)):  # 2*period-1 for ADX
-        if i == 27:
-            adx[i] = np.nanmean(dx[14:28])
-        else:
-            adx[i] = (adx[i-1] * 13 + dx[i]) / 14
-    
-    # Get 4h data for volume and price
-    close_4h = df_4h['close'].values
     volume_4h = df_4h['volume'].values
     
-    # Align all signals to main timeframe (4h)
-    H4_aligned = align_htf_to_ltf(prices, df_12h, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_12h, L4)
-    adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
-    volume_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    volume_ma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_ma_20_4h)
+    # Calculate 4h Bollinger Bands (20, 2.0)
+    ma_20_4h = pd.Series(close_4h).rolling(window=20, min_periods=20).mean()
+    std_20_4h = pd.Series(close_4h).rolling(window=20, min_periods=20).std()
+    upper_bb_4h = ma_20_4h + (2.0 * std_20_4h)
+    lower_bb_4h = ma_20_4h - (2.0 * std_20_4h)
+    
+    # 4h breakout conditions: close outside BB with volume expansion
+    vol_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean()
+    volume_expansion_4h = volume_4h > (vol_ma_20_4h * 1.5)
+    breakout_up = (close_4h > upper_bb_4h) & volume_expansion_4h
+    breakout_down = (close_4h < lower_bb_4h) & volume_expansion_4h
+    
+    # Align all signals to 1h timeframe
+    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze)
+    breakout_up_aligned = align_htf_to_ltf(prices, df_4h, breakout_up)
+    breakout_down_aligned = align_htf_to_ltf(prices, df_4h, breakout_down)
+    upper_bb_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_bb_4h.values)
+    lower_bb_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_bb_4h.values)
     
     # Session filter: 08:00-20:00 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -109,57 +83,72 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.25  # 25% of capital
+    position_size = 0.20  # 20% of capital
+    
+    # Track breakout candle high/low for entry
+    breakout_high_level = np.zeros(n)
+    breakout_low_level = np.zeros(n)
     
     for i in range(50, n):
         # Skip if not in session or data not ready
         if not session_mask[i] or \
-           np.isnan(H4_aligned[i]) or \
-           np.isnan(L4_aligned[i]) or \
-           np.isnan(adx_aligned[i]) or \
-           np.isnan(volume_ma_20_4h_aligned[i]):
+           np.isnan(squeeze_aligned[i]) or \
+           np.isnan(breakout_up_aligned[i]) or \
+           np.isnan(breakout_down_aligned[i]) or \
+           np.isnan(upper_bb_4h_aligned[i]) or \
+           np.isnan(lower_bb_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Trend filter: only trade when ADX > 25 (trending market)
-        if adx_aligned[i] <= 25:
-            if position != 0:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_expansion = volume[i] > (volume_ma_20_4h_aligned[i] * 1.5) if not np.isnan(volume_ma_20_4h_aligned[i]) else False
-        
-        # Breakout conditions
-        breakout_up = close[i] > H4_aligned[i] and volume_expansion
-        breakout_down = close[i] < L4_aligned[i] and volume_expansion
-        
-        if breakout_up:
-            if position != 1:
-                position = 1
-                signals[i] = position_size
-            else:
-                signals[i] = position_size
-        elif breakout_down:
-            if position != -1:
-                position = -1
-                signals[i] = -position_size
-            else:
-                signals[i] = -position_size
+        # Update breakout levels when new 4h breakout occurs
+        if breakout_up_aligned[i]:
+            breakout_high_level[i] = upper_bb_4h_aligned[i]
+            breakout_low_level[i] = breakout_low_level[i-1] if i > 0 else 0
+        elif breakout_down_aligned[i]:
+            breakout_low_level[i] = lower_bb_4h_aligned[i]
+            breakout_high_level[i] = breakout_high_level[i-1] if i > 0 else 0
         else:
-            # Hold position
-            if position == 1:
+            # Carry forward levels
+            breakout_high_level[i] = breakout_high_level[i-1] if i > 0 else 0
+            breakout_low_level[i] = breakout_low_level[i-1] if i > 0 else 0
+        
+        # Entry conditions: squeeze active and price breaks 4h breakout level with volume
+        if squeeze_aligned[i]:
+            # Volume confirmation on 1h
+            vol_ma_20_1h = pd.Series(volume[:i+1]).rolling(window=20, min_periods=20).mean().iloc[-1] if i >= 20 else 0
+            volume_expansion_1h = volume[i] > (vol_ma_20_1h * 1.5) if i >= 20 else False
+            
+            # Long entry: price breaks above 4h breakout high
+            if breakout_high_level[i] > 0 and close[i] > breakout_high_level[i] and volume_expansion_1h:
+                if position != 1:
+                    position = 1
+                    signals[i] = position_size
+                else:
+                    signals[i] = position_size
+            # Short entry: price breaks below 4h breakout low
+            elif breakout_low_level[i] > 0 and close[i] < breakout_low_level[i] and volume_expansion_1h:
+                if position != -1:
+                    position = -1
+                    signals[i] = -position_size
+                else:
+                    signals[i] = -position_size
+            # Hold or flat
+            elif position == 1:
                 signals[i] = position_size
             elif position == -1:
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
+        else:
+            # No squeeze - exit any position
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
     
     return signals
 
-name = "4h_12h_Camarilla_Breakout_Volume"
-timeframe = "4h"
+name = "1h_4h_1d_Squeeze_Breakout_Volume"
+timeframe = "1h"
 leverage = 1.0
