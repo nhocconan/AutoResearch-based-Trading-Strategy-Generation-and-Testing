@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_1D_Camarilla_Breakout_MeanReversion_v1
-Hypothesis: In bear markets, price reverses from extreme intraday deviations from daily VWAP.
-Long when price < daily VWAP - 2*ATR and closes above VWAP. Short when price > daily VWAP + 2*ATR and closes below VWAP.
-Uses daily VWAP and ATR for mean reversion signals. Works in both bull and bear by capturing mean reversion moves.
+1d_1W_Camarilla_Pivot_Breakout_WeeklyTrend_v1
+Hypothesis: On daily chart, buy when price breaks above weekly Camarilla R3 level with above-average volume,
+sell when price breaks below weekly S3 level with above-average volume. Exit when price crosses weekly pivot.
+Uses weekly trend filter: only take longs when price > weekly EMA20, only shorts when price < weekly EMA20.
+Designed for low trade frequency (~10-20/year) to avoid fee drag and work in both bull and bear markets.
 """
 
 import numpy as np
@@ -18,36 +19,52 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Daily data
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Weekly data
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    vol_1d = df_1d['volume'].values
+    # Previous week's values for current week's calculation
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    vol_1w = df_1w['volume'].values
     
-    # Daily VWAP
-    typical_price = (high_1d + low_1d + close_1d) / 3
-    vwap_numerator = np.cumsum(typical_price * vol_1d)
-    vwap_denominator = np.cumsum(vol_1d)
+    prev_high = np.roll(high_1w, 1)
+    prev_low = np.roll(low_1w, 1)
+    prev_close = np.roll(close_1w, 1)
+    prev_high[0] = high_1w[0]
+    prev_low[0] = low_1w[0]
+    prev_close[0] = close_1w[0]
+    
+    # Weekly VWAP approximation
+    typical_price = (high_1w + low_1w + close_1w) / 3
+    vwap_numerator = np.cumsum(typical_price * vol_1w)
+    vwap_denominator = np.cumsum(vol_1w)
     vwap = np.where(vwap_denominator != 0, vwap_numerator / vwap_denominator, typical_price)
     
-    # Daily ATR (14-period)
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]
-    tr2[0] = np.abs(high_1d[0] - close_1d[0])
-    tr3[0] = np.abs(low_1d[0] - close_1d[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Weekly Camarilla levels
+    range_1w = prev_high - prev_low
+    camarilla_pp = (prev_high + prev_low + prev_close) / 3
+    camarilla_r3 = camarilla_pp + (range_1w * 1.1 / 4)
+    camarilla_s3 = camarilla_pp - (range_1w * 1.1 / 4)
     
-    # Align to 4h
-    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    # Weekly EMA20 for trend filter
+    ema_20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Align weekly data to daily
+    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1w, camarilla_pp)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
+    vwap_aligned = align_htf_to_ltf(prices, df_1w, vwap)
+    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
+    vol_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_1w)
+    
+    # Volume condition: weekly volume > 20-period average
+    vol_ma_20 = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean()
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20.values)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -55,26 +72,29 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(vwap_aligned[i]) or np.isnan(atr_aligned[i])):
+        if (np.isnan(camarilla_pp_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(vwap_aligned[i]) or
+            np.isnan(ema_20_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or
+            np.isnan(vol_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        vwap_val = vwap_aligned[i]
-        atr_val = atr_aligned[i]
+        # Volume condition: current weekly volume > 20-period average
+        vol_condition = vol_1w_aligned[i] > vol_ma_20_aligned[i]
         
-        # Mean reversion conditions
-        long_signal = (close[i] < vwap_val - 2 * atr_val) and (close[i] > vwap_val)
-        short_signal = (close[i] > vwap_val + 2 * atr_val) and (close[i] < vwap_val)
+        # Breakout conditions with weekly trend filter
+        long_breakout = close[i] > camarilla_r3_aligned[i] and close[i] > ema_20_aligned[i]
+        short_breakout = close[i] < camarilla_s3_aligned[i] and close[i] < ema_20_aligned[i]
         
-        # Exit conditions
-        long_exit = close[i] < vwap_val
-        short_exit = close[i] > vwap_val
+        # Exit condition: price crosses weekly pivot
+        long_exit = close[i] < camarilla_pp_aligned[i]
+        short_exit = close[i] > camarilla_pp_aligned[i]
         
         if position == 0:
-            if long_signal:
+            if long_breakout and vol_condition:
                 position = 1
                 signals[i] = position_size
-            elif short_signal:
+            elif short_breakout and vol_condition:
                 position = -1
                 signals[i] = -position_size
             else:
@@ -94,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1D_Camarilla_Breakout_MeanReversion_v1"
-timeframe = "4h"
+name = "1d_1W_Camarilla_Pivot_Breakout_WeeklyTrend_v1"
+timeframe = "1d"
 leverage = 1.0
