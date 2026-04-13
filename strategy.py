@@ -1,26 +1,29 @@
-#!/usr/bin/env python3
-"""
-6h_1d_Weekly_Pivot_Directional
-Hypothesis: Trade in the direction of weekly pivot trend using 1d open position relative to weekly pivot.
-In bull markets, price tends to open above weekly pivot and stay bullish; in bear markets, opens below and stays bearish.
-Uses 1d open vs weekly pivot (PP) as trend filter, with 6h EMA(20) for entry timing.
-Works in both bull (buy dips above PP) and bear (sell rallies below PP) markets. Target: 15-25 trades/year.
-"""
+# 12h_1d_Camarilla_Breakout_Volume
+# Hypothesis: Breakout above R4 or below S4 of 12h Camarilla levels with volume expansion on 12h timeframe.
+# 12h Camarilla provides stronger support/resistance than 1h/4h, reducing false breakouts.
+# Volume confirmation ensures institutional participation. Works in both bull (breakouts up)
+# and bear (breakdowns down) markets. Target: 20-30 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_weekly_pivot(high, low, close):
-    """Calculate weekly pivot points (standard floor method)."""
-    PP = (high + low + close) / 3.0
-    R1 = 2 * PP - low
-    S1 = 2 * PP - high
-    R2 = PP + (high - low)
-    S2 = PP - (high - low)
-    R3 = high + 2 * (PP - low)
-    S3 = low - 2 * (high - PP)
-    return PP, R1, R2, R3, S1, S2, S3
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels."""
+    range_val = high - low
+    range_val = np.where(range_val == 0, 1e-10, range_val)
+    C = close
+    H = high
+    L = low
+    R1 = C + ((H - L) * 1.0833)
+    R2 = C + ((H - L) * 1.1666)
+    R3 = C + ((H - L) * 1.2500)
+    R4 = C + ((H - L) * 1.5000)
+    S1 = C - ((H - L) * 1.0833)
+    S2 = C - ((H - L) * 1.1666)
+    S3 = C - ((H - L) * 1.2500)
+    S4 = C - ((H - L) * 1.5000)
+    return R1, R2, R3, R4, S1, S2, S3, S4
 
 def generate_signals(prices):
     n = len(prices)
@@ -28,76 +31,59 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for pivot points
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 2:
+    # Get 12h data for Camarilla levels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate weekly pivot points
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    PP_weekly, R1_weekly, R2_weekly, R3_weekly, S1_weekly, S2_weekly, S3_weekly = calculate_weekly_pivot(
-        weekly_high, weekly_low, weekly_close
-    )
+    # Calculate 12h Camarilla levels
+    R1_12h, R2_12h, R3_12h, R4_12h, S1_12h, S2_12h, S3_12h, S4_12h = calculate_camarilla(high_12h, low_12h, close_12h)
     
-    # Align weekly pivot to 6h (only PP needed for trend filter)
-    PP_weekly_aligned = align_htf_to_ltf(prices, df_weekly, PP_weekly)
+    # Align all data to 12h timeframe
+    R4_12h_aligned = align_htf_to_ltf(prices, df_12h, R4_12h)
+    S4_12h_aligned = align_htf_to_ltf(prices, df_12h, S4_12h)
     
-    # 6h EMA for entry timing
-    close_series = pd.Series(close)
-    ema_20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volume_expansion = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25
     
     for i in range(50, n):
-        # Skip if PP data not ready
-        if np.isnan(PP_weekly_aligned[i]) or np.isnan(ema_20[i]):
+        # Skip if any required data is not ready
+        if (np.isnan(R4_12h_aligned[i]) or np.isnan(S4_12h_aligned[i]) or 
+            np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: 1d open vs weekly PP
-        # Get the 1d open price for current day (using same index mapping as weekly)
-        # Since we're on 6h chart, we need to check if current bar is the first 6h bar of the day
-        # Simpler approach: use the relationship between current open and weekly PP
-        # If weekly PP is trending up (current open > PP), look for longs on dips to EMA
-        # If weekly PP is trending down (current open < PP), look for shorts on rallies to EMA
+        # Long: breakout above R4 with volume expansion
+        long_condition = (close[i] > R4_12h_aligned[i]) and volume_expansion[i]
         
-        # Determine weekly trend based on price position relative to PP
-        if open_price[i] > PP_weekly_aligned[i]:
-            # Bullish bias: look for longs when price dips to EMA support
-            if close[i] <= ema_20[i] and close[i] > PP_weekly_aligned[i] * 0.995:  # near EMA but above PP
-                if position != 1:
-                    position = 1
-                    signals[i] = position_size
-            # Exit long if price breaks below PP
-            elif position == 1 and close[i] < PP_weekly_aligned[i]:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = position_size if position == 1 else 0.0
+        # Short: breakdown below S4 with volume expansion
+        short_condition = (close[i] < S4_12h_aligned[i]) and volume_expansion[i]
+        
+        if long_condition and position != 1:
+            position = 1
+            signals[i] = position_size
+        elif short_condition and position != -1:
+            position = -1
+            signals[i] = -position_size
         else:
-            # Bearish bias: look for shorts when price rallies to EMA resistance
-            if close[i] >= ema_20[i] and close[i] < PP_weekly_aligned[i] * 1.005:  # near EMA but below PP
-                if position != -1:
-                    position = -1
-                    signals[i] = -position_size
-            # Exit short if price breaks above PP
-            elif position == -1 and close[i] > PP_weekly_aligned[i]:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = -position_size if position == -1 else 0.0
+            # Hold current position
+            signals[i] = position_size if position == 1 else (-position_size if position == -1 else 0.0)
     
     return signals
 
-name = "6h_1d_Weekly_Pivot_Directional"
-timeframe = "6h"
+name = "12h_1d_Camarilla_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
