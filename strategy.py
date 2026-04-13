@@ -1,8 +1,8 @@
-# 12h_1d_Camarilla_Pivot_Breakout_With_Volume_Confirmation
-# Hypothesis: 12h timeframe with 1d context for trend filtering.
-# Uses 1d high/low to determine trend direction and 12h Camarilla pivots for entry.
-# Volume confirmation on breakout. Works in bull/bear by trading with 1d trend.
-# Target: 12-37 trades/year per symbol.
+#!/usr/bin/env python3
+"""
+4h_1d_Camarilla_Pivot_Breakout_With_Volume
+Hypothesis: Daily Camarilla pivot levels provide robust support/resistance. Breakouts above R4 or below S4 with volume confirmation indicate institutional participation. Works in both bull and bear markets by capturing breakouts in direction of trend. Target: 20-30 trades/year per symbol.
+"""
 
 import numpy as np
 import pandas as pd
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,64 +18,64 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Get 12h data for entries
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
-    
-    # 1d trend: 50 EMA
+    # Calculate Camarilla levels for each 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 12h Camarilla pivots (R4/S4 breakout with volume)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Camarilla formulas
+    close_prev = np.roll(close_1d, 1)
+    close_prev[0] = close_1d[0]  # first bar uses its own close
     
-    close_prev_12h = np.roll(close_12h, 1)
-    close_prev_12h[0] = close_12h[0]
+    range_1d = high_1d - low_1d
     
-    range_12h = high_12h - low_12h
+    # Resistance levels
+    R1 = close_prev + (range_1d * 1.0833 / 12)
+    R2 = close_prev + (range_1d * 1.1666 / 6)
+    R3 = close_prev + (range_1d * 1.2500 / 4)
+    R4 = close_prev + (range_1d * 1.5000 / 2)
     
-    # Resistance levels (focus on R4 for breakout)
-    R4_12h = close_prev_12h + (range_12h * 1.5000 / 2)
-    # Support levels (focus on S4 for breakdown)
-    S4_12h = close_prev_12h - (range_12h * 1.5000 / 2)
+    # Support levels
+    S1 = close_prev - (range_1d * 1.0833 / 12)
+    S2 = close_prev - (range_1d * 1.1666 / 6)
+    S3 = close_prev - (range_1d * 1.2500 / 4)
+    S4 = close_prev - (range_1d * 1.5000 / 2)
     
-    # Align 12h levels to minute timeframe
-    R4_12h_aligned = align_htf_to_ltf(prices, df_12h, R4_12h)
-    S4_12h_aligned = align_htf_to_ltf(prices, df_12h, S4_12h)
+    # Align levels to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
     
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Volume confirmation: current volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 2.0)
+    volume_expansion = volume > (vol_ma_20 * 1.8)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required data is not ready
-        if (np.isnan(R4_12h_aligned[i]) or np.isnan(S4_12h_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_expansion[i])):
+        if (np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or 
+            np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Determine 1d trend direction
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Long breakout: price breaks above R4 with volume expansion
+        long_breakout = close[i] > R4_aligned[i] and volume_expansion[i]
         
-        # Long breakout: price breaks above R4 with volume expansion in uptrend
-        long_breakout = close[i] > R4_12h_aligned[i] and volume_expansion[i] and uptrend
-        
-        # Short breakdown: price breaks below S4 with volume expansion in downtrend
-        short_breakout = close[i] < S4_12h_aligned[i] and volume_expansion[i] and downtrend
+        # Short breakdown: price breaks below S4 with volume expansion
+        short_breakout = close[i] < S4_aligned[i] and volume_expansion[i]
         
         if long_breakout and position != 1:
             position = 1
@@ -89,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_Pivot_Breakout_With_Volume_Confirmation"
-timeframe = "12h"
+name = "4h_1d_Camarilla_Pivot_Breakout_With_Volume"
+timeframe = "4h"
 leverage = 1.0
