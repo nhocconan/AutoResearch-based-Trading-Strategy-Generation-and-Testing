@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h/1d Camarilla pivot breakout with volume confirmation and RSI filter
-# Strategy trades breakouts from Camarilla levels (H3/L3) on 4h timeframe
-# Uses 1d pivot calculation for structural levels and RSI(14) for momentum filter
-# Volume confirmation ensures breakout validity
-# Target: 20-50 trades per year (80-200 total) for 4h timeframe
-# Works in bull/bear markets via breakout logic + volume filter
+# Hypothesis: 12h KAMA with 1-day RSI filter and volume confirmation.
+# KAMA adapts to market noise, reducing whipsaw in ranging markets and
+# tracking trends efficiently. Combined with daily RSI extremes and volume
+# spikes, it captures strong moves while avoiding false signals in chop.
+# Target: 15-35 trades per year (60-140 total over 4 years) for 12h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,102 +19,111 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-day data for Camarilla pivot calculation
+    # 1-day data for RSI filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    # RSI(14) on 1d
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.zeros_like(close_1d)
+    avg_loss = np.zeros_like(close_1d)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
+    for i in range(14, len(close_1d)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d[:13] = np.nan
     
-    # Pivot point and ranges
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_hl = high_1d - low_1d
+    # Align 1d RSI to 12h timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Camarilla levels
-    h3 = close_1d + range_hl * 1.1 / 4
-    l3 = close_1d - range_hl * 1.1 / 4
-    h4 = close_1d + range_hl * 1.1 / 2
-    l4 = close_1d - range_hl * 1.1 / 2
+    # KAMA on 12h timeframe
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
     
-    # Align levels to 4h timeframe (use previous day's levels)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    close_12h = df_12h['close'].values
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close_12h, n=10, prepend=close_12h[:10]))
+    volatility = np.sum(np.abs(np.diff(close_12h, prepend=close_12h[0])), axis=0)
+    # For simplicity, compute ER using loops (since we need prior values)
+    er = np.full(len(close_12h), np.nan)
+    for i in range(10, len(close_12h)):
+        change_val = np.abs(close_12h[i] - close_12h[i-10])
+        volatility_val = np.sum(np.abs(np.diff(close_12h[i-9:i+1])))
+        if volatility_val > 0:
+            er[i] = change_val / volatility_val
+        else:
+            er[i] = 1.0
+    # Smoothing constants
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # fast=2, slow=30
+    kama = np.full(len(close_12h), np.nan)
+    kama[0] = close_12h[0]
+    for i in range(1, len(close_12h)):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    # RSI(14) for momentum filter
-    def calculate_rsi(close_prices, period=14):
-        rsi = np.full_like(close_prices, np.nan, dtype=np.float64)
-        if len(close_prices) < period + 1:
-            return rsi
-        delta = np.diff(close_prices)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.zeros_like(gain)
-        avg_loss = np.zeros_like(loss)
-        
-        avg_gain[period-1] = np.mean(gain[:period])
-        avg_loss[period-1] = np.mean(loss[:period])
-        
-        for i in range(period, len(gain)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-        rsi[period:] = 100 - (100 / (1 + rs[period-1:]))
-        return rsi
+    # Align 12h KAMA to 12h timeframe (identity, but for consistency)
+    kama_aligned = align_htf_to_ltf(prices, df_12h, kama)
     
-    rsi = calculate_rsi(close, 14)
-    
-    # Volume confirmation (20-period average)
+    # Average volume (24-period = 12 hours) for volume confirmation
     avg_volume = np.full(n, np.nan)
-    for i in range(20, n):
-        avg_volume[i] = np.mean(volume[i-20:i])
+    for i in range(24, n):
+        avg_volume[i] = np.mean(volume[i-24:i])
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(20, n):
+    for i in range(24, n):
         # Skip if any required data is not ready
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(rsi[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        kama_val = kama_aligned[i]
+        rsi_val = rsi_1d_aligned[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        rsi_val = rsi[i]
         
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirm = vol > 1.5 * avg_vol
+        # Volume confirmation: current volume > 2.0x average volume
+        volume_confirm = vol > 2.0 * avg_vol
         
         if position == 0:
-            # Long: Price breaks above H3 with volume confirmation and RSI > 50
-            if (price > h3_aligned[i] and volume_confirm and rsi_val > 50):
+            # Long: Price above KAMA + RSI < 30 (oversold) + volume confirmation
+            if (price > kama_val and
+                rsi_val < 30 and
+                volume_confirm):
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below L3 with volume confirmation and RSI < 50
-            elif (price < l3_aligned[i] and volume_confirm and rsi_val < 50):
+            # Short: Price below KAMA + RSI > 70 (overbought) + volume confirmation
+            elif (price < kama_val and
+                  rsi_val > 70 and
+                  volume_confirm):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Price breaks below L3 or RSI < 30
-            if (price < l3_aligned[i] or rsi_val < 30):
+            # Exit long: Price crosses below KAMA or RSI > 70
+            if (price < kama_val or rsi_val > 70):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Price breaks above H3 or RSI > 70
-            if (price > h3_aligned[i] or rsi_val > 70):
+            # Exit short: Price crosses above KAMA or RSI < 30
+            if (price > kama_val or rsi_val < 30):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -123,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_Breakout_Volume_RSI"
-timeframe = "4h"
+name = "12h_1d_KAMA_RSI_Volume"
+timeframe = "12h"
 leverage = 1.0
