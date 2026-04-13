@@ -8,68 +8,79 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h EMA trend filter and volume confirmation.
-    # Long when Bull Power > 0, 12h EMA rising, and volume > 1.5x 20-period mean.
-    # Short when Bear Power < 0, 12h EMA falling, and volume > 1.5x 20-period mean.
-    # Exit when Elder Power reverses or volume drops.
-    # Uses discrete size 0.25 to minimize fee churn. Target: 50-150 total trades over 4 years.
+    # Hypothesis: 4h Camarilla pivot breakout from 1d with volume confirmation.
+    # Long when price breaks above Camarilla H3 level with volume spike.
+    # Short when price breaks below Camarilla L3 level with volume spike.
+    # Exit when price returns to Camarilla pivot point (mean reversion).
+    # Uses 1d Camarilla levels aligned to 4h bars. Discrete size 0.25 to minimize fee churn.
+    # Target: 75-200 total trades over 4 years (19-50/year).
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data (call ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 1d data (call ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 12h EMA(20) for trend filter
-    close_12h = df_12h['close'].values
-    close_12h_series = pd.Series(close_12h)
-    ema_12h = close_12h_series.ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema_12h_rising = ema_12h > np.roll(ema_12h, 1)  # EMA rising vs previous bar
-    ema_12h_falling = ema_12h < np.roll(ema_12h, 1)  # EMA falling vs previous bar
+    # Calculate 1d OHLC for Camarilla pivots
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    open_1d = df_1d['open'].values
     
-    # Align 12h EMA and trend to 6h timeframe
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
-    ema_12h_rising_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_rising)
-    ema_12h_falling_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_falling)
+    # Camarilla pivot levels (based on previous day)
+    # Pivot = (High + Low + Close) / 3
+    # Range = High - Low
+    # H3 = Close + Range * 1.1 / 4
+    # L3 = Close - Range * 1.1 / 4
+    # H4 = Close + Range * 1.1 / 2
+    # L4 = Close - Range * 1.1 / 2
     
-    # Calculate 12h volume mean (20-period) with min_periods
-    volume_12h = df_12h['volume'].values
-    volume_12h_series = pd.Series(volume_12h)
-    vol_ma_20_12h = volume_12h_series.rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20_12h)
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    rng = high_1d - low_1d
     
-    # Calculate Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13 (using 6h EMA13)
-    close_s = pd.Series(close)
-    ema_13 = close_s.ewm(span=13, min_periods=13, adjust=False).mean().values
-    bull_power = high - ema_13  # Bull Power: ability of bulls to push price above EMA
-    bear_power = low - ema_13   # Bear Power: ability of bears to push price below EMA
+    # H3 and L3 are the key breakout levels
+    camarilla_h3 = close_1d + rng * 1.1 / 4.0
+    camarilla_l3 = close_1d - rng * 1.1 / 4.0
+    camarilla_pivot = pivot  # Exit level
     
-    # Volume filter: current 12h volume > 1.5x 20-period mean (volume spike)
-    volume_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_12h)
-    volume_confirmation = volume_12h_aligned > 1.5 * vol_ma_20_12h_aligned
+    # Calculate 1d volume mean (20-period) with min_periods
+    volume_1d = df_1d['volume'].values
+    volume_series = pd.Series(volume_1d)
+    vol_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    
+    # Align HTF indicators to 4h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema_12h_aligned[i]) or np.isnan(ema_12h_rising_aligned[i]) or
-            np.isnan(ema_12h_falling_aligned[i]) or np.isnan(volume_confirmation[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions
-        long_entry = (bull_power[i] > 0 and ema_12h_rising_aligned[i] and volume_confirmation[i])
-        short_entry = (bear_power[i] < 0 and ema_12h_falling_aligned[i] and volume_confirmation[i])
+        # Get current 1d volume (aligned)
+        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
         
-        # Exit conditions: Elder Power reverses or volume drops
-        long_exit = (bull_power[i] <= 0) or (not volume_confirmation[i])
-        short_exit = (bear_power[i] >= 0) or (not volume_confirmation[i])
+        # Volume filter: current 1d volume > 1.5 * 20-period mean (volume spike)
+        volume_confirmation = vol_1d_aligned[i] > 1.5 * vol_ma_aligned[i]
+        
+        # Entry conditions: price breaks Camarilla H3/L3 levels with volume confirmation
+        long_entry = (close[i] > camarilla_h3_aligned[i] and volume_confirmation)
+        short_entry = (close[i] < camarilla_l3_aligned[i] and volume_confirmation)
+        
+        # Exit conditions: price returns to Camarilla pivot point (mean reversion)
+        long_exit = close[i] < camarilla_pivot_aligned[i]
+        short_exit = close[i] > camarilla_pivot_aligned[i]
         
         if long_entry and position != 1:
             position = 1
@@ -94,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_elder_ray_volume_trend_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
