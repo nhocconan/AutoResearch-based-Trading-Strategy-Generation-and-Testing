@@ -21,13 +21,22 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    vol_1d = df_1d['volume'].values
+    
+    # Calculate daily ATR(14)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Calculate 20-period EMA on 1d (trend filter)
     close_1d_series = pd.Series(close_1d)
     ema_20_1d = close_1d_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate RSI(14) on 1d
+    # Calculate 14-period RSI on 1d
     delta = np.diff(close_1d, prepend=close_1d[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -36,29 +45,20 @@ def generate_signals(prices):
     rs = avg_gain / (avg_loss + 1e-10)
     rsi_14 = 100 - (100 / (1 + rs))
     
-    # Get 1w data for trend confirmation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    # Calculate 20-period SMA on 1w
-    sma_20_1w = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
-    
-    # Align indicators to 12h timeframe
+    # Align indicators to 4h timeframe
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
-    sma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_20_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.25
+    position_size = 0.25  # 25% of capital
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema_20_aligned[i]) or 
-            np.isnan(rsi_14_aligned[i]) or
-            np.isnan(sma_20_1w_aligned[i])):
+        if (np.isnan(atr_14_aligned[i]) or 
+            np.isnan(ema_20_aligned[i]) or
+            np.isnan(rsi_14_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -67,20 +67,19 @@ def generate_signals(prices):
         below_ema = close[i] < ema_20_aligned[i]
         
         # RSI conditions: avoid extreme levels
-        rsi_not_overbought = rsi_14_aligned[i] < 70
-        rsi_not_oversold = rsi_14_aligned[i] > 30
+        rsi_not_overbought = rsi_14_aligned[i] < 75
+        rsi_not_oversold = rsi_14_aligned[i] > 25
         
-        # Weekly trend filter: price above/below weekly SMA20
-        above_weekly_sma = close[i] > sma_20_1w_aligned[i]
-        below_weekly_sma = close[i] < sma_20_1w_aligned[i]
+        # Volatility filter: require sufficient ATR
+        vol_ok = atr_14_aligned[i] > 0
         
-        # Entry conditions - more selective
-        long_entry = above_ema and rsi_not_overbought and above_weekly_sma
-        short_entry = below_ema and rsi_not_oversold and below_weekly_sma
+        # Entry conditions
+        long_entry = above_ema and rsi_not_overbought and vol_ok
+        short_entry = below_ema and rsi_not_oversold and vol_ok
         
-        # Exit conditions
-        exit_long = position == 1 and (below_ema or rsi_14_aligned[i] > 75)
-        exit_short = position == -1 and (above_ema or rsi_14_aligned[i] < 25)
+        # Exit conditions: opposite signal or RSI extreme
+        exit_long = position == 1 and (below_ema or rsi_14_aligned[i] > 80)
+        exit_short = position == -1 and (above_ema or rsi_14_aligned[i] < 20)
         
         # Execute signals
         if long_entry and position != 1:
@@ -103,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_ema20_rsi14_weekly_sma20_filter_v2"
-timeframe = "12h"
+name = "4h_ema20_rsi14_atr14_filter"
+timeframe = "4h"
 leverage = 1.0
