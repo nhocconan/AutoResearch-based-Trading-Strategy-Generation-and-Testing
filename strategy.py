@@ -3,12 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian channel breakout with 1d RSI filter and volume confirmation.
-# The Donchian channel (20-period high/low) identifies breakouts in trending markets.
-# 1d RSI (14) filters momentum extremes: avoid overbought/oversold conditions.
-# Volume confirmation ensures breakouts are supported by participation.
-# Works in both bull and bear markets by using 1d RSI to avoid counter-trend entries.
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+# Hypothesis: 4h Donchian breakout with 1d trend filter, volume confirmation, and ATR stop.
+# Donchian(20) breakouts capture trends; 1d EMA50 filters counter-trend trades; volume confirms momentum.
+# Works in bull markets (trend continuation) and bear markets (trend reversals filtered by 1d trend).
+# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,49 +18,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-day data for RSI filter
+    # 1-day data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    # Calculate RSI(14) on 1d
-    delta = np.diff(close_1d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # EMA(50) for 1d trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    avg_gain = np.zeros_like(close_1d)
-    avg_loss = np.zeros_like(close_1d)
+    # Align 1d EMA50 to 4h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Initialize first average
-    if len(gain) >= 14:
-        avg_gain[13] = np.mean(gain[:14])
-        avg_loss[13] = np.mean(loss[:14])
+    # Donchian channels (20-period) on 4h
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Wilder smoothing
-    for i in range(14, len(close_1d)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
+    # Average volume (20-period) for volume confirmation
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d[:13] = np.nan  # Not enough data
-    
-    # Align 1d RSI to 12h timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # Donchian channel on 12h timeframe (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
-    
-    # Average volume (20-period) for confirmation
-    avg_volume = np.full(n, np.nan)
-    for i in range(20, n):
-        avg_volume[i] = np.mean(volume[i-20:i])
+    # ATR(14) for stop loss
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -71,45 +51,49 @@ def generate_signals(prices):
     for i in range(20, n):
         # Skip if any required data is not ready
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(rsi_1d_aligned[i]) or np.isnan(avg_volume[i])):
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(avg_volume[i]) or 
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        rsi_val = rsi_1d_aligned[i]
+        ema_trend = ema50_1d_aligned[i]
+        atr_val = atr[i]
         
         # Volume confirmation: current volume > 1.3x average volume
         volume_confirm = vol > 1.3 * avg_vol
         
         if position == 0:
-            # Long: price breaks above Donchian high + RSI not overbought + volume confirmation
-            if (price > donchian_high[i] and
-                rsi_val < 70 and  # Not overbought
+            # Long: Price breaks above Donchian high + above 1d EMA50 + volume confirmation
+            if (price > donchian_high[i] and 
+                price > ema_trend and
                 volume_confirm):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below Donchian low + RSI not oversold + volume confirmation
-            elif (price < donchian_low[i] and
-                  rsi_val > 30 and  # Not oversold
+            # Short: Price breaks below Donchian low + below 1d EMA50 + volume confirmation
+            elif (price < donchian_low[i] and 
+                  price < ema_trend and
                   volume_confirm):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below Donchian low or RSI overbought
+            # Exit long: Price breaks below Donchian low OR ATR-based stop
             if (price < donchian_low[i] or
-                rsi_val > 70):
+                price < ema_trend or
+                price < close[i-1] - 2.0 * atr_val):  # ATR stop
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above Donchian high or RSI oversold
+            # Exit short: Price breaks above Donchian high OR ATR-based stop
             if (price > donchian_high[i] or
-                rsi_val < 30):
+                price > ema_trend or
+                price > close[i-1] + 2.0 * atr_val):  # ATR stop
                 position = 0
                 signals[i] = 0.0
             else:
@@ -117,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Donchian_RSI_Volume"
-timeframe = "12h"
+name = "4h_1d_Donchian_Trend_Volume_ATR"
+timeframe = "4h"
 leverage = 1.0
