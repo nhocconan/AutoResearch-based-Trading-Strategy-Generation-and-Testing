@@ -5,95 +5,114 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ATR filter
-    # Enter long when price breaks above 4h Donchian upper (20-period) with 1d volume > 1.5x 20-bar avg
-    # Enter short when price breaks below 4h Donchian lower (20-period) with 1d volume > 1.5x 20-bar avg
-    # Exit when price crosses the 4h Donchian midpoint (10-period average of upper/lower)
-    # Uses 1d HTF for volume confirmation (more stable than 4h) and 4h for price channels
-    # Donchian channels provide clear structure; volume confirms participation
-    # ATR filter avoids entries during low volatility (chop)
-    # Works in bull (continuation breaks) and bear (reversal breaks at extremes)
-    # Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag
+    # Hypothesis: 12h Williams Alligator + 1w volume confirmation + chop regime filter
+    # Enter long when Alligator jaws (13) < teeth (8) < lips (5) with volume > 1.5x 20-bar avg and CHOP > 61.8 (ranging)
+    # Enter short when Alligator jaws > teeth > lips with volume confirmation and CHOP > 61.8
+    # Exit when Alligator lines crossover (jaws crosses teeth) or CHOP < 38.2 (strong trend)
+    # Uses 1w HTF for volume average (more stable) and 1d for CHOP calculation
+    # Williams Alligator identifies trend initiation/continuation
+    # Volume confirmation ensures breakouts have participation
+    # Chop filter avoids whipsaws in strong trends, favors ranging markets where Alligator excels
+    # Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for primary timeframe (price channels)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get 12h data for primary timeframe
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Get 1d data for volume confirmation (HTF)
+    # Get 1w data for volume average (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
+        return np.zeros(n)
+    
+    volume_1w = df_1w['volume'].values
+    
+    # Get 1d data for CHOP calculation (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    volume_1d = df_1d['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 4h Donchian channels (20-period)
-    # Upper = highest high over 20 periods, Lower = lowest low over 20 periods
-    high_roll_max = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    low_roll_min = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_upper = high_roll_max
-    donchian_lower = low_roll_min
-    donchian_mid = (donchian_upper + donchian_lower) / 2.0
+    # Williams Alligator on 12h: SMAs of median price
+    # Median price = (high + low) / 2
+    median_price_12h = (high_12h + low_12h) / 2.0
     
-    # Align 4h Donchian levels to 15m timeframe (if needed) - but we're using 4h as primary
-    # Since timeframe is 4h, we need to align to 4h bars directly
-    # For 4h timeframe, prices are already at 4h resolution, so no alignment needed
-    # However, to be safe and follow MTF rules, we'll use the 4h data directly
+    # Alligator lines: jaws (13), teeth (8), lips (5)
+    # Smoothed with 3-period offset as per Williams
+    jaw = pd.Series(median_price_12h).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(median_price_12h).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(median_price_12h).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Calculate 1d average volume for confirmation
-    avg_volume_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume_1d > (1.5 * avg_volume_1d)
+    # Align Alligator lines to 12h timeframe (already aligned via get_htf_data)
+    # No additional alignment needed as we're using 12h data directly
     
-    # Calculate ATR for volatility filter (14-period ATR on 4h)
-    tr1 = np.abs(high_4h - low_4h)
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr1[0] = 0  # first bar has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
+    # Volume confirmation: volume > 1.5x 20-bar average volume (using 1w volume for stability)
+    avg_volume_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
+    avg_volume_1w_aligned = align_htf_to_ltf(prices, df_1w, avg_volume_1w)
+    volume_confirmed = volume > (1.5 * avg_volume_1w_aligned)
+    
+    # Choppiness Index on 1d: CHOP > 61.8 = ranging (good for Alligator), CHOP < 38.2 = trending (avoid)
+    # True Range = max(high-low, abs(high-previous close), abs(low-previous close))
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]  # first bar
+    tr2[0] = np.abs(high_1d[0] - close_1d[0])
+    tr3[0] = np.abs(low_1d[0] - close_1d[0])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_filter = atr > 0  # avoid zero ATR; in practice, ATR > 0.001 * price
     
-    # Align 1d volume confirmation and ATR to 4h timeframe
-    volume_confirmed_aligned = align_htf_to_ltf(prices, df_1d, volume_confirmed)
-    atr_aligned = align_htf_to_ltf(prices, df_4h, atr)
-    atr_filter_aligned = atr_aligned > (0.001 * close_4h)  # ATR > 0.1% of price
+    # ATR(14) = sum of TR over 14 periods
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Sum of True Range over 14 periods
+    sum_tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    
+    # Choppiness Index = 100 * log10(sum_tr14 / (atr14 * 14)) / log10(14)
+    chop = 100 * np.log10(sum_tr14 / (atr14 * 14)) / np.log10(14)
+    
+    # Align CHOP to 12h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
     
-    for i in range(20, n):  # start from 20 to ensure Donchian is valid
+    for i in range(1, n):  # start from 1 to access previous bar
         # Skip if data not ready
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(donchian_mid[i]) or
-            np.isnan(volume_confirmed_aligned[i]) or np.isnan(atr_filter_aligned[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(volume_confirmed[i]) or np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > donchian_upper[i]  # break above upper channel
-        breakout_down = close[i] < donchian_lower[i]  # break below lower channel
+        # Alligator conditions
+        # Long: jaws < teeth < lips (alligator sleeping, waking up bullish)
+        alligator_long = (jaw[i] < teeth[i]) and (teeth[i] < lips[i])
+        # Short: jaws > teeth > lips (alligator sleeping, waking up bearish)
+        alligator_short = (jaw[i] > teeth[i]) and (teeth[i] > lips[i])
         
-        # Entry conditions with volume confirmation and ATR filter
-        long_entry = breakout_up and volume_confirmed_aligned[i] and atr_filter_aligned[i] and position != 1
-        short_entry = breakout_down and volume_confirmed_aligned[i] and atr_filter_aligned[i] and position != -1
+        # Entry conditions with volume confirmation and chop filter (ranging market)
+        long_entry = alligator_long and volume_confirmed[i] and (chop_aligned[i] > 61.8) and position != 1
+        short_entry = alligator_short and volume_confirmed[i] and (chop_aligned[i] > 61.8) and position != -1
         
-        # Exit conditions: cross the midpoint
-        exit_long = (position == 1 and close[i] < donchian_mid[i])
-        exit_short = (position == -1 and close[i] > donchian_mid[i])
+        # Exit conditions
+        # Exit on Alligator crossover (jaws crosses teeth) or strong trend (chop < 38.2)
+        exit_long = (position == 1) and ((jaw[i] > teeth[i]) or (chop_aligned[i] < 38.2))
+        exit_short = (position == -1) and ((jaw[i] < teeth[i]) or (chop_aligned[i] < 38.2))
         
         # Execute signals
         if long_entry:
@@ -119,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_breakout_volume_filter_v1"
-timeframe = "4h"
+name = "12h_1w_1d_alligator_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
