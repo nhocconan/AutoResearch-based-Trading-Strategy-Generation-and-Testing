@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -30,7 +30,7 @@ def generate_signals(prices):
             np.abs(low_1d - np.roll(close_1d, 1))
         )
     )
-    tr_1d[0] = high_1d[0] - low_1d[0]  # First value
+    tr_1d[0] = high_1d[0] - low_1d[0]
     atr_1d = np.zeros_like(tr_1d)
     for i in range(len(tr_1d)):
         if i < 14:
@@ -70,7 +70,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25
     
-    for i in range(200, n):
+    for i in range(100, n):
         # Skip if data not ready
         if (np.isnan(ema_200_1d_aligned[i]) or 
             np.isnan(rsi_1d_aligned[i]) or
@@ -118,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_ema200_rsi_momentum_filter_v1"
-timeframe = "1d"
+name = "12h_ema200_rsi_momentum_filter_v1"
+timeframe = "12h"
 leverage = 1.0
