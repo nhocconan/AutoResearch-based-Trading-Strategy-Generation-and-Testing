@@ -8,12 +8,12 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for ATR and range
+    # Daily data for pivot levels and volume
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -23,81 +23,94 @@ def generate_signals(prices):
     if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Daily ATR for volatility-based stops and sizing
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate daily Camarilla pivot levels (using previous day's data)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Daily range for breakout levels
-    daily_range = df_1d['high'] - df_1d['low']
+    # Pivot point and range
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
+    
+    # Resistance levels
+    r1 = pivot + (range_hl * 1.1 / 12)
+    r2 = pivot + (range_hl * 1.1 / 6)
+    r3 = pivot + (range_hl * 1.1 / 4)
+    r4 = pivot + (range_hl * 1.1 / 2)
+    
+    # Support levels
+    s1 = pivot - (range_hl * 1.1 / 12)
+    s2 = pivot - (range_hl * 1.1 / 6)
+    s3 = pivot - (range_hl * 1.1 / 4)
+    s4 = pivot - (range_hl * 1.1 / 2)
     
     # Weekly EMA for trend filter
     ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean()
     
-    # Align all data to 1h timeframe
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    daily_range_aligned = align_htf_to_ltf(prices, df_1d, daily_range)
+    # Align all data to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w.values)
     
-    # Hourly ATR for entry timing
-    tr_h = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr_h[0] = high[0] - low[0]  # First bar
-    atr_14_h = pd.Series(tr_h).rolling(window=14, min_periods=14).mean()
+    # Daily volume and its 20-period average
+    volume_1d = df_1d['volume'].values
+    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean()
+    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d.values)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.20  # 20% position size
-    
-    # Precompute session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    position_size = 0.25  # 25% position size
     
     for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(daily_range_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr_14_h[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or
+            np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(s2_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
+        # Volume condition: current 6h volume > 1.5x 20-period average
+        volume_6h_approx = volume[i]  # Current 6h bar volume
+        volume_ma_20_6h = volume_ma_20_1d_aligned[i] / 4  # Approximate 20-period average for 6h
+        volume_condition = volume_6h_approx > (volume_ma_20_6h * 1.5)
         
         # Trend filter: only long when price > weekly EMA50, short when price < weekly EMA50
         long_trend = close[i] > ema_50_1w_aligned[i]
         short_trend = close[i] < ema_50_1w_aligned[i]
         
-        # Breakout condition: price breaks daily high/low with volatility expansion
-        # Long breakout: price > daily high + 0.5 * ATR
-        # Short breakdown: price < daily low - 0.5 * ATR
-        long_breakout = close[i] > high[i-1] + 0.5 * atr_14_1d_aligned[i]
-        short_breakout = close[i] < low[i-1] - 0.5 * atr_14_1d_aligned[i]
-        
-        # Volume confirmation: current hour volume > 1.5x 14-period average
-        vol_condition = volume[i] > (atr_14_h[i] * 1.5)  # Using ATR as proxy for normal volatility
+        # Entry conditions: price near Camarilla levels with volume and trend confirmation
+        # Long when price touches or crosses above S1/S2 with volume and uptrend
+        # Short when price touches or crosses below R1/R2 with volume and downtrend
+        near_support = (close[i] <= s1_aligned[i] * 1.002) or (close[i] <= s2_aligned[i] * 1.002)
+        near_resistance = (close[i] >= r1_aligned[i] * 0.998) or (close[i] >= r2_aligned[i] * 0.998)
         
         if position == 0:
-            if long_breakout and vol_condition and long_trend:
+            if near_support and volume_condition and long_trend:
                 position = 1
                 signals[i] = position_size
-            elif short_breakout and vol_condition and short_trend:
+            elif near_resistance and volume_condition and short_trend:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit when price reverses or volatility contracts
-            if close[i] < ema_50_1w_aligned[i] or atr_14_h[i] < 0.5 * atr_14_1d_aligned[i]:
+            # Exit when price reaches pivot or shows reversal signs
+            if close[i] >= pivot_aligned[i] * 0.998:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit when price reverses or volatility contracts
-            if close[i] > ema_50_1w_aligned[i] or atr_14_h[i] < 0.5 * atr_14_1d_aligned[i]:
+            # Exit when price reaches pivot or shows reversal signs
+            if close[i] <= pivot_aligned[i] * 1.002:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -105,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_1d1w_ATR_Breakout_With_Volume_Filter_v1"
-timeframe = "1h"
+name = "6h_1d1w_Camarilla_Pivot_Breakout_With_Volume_Confirmation_v1"
+timeframe = "6h"
 leverage = 1.0
