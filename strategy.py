@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h timeframe with 1-day Elder Ray (Bull/Bear Power) + 1-week trend filter
-# Strategy: Long when Bull Power > 0 and weekly EMA50 > EMA200 (bullish regime)
-# Short when Bear Power < 0 and weekly EMA50 < EMA200 (bearish regime)
-# Elder Ray = Close - EMA13 (Bull Power) and EMA13 - Close (Bear Power)
-# Uses 1-day EMA13 for power calculation and 1-week EMAs for regime filter
-# Aims to capture momentum in trending markets while avoiding counter-trend whipsaws
-# Target: 50-150 total trades over 4 years (12-37/year)
+# Hypothesis: 4h timeframe with 1d/1w trend filter and volume confirmation
+# Strategy: Long when price closes above 1d high of previous 10 days and 1w close > 1w open (bullish week)
+#           with volume > 1.3x 20-period average
+#           Short when price closes below 1d low of previous 10 days and 1w close < 1w open (bearish week)
+#           with volume > 1.3x 20-period average
+# Uses multi-timeframe alignment: 1d for price channels, 1w for trend filter
+# Volume surge confirms breakout strength in direction of higher timeframe trend
+# Target: 15-35 total trades over 4 years (4-9/year) to minimize fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,37 +20,44 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for Elder Ray calculation
+    # Get 1d data for price channels (10-day high/low)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    open_1d = df_1d['open'].values
     
-    # Calculate EMA13 on 1d for Elder Ray
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate 10-day high/low channels
+    high_10_1d = pd.Series(high_1d).rolling(window=10, min_periods=10).max().values
+    low_10_1d = pd.Series(low_1d).rolling(window=10, min_periods=10).min().values
     
-    # Elder Ray components
-    bull_power_1d = close_1d - ema13_1d  # Close - EMA13
-    bear_power_1d = ema13_1d - close_1d   # EMA13 - Close
-    
-    # Get 1w data for regime filter (EMA50 and EMA200)
+    # Get 1w data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 10:
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    open_1w = df_1w['open'].values
     
-    # Align indicators to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # Weekly bullish/bearish filter
+    weekly_bullish = close_1w > open_1w
+    weekly_bearish = close_1w < open_1w
+    
+    # Volume average (20-period)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Align 1d indicators to 4h timeframe
+    high_10_1d_aligned = align_htf_to_ltf(prices, df_1d, high_10_1d)
+    low_10_1d_aligned = align_htf_to_ltf(prices, df_1d, low_10_1d)
+    
+    # Align 1w indicators to 4h timeframe
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,24 +65,28 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(ema200_1w_aligned[i])):
+        if (np.isnan(high_10_1d_aligned[i]) or 
+            np.isnan(low_10_1d_aligned[i]) or 
+            np.isnan(weekly_bullish_aligned[i]) or 
+            np.isnan(weekly_bearish_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: weekly EMA50 > EMA200 = bullish, < = bearish
-        bullish_regime = ema50_1w_aligned[i] > ema200_1w_aligned[i]
-        bearish_regime = ema50_1w_aligned[i] < ema200_1w_aligned[i]
+        # Volume surge condition
+        volume_surge = volume[i] > 1.3 * vol_ma_20[i]
         
-        # Entry conditions
-        long_entry = bull_power_aligned[i] > 0 and bullish_regime
-        short_entry = bear_power_aligned[i] > 0 and bearish_regime  # Bear Power > 0 means bearish pressure
+        # Breakout conditions with weekly trend filter
+        long_breakout = close[i] > high_10_1d_aligned[i]
+        short_breakout = close[i] < low_10_1d_aligned[i]
         
-        # Exit conditions: opposite Elder Ray signal or regime change
-        exit_long = position == 1 and (bear_power_aligned[i] > 0 or not bullish_regime)
-        exit_short = position == -1 and (bull_power_aligned[i] > 0 or not bearish_regime)
+        # Entry logic: breakout in direction of weekly trend with volume
+        long_entry = long_breakout and weekly_bullish_aligned[i] > 0.5 and volume_surge
+        short_entry = short_breakout and weekly_bearish_aligned[i] > 0.5 and volume_surge
+        
+        # Exit conditions: opposite breakout or loss of weekly trend alignment
+        exit_long = position == 1 and (short_breakout or weekly_bullish_aligned[i] < 0.5)
+        exit_short = position == -1 and (long_breakout or weekly_bearish_aligned[i] < 0.5)
         
         # Execute signals
         if long_entry and position != 1:
@@ -97,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_1w_elder_ray_regime_v1"
-timeframe = "6h"
+name = "4h_1d_1w_trend_filter_volume_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
