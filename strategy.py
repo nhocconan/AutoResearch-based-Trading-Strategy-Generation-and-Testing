@@ -1,26 +1,31 @@
 #!/usr/bin/env python3
 """
-6h_1d_Pivot_Reversion
-Hypothesis: Fade at 1d pivot support/resistance with volume exhaustion during 6h range-bound markets.
-In BTC/ETH, price often reverts to daily pivot after overextended moves, especially in low volatility.
-Works in both bull (fade from R1/R2) and bear (fade from S1/S2) markets by exploiting mean reversion.
-Targets 15-25 trades/year with strict entry conditions to minimize fee drag.
+12h_1d_Camarilla_Breakout_Volume
+Hypothesis: Breakout above R4 or below S4 of daily Camarilla levels with volume expansion.
+Daily Camarilla provides strong institutional support/resistance. Volume confirms institutional participation.
+Works in both bull (breakouts up) and bear (breakdowns down) markets. Target: 15-25 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_pivot_points(high, low, close):
-    """Calculate standard pivot points and support/resistance levels."""
-    P = (high + low + close) / 3.0
-    R1 = 2 * P - low
-    S1 = 2 * P - high
-    R2 = P + (high - low)
-    S2 = P - (high - low)
-    R3 = high + 2 * (P - low)
-    S3 = low - 2 * (high - P)
-    return P, R1, R2, R3, S1, S2, S3
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels."""
+    range_val = high - low
+    range_val = np.where(range_val == 0, 1e-10, range_val)
+    C = close
+    H = high
+    L = low
+    R1 = C + ((H - L) * 1.0833)
+    R2 = C + ((H - L) * 1.1666)
+    R3 = C + ((H - L) * 1.2500)
+    R4 = C + ((H - L) * 1.5000)
+    S1 = C - ((H - L) * 1.0833)
+    S2 = C - ((H - L) * 1.1666)
+    S3 = C - ((H - L) * 1.2500)
+    S4 = C - ((H - L) * 1.5000)
+    return R1, R2, R3, R4, S1, S2, S3, S4
 
 def generate_signals(prices):
     n = len(prices)
@@ -32,33 +37,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for pivot points
+    # Get daily data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d pivot points
-    P_1d, R1_1d, R2_1d, R3_1d, S1_1d, S2_1d, S3_1d = calculate_pivot_points(high_1d, low_1d, close_1d)
+    # Calculate daily Camarilla levels
+    R1_1d, R2_1d, R3_1d, R4_1d, S1_1d, S2_1d, S3_1d, S4_1d = calculate_camarilla(high_1d, low_1d, close_1d)
     
-    # Align pivot levels to 6h timeframe
-    P_1d_aligned = align_htf_to_ltf(prices, df_1d, P_1d)
-    R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
-    S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
+    # Align all data to 12h timeframe
+    R4_1d_aligned = align_htf_to_ltf(prices, df_1d, R4_1d)
+    S4_1d_aligned = align_htf_to_ltf(prices, df_1d, S4_1d)
     
-    # 6h ATR for volatility filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Volume exhaustion: current volume < 0.7 * 20-period average (low interest at extremes)
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_exhaustion = volume < (vol_ma_20 * 0.7)
+    volume_expansion = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -66,20 +63,16 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(P_1d_aligned[i]) or np.isnan(R1_1d_aligned[i]) or 
-            np.isnan(S1_1d_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(volume_exhaustion[i])):
+        if (np.isnan(R4_1d_aligned[i]) or np.isnan(S4_1d_aligned[i]) or 
+            np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Calculate distance from pivot as percentage of ATR
-        dist_from_pivot = abs(close[i] - P_1d_aligned[i]) / atr[i]
+        # Long: breakout above R4 with volume expansion
+        long_condition = (close[i] > R4_1d_aligned[i]) and volume_expansion[i]
         
-        # Long: price near S1 with volume exhaustion and not too far from pivot
-        long_condition = (close[i] <= S1_1d_aligned[i] * 1.001) and volume_exhaustion[i] and (dist_from_pivot < 3.0)
-        
-        # Short: price near R1 with volume exhaustion and not too far from pivot
-        short_condition = (close[i] >= R1_1d_aligned[i] * 0.999) and volume_exhaustion[i] and (dist_from_pivot < 3.0)
+        # Short: breakdown below S4 with volume expansion
+        short_condition = (close[i] < S4_1d_aligned[i]) and volume_expansion[i]
         
         if long_condition and position != 1:
             position = 1
@@ -93,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Pivot_Reversion"
-timeframe = "6h"
+name = "12h_1d_Camarilla_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
