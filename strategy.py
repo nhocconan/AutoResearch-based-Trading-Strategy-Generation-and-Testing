@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe with 1d Donchian channel breakout and volume confirmation.
-# Long: Price closes above 20-day Donchian high + volume > 1.3x average volume (20-period).
-# Short: Price closes below 20-day Donchian low + volume > 1.3x average volume.
-# Exit: Price closes opposite the Donchian channel (long exit below Donchian low, short exit above Donchian high).
-# Uses 1d Donchian channels for trend structure, 12h for execution with volume confirmation.
-# Position size: 0.25 (25%) to manage drawdown in volatile markets.
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+# Hypothesis: 4h timeframe with 1-day Choppiness Index regime filter + volume confirmation.
+# Long: Price closes above Donchian(20) upper band + volume > 1.5x avg volume (20-period) + Chop(14) > 61.8 (range).
+# Short: Price closes below Donchian(20) lower band + volume > 1.5x avg volume + Chop(14) > 61.8.
+# Exit: Price crosses midline (average of upper/lower band) or Chop < 38.2 (trend regime).
+# Uses Chop to filter for ranging markets where mean reversion works, volume to confirm breakouts.
+# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,30 +20,48 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for Donchian channels
+    # 1d data for Choppiness Index
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 20-period Donchian channels (using prior day's data to avoid look-ahead)
-    donchian_high = np.full(len(high_1d), np.nan)
-    donchian_low = np.full(len(low_1d), np.nan)
-    for i in range(20, len(high_1d)):
-        # Use last 20 days up to previous day (i-1) to avoid look-ahead
-        donchian_high[i] = np.max(high_1d[i-20:i])
-        donchian_low[i] = np.min(low_1d[i-20:i])
+    # Calculate True Range and ATR(14) for Choppiness
+    tr1 = np.zeros(len(high_1d))
+    tr1[0] = high_1d[0] - low_1d[0]
+    for i in range(1, len(high_1d)):
+        tr1[i] = max(high_1d[i] - low_1d[i], 
+                     abs(high_1d[i] - close_1d[i-1]), 
+                     abs(low_1d[i] - close_1d[i-1]))
+    
+    atr_14 = np.zeros(len(tr1))
+    for i in range(14, len(tr1)):
+        atr_14[i] = np.mean(tr1[i-14:i])
+    
+    # Calculate Choppiness Index: 100 * log10(sum(TR14)/(ATR14 * n)) / log10(n)
+    chop = np.full(len(close_1d), 50.0)  # default neutral
+    for i in range(14, len(close_1d)):
+        sum_tr = np.sum(tr1[i-14:i+1])  # including current
+        if atr_14[i] > 0 and len(close_1d[i-14:i+1]) > 0:
+            chop[i] = 100 * np.log10(sum_tr / (atr_14[i] * 14)) / np.log10(14)
+    
+    # Donchian(20) channels on 4h
+    highest_20 = np.full(n, np.nan)
+    lowest_20 = np.full(n, np.nan)
+    for i in range(20, n):
+        highest_20[i] = np.max(high[i-20:i])
+        lowest_20[i] = np.min(low[i-20:i])
     
     # Average volume (20-period) for volume confirmation
     avg_volume = np.full(n, np.nan)
     for i in range(20, n):
         avg_volume[i] = np.mean(volume[i-20:i])
     
-    # Align 1d Donchian levels to 12h
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Align 1d Chop to 4h
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -52,41 +69,47 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(avg_volume[i])):
+        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
+            np.isnan(chop_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        upper = donchian_high_aligned[i]
-        lower = donchian_low_aligned[i]
+        upper = highest_20[i]
+        lower = lowest_20[i]
+        chop_val = chop_aligned[i]
+        midline = (upper + lower) / 2
         
-        # Volume confirmation: current volume > 1.3x average volume
-        volume_confirm = vol > 1.3 * avg_vol
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirm = vol > 1.5 * avg_vol
+        # Chop regime: > 61.8 = ranging (good for mean reversion)
+        ranging = chop_val > 61.8
+        # Trend regime: < 38.2 = trending (exit signal)
+        trending = chop_val < 38.2
         
         if position == 0:
-            # Long: price closes above Donchian high + volume confirmation
-            if (price > upper and volume_confirm):
+            # Long: price closes above upper band + volume + ranging
+            if (price > upper and volume_confirm and ranging):
                 position = 1
                 signals[i] = position_size
-            # Short: price closes below Donchian low + volume confirmation
-            elif (price < lower and volume_confirm):
+            # Short: price closes below lower band + volume + ranging
+            elif (price < lower and volume_confirm and ranging):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below Donchian low (opposite band)
-            if price < lower:
+            # Exit long: price crosses below midline OR trend regime
+            if (price < midline) or trending:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes above Donchian high (opposite band)
-            if price > upper:
+            # Exit short: price crosses above midline OR trend regime
+            if (price > midline) or trending:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -94,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Donchian_Breakout_Volume"
-timeframe = "12h"
+name = "4h_1d_Chop_Range_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
