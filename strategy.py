@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -13,48 +13,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for calculations
+    # 1-day data for ATR and volatility regime
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Calculate daily range and body size
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    open_1d = df_1d['open'].values
     volume_1d = df_1d['volume'].values
     
-    body_size_1d = np.abs(close_1d - open_1d)
-    range_1d = high_1d - low_1d
+    # 4-hour ATR for volatility filter
+    tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]))
+    tr2 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.inf], np.maximum(tr1, tr2)])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Daily 20-period SMA for Bollinger Bands
-    sma_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean()
-    std_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std()
-    upper_bb_1d = sma_20_1d + (2 * std_20_1d)
-    lower_bb_1d = sma_20_1d - (2 * std_20_1d)
+    # Daily ATR for volatility regime filter
+    tr1d = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
+    tr2d = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_d = np.concatenate([[np.inf], np.maximum(tr1d, tr2d)])
+    atr_1d = pd.Series(tr_d).rolling(window=14, min_periods=14).mean().values
+    atr_1d_ma = pd.Series(atr_1d).rolling(window=10, min_periods=10).mean().values
     
-    # Weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean()
+    # Align daily ATR and MA to 4h
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr_1d_ma_aligned = align_htf_to_ltf(prices, df_1d, atr_1d_ma)
     
-    # Align 1d data to daily timeframe (no additional alignment needed as we're using 1d timeframe)
-    # Since our primary timeframe is 1d, we can use the values directly
-    body_size_1d_aligned = body_size_1d
-    range_1d_aligned = range_1d
-    upper_bb_1d_aligned = upper_bb_1d.values
-    lower_bb_1d_aligned = lower_bb_1d.values
+    # 4-hour Bollinger Bands (20, 2)
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean()
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std()
+    upper_bb = sma_20 + (2 * std_20)
+    lower_bb = sma_20 - (2 * std_20)
     
-    # Align weekly EMA50 to daily timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w.values)
-    
-    # Daily volume and its 20-period average
-    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean()
-    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d.values)
+    # Bollinger Band Width for squeeze detection
+    bb_width = (upper_bb - lower_bb) / sma_20
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean()
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -62,54 +56,60 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(body_size_1d_aligned[i]) or np.isnan(range_1d_aligned[i]) or
-            np.isnan(upper_bb_1d_aligned[i]) or np.isnan(lower_bb_1d_aligned[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
+        if (np.isnan(atr[i]) or np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]) or
+            np.isnan(bb_width[i]) or np.isnan(bb_width_ma[i]) or
+            np.isnan(atr_1d_aligned[i]) or np.isnan(atr_1d_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current 1d volume > 1.5x 20-period average
-        volume_condition = volume_1d[i] > (volume_ma_20_1d_aligned[i] * 1.5)
+        # Volatility regime filter: only trade when volatility is low (squeeze)
+        # BB Width < MA of BB Width indicates low volatility/squeeze
+        volatility_low = bb_width[i] < bb_width_ma[i]
         
-        # Trend filter: only long when price > weekly EMA50, short when price < weekly EMA50
-        long_trend = close[i] > ema_50_1w_aligned[i]
-        short_trend = close[i] < ema_50_1w_aligned[i]
+        # Additional volatility filter: daily ATR below its MA (low volatility environment)
+        vol_regime = atr_1d_aligned[i] < atr_1d_ma_aligned[i]
         
-        # Candlestick pattern: small body (doji-like) near Bollinger Bands
-        # Long: small body near lower BB (potential reversal up)
-        # Short: small body near upper BB (potential reversal down)
-        body_ratio = body_size_1d_aligned[i] / range_1d_aligned[i] if range_1d_aligned[i] > 0 else 1
-        bb_width = upper_bb_1d_aligned[i] - lower_bb_1d_aligned[i]
-        near_lower_bb = close[i] < lower_bb_1d_aligned[i] + (0.1 * bb_width)
-        near_upper_bb = close[i] > upper_bb_1d_aligned[i] - (0.1 * bb_width)
+        # Only trade in low volatility regimes
+        if not (volatility_low and vol_regime):
+            signals[i] = 0.0
+            continue
         
-        long_pattern = (body_ratio < 0.3) and near_lower_bb
-        short_pattern = (body_ratio < 0.3) and near_upper_bb
+        # Bollinger Band breakout signals
+        # Long: price breaks above upper BB with volume confirmation
+        # Short: price breaks below lower BB with volume confirmation
+        long_breakout = close[i] > upper_bb[i]
+        short_breakout = close[i] < lower_bb[i]
+        
+        # Volume confirmation: current volume > 1.5x average volume
+        # Use 20-period volume average for confirmation
+        vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        if np.isnan(vol_ma[i]):
+            signals[i] = 0.0
+            continue
+        volume_confirm = volume[i] > (vol_ma[i] * 1.5)
         
         # Entry conditions
         if position == 0:
-            if long_pattern and volume_condition and long_trend:
+            if long_breakout and volume_confirm:
                 position = 1
                 signals[i] = position_size
-            elif short_pattern and volume_condition and short_trend:
+            elif short_breakout and volume_confirm:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit when price crosses back above the middle (SMA) or opposite conditions
-            middle_bb_1d = sma_20_1d + std_20_1d  # middle + 0.5*bandwidth
-            middle_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, middle_bb_1d.values)
-            if close[i] > middle_bb_1d_aligned[i]:
+            # Exit when price returns to middle of Bollinger Bands
+            middle_bb = sma_20.iloc[i] if hasattr(sma_20, 'iloc') else sma_20[i]
+            if close[i] < middle_bb:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit when price crosses back below the middle (SMA) or opposite conditions
-            middle_bb_1d = sma_20_1d - std_20_1d  # middle - 0.5*bandwidth
-            middle_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, middle_bb_1d.values)
-            if close[i] < middle_bb_1d_aligned[i]:
+            # Exit when price returns to middle of Bollinger Bands
+            middle_bb = sma_20.iloc[i] if hasattr(sma_20, 'iloc') else sma_20[i]
+            if close[i] > middle_bb:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -117,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_Doji_BB_Trend_Filter"
-timeframe = "1d"
+name = "4h_1d_BB_Squeeze_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
