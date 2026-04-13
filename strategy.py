@@ -1,12 +1,13 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-Hypothesis: 1h RSI mean reversion with 4h trend filter and 1d volume confirmation.
-- 4h EMA(50) determines trend direction: long only when price > EMA50, short only when price < EMA50
-- 1h RSI(14) for mean reversion entries: long when RSI < 30, short when RSI > 70
-- 1d volume spike (volume > 1.5x 20-period average) confirms momentum behind the move
-- Session filter: only trade 08:00-20:00 UTC to avoid low-liquidity hours
-- Fixed position size: 0.20 (20% of capital) to manage drawdown
-- Target: 15-30 trades/year to stay under fee drag limits
+Hypothesis: 6h trading with 12h directional filter and 1d volume confirmation.
+Uses 12h EMA(20) for trend direction, 1d volume spike (volume > 1.8x 20-period average) 
+to confirm momentum, and 6h RSI(14) for entry timing. Long when 12h EMA up + 1d volume spike + 6h RSI crosses above 50.
+Short when 12h EMA down + 1d volume spike + 6h RSI crosses below 50.
+Exit when RSI crosses back to 50 or opposite EMA direction.
+Designed for 60-120 total trades over 4 years (15-30/year) to minimize fee drag.
+Works in bull/bear: EMA filter adapts to trend, volume confirms strength, RSI provides mean-reversion within trend.
 """
 
 import numpy as np
@@ -15,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,14 +24,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    close_12h = df_12h['close'].values
+    
+    # Calculate 12h EMA(20) for trend direction
+    ema_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     # Get 1d data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
@@ -38,50 +41,56 @@ def generate_signals(prices):
         return np.zeros(n)
     
     volume_1d = df_1d['volume'].values
+    
+    # Calculate 1d volume spike (volume > 1.8x 20-period average)
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_1d > (vol_ma_20 * 1.5)
+    vol_spike = volume_1d > (vol_ma_20 * 1.8)
     vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
     
-    # Calculate 1h RSI(14)
+    # Calculate 6h RSI(14) for entry timing
+    # RSI = 100 - (100 / (1 + RS)), RS = average gain / average loss
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     
+    # Wilder's smoothing (alpha = 1/period)
     avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     rs = avg_gain / (avg_loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
     
-    # Pre-compute session hours (08:00-20:00 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.20  # 20% of capital
+    position_size = 0.25  # 25% of capital
     
-    for i in range(100, n):
-        # Skip if data not ready or outside session
-        if (np.isnan(ema_4h_aligned[i]) or 
+    for i in range(20, n):
+        # Skip if data not ready
+        if (np.isnan(ema_12h_aligned[i]) or 
             np.isnan(vol_spike_aligned[i]) or 
-            np.isnan(rsi[i]) or 
-            not in_session[i]):
+            np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
-        trend_up = close[i] > ema_4h_aligned[i]
-        trend_down = close[i] < ema_4h_aligned[i]
+        # Determine trend direction from 12h EMA
+        ema_up = ema_12h_aligned[i] > ema_12h_aligned[i-1] if i > 0 else False
+        ema_down = ema_12h_aligned[i] < ema_12h_aligned[i-1] if i > 0 else False
+        
+        # Volume confirmation
         vol_confirm = vol_spike_aligned[i] > 0.5
         
-        long_entry = rsi_oversold and trend_up and vol_confirm
-        short_entry = rsi_overbought and trend_down and vol_confirm
+        # RSI conditions
+        rsi_above_50 = rsi[i] > 50
+        rsi_below_50 = rsi[i] < 50
+        rsi_cross_up = (i > 0) and (rsi[i-1] <= 50) and (rsi[i] > 50)
+        rsi_cross_down = (i > 0) and (rsi[i-1] >= 50) and (rsi[i] < 50)
         
-        # Exit when RSI returns to neutral zone (40-60)
-        exit_long = position == 1 and rsi[i] > 40
-        exit_short = position == -1 and rsi[i] < 60
+        # Entry conditions
+        long_entry = ema_up and vol_confirm and rsi_cross_up
+        short_entry = ema_down and vol_confirm and rsi_cross_down
+        
+        # Exit conditions: RSI crosses back to 50 or trend changes
+        exit_long = (position == 1) and (rsi_cross_down or ema_down)
+        exit_short = (position == -1) and (rsi_cross_up or ema_up)
         
         # Execute signals
         if long_entry and position != 1:
@@ -104,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_rsi_meanrev_4h_trend_1d_vol"
-timeframe = "1h"
+name = "6h_12h_ema_1d_volume_rsi"
+timeframe = "6h"
 leverage = 1.0
