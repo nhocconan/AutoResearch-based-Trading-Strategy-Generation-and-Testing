@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_1d_Pivot_Breakout_With_Volume_Confirmation
-Hypothesis: 12-hour breakout of daily pivot levels (resistance/support) with volume confirmation and ATR-based stop works in both bull and bear markets.
-Pivot levels calculated from prior day's OHLC. Long when price breaks above R1 with volume > 1.5x 20-period average, short when breaks below S1.
-Volume filter ensures breakouts are genuine. ATR stop limits downside. Target: 20-30 trades/year per symbol.
+4h_1d_Donchian_Breakout_With_Volume_Confirmation
+Hypothesis: 4-hour Donchian channel breakouts with volume confirmation and 1-day trend filter capture high-probability swing moves in both bull and bear markets.
+Breakouts occur when price closes above/below the 20-period 4h Donchian channel with volume > 1.5x 20-period 4h average, filtered by 1-day EMA trend.
+Targets 20-30 trades/year per symbol (~80-120 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,45 +20,43 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate ATR for volatility normalization
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[0], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # 4h Donchian channel (20-period high/low)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Daily pivot levels from prior day's OHLC
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
-    
-    pivot = (prev_high + prev_low + prev_close) / 3
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    # 4h volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_expansion = volume > (vol_ma_20 * 1.5)
+    
+    # 1-day EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 21:
+        ema21_1d = np.full(len(prices), np.nan)
+    else:
+        close_1d = df_1d['close'].values
+        ema21_1d_raw = pd.Series(close_1d).ewm(span=21, min_periods=21, adjust=False).mean().values
+        ema21_1d = align_htf_to_ltf(prices, df_1d, ema21_1d_raw)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(20, n):  # warmup period
+    for i in range(20, n):  # warmup for Donchian
         # Skip if any required data is not ready
-        if (np.isnan(r1[i]) or np.isnan(s1[i]) or 
-            np.isnan(volume_expansion[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema21_1d[i]) or np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Long signal: break above R1 with volume expansion
-        long_signal = (high[i] > r1[i] and volume_expansion[i])
+        # Long signal: close above Donchian high with volume expansion and 1-day uptrend
+        long_signal = (close[i] > donchian_high[i] and 
+                      volume_expansion[i] and 
+                      close[i] > ema21_1d[i])
         
-        # Short signal: break below S1 with volume expansion
-        short_signal = (low[i] < s1[i] and volume_expansion[i])
+        # Short signal: close below Donchian low with volume expansion and 1-day downtrend
+        short_signal = (close[i] < donchian_low[i] and 
+                       volume_expansion[i] and 
+                       close[i] < ema21_1d[i])
         
         if long_signal and position != 1:
             position = 1
@@ -72,6 +70,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Pivot_Breakout_With_Volume_Confirmation"
-timeframe = "12h"
+name = "4h_1d_Donchian_Breakout_With_Volume_Confirmation"
+timeframe = "4h"
 leverage = 1.0
