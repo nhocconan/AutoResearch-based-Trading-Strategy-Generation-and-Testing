@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -13,47 +13,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h Donchian channels (20-period) - use previous bar's high/low
+    # 1d Donchian channels (20-period) - use previous bar's high/low
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
     lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    # 4h average volume (20-period) - previous bar
+    # 1d average volume (20-period) - previous bar
     vol_series = pd.Series(volume)
     avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
-    # 1d close and ATR for regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # 1w EMA200 trend filter - weekly trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Calculate ATR(14) for 1d
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
-    tr2 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, tr2)
-    tr = np.concatenate([[np.nan], tr])
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # 1d EMA50 trend filter
-    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    
-    # Align HTF indicators
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    close_1w = df_1w['close'].values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25
     
-    start = max(20, 50)
+    start = max(20, 200)
     for i in range(start, n):
         if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(avg_vol[i]) or np.isnan(ema_1d_aligned[i]) or 
-            np.isnan(atr_1d_aligned[i])):
+            np.isnan(avg_vol[i]) or np.isnan(ema_200_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -61,28 +46,26 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long: breakout above upper band + volume confirmation + price above 1d EMA + low volatility regime
-            if (price > upper[i] and vol > 1.5 * avg_vol[i] and 
-                price > ema_1d_aligned[i] and atr_1d_aligned[i] < np.nanpercentile(atr_1d[:i+1], 50)):
+            # Long: breakout above upper band + volume confirmation + price above 1w EMA200
+            if (price > upper[i] and vol > 2.0 * avg_vol[i] and price > ema_200_1w_aligned[i]):
                 position = 1
                 signals[i] = position_size
-            # Short: breakout below lower band + volume confirmation + price below 1d EMA + low volatility regime
-            elif (price < lower[i] and vol > 1.5 * avg_vol[i] and 
-                  price < ema_1d_aligned[i] and atr_1d_aligned[i] < np.nanpercentile(atr_1d[:i+1], 50)):
+            # Short: breakout below lower band + volume confirmation + price below 1w EMA200
+            elif (price < lower[i] and vol > 2.0 * avg_vol[i] and price < ema_200_1w_aligned[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below lower band OR below 1d EMA
-            if price < lower[i] or price < ema_1d_aligned[i]:
+            # Exit long: price closes below lower band OR below 1w EMA200
+            if price < lower[i] or price < ema_200_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes above upper band OR above 1d EMA
-            if price > upper[i] or price > ema_1d_aligned[i]:
+            # Exit short: price closes above upper band OR above 1w EMA200
+            if price > upper[i] or price > ema_200_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -90,6 +73,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Donchian_Volume_EMATrend_VolRegime"
-timeframe = "4h"
+name = "12h_1w_Donchian_Volume_EMA200Trend"
+timeframe = "12h"
 leverage = 1.0
