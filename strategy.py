@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h momentum with 4h trend filter and 1d volatility filter.
-# Uses 1h RSI(14) for momentum entry/exit, 4h EMA(50) for trend direction,
-# and 1d ATR(14) normalized by price for volatility regime filtering.
-# Only trades during 08-20 UTC to avoid low-liquidity hours.
-# Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
-# Designed to work in both bull (momentum continuation) and bear (mean reversion in low volatility).
+# Hypothesis: 12h Camarilla pivot bounce with 1d trend filter and volume confirmation.
+# Camarilla levels: H4 = (H-L)*1.1/2 + C, L4 = C - (H-L)*1.1/2 (daily).
+# Price bouncing off L4 (support) in uptrend or H4 (resistance) in downtrend.
+# 1d EMA50 trend filter + volume spike (>2x avg) confirms institutional interest.
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,116 +19,89 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-calculate session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # 1h RSI(14) for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    avg_gain[0] = gain[0]
-    avg_loss[0] = loss[0]
-    for i in range(1, n):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # 4h EMA(50) for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    ema50_4h = np.zeros(len(close_4h))
-    ema_multiplier = 2 / (50 + 1)
-    ema50_4h[0] = close_4h[0]
-    for i in range(1, len(close_4h)):
-        ema50_4h[i] = (close_4h[i] - ema50_4h[i-1]) * ema_multiplier + ema50_4h[i-1]
-    
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    
-    # 1d ATR(14) normalized by price for volatility regime
+    # 1-day data for trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    tr1 = np.zeros(len(close_1d))
-    tr1[0] = high_1d[0] - low_1d[0]
+    # 1-day EMA(50) for trend filter
+    ema50_1d = np.zeros(len(close_1d))
+    ema_multiplier = 2 / (50 + 1)
+    ema50_1d[0] = close_1d[0]
     for i in range(1, len(close_1d)):
-        tr1[i] = max(high_1d[i] - low_1d[i], 
-                     abs(high_1d[i] - close_1d[i-1]),
-                     abs(low_1d[i] - close_1d[i-1]))
+        ema50_1d[i] = (close_1d[i] - ema50_1d[i-1]) * ema_multiplier + ema50_1d[i-1]
     
-    atr14 = np.zeros(len(close_1d))
-    atr14[0] = tr1[0]
-    for i in range(1, len(atr14)):
-        atr14[i] = (atr14[i-1] * 13 + tr1[i]) / 14
+    # Align 1d EMA50 to 12h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Normalize ATR by price to get volatility regime
-    atr_norm = atr14 / close_1d
-    atr_norm_aligned = align_htf_to_ltf(prices, df_1d, atr_norm)
+    # Calculate Camarilla levels from previous day's OHLC
+    # H4 = Close + 1.1*(High-Low)/2
+    # L4 = Close - 1.1*(High-Low)/2
+    camarilla_H4 = close_1d + 1.1 * (high_1d - low_1d) / 2
+    camarilla_L4 = close_1d - 1.1 * (high_1d - low_1d) / 2
+    
+    # Align Camarilla levels to 12h timeframe (use previous day's levels)
+    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
+    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
+    
+    # Average volume (24-period = 24*12h = 12 days) for volume confirmation
+    avg_volume = np.full(n, np.nan)
+    for i in range(24, n):
+        avg_volume[i] = np.mean(volume[i-24:i])
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
-    for i in range(50, n):
-        # Skip if not in trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-            
+    for i in range(24, n):
         # Skip if any required data is not ready
-        if (np.isnan(rsi[i]) or np.isnan(ema50_4h_aligned[i]) or 
-            np.isnan(atr_norm_aligned[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(camarilla_H4_aligned[i]) or 
+            np.isnan(camarilla_L4_aligned[i]) or 
+            np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        rsi_val = rsi[i]
-        ema_trend = ema50_4h_aligned[i]
-        vol_regime = atr_norm_aligned[i]
+        vol = volume[i]
+        avg_vol = avg_volume[i]
+        ema_trend = ema50_1d_aligned[i]
+        H4 = camarilla_H4_aligned[i]
+        L4 = camarilla_L4_aligned[i]
         
-        # Volatility filter: only trade when volatility is normalized (not too high)
-        # Avoid trading during extreme volatility spikes
-        vol_filter = vol_regime < 0.05  # 5% daily ATR as threshold
+        # Volume confirmation: current volume > 2x average volume
+        volume_confirm = vol > 2.0 * avg_vol
         
         if position == 0:
-            # Long: RSI > 55 (bullish momentum) + above 4h EMA50 + vol filter
-            if (rsi_val > 55 and 
+            # Long: Price near L4 support + above 1d EMA50 + volume confirmation
+            if (price <= L4 * 1.005 and  # Within 0.5% of L4
                 price > ema_trend and
-                vol_filter):
+                volume_confirm):
                 position = 1
                 signals[i] = position_size
-            # Short: RSI < 45 (bearish momentum) + below 4h EMA50 + vol filter
-            elif (rsi_val < 45 and 
+            # Short: Price near H4 resistance + below 1d EMA50 + volume confirmation
+            elif (price >= H4 * 0.995 and  # Within 0.5% of H4
                   price < ema_trend and
-                  vol_filter):
+                  volume_confirm):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI < 40 (momentum fade) or price below 4h EMA
-            if (rsi_val < 40 or
+            # Exit long: Price reaches H4 or breaks below EMA50
+            if (price >= H4 * 0.995 or
                 price < ema_trend):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: RSI > 60 (momentum fade) or price above 4h EMA
-            if (rsi_val > 60 or
+            # Exit short: Price reaches L4 or breaks above EMA50
+            if (price <= L4 * 1.005 or
                 price > ema_trend):
                 position = 0
                 signals[i] = 0.0
@@ -138,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4h_1d_RSI_EMA_Volatility_Filter"
-timeframe = "1h"
+name = "12h_1d_Camarilla_Pivot_Bounce_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
