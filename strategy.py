@@ -8,58 +8,42 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h strategy using weekly Camarilla pivot breakouts with 1d volume confirmation
-    # Long when price breaks above weekly R4 with 1d volume spike
-    # Short when price breaks below weekly S4 with 1d volume spike
-    # Exit when price returns to weekly H3/L3 levels
-    # Designed for low trade frequency (12-37/year) to minimize fee drag on 6h timeframe
-    # Works in both bull and bear: breakouts capture strong moves, volume confirmation filters false signals
+    # Hypothesis: 12h Donchian(20) breakout with 1d volume spike and 1d chop regime filter
+    # Designed for low trade frequency (12-37/year) to minimize fee drag on 12h timeframe
+    # Uses 1d for volume and regime confirmation, 12h only for breakout timing
+    # Works in both bull and bear: chop filter avoids whipsaws in ranging markets
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values if 'volume' in prices.columns else np.ones(len(prices))
     
-    # Get 1w data for HTF Camarilla levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate 1w Camarilla pivot levels (based on previous 1w bar)
-    prev_high_1w = np.roll(high_1w, 1)
-    prev_low_1w = np.roll(low_1w, 1)
-    prev_close_1w = np.roll(close_1w, 1)
-    
-    # Calculate pivot point (PP)
-    pp = (prev_high_1w + prev_low_1w + prev_close_1w) / 3.0
-    range_1w = prev_high_1w - prev_low_1w
-    
-    # Camarilla levels
-    camarilla_h3 = pp + 1.125 * range_1w
-    camarilla_l3 = pp - 1.125 * range_1w
-    camarilla_h4 = pp + 1.5 * range_1w
-    camarilla_l4 = pp - 1.5 * range_1w
-    
-    # Get 1d data for volume confirmation
+    # Get 1d data for HTF volume and chop regime
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values if 'volume' in df_1d.columns else np.ones(len(df_1d))
     
     # Calculate 1d volume average (20-period)
     vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all HTF indicators to 6h primary timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l4)
+    # Calculate 1d choppiness index (14-period)
+    # CHOP = 100 * log10(sum(ATR(1)) / (n * log(n))) / log10(n)
+    # Simplified: CHOP = 100 * log10(sum(tr) / (max(high)-min(low))) / log10(14)
+    tr_1d = np.maximum(np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1])), np.abs(low_1d[1:] - close_1d[:-1]))
+    tr_1d = np.concatenate([[np.nan], tr_1d])  # align length
+    atr_sum_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
+    max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop_1d = 100 * np.log10(atr_sum_14 / (max_high_14 - min_low_14)) / np.log10(14)
+    
+    # Align HTF indicators to 12h primary timeframe
     vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -67,35 +51,50 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(camarilla_h4_aligned[i]) or
-            np.isnan(camarilla_l4_aligned[i]) or
-            np.isnan(vol_avg_20_1d_aligned[i])):
+        if (np.isnan(vol_avg_20_1d_aligned[i]) or 
+            np.isnan(chop_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 2.0x 20-period average
-        # Get the 1d bar index for current 6h bar (each 1d bar = 4 6h bars)
-        idx_1d = i // 4
+        # Volume confirmation: current 1d volume > 1.8x 20-period average
+        # Get the 1d bar index for current 12h bar (each 1d bar = 2 12h bars)
+        idx_1d = i // 2
         if idx_1d >= len(volume_1d):
             signals[i] = 0.0
             continue
-        volume_confirmed = volume_1d[idx_1d] > 2.0 * vol_avg_20_1d_aligned[i]
+        volume_confirmed = volume_1d[idx_1d] > 1.8 * vol_avg_20_1d_aligned[i]
         
-        # Breakout conditions at Camarilla H4/L4 levels
-        breakout_long = close[i] > camarilla_h4_aligned[i]  # Price above H4 -> long breakout
-        breakout_short = close[i] < camarilla_l4_aligned[i]  # Price below L4 -> short breakout
+        # Regime filter: only trade when market is trending (CHOP < 40)
+        regime_filter = chop_1d_aligned[i] < 40
         
-        # Exit conditions: price returns to Camarilla H3/L3 levels
-        exit_long = position == 1 and close[i] <= camarilla_h3_aligned[i]
-        exit_short = position == -1 and close[i] >= camarilla_l3_aligned[i]
+        # Calculate 12h Donchian channels (20-period)
+        # Need at least 20 periods of 12h data
+        if i >= 20:
+            highest_high = np.max(high[i-20:i])
+            lowest_low = np.min(low[i-20:i])
+            
+            # Breakout conditions
+            breakout_long = close[i] > highest_high and volume_confirmed and regime_filter
+            breakout_short = close[i] < lowest_low and volume_confirmed and regime_filter
+        else:
+            breakout_long = False
+            breakout_short = False
+        
+        # Exit conditions: opposite Donchian breakout or volatility contraction
+        if i >= 10:  # shorter lookback for exit
+            exit_high = np.max(high[i-10:i])
+            exit_low = np.min(low[i-10:i])
+            exit_long = position == 1 and close[i] < exit_low
+            exit_short = position == -1 and close[i] > exit_high
+        else:
+            exit_long = False
+            exit_short = False
         
         # Execute signals
-        if breakout_long and volume_confirmed and position != 1:
+        if breakout_long and position != 1:
             position = 1
             signals[i] = position_size
-        elif breakout_short and volume_confirmed and position != -1:
+        elif breakout_short and position != -1:
             position = -1
             signals[i] = -position_size
         elif position == 1 and exit_long:
@@ -115,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_1d_camarilla_breakout_volume_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_breakout_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
