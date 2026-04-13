@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_1d_RSI_MeanReversion_With_Volume_Filter
-Hypothesis: Mean reversion works in range-bound markets. Enter long when RSI(14) < 30 and price > daily VWAP,
-short when RSI(14) > 70 and price < daily VWAP, with volume confirmation (>1.5x 20-day average volume).
-Exit when RSI crosses back above 50 (long) or below 50 (short).
-Uses daily timeframe for RSI/VWAP/volume to reduce trade frequency and avoid whipsaw.
-Designed to work in both bull (buy dips) and bear (sell rallies) markets by fading extremes.
-Target: 20-40 trades/year per symbol for low friction and high edge.
+4h_1d_Range_Breakout_With_Volume_Confirmation_v2
+Hypothesis: 4h price breaks above/below daily range (high-low) with volume confirmation.
+Long when price breaks above prior day's high + volume > 1.5x 20-day average.
+Short when price breaks below prior day's low + volume > 1.5x 20-day average.
+Exit when price returns to prior day's close.
+Designed for 4h timeframe to capture breakouts in both bull and bear markets.
+Target: 20-50 trades/year per symbol for better generalization.
 """
 
 import numpy as np
@@ -22,37 +22,36 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     
-    # Daily data for RSI, VWAP, volume
+    # Daily data for range calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
+    # Previous day's values for today's calculation
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     vol_1d = df_1d['volume'].values
     
-    # RSI(14) calculation
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
     
-    # Daily VWAP calculation
-    typical_price = (high_1d + low_1d + close_1d) / 3
-    vwap_numerator = np.cumsum(typical_price * vol_1d)
-    vwap_denominator = np.cumsum(vol_1d)
-    vwap = np.where(vwap_denominator != 0, vwap_numerator / vwap_denominator, typical_price)
+    # Daily range and key levels
+    prev_range = prev_high - prev_low
+    prev_high_level = prev_high
+    prev_low_level = prev_low
     
-    # Volume MA(20)
+    # Volume moving average
     vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean()
     
     # Align 1d data to 4h
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap)
+    prev_high_aligned = align_htf_to_ltf(prices, df_1d, prev_high_level)
+    prev_low_aligned = align_htf_to_ltf(prices, df_1d, prev_low_level)
+    prev_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close)
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20.values)
     vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
     
@@ -60,29 +59,30 @@ def generate_signals(prices):
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(rsi_aligned[i]) or np.isnan(vwap_aligned[i]) or
-            np.isnan(vol_ma_20_aligned[i]) or np.isnan(vol_1d_aligned[i])):
+        if (np.isnan(prev_high_aligned[i]) or np.isnan(prev_low_aligned[i]) or
+            np.isnan(prev_close_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or
+            np.isnan(vol_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Volume condition: current 1d volume > 1.5x 20-period average
         vol_condition = vol_1d_aligned[i] > (vol_ma_20_aligned[i] * 1.5)
         
-        # Mean reversion conditions
-        long_condition = (rsi_aligned[i] < 30) and (close[i] > vwap_aligned[i]) and vol_condition
-        short_condition = (rsi_aligned[i] > 70) and (close[i] < vwap_aligned[i]) and vol_condition
+        # Breakout conditions
+        long_breakout = close[i] > prev_high_aligned[i]
+        short_breakout = close[i] < prev_low_aligned[i]
         
-        # Exit conditions: RSI crosses 50
-        long_exit = rsi_aligned[i] > 50
-        short_exit = rsi_aligned[i] < 50
+        # Exit condition: price returns to prior day's close
+        long_exit = close[i] < prev_close_aligned[i]
+        short_exit = close[i] > prev_close_aligned[i]
         
         if position == 0:
-            if long_condition:
+            if long_breakout and vol_condition:
                 position = 1
                 signals[i] = position_size
-            elif short_condition:
+            elif short_breakout and vol_condition:
                 position = -1
                 signals[i] = -position_size
             else:
@@ -102,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_RSI_MeanReversion_With_Volume_Filter"
+name = "4h_1d_Range_Breakout_With_Volume_Confirmation_v2"
 timeframe = "4h"
 leverage = 1.0
