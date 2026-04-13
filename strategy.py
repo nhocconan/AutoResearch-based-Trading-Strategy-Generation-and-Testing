@@ -8,32 +8,83 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with daily ATR regime filter + volume confirmation
-    # Long: price > Donchian(20) high AND ATR(14) > ATR(50) AND volume > 1.5x 20-period average
-    # Short: price < Donchian(20) low AND ATR(14) > ATR(50) AND volume > 1.5x 20-period average
+    # Hypothesis: 4h Donchian(20) breakout with 1d volume spike and 1w ADX regime filter
+    # Long: price > Donchian(20) high AND volume > 2.0x 20-period average AND 1w ADX < 25 (range)
+    # Short: price < Donchian(20) low AND volume > 2.0x 20-period average AND 1w ADX < 25 (range)
     # Exit: opposite Donchian breakout
-    # Using 4h timeframe for optimal trade frequency (target 19-50/year), ATR regime to filter choppy markets,
-    # and volume spike confirmation to avoid false breakouts. Discrete position sizing (0.25) to minimize fee churn.
+    # Using 4h timeframe for optimal trade frequency (target 20-50/year), 1d volume confirmation to avoid false breakouts,
+    # and 1w ADX < 25 to trade only in ranging markets where mean reversion works well.
+    # Discrete position sizing (0.25) to minimize fee churn.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ATR calculation with min_periods
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14 = np.full(n, np.nan)
-    atr_50 = np.full(n, np.nan)
+    # Get 1d data for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    for i in range(14, n):
-        atr_14[i] = np.nanmean(tr[i-13:i+1])
-    for i in range(50, n):
-        atr_50[i] = np.nanmean(tr[i-49:i+1])
+    # Get 1w data for ADX regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
     
-    atr_regime = atr_14 > atr_50  # Trending regime when short ATR > long ATR
+    # Calculate 1d volume 20-period average with min_periods
+    vol_ma = np.full(len(df_1d), np.nan)
+    for i in range(20, len(df_1d)):
+        vol_ma[i] = np.mean(df_1d['volume'].iloc[i-20:i].values)
+    
+    # Calculate 1w ADX with min_periods
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # True Range
+    tr1 = np.abs(high_1w[1:] - low_1w[1:])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.nan], tr])
+    
+    # Directional Movement
+    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
+    
+    # Smoothed values
+    def smma(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        result[period-1] = np.nansum(arr[1:period])
+        for i in range(period, len(arr)):
+            if not np.isnan(arr[i]):
+                result[i] = result[i-1] - (result[i-1]/period) + arr[i]
+        return result
+    
+    atr = smma(tr, 30)
+    dm_plus_smooth = smma(dm_plus, 30)
+    dm_minus_smooth = smma(dm_minus, 30)
+    
+    # DI+ and DI-
+    di_plus = np.full_like(atr, np.nan)
+    di_minus = np.full_like(atr, np.nan)
+    mask = ~np.isnan(atr) & (atr != 0)
+    di_plus[mask] = (dm_plus_smooth[mask] / atr[mask]) * 100
+    di_minus[mask] = (dm_minus_smooth[mask] / atr[mask]) * 100
+    
+    # DX and ADX
+    dx = np.full_like(atr, np.nan)
+    mask_dx = ~np.isnan(di_plus) & ~np.isnan(di_minus) & ((di_plus + di_minus) != 0)
+    dx[mask_dx] = (np.abs(di_plus[mask_dx] - di_minus[mask_dx]) / (di_plus[mask_dx] + di_minus[mask_dx])) * 100
+    
+    adx = smma(dx, 30)
+    adx_filter = adx < 25  # Range regime
     
     # Get 4h Donchian(20) for breakout with min_periods
     donchian_high = np.full(n, np.nan)
@@ -43,11 +94,12 @@ def generate_signals(prices):
         donchian_high[i] = np.max(high[i-20:i])
         donchian_low[i] = np.min(low[i-20:i])
     
-    # Get 4h volume for confirmation (>1.5x 20-period average)
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (1.5 * vol_ma)
+    # Align 1d volume spike confirmation
+    volume_spike_1d = df_1d['volume'].values > (2.0 * vol_ma)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
+    
+    # Align 1w ADX filter
+    adx_filter_aligned = align_htf_to_ltf(prices, df_1w, adx_filter)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,7 +107,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if data not ready
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(atr_regime[i]) or np.isnan(volume_spike[i])):
+            np.isnan(volume_spike_aligned[i]) or np.isnan(adx_filter_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -63,9 +115,9 @@ def generate_signals(prices):
         long_breakout = close[i] > donchian_high[i]
         short_breakout = close[i] < donchian_low[i]
         
-        # Entry logic: Breakout + ATR regime + volume confirmation
-        long_entry = long_breakout and atr_regime[i] and volume_spike[i]
-        short_entry = short_breakout and atr_regime[i] and volume_spike[i]
+        # Entry logic: Breakout + volume confirmation + range regime
+        long_entry = long_breakout and volume_spike_aligned[i] and adx_filter_aligned[i]
+        short_entry = short_breakout and volume_spike_aligned[i] and adx_filter_aligned[i]
         
         # Exit logic: opposite breakout
         long_exit = short_breakout
@@ -94,6 +146,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_donchian_breakout_atr_regime_volume_v1"
+name = "4h_1d_1w_donchian_breakout_volume_adx_filter_v1"
 timeframe = "4h"
 leverage = 1.0
