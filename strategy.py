@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -13,55 +13,48 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1h ATR(14) for volatility filter
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    close_series = pd.Series(close)
-    tr1 = high_series - low_series
-    tr2 = abs(high_series - close_series.shift(1))
-    tr3 = abs(low_series - close_series.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
-    
-    # 4h Close for trend filter (Hull Moving Average 21)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 21:
+    # 6h Weekly Pivot Points (calculated from previous week)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
-    close_4h = df_4h['close'].values
-    # HMA calculation: WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
-    half_len = 21 // 2
-    sqrt_len = int(np.sqrt(21))
-    wma_half = pd.Series(close_4h).ewm(span=half_len, adjust=False).mean()
-    wma_full = pd.Series(close_4h).ewm(span=21, adjust=False).mean()
-    raw_hma = 2 * wma_half - wma_full
-    hma_21 = pd.Series(raw_hma).ewm(span=sqrt_len, adjust=False).mean().values
-    hma_21_aligned = align_htf_to_ltf(prices, df_4h, hma_21)
     
-    # 1d Close for regime filter (Close > SMA50 = bull, < SMA50 = bear)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    close_1d = df_1d['close'].values
-    sma_50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
-    sma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
+    # Calculate weekly pivot points using previous week's OHLC
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Hour filter: 08-20 UTC
-    hours = prices.index.hour
+    # Pivot point formula
+    pivot = (weekly_high + weekly_low + weekly_close) / 3
+    r1 = 2 * pivot - weekly_low
+    s1 = 2 * pivot - weekly_high
+    r2 = pivot + (weekly_high - weekly_low)
+    s2 = pivot - (weekly_high - weekly_low)
+    r3 = weekly_high + 2 * (pivot - weekly_low)
+    s3 = weekly_low - 2 * (weekly_high - pivot)
+    
+    # Align weekly pivots to 6h timeframe (wait for weekly bar to close)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    
+    # 6h Average Volume (20-period) - previous bar
+    vol_series = pd.Series(volume)
+    avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.20  # Fixed 20% position
+    position_size = 0.25
     
-    start = max(14, 21, 50)  # ATR(14), HMA(21), SMA50(1d)
+    start = 20
     for i in range(start, n):
-        if (np.isnan(atr[i]) or np.isnan(hma_21_aligned[i]) or 
-            np.isnan(sma_50_1d_aligned[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or 
+            np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
         
@@ -69,28 +62,26 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long: price > HMA21(4h) AND price > SMA50(1d) AND volatility expansion (ATR rising)
-            if (price > hma_21_aligned[i] and price > sma_50_1d_aligned[i] and 
-                atr[i] > atr[i-1]):
+            # Long: price breaks above R2 with volume confirmation
+            if price > r2_aligned[i] and vol > 1.5 * avg_vol[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: price < HMA21(4h) AND price < SMA50(1d) AND volatility expansion
-            elif (price < hma_21_aligned[i] and price < sma_50_1d_aligned[i] and 
-                  atr[i] > atr[i-1]):
+            # Short: price breaks below S2 with volume confirmation
+            elif price < s2_aligned[i] and vol > 1.5 * avg_vol[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price < HMA21(4h) OR volatility contraction
-            if price < hma_21_aligned[i] or atr[i] < atr[i-1]:
+            # Exit long: price closes below R1 or reverses at R3
+            if price < r1_aligned[i] or price > r3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price > HMA21(4h) OR volatility contraction
-            if price > hma_21_aligned[i] or atr[i] < atr[i-1]:
+            # Exit short: price closes above S1 or reverses at S3
+            if price > s1_aligned[i] or price < s3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -98,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4h_1d_HMA_SMA_Volatility_Filter"
-timeframe = "1h"
+name = "6h_1w_Pivot_R2S2_Breakout_Volume"
+timeframe = "6h"
 leverage = 1.0
