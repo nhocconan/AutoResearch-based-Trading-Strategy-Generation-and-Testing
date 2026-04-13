@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -13,39 +13,37 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 6h Donchian channels (20-period) - use previous bar's high/low
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
-    lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
+    # Daily high/low for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
+        return np.zeros(n)
     
-    # 6h average volume (20-period) - previous bar
+    # Calculate Camarilla levels from daily OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    range_1d = high_1d - low_1d
+    # Camarilla levels: H4 = close + 1.1/2 * range, L4 = close - 1.1/2 * range
+    H4 = close_1d + 1.1 * range_1d / 2
+    L4 = close_1d - 1.1 * range_1d / 2
+    
+    # Align Camarilla levels to 4h timeframe
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    
+    # Volume confirmation: 20-period average volume
     vol_series = pd.Series(volume)
     avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
-    
-    # 12h RSI (14-period) for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 14:
-        return np.zeros(n)
-    close_12h = df_12h['close'].values
-    delta = pd.Series(close_12h).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
-    rs = avg_gain / avg_loss
-    rsi_12h = 100 - (100 / (1 + rs))
-    rsi_12h = rsi_12h.values
-    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25
     
-    start = max(20, 14)
+    start = 20
     for i in range(start, n):
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(avg_vol[i]) or np.isnan(rsi_12h_aligned[i])):
+        if (np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or 
+            np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
         
@@ -53,26 +51,28 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long: breakout above upper band + volume confirmation + 12h RSI > 50 (uptrend)
-            if (price > upper[i] and vol > 1.5 * avg_vol[i] and rsi_12h_aligned[i] > 50):
+            # Long: price touches or breaks below L4 (support) with volume confirmation
+            if price <= L4_aligned[i] and vol > 1.5 * avg_vol[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: breakout below lower band + volume confirmation + 12h RSI < 50 (downtrend)
-            elif (price < lower[i] and vol > 1.5 * avg_vol[i] and rsi_12h_aligned[i] < 50):
+            # Short: price touches or breaks above H4 (resistance) with volume confirmation
+            elif price >= H4_aligned[i] and vol > 1.5 * avg_vol[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below lower band OR 12h RSI < 40 (weakening)
-            if price < lower[i] or rsi_12h_aligned[i] < 40:
+            # Exit long: price moves back above midpoint or stops loss
+            midpoint = (H4_aligned[i] + L4_aligned[i]) / 2
+            if price >= midpoint:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes above upper band OR 12h RSI > 60 (strengthening)
-            if price > upper[i] or rsi_12h_aligned[i] > 60:
+            # Exit short: price moves back below midpoint
+            midpoint = (H4_aligned[i] + L4_aligned[i]) / 2
+            if price <= midpoint:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -80,6 +80,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_Donchian_Volume_RSITrend"
-timeframe = "6h"
+name = "4h_1d_Camarilla_Pivot_Volume"
+timeframe = "4h"
 leverage = 1.0
