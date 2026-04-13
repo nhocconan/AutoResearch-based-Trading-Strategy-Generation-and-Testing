@@ -8,57 +8,49 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian breakout with 1d ATR volatility filter and volume confirmation.
-    # Donchian channels provide objective breakout levels in trending markets.
-    # 1d ATR(14) filter ensures we only trade during sufficient volatility regimes.
-    # Volume spike confirms breakout validity and reduces false signals.
+    # Hypothesis: 4h Donchian breakout with 1d ATR regime filter and volume confirmation.
+    # Donchian channels provide clear breakout levels in trending markets.
+    # 1d ATR ratio (short/long) identifies low volatility regimes for breakout trading.
+    # Volume spike confirms institutional participation.
     # Discrete position sizing (0.0, ±0.25) minimizes fee churn.
-    # Target: 50-150 total trades over 4 years (12-37/year).
+    # Target: 75-200 total trades over 4 years (19-50/year).
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR calculation (call ONCE before loop)
+    # Get 1d data for ATR regime filter (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d ATR(14) for volatility filter
+    # Calculate 1d ATR(14) and ATR(50) for regime filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range components
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    # Set first period TR to high-low (no previous close)
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # True Range calculation
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # ATR(14) using Wilder's smoothing (equivalent to EMA with alpha=1/14)
-    atr_14 = np.zeros_like(tr)
-    atr_14[13] = np.mean(tr[:14])  # Seed with simple average
-    for i in range(14, len(tr)):
-        atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
     
-    # Align 1d ATR to 12h timeframe
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    # ATR ratio (short-term/long-term) - low values indicate low volatility regime
+    atr_ratio = atr_14 / atr_50
     
-    # Calculate 12h Donchian channels (20-period)
-    lookback = 20
-    highest_high = np.full_like(high, np.nan)
-    lowest_low = np.full_like(low, np.nan)
+    # Align ATR ratio to 4h timeframe
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    for i in range(lookback-1, len(high)):
-        highest_high[i] = np.max(high[i-lookback+1:i+1])
-        lowest_low[i] = np.min(low[i-lookback+1:i+1])
+    # Calculate 4h Donchian channels (20-period)
+    donchian_period = 20
+    upper_channel = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    lower_channel = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
-    # Align Donchian levels (they're already in 12h timeframe)
-    # Calculate 12h volume MA(20) for confirmation
+    # Calculate 4h volume MA(20) for confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -66,35 +58,34 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(atr_14_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(atr_ratio_aligned[i]) or np.isnan(upper_channel[i]) or 
+            np.isnan(lower_channel[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: current ATR > 0.5 * 1d ATR(14) (ensures sufficient volatility)
-        # Convert 12h ATR equivalent: 1d ATR * sqrt(12h/1d) ≈ 1d ATR * 0.707
-        vol_filter = atr_14_aligned[i] > 0.0  # Always true if ATR calculated, but keep for structure
+        # Regime filter: ATR ratio < 0.8 (low volatility regime conducive to breakouts)
+        low_vol_regime = atr_ratio_aligned[i] < 0.8
         
-        # Volume filter: current volume > 1.3 * 20-period MA
-        volume_filter = volume[i] > 1.3 * volume_ma[i]
+        # Volume filter: current volume > 1.5 * 20-period MA
+        volume_filter = volume[i] > 1.5 * volume_ma[i]
         
-        # Breakout conditions
-        long_breakout = close[i] > highest_high[i-1]
-        short_breakout = close[i] < lowest_low[i-1]
+        # Breakout conditions: price breaks Donchian channels with regime and volume confirmation
+        long_breakout = (close[i] > upper_channel[i-1]) and low_vol_regime and volume_filter
+        short_breakout = (close[i] < lower_channel[i-1]) and low_vol_regime and volume_filter
         
-        # Exit conditions: return to mid-channel
-        mid_channel = (highest_high[i] + lowest_low[i]) / 2.0
-        long_exit = close[i] < mid_channel
-        short_exit = close[i] > mid_channel
+        # Exit conditions: price returns to midpoint of Donchian channel
+        midpoint = (upper_channel[i-1] + lower_channel[i-1]) / 2.0
+        long_exit = close[i] < midpoint
+        short_exit = close[i] > midpoint
         
         # Fixed position size (discrete levels to minimize fee churn)
         position_size = 0.25
         
         # Entry conditions
-        if long_breakout and volume_filter and position != 1:
+        if long_breakout and position != 1:
             position = 1
             signals[i] = position_size
-        elif short_breakout and volume_filter and position != -1:
+        elif short_breakout and position != -1:
             position = -1
             signals[i] = -position_size
         # Exit conditions
@@ -115,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_donchian_breakout_volume_volatility_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_breakout_atr_regime_volume_v1"
+timeframe = "4h"
 leverage = 1.0
