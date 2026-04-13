@@ -5,96 +5,89 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for Donchian and ADX
+    # Daily data for 12h strategy
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
+    # Previous day's values for today's calculation
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    vol_1d = df_1d['volume'].values
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
     
-    close_1w = df_1w['close'].values
+    # Daily ATR for volatility filter
+    tr = np.maximum(high_1d - low_1d, 
+                    np.maximum(abs(high_1d - np.roll(close_1d, 1)), 
+                               abs(low_1d - np.roll(close_1d, 1))))
+    tr[0] = high_1d[0] - low_1d[0]
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean()
     
-    # Daily Donchian channels (20-period)
-    highest_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Daily volume average
+    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean()
     
-    # Daily ADX (14-period) for trend strength
-    # Calculate True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    
-    # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di = 100 * (pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr)
-    minus_di = 100 * (pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Weekly EMA for trend filter
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Align all daily data to lower timeframe
-    highest_high_20_aligned = align_htf_to_ltf(prices, df_1d, highest_high_20)
-    lowest_low_20_aligned = align_htf_to_ltf(prices, df_1d, lowest_low_20)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Align 1d data to 12h
+    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
+    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
+    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d.values)
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d.values)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is not ready
-        if (np.isnan(highest_high_20_aligned[i]) or np.isnan(lowest_low_20_aligned[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(ema_20_1w_aligned[i])):
+        if (np.isnan(high_1d_aligned[i]) or np.isnan(low_1d_aligned[i]) or
+            np.isnan(close_1d_aligned[i]) or np.isnan(vol_1d_aligned[i]) or
+            np.isnan(atr_1d_aligned[i]) or np.isnan(vol_avg_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Breakout conditions
-        long_breakout = close[i] > highest_high_20_aligned[i]
-        short_breakout = close[i] < lowest_low_20_aligned[i]
+        # Daily range
+        daily_range = high_1d_aligned[i] - low_1d_aligned[i]
         
-        # Trend filter: only trade in direction of weekly trend
-        long_trend = close[i] > ema_20_1w_aligned[i]
-        short_trend = close[i] < ema_20_1w_aligned[i]
+        # Calculate Camarilla levels from previous day's data
+        camarilla_pp = (high_1d_aligned[i] + low_1d_aligned[i] + close_1d_aligned[i]) / 3
+        camarilla_r4 = camarilla_pp + (daily_range * 1.1 / 2)
+        camarilla_s4 = camarilla_pp - (daily_range * 1.1 / 2)
         
-        # ADX filter: only trade when trend is strong enough (ADX > 25)
-        strong_trend = adx_aligned[i] > 25
+        # Volatility filter: only trade when daily ATR is above average
+        vol_filter = atr_1d_aligned[i] > vol_avg_1d_aligned[i] * 0.5
         
-        # Exit conditions
-        long_exit = close[i] < lowest_low_20_aligned[i]  # Exit on opposite break
-        short_exit = close[i] > highest_high_20_aligned[i]  # Exit on opposite break
+        # Volume filter: current daily volume > 1.5x 20-day average
+        vol_condition = vol_1d_aligned[i] > vol_avg_1d_aligned[i] * 1.5
+        
+        # Entry conditions
+        long_entry = (close[i] > camarilla_r4) and vol_filter and vol_condition
+        short_entry = (close[i] < camarilla_s4) and vol_filter and vol_condition
+        
+        # Exit conditions: price crosses daily pivot point
+        long_exit = close[i] < camarilla_pp
+        short_exit = close[i] > camarilla_pp
         
         if position == 0:
-            if long_breakout and long_trend and strong_trend:
+            if long_entry:
                 position = 1
                 signals[i] = position_size
-            elif short_breakout and short_trend and strong_trend:
+            elif short_entry:
                 position = -1
                 signals[i] = -position_size
             else:
@@ -114,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_Donchian_Trend_Filter"
-timeframe = "1d"
+name = "12h_1d_Camarilla_Pivot_Breakout_With_Volume_And_Volatility_Filter"
+timeframe = "12h"
 leverage = 1.0
