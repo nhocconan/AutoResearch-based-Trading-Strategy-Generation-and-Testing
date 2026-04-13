@@ -8,139 +8,160 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1h EMA(21) pullback to 4h EMA(50) in trending markets (ADX>25)
-    # Long: price > 4h EMA50 AND ADX(14) > 25 AND 1h close > 1h EMA21 AND prior 1h close <= prior 1h EMA21 (pullback entry)
-    # Short: price < 4h EMA50 AND ADX(14) > 25 AND 1h close < 1h EMA21 AND prior 1h close >= prior 1h EMA21 (pullback entry)
-    # Exit: price crosses 4h EMA50 OR ADX < 20 (trend weakening)
-    # Session filter: 08-20 UTC to avoid low-volume hours
-    # Discrete position sizing (0.20) to minimize fee churn
-    # Target: 15-37 trades/year (~60-150 over 4 years) to stay within fee drag limits
+    # Hypothesis: 6h Donchian(20) breakout + 1w volume confirmation + 1d chop regime filter
+    # Long: price breaks above 6h Donchian(20) high AND 1w volume > 1.5 * 20-period average AND chop > 61.8 (range)
+    # Short: price breaks below 6h Donchian(20) low AND 1w volume > 1.5 * 20-period average AND chop > 61.8 (range)
+    # Exit: price reverts to 6h Donchian(20) midpoint OR chop < 38.2 (trending)
+    # Using 1w for volume to capture institutional participation, 1d for chop to avoid look-ahead, 6h for price action
+    # Discrete position sizing (0.25) to minimize fee churn
+    # Target: 12-37 trades/year (~50-150 over 4 years) to stay within fee drag limits
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get 4h data for EMA and ADX (call ONCE before loop)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 60:
+    # Get 6h data for Donchian channels (call ONCE before loop)
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 30:
         return np.zeros(n)
     
-    # Calculate 4h EMA(50)
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Get 1w data for volume confirmation (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
     
-    # Calculate 4h ADX(14)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Get 1d data for chop regime filter (call ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # True Range
-    tr1 = np.abs(high_4h[1:] - low_4h[1:])
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
+    # Calculate 6h Donchian channels (20-period)
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    
+    # Donchian high: rolling max of high
+    donchian_high = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    # Donchian low: rolling min of low
+    donchian_low = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    # Donchian midpoint: average of high and low
+    donchian_mid = (donchian_high + donchian_low) / 2.0
+    
+    # Align 6h Donchian to 6h timeframe (no additional delay needed for price channels)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_6h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_6h, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_6h, donchian_mid)
+    
+    # Calculate 1w volume spike filter: volume > 1.5 * 20-period average
+    volume_1w = df_1w['volume'].values
+    vol_ma_20 = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume_1w > (1.5 * vol_ma_20)
+    
+    # Align 1w volume spike to 6h (wait for completed 1w bar)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1w, volume_spike.astype(float))
+    
+    # Calculate 1d Choppiness Index (CHOP) - range/trend regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range for 1d
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])
+    tr = np.concatenate([[np.nan], tr])  # align with index 0
     
-    # +DM and -DM
-    up_move = high_4h[1:] - high_4h[:-1]
-    down_move = low_4h[:-1] - low_4h[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[0.0], plus_dm])
-    minus_dm = np.concatenate([[0.0], minus_dm])
-    
-    # Wilder's smoothing for TR, +DM, -DM
+    # ATR(14) - using Wilder's smoothing
     def wilders_smoothing(data, period):
+        alpha = 1.0 / period
         result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        result[period-1] = np.nanmean(data[:period])
+        if len(data) >= period:
+            result[period-1] = np.nanmean(data[:period])
         for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
+            if not np.isnan(result[i-1]):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
         return result
     
-    atr_14 = wilders_smoothing(tr, 14)
-    plus_dm_14 = wilders_smoothing(plus_dm, 14)
-    minus_dm_14 = wilders_smoothing(minus_dm, 14)
+    atr_1d = wilders_smoothing(tr, 14)
     
-    # +DI and -DI
-    plus_di = 100 * plus_dm_14 / atr_14
-    minus_di = 100 * minus_dm_14 / atr_14
+    # Choppiness Index (14-period)
+    chop_period = 14
+    sum_atr = np.full_like(atr_1d, np.nan)
+    highest_high = np.full_like(high_1d, np.nan)
+    lowest_low = np.full_like(low_1d, np.nan)
     
-    # DX and ADX
-    dx = np.full_like(atr_14, np.nan)
-    mask = (plus_di + minus_di) > 0
-    dx[mask] = 100 * np.abs(plus_di[mask] - minus_di[mask]) / (plus_di[mask] + minus_di[mask])
+    for i in range(len(atr_1d)):
+        if i < chop_period - 1:
+            continue
+        if np.isnan(atr_1d[i-chop_period+1:i+1]).any():
+            continue
+        sum_atr[i] = np.nansum(atr_1d[i-chop_period+1:i+1])
+        highest_high[i] = np.nanmax(high_1d[i-chop_period+1:i+1])
+        lowest_low[i] = np.nanmin(low_1d[i-chop_period+1:i+1])
     
-    adx = wilders_smoothing(dx, 14)
+    # Avoid division by zero
+    range_1d = highest_high - lowest_low
+    chop = np.full_like(atr_1d, 50.0)  # default to neutral
+    mask = (range_1d > 0) & ~np.isnan(sum_atr)
+    chop[mask] = 100 * np.log10(sum_atr[mask] / (np.log10(chop_period) * range_1d[mask]))
     
-    # Align 4h indicators to 1h
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
-    
-    # Calculate 1h EMA(21)
-    ema_21_1h = pd.Series(close).ewm(span=21, min_periods=21, adjust=False).mean().values
+    # Align 1d chop to 6h (wait for completed 1d bar)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Pre-compute session hours (08-20 UTC)
-    hours = prices.index.hour
-    
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(ema_21_1h[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(donchian_mid_aligned[i]) or np.isnan(volume_spike_aligned[i]) or 
+            np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        in_session = 8 <= hour <= 20
+        # Regime filter: only trade when chop > 61.8 (range-bound market)
+        in_range = chop_aligned[i] > 61.8
+        # Exit regime: chop < 38.2 (trending market) - exit positions
+        in_trend = chop_aligned[i] < 38.2
         
-        # Trend filter: ADX > 25
-        strong_trend = adx_aligned[i] > 25
-        # Weak trend filter: ADX < 20 (exit condition)
-        weak_trend = adx_aligned[i] < 20
+        # Volume confirmation: 1w volume spike
+        vol_confirmed = volume_spike_aligned[i] > 0.5  # boolean as float
         
-        # Pullback entry conditions
-        long_pullback = (close[i] > ema_50_4h_aligned[i]) and \
-                       strong_trend and \
-                       (close[i] > ema_21_1h[i]) and \
-                       (close[i-1] <= ema_21_1h[i-1])
+        # Breakout conditions
+        long_breakout = close[i] > donchian_high_aligned[i]
+        short_breakout = close[i] < donchian_low_aligned[i]
         
-        short_pullback = (close[i] < ema_50_4h_aligned[i]) and \
-                        strong_trend and \
-                        (close[i] < ema_21_1h[i]) and \
-                        (close[i-1] >= ema_21_1h[i-1])
+        # Entry logic: Donchian breakout + volume spike + range regime
+        long_entry = long_breakout and vol_confirmed and in_range
+        short_entry = short_breakout and vol_confirmed and in_range
         
-        # Exit conditions
-        long_exit = (close[i] < ema_50_4h_aligned[i]) or weak_trend
-        short_exit = (close[i] > ema_50_4h_aligned[i]) or weak_trend
+        # Exit logic: price reverts to midpoint OR regime shifts to trending
+        long_exit = (close[i] < donchian_mid_aligned[i]) or in_trend
+        short_exit = (close[i] > donchian_mid_aligned[i]) or in_trend
         
-        if long_pullback and in_session and position != 1:
+        if long_entry and position != 1:
             position = 1
-            signals[i] = 0.20
-        elif short_pullback and in_session and position != -1:
+            signals[i] = 0.25
+        elif short_entry and position != -1:
             position = -1
-            signals[i] = -0.20
-        elif position == 1 and (long_exit or not in_session):
+            signals[i] = -0.25
+        elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (short_exit or not in_session):
+        elif position == -1 and short_exit:
             position = 0
             signals[i] = 0.0
         else:
-            # Hold current position if still in session
-            if position == 1 and in_session:
-                signals[i] = 0.20
-            elif position == -1 and in_session:
-                signals[i] = -0.20
+            # Hold current position
+            if position == 1:
+                signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "1h_4h_ema_pullback_adx_v1"
-timeframe = "1h"
+name = "6h_1w_1d_donchian_volume_chop_regime_v1"
+timeframe = "6h"
 leverage = 1.0
