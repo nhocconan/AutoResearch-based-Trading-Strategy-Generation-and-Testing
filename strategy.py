@@ -3,19 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h/1d for trend direction and 1h for entry timing.
-# Trend direction: 4h close above/below 4h EMA200 (bull/bear).
-# Entry: In bull trend, buy when 1h price crosses above 1h VWAP; in bear trend, sell when 1h price crosses below 1h VWAP.
-# Volume filter: Require volume > 1.2x 20-period average to confirm breakouts.
-# Session filter: Trade only between 08:00-20:00 UTC to avoid low-volume Asian session.
-# Position size: 0.20 (20%) to manage drawdown in volatile markets.
-# This approach uses higher timeframes for trend filtering (reducing whipsaw) and lower timeframe for precise entries,
-# while volume and session filters reduce false signals. Designed to work in both bull and bear markets by
-# following the trend defined on 4h and using mean-reversion to VWAP on 1h for entries.
+# Hypothesis: 6h timeframe with 1w and 1d confluence.
+# Long: Price above 1w EMA50 (trend filter) + breaks above 1d Donchian upper channel + volume > 1.5x 20-period average.
+# Short: Price below 1w EMA50 + breaks below 1d Donchian lower channel + volume > 1.5x average.
+# Uses 1w EMA for primary trend, 1d Donchian for entry/exit with volume confirmation.
+# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,84 +19,91 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter (EMA200)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 200:
+    # 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    # Calculate EMA200 on 4h close
-    ema_200_4h = np.full(len(close_4h), np.nan)
-    if len(close_4h) >= 200:
-        ema_200_4h[199] = np.mean(close_4h[:200])  # Simple average for first value
-        for i in range(200, len(close_4h)):
-            ema_200_4h[i] = (close_4h[i] * 2 / (200 + 1)) + (ema_200_4h[i-1] * (199 / (200 + 1)))
+    close_1w = df_1w['close'].values
+    # EMA50 on weekly close
+    ema_50_1w = np.full(len(close_1w), np.nan)
+    alpha = 2.0 / (50 + 1)
+    for i in range(len(close_1w)):
+        if i == 0:
+            ema_50_1w[i] = close_1w[i]
+        elif np.isnan(ema_50_1w[i-1]):
+            ema_50_1w[i] = close_1w[i]
+        else:
+            ema_50_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_50_1w[i-1]
     
-    # Align 4h EMA200 to 1h timeframe
-    ema_200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_200_4h)
+    # 1d data for Donchian channels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Calculate 1h VWAP (typical price * volume cumulative)
-    typical_price = (high + low + close) / 3.0
-    vwap_num = np.cumsum(typical_price * volume)
-    vwap_den = np.cumsum(volume)
-    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(vwap_num, np.nan), where=vwap_den!=0)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Donchian channels (20-period) on daily data
+    donchian_high = np.full(len(high_1d), np.nan)
+    donchian_low = np.full(len(low_1d), np.nan)
+    for i in range(20, len(high_1d)):
+        donchian_high[i] = np.max(high_1d[i-20:i])
+        donchian_low[i] = np.min(low_1d[i-20:i])
     
     # Average volume (20-period) for volume confirmation
     avg_volume = np.full(n, np.nan)
     for i in range(20, n):
         avg_volume[i] = np.mean(volume[i-20:i])
     
-    # Precompute session hours (08:00-20:00 UTC)
-    hours = pd.to_datetime(prices['open_time']).hour
+    # Align 1w EMA50 to 6h
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align 1d Donchian to 6h
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
-    for i in range(200, n):  # Start after EMA200 warmup
+    for i in range(60, n):
         # Skip if any required data is not ready
-        if (np.isnan(ema_200_4h_aligned[i]) or np.isnan(vwap[i]) or 
-            np.isnan(avg_volume[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Session filter: only trade 08:00-20:00 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        ema_200 = ema_200_4h_aligned[i]
-        vwap_val = vwap[i]
+        ema_50 = ema_50_1w_aligned[i]
+        dc_high = donchian_high_aligned[i]
+        dc_low = donchian_low_aligned[i]
         
-        # Volume confirmation: current volume > 1.2x average volume
-        volume_confirm = vol > 1.2 * avg_vol
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirm = vol > 1.5 * avg_vol
         
         if position == 0:
-            # Determine trend from 4h EMA200
-            if price > ema_200:  # Bull trend
-                # Long: price crosses above VWAP + volume confirmation
-                if price > vwap_val and volume_confirm:
-                    position = 1
-                    signals[i] = position_size
-            else:  # Bear trend (price <= ema_200)
-                # Short: price crosses below VWAP + volume confirmation
-                if price < vwap_val and volume_confirm:
-                    position = -1
-                    signals[i] = -position_size
+            # Long: price > 1w EMA50 + breaks above 1d Donchian high + volume confirmation
+            if (price > ema_50 and price > dc_high and volume_confirm):
+                position = 1
+                signals[i] = position_size
+            # Short: price < 1w EMA50 + breaks below 1d Donchian low + volume confirmation
+            elif (price < ema_50 and price < dc_low and volume_confirm):
+                position = -1
+                signals[i] = -position_size
+            else:
+                signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below VWAP (mean reversion)
-            if price < vwap_val:
+            # Exit long: price breaks below 1d Donchian low
+            if price < dc_low:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above VWAP (mean reversion)
-            if price > vwap_val:
+            # Exit short: price breaks above 1d Donchian high
+            if price > dc_high:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -108,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4h_VWAP_Trend_Filter"
-timeframe = "1h"
+name = "6h_1w_1d_Donchian_EMA_Volume"
+timeframe = "6h"
 leverage = 1.0
