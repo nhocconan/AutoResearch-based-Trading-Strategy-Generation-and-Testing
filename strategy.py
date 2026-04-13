@@ -120,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d1w_Camarilla_Pivot_Breakout_With_Volume_Confirmation_v3"
+name = "12h_1d1w_Camarilla_Pivot_Breakout_With_Volume_Confirmation_v4"
 timeframe = "12h"
 leverage = 1.0
