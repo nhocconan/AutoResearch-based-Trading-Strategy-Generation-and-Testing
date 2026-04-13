@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Range_Breakout_v2
-Hypothesis: Trade breakouts from 1d Camarilla pivot levels (H4/L4) on 4h timeframe with volume confirmation and ATR volatility filter.
-Uses 1d Camarilla levels as strong support/resistance that institutions respect. Works in bull (breakouts above H4)
-and bear (breakdowns below L4) markets. Volume filter ensures institutional participation. ATR filter avoids low volatility periods.
-Target: 25-35 trades/year.
+4h_1d_Camarilla_Range_Breakout_v3
+Hypothesis: Trade breakouts from 1d Camarilla pivot levels (H4/L4) on 4h timeframe with volume confirmation and volatility filter.
+Uses 1d Camarilla levels as strong support/resistance that institutions respect. Works in bull (breakouts above H4) and bear (breakdowns below L4) markets.
+Volume filter ensures institutional participation. Volatility filter avoids low-volatility chop. Target: 25-35 trades/year.
 """
 
 import numpy as np
@@ -58,14 +57,14 @@ def generate_signals(prices):
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     volume_expansion = volume > (vol_ma_20 * 1.8)
     
-    # ATR volatility filter: avoid low volatility periods
+    # Volatility filter: avoid low volatility periods (ATR < 20-period ATR average)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[tr1[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean()
     atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean()
-    low_vol_filter = atr > atr_ma * 0.8  # Only trade when volatility is above 80% of MA
+    vol_filter = atr > (atr_ma * 0.5)  # Only trade when volatility is above 50% of average
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -74,15 +73,15 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if any required data is not ready
         if (np.isnan(R4_1d_aligned[i]) or np.isnan(S4_1d_aligned[i]) or 
-            np.isnan(volume_expansion[i]) or np.isnan(low_vol_filter[i])):
+            np.isnan(volume_expansion[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
-        # Long: breakout above R4 with volume expansion and adequate volatility
-        long_condition = (close[i] > R4_1d_aligned[i]) and volume_expansion[i] and low_vol_filter[i]
+        # Long: breakout above R4 with volume expansion and volatility filter
+        long_condition = (close[i] > R4_1d_aligned[i]) and volume_expansion[i] and vol_filter[i]
         
-        # Short: breakdown below S4 with volume expansion and adequate volatility
-        short_condition = (close[i] < S4_1d_aligned[i]) and volume_expansion[i] and low_vol_filter[i]
+        # Short: breakdown below S4 with volume expansion and volatility filter
+        short_condition = (close[i] < S4_1d_aligned[i]) and volume_expansion[i] and vol_filter[i]
         
         if long_condition and position != 1:
             position = 1
@@ -96,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_Range_Breakout_v2"
+name = "4h_1d_Camarilla_Range_Breakout_v3"
 timeframe = "4h"
 leverage = 1.0
