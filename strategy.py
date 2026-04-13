@@ -24,27 +24,26 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Calculate daily Camarilla pivot levels (using previous day's data)
-    # Pivot levels are calculated from previous day's OHLC
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     
-    # Camarilla levels
+    # Pivot and range
     pivot = (prev_high + prev_low + prev_close) / 3
     range_hl = prev_high - prev_low
     
-    # Resistance levels (only using R1 and R2 for simplicity)
+    # Resistance levels
     r1 = pivot + (range_hl * 1.1 / 12)
     r2 = pivot + (range_hl * 1.1 / 6)
     
-    # Support levels (only using S1 and S2 for simplicity)
+    # Support levels
     s1 = pivot - (range_hl * 1.1 / 12)
     s2 = pivot - (range_hl * 1.1 / 6)
     
     # Weekly EMA for trend filter
     ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean()
     
-    # Align all data to 4h timeframe
+    # Align all data to 12h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
@@ -69,19 +68,16 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current 4h volume > 1.5x 20-period average
-        # Approximate 4h volume from daily volume (assuming 6x 4h periods per day)
-        volume_4h = volume[i]  # Current 4h bar volume
-        volume_ma_20_4h = volume_ma_20_1d_aligned[i] / 6  # Approximate 20-period average for 4h
-        volume_condition = volume_4h > (volume_ma_20_4h * 1.5)
+        # Volume condition: current 12h volume > 1.5x 20-period average
+        volume_12h_approx = volume[i]  # Current 12h bar volume
+        volume_ma_20_12h = volume_ma_20_1d_aligned[i] / 2  # Approximate 2-period average for 12h (2 per day)
+        volume_condition = volume_12h_approx > (volume_ma_20_12h * 1.5)
         
         # Trend filter: only long when price > weekly EMA50, short when price < weekly EMA50
         long_trend = close[i] > ema_50_1w_aligned[i]
         short_trend = close[i] < ema_50_1w_aligned[i]
         
         # Entry conditions: price near Camarilla levels with volume and trend confirmation
-        # Long when price touches or crosses above S1/S2 with volume and uptrend
-        # Short when price touches or crosses below R1/R2 with volume and downtrend
         near_support = (close[i] <= s1_aligned[i] * 1.002) or (close[i] <= s2_aligned[i] * 1.002)
         near_resistance = (close[i] >= r1_aligned[i] * 0.998) or (close[i] >= r2_aligned[i] * 0.998)
         
@@ -111,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d1w_Camarilla_Pivot_Breakout_With_Volume_Confirmation_v1"
-timeframe = "4h"
+name = "12h_1d1w_Camarilla_Pivot_Breakout_With_Volume_Confirmation_v1"
+timeframe = "12h"
 leverage = 1.0
