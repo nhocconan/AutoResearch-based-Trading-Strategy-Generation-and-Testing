@@ -8,90 +8,91 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h strategy using 1h RSI extremes with 12h EMA trend filter and volume confirmation
-    # Works in both bull and bear: RSI < 30 for long, > 70 for short captures mean reversion,
-    # 12h EMA > price for longs, < price for shorts ensures trend alignment,
-    # volume confirmation ensures momentum. Discrete sizing (0.25) minimizes fee drag.
-    # Target: 20-40 trades/year to stay within 4h optimal range.
+    # Hypothesis: 1h strategy using 4h Williams %R extremes + 1d EMA trend filter + volume confirmation
+    # Williams %R captures short-term reversals, 1d EMA ensures trend alignment, volume confirms momentum
+    # Session filter (08-20 UTC) reduces noise. Discrete sizing (0.20) minimizes fee drag.
+    # Target: 15-37 trades/year to stay within 1h optimal range.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values if 'volume' in prices.columns else np.ones(len(prices))
     
-    # Get 1h data for RSI (primary HTF for reversal signals)
-    df_1h = get_htf_data(prices, '1h')
-    if len(df_1h) < 14:
+    # Get 4h data for Williams %R (primary HTF for reversal signals)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 14:
         return np.zeros(n)
     
-    close_1h = df_1h['close'].values
-    high_1h = df_1h['high'].values
-    low_1h = df_1h['low'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values if 'volume' in df_4h.columns else np.ones(len(df_4h))
     
-    # Get 12h data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    close_1d = df_1d['close'].values
     
-    # Get 1h volume for confirmation (20-period average)
-    volume_1h = df_1h['volume'].values if 'volume' in df_1h.columns else np.ones(len(df_1h))
+    # Calculate 4h Williams %R (14-period)
+    highest_high = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_4h) / (highest_high - lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid division by zero
     
-    # Calculate 1h RSI (14-period)
-    delta = pd.Series(close_1h).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values  # neutral when undefined
+    # Calculate 1d EMA (50-period)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 12h EMA (50-period)
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Get 4h volume for confirmation (20-period average)
+    vol_avg_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
     
-    # Get 1h volume average (20-period)
-    vol_avg_20_1h = pd.Series(volume_1h).rolling(window=20, min_periods=20).mean().values
+    # Align all HTF indicators to 1h primary timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_4h, williams_r)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    vol_avg_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_avg_20_4h)
     
-    # Align all HTF indicators to 4h primary timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1h, rsi)
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    vol_avg_20_1h_aligned = align_htf_to_ltf(prices, df_1h, vol_avg_20_1h)
+    # Pre-compute session filter (08-20 UTC)
+    hours = prices.index.hour  # prices.index is DatetimeIndex
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.25  # 25% position size
+    position_size = 0.20  # 20% position size
     
     # Track entry price for stoploss
     entry_price = np.full(n, np.nan)
     
     for i in range(50, n):
-        # Skip if data not ready
-        if (np.isnan(rsi_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or
-            np.isnan(vol_avg_20_1h_aligned[i])):
+        # Skip if data not ready or outside session
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(vol_avg_20_4h_aligned[i]) or
+            not in_session[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1h volume > 1.5x 20-period average
-        idx_1h = i // 3  # 1h bars in 4h timeframe (3 bars per 4h)
-        if idx_1h >= len(volume_1h):
+        # Volume confirmation: current 4h volume > 1.5x 20-period average
+        idx_4h = i // 4  # 4h bars in 1h timeframe (4 bars per 4h)
+        if idx_4h >= len(volume_4h):
             signals[i] = 0.0
             continue
-        volume_confirmed = volume_1h[idx_1h] > 1.5 * vol_avg_20_1h_aligned[i]
+        volume_confirmed = volume_4h[idx_4h] > 1.5 * vol_avg_20_4h_aligned[i]
         
-        # Trend filter: price relative to 12h EMA
-        price_above_ema = close[i] > ema_50_12h_aligned[i]
-        price_below_ema = close[i] < ema_50_12h_aligned[i]
+        # Trend filter: price relative to 1d EMA
+        price_above_ema = close[i] > ema_50_1d_aligned[i]
+        price_below_ema = close[i] < ema_50_1d_aligned[i]
         
-        # Entry conditions: RSI extremes + trend alignment + volume
-        enter_long = (rsi_aligned[i] < 30) and price_above_ema and volume_confirmed
-        enter_short = (rsi_aligned[i] > 70) and price_below_ema and volume_confirmed
+        # Entry conditions: Williams %R extremes + trend alignment + volume
+        enter_long = (williams_r_aligned[i] < -80) and price_above_ema and volume_confirmed
+        enter_short = (williams_r_aligned[i] > -20) and price_below_ema and volume_confirmed
         
-        # Stoploss: 2x ATR based on 1h true range (simplified using hourly range)
-        hourly_range = high_1h[idx_1h] - low_1h[idx_1h] if idx_1h < len(high_1h) else 0
-        stop_distance = hourly_range * 1.5  # 150% of hourly range
+        # Stoploss: 2x ATR based on 4h true range (simplified using 4h range)
+        if idx_4h < len(high_4h) and idx_4h < len(low_4h):
+            daily_range = high_4h[idx_4h] - low_4h[idx_4h]
+        else:
+            daily_range = 0
+        stop_distance = daily_range * 0.5  # 50% of 4h range
         
         exit_long = position == 1 and not np.isnan(entry_price[i-1]) and close[i] < entry_price[i-1] - stop_distance
         exit_short = position == -1 and not np.isnan(entry_price[i-1]) and close[i] > entry_price[i-1] + stop_distance
@@ -127,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1h_12h_rsi_extreme_ema_volume_v1"
-timeframe = "4h"
+name = "1h_4h_1d_williams_r_extreme_ema_volume_v1"
+timeframe = "1h"
 leverage = 1.0
