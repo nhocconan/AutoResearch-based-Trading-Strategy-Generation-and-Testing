@@ -8,87 +8,72 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1h timeframe with 4h/1d HTF filters
-    # Use 4h trend direction (EMA21) + 1d volume regime (high/low) + 1h entry timing (pullback to EMA8)
-    # Long: 4h EMA21 up + 1d volume > 20-day avg + 1h price pulls back to EMA8 from above
-    # Short: 4h EMA21 down + 1d volume < 20-day avg + 1h price bounces off EMA8 from below
-    # Session filter: 08-20 UTC only
-    # Position size: 0.20 (20%) to control drawdown
-    # Target: 15-37 trades/year (60-150 total over 4 years) to minimize fee drag
+    # Hypothesis: 6h primary timeframe with 1w HTF filter
+    # Strategy: 6h Williams %R mean reversion within 1w trend
+    # Long: 1w uptrend (price > 1w EMA50) + 6h Williams %R < -80 (oversold)
+    # Short: 1w downtrend (price < 1w EMA50) + 6h Williams %R > -20 (overbought)
+    # Exit: Williams %R returns to -50 level
+    # Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+    # Williams %R is effective at catching reversals in trending markets
+    # Using 1w EMA50 for trend filter avoids whipsaws in ranging markets
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Precompute session filter (08-20 UTC)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Get 4h data for trend direction (EMA21)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get 1w data for trend filter (EMA50)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 60:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema_21_4h = pd.Series(close_4h).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
+    close_1w = df_1w['close'].values
     
-    # Get 1d data for volume regime
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
+    # Calculate 1w EMA50 for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    volume_1d = df_1d['volume'].values
-    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    # Align 1w EMA50 to 6h timeframe
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Get 1h EMA8 for entry timing
-    ema_8 = pd.Series(close).ewm(span=8, min_periods=8, adjust=False).mean().values
+    # Calculate Williams %R on 6h data (14-period)
+    def calculate_williams_r(high, low, close, window=14):
+        highest_high = pd.Series(high).rolling(window=window, min_periods=window).max().values
+        lowest_low = pd.Series(low).rolling(window=window, min_periods=window).min().values
+        williams_r = np.where(
+            (highest_high - lowest_low) != 0,
+            -100 * (highest_high - close) / (highest_high - lowest_low),
+            -50  # default when no range
+        )
+        return williams_r
+    
+    williams_r = calculate_williams_r(high, low, close, window=14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
-    for i in range(30, n):
-        # Skip if not in session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-            
+    for i in range(60, n):  # start from 60 to have enough data for calculations
         # Skip if data not ready
-        if (np.isnan(ema_21_4h_aligned[i]) or 
-            np.isnan(ema_21_4h_aligned[i-1]) or
-            np.isnan(vol_avg_20_1d_aligned[i]) or
-            np.isnan(ema_8[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or 
+            np.isnan(williams_r[i])):
             signals[i] = 0.0
             continue
         
-        # 4h trend direction: EMA21 slope
-        ema_21_4h_up = ema_21_4h_aligned[i] > ema_21_4h_aligned[i-1]
-        ema_21_4h_down = ema_21_4h_aligned[i] < ema_21_4h_aligned[i-1]
+        # Trend filter: 1w uptrend/downtrend
+        is_uptrend = close[i] > ema50_1w_aligned[i]
+        is_downtrend = close[i] < ema50_1w_aligned[i]
         
-        # 1d volume regime: above/below average
-        volume_high = volume_1d[i] > vol_avg_20_1d_aligned[i]
-        volume_low = volume_1d[i] < vol_avg_20_1d_aligned[i]
-        
-        # 1h entry timing: price relative to EMA8
-        price_above_ema8 = close[i] > ema_8[i]
-        price_below_ema8 = close[i] < ema_8[i]
-        was_above_ema8 = close[i-1] > ema_8[i-1]
-        was_below_ema8 = close[i-1] < ema_8[i-1]
+        # Williams %R conditions
+        is_oversold = williams_r[i] < -80
+        is_overbought = williams_r[i] > -20
+        is_exit = abs(williams_r[i] + 50) < 5  # Near -50 level
         
         # Entry conditions
-        enter_long = (ema_21_4h_up and volume_high and 
-                     price_above_ema8 and was_below_ema8)
-        enter_short = (ema_21_4h_down and volume_low and 
-                      price_below_ema8 and was_above_ema8)
+        enter_long = is_uptrend and is_oversold
+        enter_short = is_downtrend and is_overbought
         
-        # Exit conditions: trend reversal or volume regime change
-        exit_long = (position == 1 and 
-                    (ema_21_4h_down or not volume_high))
-        exit_short = (position == -1 and 
-                     (ema_21_4h_up or not volume_low))
+        # Exit conditions
+        exit_long = position == 1 and is_exit
+        exit_short = position == -1 and is_exit
         
         # Execute signals
         if enter_long and position != 1:
@@ -114,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4h_1d_ema_trend_volume_session_v1"
-timeframe = "1h"
+name = "6h_1w_williamsr_meanreversion_v1"
+timeframe = "6h"
 leverage = 1.0
