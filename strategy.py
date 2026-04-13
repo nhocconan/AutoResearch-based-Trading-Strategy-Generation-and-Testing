@@ -8,11 +8,10 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Donchian(20) breakout with 1d trend filter (ADX>25) and volume confirmation.
-    # Donchian channels capture breakouts in trending markets.
-    # 1d ADX filter ensures we only trade when higher timeframe is trending (avoids chop).
-    # Volume spike confirms breakout validity and reduces false signals.
-    # Discrete position sizing (0.0, ±0.25) minimizes fee churn.
+    # Hypothesis: 12h Donchian(20) breakout with 1w EMA(50) trend filter and volume confirmation.
+    # Donchian channels provide robust breakout signals in trending markets.
+    # 1w EMA ensures alignment with higher timeframe trend.
+    # Volume spike filters false breakouts.
     # Target: 50-150 total trades over 4 years (12-37/year).
     
     close = prices['close'].values
@@ -20,71 +19,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX trend filter (call ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 1w data for EMA trend filter (call ONCE before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ADX(14) for trend filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1w EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with original index
+    # Align 1w EMA to 12h timeframe
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
+    # Calculate 12h Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Smoothed TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
-    period = 14
-    alpha = 1.0 / period
-    
-    def wilders_smoothing(values, alpha):
-        result = np.full_like(values, np.nan)
-        for i in range(len(values)):
-            if np.isnan(values[i]):
-                if i == 0:
-                    result[i] = np.nan
-                else:
-                    result[i] = result[i-1]
-            else:
-                if np.isnan(result[i-1]):
-                    result[i] = values[i]
-                else:
-                    result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
-        return result
-    
-    tr_smooth = wilders_smoothing(tr, alpha)
-    plus_dm_smooth = wilders_smoothing(plus_dm, alpha)
-    minus_dm_smooth = wilders_smoothing(minus_dm, alpha)
-    
-    # DI+ and DI-
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilders_smoothing(dx, alpha)
-    
-    # Align 1d ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate 6h Donchian(20) channels
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    
-    # Calculate 6h volume MA(20) for confirmation
+    # Calculate 12h volume MA(20) for confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -93,24 +44,24 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if data not ready
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(volume_ma[i])):
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volume filter: current volume > 1.5 * 20-period MA
         volume_filter = volume[i] > 1.5 * volume_ma[i]
         
-        # Trend filter: 1d ADX > 25 indicates trending market
-        trending = adx_aligned[i] > 25
+        # Trend filter: price above/below 1w EMA(50)
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
         # Breakout conditions: price breaks Donchian channels with volume and trend confirmation
-        long_breakout = (close[i] > highest_high[i-1]) and volume_filter and trending
-        short_breakout = (close[i] < lowest_low[i-1]) and volume_filter and trending
+        long_breakout = (close[i] > highest_high[i-1]) and volume_filter and uptrend
+        short_breakout = (close[i] < lowest_low[i-1]) and volume_filter and downtrend
         
-        # Exit conditions: price returns to opposite Donchian level (midpoint)
-        midpoint = (highest_high[i-1] + lowest_low[i-1]) / 2.0
-        long_exit = close[i] < midpoint
-        short_exit = close[i] > midpoint
+        # Exit conditions: price returns to opposite Donchian level
+        long_exit = close[i] < lowest_low[i-1]
+        short_exit = close[i] > highest_high[i-1]
         
         # Fixed position size (discrete levels to minimize fee churn)
         position_size = 0.25
@@ -140,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_donchian_breakout_adx_volume_v1"
-timeframe = "6h"
+name = "12h_1w_donchian_breakout_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
