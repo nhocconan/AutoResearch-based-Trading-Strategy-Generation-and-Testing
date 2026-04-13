@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Pivot_Breakout_With_Volume
-Hypothesis: Daily Camarilla pivot levels provide robust support/resistance. Breakouts above R4 or below S4 with volume confirmation indicate institutional participation. Works in both bull and bear markets by capturing breakouts in direction of trend. Target: 20-30 trades/year per symbol.
+1D_1W_CAMARILLA_PIVOT_BREAKOUT_VOLUME_FILTER
+Hypothesis: On the daily timeframe, Camarilla pivot levels derived from weekly candles provide strong support/resistance.
+Breakouts above weekly R4 or below weekly S4 with volume confirmation (1.5x 20-day average volume) indicate institutional participation.
+The weekly timeframe filters noise and captures major trend shifts, working in both bull and bear markets by trading in the direction of the breakout.
+Target: 10-20 trades/year per symbol.
 """
 
 import numpy as np
@@ -18,47 +21,41 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for Camarilla pivots
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Camarilla levels for each weekly bar
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    close_weekly = df_weekly['close'].values
     
-    # Camarilla formulas
-    close_prev = np.roll(close_1d, 1)
-    close_prev[0] = close_1d[0]  # first bar uses its own close
+    # Shift close by 1 to get previous week's close
+    close_prev = np.roll(close_weekly, 1)
+    close_prev[0] = close_weekly[0]  # first bar uses its own close
     
-    range_1d = high_1d - low_1d
+    range_weekly = high_weekly - low_weekly
     
     # Resistance levels
-    R1 = close_prev + (range_1d * 1.0833 / 12)
-    R2 = close_prev + (range_1d * 1.1666 / 6)
-    R3 = close_prev + (range_1d * 1.2500 / 4)
-    R4 = close_prev + (range_1d * 1.5000 / 2)
+    R1 = close_prev + (range_weekly * 1.0833 / 12)
+    R2 = close_prev + (range_weekly * 1.1666 / 6)
+    R3 = close_prev + (range_weekly * 1.2500 / 4)
+    R4 = close_prev + (range_weekly * 1.5000 / 2)
     
     # Support levels
-    S1 = close_prev - (range_1d * 1.0833 / 12)
-    S2 = close_prev - (range_1d * 1.1666 / 6)
-    S3 = close_prev - (range_1d * 1.2500 / 4)
-    S4 = close_prev - (range_1d * 1.5000 / 2)
+    S1 = close_prev - (range_weekly * 1.0833 / 12)
+    S2 = close_prev - (range_weekly * 1.1666 / 6)
+    S3 = close_prev - (range_weekly * 1.2500 / 4)
+    S4 = close_prev - (range_weekly * 1.5000 / 2)
     
-    # Align levels to 4h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    # Align levels to daily timeframe
+    R4_aligned = align_htf_to_ltf(prices, df_weekly, R4)
+    S4_aligned = align_htf_to_ltf(prices, df_weekly, S4)
     
-    # Volume confirmation: current volume > 1.8x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-day average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 1.8)
+    volume_expansion = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -71,10 +68,10 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Long breakout: price breaks above R4 with volume expansion
+        # Long breakout: price breaks above weekly R4 with volume expansion
         long_breakout = close[i] > R4_aligned[i] and volume_expansion[i]
         
-        # Short breakdown: price breaks below S4 with volume expansion
+        # Short breakdown: price breaks below weekly S4 with volume expansion
         short_breakout = close[i] < S4_aligned[i] and volume_expansion[i]
         
         if long_breakout and position != 1:
@@ -89,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_Pivot_Breakout_With_Volume"
-timeframe = "4h"
+name = "1D_1W_Camarilla_Pivot_Breakout_Volume_Filter"
+timeframe = "1d"
 leverage = 1.0
