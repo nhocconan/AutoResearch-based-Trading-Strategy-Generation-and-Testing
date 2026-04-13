@@ -8,41 +8,62 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Donchian(20) breakout with 1w trend filter and 1d volume confirmation
-    # Long: price breaks above 20-period high + 1w close > 1w EMA200 + 1d volume > 1.5x 20-period average
-    # Short: price breaks below 20-period low + 1w close < 1w EMA200 + 1d volume > 1.5x 20-period average
-    # Uses discrete sizing (0.25) to minimize fee drag and ATR-based stoploss
-    # Target: 12-37 trades/year to stay within 6h optimal range
+    # Hypothesis: 12h Donchian channel breakout with 1d volume spike and ATR filter
+    # Long: price breaks above 20-period Donchian high + volume > 2.0x 20-period average + ATR(14) > ATR(50)
+    # Short: price breaks below 20-period Donchian low + volume > 2.0x 20-period average + ATR(14) > ATR(50)
+    # Uses discrete sizing (0.25) to minimize fee drag and ATR-based stoploss (2x ATR)
+    # Target: 12-30 trades/year to stay within 12h optimal range
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time']
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    
-    # Get 1d data for volume confirmation
+    # Get 1d data for volume confirmation and ATR filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1w EMA200 for trend filter
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate 12h Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Calculate 1d volume average (20-period) for confirmation
     vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all indicators to 6h timeframe
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # Calculate 1d ATR(14) and ATR(50) for volatility regime filter
+    # True range for 1d
+    tr_1d = np.zeros(len(high_1d))
+    for i in range(1, len(high_1d)):
+        tr_1d[i] = max(
+            high_1d[i] - low_1d[i],
+            abs(high_1d[i] - close_1d[i-1]),
+            abs(low_1d[i] - close_1d[i-1])
+        )
+    # ATR(14) and ATR(50) using Wilder's smoothing
+    atr_14_1d = np.zeros(len(high_1d))
+    atr_50_1d = np.zeros(len(high_1d))
+    for i in range(1, len(high_1d)):
+        if i < 14:
+            atr_14_1d[i] = np.mean(tr_1d[1:i+1]) if i > 0 else tr_1d[i]
+            atr_50_1d[i] = np.mean(tr_1d[1:i+1]) if i > 0 else tr_1d[i]
+        else:
+            atr_14_1d[i] = 0.93 * atr_14_1d[i-1] + 0.07 * tr_1d[i]
+            atr_50_1d[i] = 0.98 * atr_50_1d[i-1] + 0.02 * tr_1d[i]
+    
+    # Volatility filter: ATR(14) > ATR(50) indicates increasing volatility (good for breakouts)
+    vol_filter = atr_14_1d > atr_50_1d
+    
+    # Align all indicators to 12h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    vol_filter_aligned = align_htf_to_ltf(prices, df_1d, vol_filter.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -51,57 +72,44 @@ def generate_signals(prices):
     # Track entry price for stoploss
     entry_price = np.full(n, np.nan)
     
-    # Calculate Donchian channels (20-period)
-    donchian_high = np.zeros(n)
-    donchian_low = np.zeros(n)
-    for i in range(n):
-        if i < 20:
-            donchian_high[i] = np.nan
-            donchian_low[i] = np.nan
-        else:
-            donchian_high[i] = np.max(high[i-20:i])
-            donchian_low[i] = np.min(low[i-20:i])
-    
-    # Calculate ATR using true range approximation for 6h timeframe
-    atr_6h = np.zeros(n)
+    # Calculate 12h ATR for stoploss
+    tr_12h = np.zeros(n)
     for i in range(1, n):
-        tr = max(
+        tr_12h[i] = max(
             high[i] - low[i],
             abs(high[i] - close[i-1]),
             abs(low[i] - close[i-1])
         )
+    atr_12h = np.zeros(n)
+    for i in range(1, n):
         if i < 14:
-            atr_6h[i] = tr  # Simple average for warmup
+            atr_12h[i] = np.mean(tr_12h[1:i+1]) if i > 0 else tr_12h[i]
         else:
-            atr_6h[i] = 0.93 * atr_6h[i-1] + 0.07 * tr  # Wilder's smoothing
+            atr_12h[i] = 0.93 * atr_12h[i-1] + 0.07 * tr_12h[i]
     
-    for i in range(200, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or
-            np.isnan(ema_200_1w_aligned[i]) or
-            np.isnan(vol_avg_20_1d_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or
+            np.isnan(vol_avg_20_1d_aligned[i]) or
+            np.isnan(vol_filter_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 6h volume > 1.5x 20-period 1d volume average
-        vol_avg_20_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        if np.isnan(vol_avg_20_6h[i]):
+        # Volume confirmation: current 12h volume > 2.0x 20-period average (using 12h volume directly)
+        vol_avg_20_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        if np.isnan(vol_avg_20_12h[i]):
             signals[i] = 0.0
             continue
-        volume_confirmed = volume[i] > 1.5 * vol_avg_20_6h[i]
+        volume_confirmed = volume[i] > 2.0 * vol_avg_20_12h[i]
         
-        # Trend filter: 6h close above/below 1w EMA200
-        uptrend = close[i] > ema_200_1w_aligned[i]
-        downtrend = close[i] < ema_200_1w_aligned[i]
-        
-        # Breakout conditions: price breaks Donchian levels with volume and trend
-        breakout_long = (close[i] > donchian_high[i]) and volume_confirmed and uptrend
-        breakout_short = (close[i] < donchian_low[i]) and volume_confirmed and downtrend
+        # Breakout conditions: price breaks Donchian levels with volume and volatility filter
+        breakout_long = (close[i] > donchian_high_aligned[i]) and volume_confirmed and (vol_filter_aligned[i] > 0.5)
+        breakout_short = (close[i] < donchian_low_aligned[i]) and volume_confirmed and (vol_filter_aligned[i] > 0.5)
         
         # Stoploss: 2x ATR below/above entry
-        exit_long = position == 1 and not np.isnan(entry_price[i-1]) and close[i] < entry_price[i-1] - 2.0 * atr_6h[i]
-        exit_short = position == -1 and not np.isnan(entry_price[i-1]) and close[i] > entry_price[i-1] + 2.0 * atr_6h[i]
+        exit_long = position == 1 and not np.isnan(entry_price[i-1]) and close[i] < entry_price[i-1] - 2.0 * atr_12h[i]
+        exit_short = position == -1 and not np.isnan(entry_price[i-1]) and close[i] > entry_price[i-1] + 2.0 * atr_12h[i]
         
         # Execute signals
         if breakout_long and position != 1:
@@ -134,6 +142,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_1d_donchian_volume_trend_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_volume_volatility_v1"
+timeframe = "12h"
 leverage = 1.0
