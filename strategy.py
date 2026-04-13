@@ -3,12 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1w trend filter and volume confirmation.
-# Uses weekly Donchian channels to identify primary trend, then enters on 12h breakouts
-# in the direction of the weekly trend. Volume confirmation filters false breakouts.
-# Designed to work in both bull (breakouts continue) and bear (mean reversion at extremes)
-# markets by only trading in direction of higher timeframe trend.
-# Target: 15-35 trades per year (60-140 total over 4 years) for 12h timeframe.
+# Hypothesis: 4h Bollinger Band squeeze with RSI momentum and 1d volume confirmation.
+# Bollinger Band squeeze (low volatility) precedes explosive moves. RSI > 55 confirms bullish momentum, < 45 bearish.
+# 1d volume > 1.5x average confirms institutional interest. Works in both bull (breakouts up) and bear (breakouts down).
+# Target: 20-40 trades per year (80-160 total over 4 years) for 4h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,86 +18,92 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Bollinger Bands (20, 2) on 4h
+    bb_length = 20
+    bb_mult = 2
+    sma = np.full(n, np.nan)
+    std = np.full(n, np.nan)
+    for i in range(bb_length - 1, n):
+        sma[i] = np.mean(close[i - bb_length + 1:i + 1])
+        std[i] = np.std(close[i - bb_length + 1:i + 1])
+    upper = sma + bb_mult * std
+    lower = sma - bb_mult * std
+    bb_width = (upper - lower) / sma  # normalized width
+    
+    # Bollinger Band squeeze: width < 20th percentile of last 50 periods
+    bb_width_percentile = np.full(n, np.nan)
+    for i in range(50, n):
+        past_widths = bb_width[i - 50:i]
+        bb_width_percentile[i] = (np.sum(past_widths < bb_width[i]) / 50) * 100
+    squeeze = bb_width_percentile < 20  # squeeze when width in lowest 20%
+    
+    # RSI(14) for momentum
+    rsi_length = 14
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    for i in range(rsi_length, n):
+        if i == rsi_length:
+            avg_gain[i] = np.mean(gain[i - rsi_length + 1:i + 1])
+            avg_loss[i] = np.mean(loss[i - rsi_length + 1:i + 1])
+        else:
+            avg_gain[i] = (avg_gain[i - 1] * (rsi_length - 1) + gain[i]) / rsi_length
+            avg_loss[i] = (avg_loss[i - 1] * (rsi_length - 1) + loss[i]) / rsi_length
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # 1-day data for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Weekly Donchian(20) for trend identification
-    donch_high_1w = np.full(len(high_1w), np.nan)
-    donch_low_1w = np.full(len(low_1w), np.nan)
-    for i in range(19, len(high_1w)):
-        donch_high_1w[i] = np.max(high_1w[i-19:i+1])
-        donch_low_1w[i] = np.min(low_1w[i-19:i+1])
-    
-    # Align weekly Donchian to 12h timeframe (with 1-bar delay for completed weekly bar)
-    donch_high_1w_aligned = align_htf_to_ltf(prices, df_1w, donch_high_1w)
-    donch_low_1w_aligned = align_htf_to_ltf(prices, df_1w, donch_low_1w)
-    
-    # 12h Donchian(20) for entry signals
-    donch_high = np.full(n, np.nan)
-    donch_low = np.full(n, np.nan)
-    for i in range(19, n):
-        donch_high[i] = np.max(high[i-19:i+1])
-        donch_low[i] = np.min(low[i-19:i+1])
-    
-    # Average volume (20-period = 10 hours) for volume confirmation
-    avg_volume = np.full(n, np.nan)
-    for i in range(20, n):
-        avg_volume[i] = np.mean(volume[i-20:i])
+    volume_1d = df_1d['volume'].values
+    avg_volume_1d = np.full(len(volume_1d), np.nan)
+    for i in range(20, len(volume_1d)):
+        avg_volume_1d[i] = np.mean(volume_1d[i - 20:i])
+    volume_1d_avg_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(donch_high_1w_aligned[i]) or np.isnan(donch_low_1w_aligned[i]) or
-            np.isnan(avg_volume[i])):
+        if (np.isnan(squeeze[i]) or np.isnan(rsi[i]) or 
+            np.isnan(volume_1d_avg_aligned[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        vol = volume[i]
-        avg_vol = avg_volume[i]
+        vol_1d = volume[i]  # current 4h volume
+        avg_vol_1d = volume_1d_avg_aligned[i]  # average 1d volume aligned to 4h
         
-        # Weekly trend: price above weekly Donchian high = uptrend, below low = downtrend
-        weekly_high = donch_high_1w_aligned[i]
-        weekly_low = donch_low_1w_aligned[i]
-        
-        # Volume confirmation: current volume > 2.0x average volume
-        volume_confirm = vol > 2.0 * avg_vol
+        # Volume confirmation: current 4h volume > 1.5x average 1d volume (scaled)
+        # Scale: 1d volume represents ~6x 4h bars, so divide by 6 for per-bar comparison
+        volume_confirm = vol_1d > 1.5 * (avg_vol_1d / 6)
         
         if position == 0:
-            # Long: 12h breakout above Donchian high + weekly uptrend + volume confirmation
-            if (price > donch_high[i] and 
-                price > weekly_high and
-                volume_confirm):
+            # Long: Squeeze + RSI > 55 (bullish momentum) + volume confirmation
+            if squeeze[i] and (rsi[i] > 55) and volume_confirm:
                 position = 1
                 signals[i] = position_size
-            # Short: 12h breakdown below Donchian low + weekly downtrend + volume confirmation
-            elif (price < donch_low[i] and 
-                  price < weekly_low and
-                  volume_confirm):
+            # Short: Squeeze + RSI < 45 (bearish momentum) + volume confirmation
+            elif squeeze[i] and (rsi[i] < 45) and volume_confirm:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: 12h breakdown below Donchian low or weekly trend turns down
-            if (price < donch_low[i] or price < weekly_low):
+            # Exit long: Squeeze ends or RSI < 50
+            if (not squeeze[i]) or (rsi[i] < 50):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: 12h breakout above Donchian high or weekly trend turns up
-            if (price > donch_high[i] or price > weekly_high):
+            # Exit short: Squeeze ends or RSI > 50
+            if (not squeeze[i]) or (rsi[i] > 50):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -107,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1w_Donchian_Trend_Volume"
-timeframe = "12h"
+name = "4h_1d_BollingerSqueeze_RSI_Momentum"
+timeframe = "4h"
 leverage = 1.0
