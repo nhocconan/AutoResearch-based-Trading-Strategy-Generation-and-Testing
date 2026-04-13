@@ -8,11 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian(20) breakout with daily Camarilla pivot filter + volume confirmation
-    # Long: price > Donchian(20) high AND price > daily S3 pivot AND volume > 1.8x 20-period average
-    # Short: price < Donchian(20) low AND price < daily R3 pivot AND volume > 1.8x 20-period average
+    # Hypothesis: 4h Donchian(20) breakout with daily Camarilla pivot filter + volume confirmation
+    # Long: price > Donchian(20) high AND price > daily S3 pivot AND volume > 2.0x 20-period average
+    # Short: price < Donchian(20) low AND price < daily R3 pivot AND volume > 2.0x 20-period average
     # Exit: opposite Donchian breakout OR price crosses daily H3/L3 pivot
-    # Using 12h timeframe to minimize trade frequency and fee drag, daily Camarilla pivots for strong structure,
+    # Using 4h timeframe for optimal trade frequency (target 20-50/year), daily Camarilla pivots for strong structure,
     # and volume spike confirmation to avoid false breakouts. Discrete position sizing (0.25) to minimize fee churn.
     
     close = prices['close'].values
@@ -26,6 +26,8 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Calculate daily Camarilla pivot levels (H3, L3, S3, R3)
+    # Formula based on previous daily candle: H4 = close + 1.1*(high-low)*1.1/2, L4 = close - 1.1*(high-low)*1.1/2
+    # Then: H3 = H4 - (H4-L4)/2, L3 = L4 + (H4-L4)/2, S3 = L4 - (H4-L4)*1.1/6, R3 = H4 + (H4-L4)*1.1/6
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -47,7 +49,7 @@ def generate_signals(prices):
         S3[i] = L4[i] - (H4[i] - L4[i]) * 1.1 / 6
         R3[i] = H4[i] + (H4[i] - L4[i]) * 1.1 / 6
     
-    # Get 12h Donchian(20) for breakout with min_periods
+    # Get 4h Donchian(20) for breakout with min_periods
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     
@@ -55,13 +57,13 @@ def generate_signals(prices):
         donchian_high[i] = np.max(high[i-20:i])
         donchian_low[i] = np.min(low[i-20:i])
     
-    # Get 12h volume for confirmation (>1.8x 20-period average)
+    # Get 4h volume for confirmation (>2.0x 20-period average)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (1.8 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
-    # Align daily Camarilla levels to 12h
+    # Align daily Camarilla levels to 4h
     H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
     L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
@@ -118,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_donchian_breakout_camarilla_pivot_volume_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_breakout_camarilla_pivot_volume_v1"
+timeframe = "4h"
 leverage = 1.0
