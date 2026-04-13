@@ -5,13 +5,12 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
     # Get daily data for HTF calculations
     df_1d = get_htf_data(prices, '1d')
@@ -21,7 +20,6 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
     # Calculate 10-period Donchian channels on daily
     high_10 = np.full(len(close_1d), np.nan)
@@ -34,31 +32,20 @@ def generate_signals(prices):
     close_1d_series = pd.Series(close_1d)
     ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate volume ratio (current volume / 20-period average)
-    vol_ma_20 = np.full(len(volume_1d), np.nan)
-    for i in range(20, len(volume_1d)):
-        vol_ma_20[i] = np.mean(volume_1d[i-20:i])
-    volume_ratio = np.full(len(volume_1d), np.nan)
-    for i in range(20, len(volume_1d)):
-        if vol_ma_20[i] > 0:
-            volume_ratio[i] = volume_1d[i] / vol_ma_20[i]
-    
-    # Align indicators to 12h timeframe
+    # Align indicators to 4h timeframe
     high_10_aligned = align_htf_to_ltf(prices, df_1d, high_10)
     low_10_aligned = align_htf_to_ltf(prices, df_1d, low_10)
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    volume_ratio_aligned = align_htf_to_ltf(prices, df_1d, volume_ratio)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% of capital
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if data not ready
         if (np.isnan(high_10_aligned[i]) or 
             np.isnan(low_10_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or 
-            np.isnan(volume_ratio_aligned[i])):
+            np.isnan(ema_34_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -70,12 +57,9 @@ def generate_signals(prices):
         long_breakout = close[i] > high_10_aligned[i]
         short_breakout = close[i] < low_10_aligned[i]
         
-        # Volume confirmation: volume > 1.5x average
-        volume_confirm = volume_ratio_aligned[i] > 1.5
-        
-        # Entry conditions: breakout in direction of trend with volume
-        long_entry = long_breakout and above_ema and volume_confirm
-        short_entry = short_breakout and below_ema and volume_confirm
+        # Entry conditions: breakout in direction of trend
+        long_entry = long_breakout and above_ema
+        short_entry = short_breakout and below_ema
         
         # Exit conditions: opposite breakout or trend reversal
         exit_long = position == 1 and (short_breakout or below_ema)
@@ -102,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_donchian_ema34_volume_breakout_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_ema34_breakout_v2"
+timeframe = "4h"
 leverage = 1.0
