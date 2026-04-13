@@ -8,100 +8,87 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h primary timeframe with 12h HTF filter
-    # Long: price breaks above 12h Donchian(20) high + volume > 1.5x 20-period avg + chop < 61.8 (trending)
-    # Short: price breaks below 12h Donchian(20) low + volume > 1.5x 20-period avg + chop < 61.8 (trending)
-    # Exit: price returns to 12h Donchian middle (10-period average of high/low)
-    # Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag
-    # Using 4h timeframe with 12h HTF filter for trend confirmation and volume/chop regime filter
-    # This combination has shown strong performance in both bull and bear markets
+    # Hypothesis: 1h timeframe with 4h/1d HTF filters
+    # Use 4h trend direction (EMA21) + 1d volume regime (high/low) + 1h entry timing (pullback to EMA8)
+    # Long: 4h EMA21 up + 1d volume > 20-day avg + 1h price pulls back to EMA8 from above
+    # Short: 4h EMA21 down + 1d volume < 20-day avg + 1h price bounces off EMA8 from below
+    # Session filter: 08-20 UTC only
+    # Position size: 0.20 (20%) to control drawdown
+    # Target: 15-37 trades/year (60-150 total over 4 years) to minimize fee drag
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values if 'volume' in prices.columns else np.ones(len(prices))
+    volume = prices['volume'].values
     
-    # Get 12h data for HTF Donchian channels and chop regime
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Precompute session filter (08-20 UTC)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Get 4h data for trend direction (EMA21)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values if 'volume' in df_12h.columns else np.ones(len(df_12h))
+    close_4h = df_4h['close'].values
+    ema_21_4h = pd.Series(close_4h).ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
     
-    # Calculate Donchian channels on 12h data (20-period)
-    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # Get 1d data for volume regime
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # Calculate Chopiness Index on 12h data (14-period)
-    def calculate_chop(high, low, close, window=14):
-        # True Range
-        tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - np.roll(close, 1)[1:]))
-        tr1 = np.maximum(tr1, np.abs(low[1:] - np.roll(close, 1)[1:]))
-        tr = np.concatenate([[np.nan], tr1])
-        
-        # Sum of True Range over window
-        atr_sum = pd.Series(tr).rolling(window=window, min_periods=window).sum().values
-        
-        # Highest high and lowest low over window
-        highest_high = pd.Series(high).rolling(window=window, min_periods=window).max().values
-        lowest_low = pd.Series(low).rolling(window=window, min_periods=window).min().values
-        
-        # Chop = log10(atr_sum / (highest_high - lowest_low)) / log10(window) * 100
-        highest_low_diff = highest_high - lowest_low
-        chop = np.where(
-            (highest_low_diff > 0) & (~np.isnan(atr_sum)),
-            np.log10(atr_sum / highest_low_diff) / np.log10(window) * 100,
-            50  # default to middle when invalid
-        )
-        return chop
+    volume_1d = df_1d['volume'].values
+    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
-    chop = calculate_chop(high_12h, low_12h, close_12h, window=14)
-    
-    # Volume averages on 12h data (20-period)
-    vol_avg_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all indicators to 4h timeframe (primary)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_12h, donchian_mid)
-    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
-    vol_avg_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_avg_20_12h)
+    # Get 1h EMA8 for entry timing
+    ema_8 = pd.Series(close).ewm(span=8, min_periods=8, adjust=False).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.25  # 25% position size
+    position_size = 0.20  # 20% position size
     
-    for i in range(50, n):  # start from 50 to have enough data for calculations
+    for i in range(30, n):
+        # Skip if not in session
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
+            
         # Skip if data not ready
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(donchian_mid_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or 
-            np.isnan(vol_avg_20_12h_aligned[i])):
+        if (np.isnan(ema_21_4h_aligned[i]) or 
+            np.isnan(ema_21_4h_aligned[i-1]) or
+            np.isnan(vol_avg_20_1d_aligned[i]) or
+            np.isnan(ema_8[i])):
             signals[i] = 0.0
             continue
         
-        # Chop regime filter: chop < 61.8 indicates trending market (good for breakouts)
-        is_trending_regime = chop_aligned[i] < 61.8
+        # 4h trend direction: EMA21 slope
+        ema_21_4h_up = ema_21_4h_aligned[i] > ema_21_4h_aligned[i-1]
+        ema_21_4h_down = ema_21_4h_aligned[i] < ema_21_4h_aligned[i-1]
         
-        # Volume confirmation: current 12h volume > 1.5x 20-period average
-        volume_confirmed = volume_12h[i] > 1.5 * vol_avg_20_12h_aligned[i]
+        # 1d volume regime: above/below average
+        volume_high = volume_1d[i] > vol_avg_20_1d_aligned[i]
+        volume_low = volume_1d[i] < vol_avg_20_1d_aligned[i]
         
-        # Breakout conditions
-        breakout_up = close_12h[i] > donchian_high_aligned[i]
-        breakout_down = close_12h[i] < donchian_low_aligned[i]
+        # 1h entry timing: price relative to EMA8
+        price_above_ema8 = close[i] > ema_8[i]
+        price_below_ema8 = close[i] < ema_8[i]
+        was_above_ema8 = close[i-1] > ema_8[i-1]
+        was_below_ema8 = close[i-1] < ema_8[i-1]
         
         # Entry conditions
-        enter_long = is_trending_regime and breakout_up and volume_confirmed
-        enter_short = is_trending_regime and breakout_down and volume_confirmed
+        enter_long = (ema_21_4h_up and volume_high and 
+                     price_above_ema8 and was_below_ema8)
+        enter_short = (ema_21_4h_down and volume_low and 
+                      price_below_ema8 and was_above_ema8)
         
-        # Exit conditions: price returns to 12h Donchian middle
-        exit_long = position == 1 and close_12h[i] <= donchian_mid_aligned[i]
-        exit_short = position == -1 and close_12h[i] >= donchian_mid_aligned[i]
+        # Exit conditions: trend reversal or volume regime change
+        exit_long = (position == 1 and 
+                    (ema_21_4h_down or not volume_high))
+        exit_short = (position == -1 and 
+                     (ema_21_4h_up or not volume_low))
         
         # Execute signals
         if enter_long and position != 1:
@@ -127,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_donchian_breakout_volume_chop_v1"
-timeframe = "4h"
+name = "1h_4h_1d_ema_trend_volume_session_v1"
+timeframe = "1h"
 leverage = 1.0
