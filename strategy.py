@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_1d_TrueRange_Breakout_Volume_Confirmation
-Hypothesis: 4h True Range breakout with 1d volume confirmation works in both bull and bear markets.
-Long when price breaks above prior 4h bar's high + True Range > 1.5x ATR(14) + 1d volume > 1.5x 20-day average.
-Short when price breaks below prior 4h bar's low + True Range > 1.5x ATR(14) + 1d volume > 1.5x 20-day average.
-Exit when price crosses the 4h midpoint of the breakout bar.
-Targets 20-40 trades/year with volatility-based entries that capture expansion moves.
+6h_1d1w_Angle_of_Attack
+Hypothesis: Price crosses above/below 60-period EMA on 6h chart with 1d volume confirmation and 1w trend filter.
+Long when 6h close > 60-period EMA + 1d volume > 1.5x 20-period average + 1w close > 1w EMA50.
+Short when 6h close < 60-period EMA + 1d volume > 1.5x 20-period average + 1w close < 1w EMA50.
+Exit when price crosses back below/above 60-period EMA or 1w trend reverses.
+Designed for 6h timeframe to target 20-40 trades/year with trend-following in both bull/bear markets.
 """
 
 import numpy as np
@@ -14,25 +14,18 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     
-    # 4h True Range and ATR
-    prev_close = np.roll(close, 1)
-    prev_close[0] = close[0]
-    tr1 = high - low
-    tr2 = np.abs(high - prev_close)
-    tr3 = np.abs(low - prev_close)
-    true_range = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(true_range).rolling(window=14, min_periods=14).mean().values
+    # 60-period EMA on 6h
+    close_series = pd.Series(close)
+    ema_60 = close_series.ewm(span=60, adjust=False, min_periods=60).mean().values
     
     # 1d volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     vol_1d = df_1d['volume'].values
@@ -40,47 +33,60 @@ def generate_signals(prices):
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
     
+    # 1w trend filter using EMA50
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if any required data is not ready
-        if (np.isnan(atr[i]) or np.isnan(vol_ma_20_aligned[i]) or np.isnan(vol_1d_aligned[i])):
+        if (np.isnan(ema_60[i]) or np.isnan(vol_ma_20_aligned[i]) or np.isnan(vol_1d_aligned[i]) or
+            np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current 1d volume > 1.5x 20-day average
+        # Volume condition: current 1d volume > 1.5x 20-period average
         vol_condition = vol_1d_aligned[i] > (vol_ma_20_aligned[i] * 1.5)
         
-        # True Range condition: current TR > 1.5x ATR
-        tr_condition = true_range[i] > (atr[i] * 1.5)
+        # 1w trend condition
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
-        # Breakout conditions: price breaks prior bar's high/low
-        long_breakout = close[i] > high[i-1]
-        short_breakout = close[i] < low[i-1]
+        # EMA cross conditions
+        ema_cross_up = close[i] > ema_60[i]
+        ema_cross_down = close[i] < ema_60[i]
         
-        # Exit conditions: price crosses midpoint of breakout bar
-        long_exit = close[i] < (high[i-1] + low[i-1]) / 2
-        short_exit = close[i] > (high[i-1] + low[i-1]) / 2
+        # Exit conditions
+        ema_cross_down_exit = close[i] < ema_60[i]  # for long exit
+        ema_cross_up_exit = close[i] > ema_60[i]    # for short exit
+        trend_reverse_long = close[i] < ema_50_1w_aligned[i]  # uptrend broken
+        trend_reverse_short = close[i] > ema_50_1w_aligned[i]  # downtrend broken
         
         if position == 0:
-            if long_breakout and vol_condition and tr_condition:
+            if ema_cross_up and vol_condition and uptrend:
                 position = 1
                 signals[i] = position_size
-            elif short_breakout and vol_condition and tr_condition:
+            elif ema_cross_down and vol_condition and downtrend:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            if long_exit:
+            if ema_cross_down_exit or trend_reverse_long:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            if short_exit:
+            if ema_cross_up_exit or trend_reverse_short:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -88,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_TrueRange_Breakout_Volume_Confirmation"
-timeframe = "4h"
+name = "6h_1d1w_Angle_of_Attack"
+timeframe = "6h"
 leverage = 1.0
