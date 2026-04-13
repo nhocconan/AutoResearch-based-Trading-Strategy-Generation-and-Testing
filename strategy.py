@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d 1-week Supertrend with 1d RSI filter and volume confirmation.
-Uses 1-week Supertrend (ATR=10, multiplier=3) for trend direction, 1d RSI(14) for momentum 
-confirmation (long when RSI > 50, short when RSI < 50), and 1d volume spike (volume > 1.5x 
-20-period average) to confirm momentum. Long when 1-week Supertrend is bullish, RSI > 50, 
-and volume spike. Short when 1-week Supertrend is bearish, RSI < 50, and volume spike.
-Designed to work in both bull and bear markets by following the higher timeframe trend.
-Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+Hypothesis: 12h ADX trend filter + 1d RSI mean reversion + volume confirmation.
+In high ADX (>25) trends, RSI extremes (RSI<30 or >70) with volume spike indicate
+pullbacks likely to reverse. Short on RSI>70 in uptrend, long on RSI<30 in downtrend.
+Uses 1d RSI for signal, 12h ADX for trend filter, 1d volume spike for confirmation.
+Designed for fewer trades (target: 50-150/4 years) to avoid fee drag in ranging/volatile markets.
 """
 
 import numpy as np
@@ -23,7 +21,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for RSI and volume confirmation
+    # Get 1d data for RSI and volume
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -31,73 +29,59 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d RSI(14)
-    delta = np.diff(close_1d)
+    # Calculate 1d RSI (14-period)
+    delta = np.diff(close_1d, prepend=close_1d[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
     rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.concatenate([[50], rsi])  # pad first value
+    rsi_1d = 100 - (100 / (1 + rs))
     
     # Calculate 1d volume spike (volume > 1.5x 20-period average)
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume_1d > (vol_ma_20 * 1.5)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
     
-    # Get 1w data for Supertrend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 12h data for ADX trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate ATR(10) for Supertrend
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.concatenate([[np.max([high_1w[0] - low_1w[0], np.abs(high_1w[0] - close_1w[0]), np.abs(low_1w[0] - close_1w[0])])], 
-                        np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate 12h ADX (14-period)
+    # True Range
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr_12h = np.concatenate([[np.max([high_12h[0] - low_12h[0], np.abs(high_12h[0] - close_12h[0]), np.abs(low_12h[0] - close_12h[0])])], 
+                            np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    # Directional Movement
+    up_move = high_12h[1:] - high_12h[:-1]
+    down_move = low_12h[:-1] - low_12h[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Calculate Supertrend
-    hl2 = (high_1w + low_1w) / 2
-    upper_band = hl2 + (3 * atr)
-    lower_band = hl2 - (3 * atr)
+    # Smoothed values
+    tr_14 = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False).mean().values
+    plus_dm_14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values
+    minus_dm_14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values
     
-    supertrend = np.zeros_like(close_1w)
-    trend = np.ones_like(close_1w)  # 1 for uptrend, -1 for downtrend
+    # Directional Indicators
+    plus_di = 100 * plus_dm_14 / (tr_14 + 1e-10)
+    minus_di = 100 * minus_dm_14 / (tr_14 + 1e-10)
     
-    for i in range(1, len(close_1w)):
-        if close_1w[i] > upper_band[i-1]:
-            trend[i] = 1
-        elif close_1w[i] < lower_band[i-1]:
-            trend[i] = -1
-        else:
-            trend[i] = trend[i-1]
-            if trend[i] == 1 and lower_band[i] < lower_band[i-1]:
-                lower_band[i] = lower_band[i-1]
-            if trend[i] == -1 and upper_band[i] > upper_band[i-1]:
-                upper_band[i] = upper_band[i-1]
-        
-        if trend[i] == 1:
-            supertrend[i] = lower_band[i]
-        else:
-            supertrend[i] = upper_band[i]
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx_12h = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
     
-    # Supertrend direction: 1 for uptrend, -1 for downtrend
-    supertrend_direction = trend
-    
-    # Align 1d indicators
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Align indicators to 12h timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
-    
-    # Align 1w Supertrend direction
-    supertrend_direction_aligned = align_htf_to_ltf(prices, df_1w, supertrend_direction.astype(float))
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -105,25 +89,29 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(rsi_aligned[i]) or 
+        if (np.isnan(rsi_1d_aligned[i]) or 
             np.isnan(vol_spike_aligned[i]) or 
-            np.isnan(supertrend_direction_aligned[i])):
+            np.isnan(adx_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: Supertrend direction + RSI > 50/<50 + volume spike
-        supertrend_up = supertrend_direction_aligned[i] > 0
-        supertrend_down = supertrend_direction_aligned[i] < 0
-        rsi_above = rsi_aligned[i] > 50
-        rsi_below = rsi_aligned[i] < 50
-        vol_confirm = vol_spike_aligned[i] > 0.5  # True if volume spike
+        # Trend filter: ADX > 25 indicates strong trend
+        strong_trend = adx_12h_aligned[i] > 25
         
-        long_entry = supertrend_up and rsi_above and vol_confirm
-        short_entry = supertrend_down and rsi_below and vol_confirm
+        # RSI extremes for mean reversion
+        rsi_overbought = rsi_1d_aligned[i] > 70
+        rsi_oversold = rsi_1d_aligned[i] < 30
         
-        # Exit when Supertrend reverses
-        exit_long = position == 1 and supertrend_down
-        exit_short = position == -1 and supertrend_up
+        # Volume confirmation
+        vol_confirm = vol_spike_aligned[i] > 0.5
+        
+        # Entry logic: In strong trend, fade RSI extremes with volume
+        long_entry = strong_trend and rsi_oversold and vol_confirm
+        short_entry = strong_trend and rsi_overbought and vol_confirm
+        
+        # Exit when RSI returns to neutral zone (40-60)
+        exit_long = position == 1 and rsi_1d_aligned[i] > 40
+        exit_short = position == -1 and rsi_1d_aligned[i] < 60
         
         # Execute signals
         if long_entry and position != 1:
@@ -146,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_supertrend_rsi_volume"
-timeframe = "1d"
+name = "12h_adx_rsi_volume_mean_reversion"
+timeframe = "12h"
 leverage = 1.0
