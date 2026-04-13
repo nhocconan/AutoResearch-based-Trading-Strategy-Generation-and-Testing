@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-day KAMA (Kaufman Adaptive Moving Average) with RSI momentum and Chop filter.
-# KAMA adapts to market noise - fast in trends, slow in ranging markets.
-# RSI (14) provides momentum confirmation - only trade when momentum aligns with trend.
-# Chop index filters for trending markets only (Chop < 38.2) to avoid whipsaws in ranges.
-# Daily timeframe with weekly trend filter for higher reliability.
-# Target: 30-100 total trades over 4 years (7-25/year) to stay within profitable range.
+# Hypothesis: 12h Williams Alligator with 1d volume confirmation and 1w trend filter.
+# Williams Alligator identifies trend presence and direction via three smoothed moving averages (Jaws, Teeth, Lips).
+# The strategy enters when the Alligator "wakes up" (lines diverge) in the direction of the weekly trend.
+# Volume confirmation on the 1d timeframe ensures breakouts have institutional participation.
+# Designed to work in both bull (trend following) and bear (counter-trend on weekly reversals) markets.
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,116 +20,62 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for multi-timeframe analysis
+    # 1-day data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Weekly data for trend filter
+    # 1-week data for trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate KAMA on daily close
-    close_1d = df_1d['close'].values
+    # Williams Alligator on 12h price data (Jaws=13, Teeth=8, Lips=5)
+    def smma(data, period):
+        """Smoothed Moving Average"""
+        sma = np.full(len(data), np.nan)
+        if len(data) >= period:
+            sma[period-1] = np.mean(data[:period])
+            for i in range(period, len(data)):
+                sma[i] = (sma[i-1] * (period-1) + data[i]) / period
+        return sma
     
-    # Efficiency Ratio (ER) for KAMA
-    def er(close, period=10):
-        change = np.abs(np.diff(close, period))
-        volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(close) > 1 else 0
-        # Vectorized calculation
-        result = np.full(len(close), np.nan)
-        for i in range(period, len(close)):
-            if np.sum(np.abs(np.diff(close[i-period:i+1]))) > 0:
-                result[i] = np.abs(close[i] - close[i-period]) / np.sum(np.abs(np.diff(close[i-period:i+1])))
-            else:
-                result[i] = 0
-        return result
+    jaws = smma(close, 13)
+    teeth = smma(close, 8)
+    lips = smma(close, 5)
     
-    er_values = er(close_1d, 10)
-    # Smoothing constants
-    sc = (er_values * (2/2 - 2/30) + 2/30) ** 2  # fast=2, slow=30
+    # Alligator signals: 
+    # - Bullish: Lips > Teeth > Jaws (green alignment, mouth opening up)
+    # - Bearish: Lips < Teeth < Jaws (red alignment, mouth opening down)
+    # - Sleeping: intertwined (no trend)
+    bullish_alignment = (lips > teeth) & (teeth > jaws)
+    bearish_alignment = (lips < teeth) & (teeth < jaws)
     
-    # Calculate KAMA
-    kama = np.full(len(close_1d), np.nan)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    # Volume confirmation: 1d volume > 1.5x 20-period average
+    vol_1d = df_1d['volume'].values
+    vol_ma_20 = smma(vol_1d, 20) if len(vol_1d) >= 20 else np.full(len(vol_1d), np.nan)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    volume_confirmed = volume > (vol_ma_20_aligned * 1.5)
     
-    # Calculate RSI on daily
-    def rsi(close, period=14):
-        delta = np.diff(close)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.full(len(close), np.nan)
-        avg_loss = np.full(len(close), np.nan)
-        
-        # First average
-        if len(gain) >= period:
-            avg_gain[period] = np.mean(gain[:period])
-            avg_loss[period] = np.mean(loss[:period])
-            
-            # Wilder smoothing
-            for i in range(period+1, len(close)):
-                avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-                avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi_values = 100 - (100 / (1 + rs))
-        return rsi_values
-    
-    rsi_values = rsi(close_1d, 14)
-    
-    # Calculate Chop index on daily
-    def chop(high, low, close, period=14):
-        atr = np.zeros(len(close))
-        for i in range(1, len(close)):
-            tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-            atr[i] = tr
-        
-        # Smoothed ATR
-        atr_sum = np.zeros(len(close))
-        for i in range(period, len(close)):
-            atr_sum[i] = np.sum(atr[i-period+1:i+1])
-        
-        # Max/min range
-        max_high = np.zeros(len(close))
-        min_low = np.zeros(len(close))
-        for i in range(period-1, len(close)):
-            max_high[i] = np.max(high[i-period+1:i+1])
-            min_low[i] = np.min(low[i-period+1:i+1])
-        
-        chop_values = np.zeros(len(close))
-        for i in range(period-1, len(close)):
-            if atr_sum[i] > 0 and (max_high[i] - min_low[i]) > 0:
-                chop_values[i] = 100 * np.log10(atr_sum[i] / (max_high[i] - min_low[i])) / np.log10(period)
-            else:
-                chop_values[i] = 50
-        return chop_values
-    
-    chop_values = chop(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
-    
-    # Weekly trend filter: price above/below weekly KAMA
+    # Weekly trend filter: price relative to weekly Alligator (using weekly close)
     close_1w = df_1w['close'].values
-    er_1w = er(close_1w, 10)
-    sc_1w = (er_1w * (2/2 - 2/30) + 2/30) ** 2
-    kama_1w = np.full(len(close_1w), np.nan)
-    kama_1w[0] = close_1w[0]
-    for i in range(1, len(close_1w)):
-        if not np.isnan(sc_1w[i]):
-            kama_1w[i] = kama_1w[i-1] + sc_1w[i] * (close_1w[i] - kama_1w[i-1])
-        else:
-            kama_1w[i] = kama_1w[i-1]
+    jaws_1w = smma(close_1w, 13)
+    teeth_1w = smma(close_1w, 8)
+    lips_1w = smma(close_1w, 5)
+    # Weekly bullish: price above all three lines
+    weekly_bullish = close_1w > jaws_1w
+    # Weekly bearish: price below all three lines
+    weekly_bearish = close_1w < jaws_1w
+    jaws_1w_aligned = align_htf_to_ltf(prices, df_1w, jaws_1w)
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish)
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish)
     
-    # Align all data to daily timeframe (our trading timeframe)
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_values)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_values)
-    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
+    # Align Alligator lines to 12h timeframe
+    jaws_aligned = align_htf_to_ltf(prices, None, jaws)  # Same timeframe, no alignment needed
+    teeth_aligned = align_htf_to_ltf(prices, None, teeth)
+    lips_aligned = align_htf_to_ltf(prices, None, lips)
+    bullish_aligned = align_htf_to_ltf(prices, None, bullish_alignment)
+    bearish_aligned = align_htf_to_ltf(prices, None, bearish_alignment)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -137,63 +83,40 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or np.isnan(kama_1w_aligned[i])):
+        if (np.isnan(jaws_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(volume_confirmed[i]) or
+            np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Conditions:
-        # 1. Price relative to KAMA (trend direction)
-        # 2. RSI momentum (not overbought/oversold extremes)
-        # 3. Chop filter (trending market only)
-        # 4. Weekly trend alignment
-        
         price = close[i]
-        kama_val = kama_aligned[i]
-        rsi_val = rsi_aligned[i]
-        chop_val = chop_aligned[i]
-        weekly_kama = kama_1w_aligned[i]
-        
-        # Only trade in trending markets (Chop < 38.2)
-        trending_market = chop_val < 38.2
-        
-        # Weekly trend filter
-        weekly_uptrend = price > weekly_kama
-        weekly_downtrend = price < weekly_kama
+        volume_ok = volume_confirmed[i]
+        weekly_up = weekly_bullish_aligned[i]
+        weekly_down = weekly_bearish_aligned[i]
+        bullish = bullish_aligned[i]
+        bearish = bearish_aligned[i]
         
         if position == 0:
-            # Long: price above KAMA, RSI not overbought, weekly uptrend, trending market
-            if (price > kama_val and 
-                rsi_val < 70 and 
-                weekly_uptrend and 
-                trending_market):
+            # Long: Alligator bullish alignment, volume confirmed, weekly bullish trend
+            if bullish and volume_ok and weekly_up:
                 position = 1
                 signals[i] = position_size
-            # Short: price below KAMA, RSI not oversold, weekly downtrend, trending market
-            elif (price < kama_val and 
-                  rsi_val > 30 and 
-                  weekly_downtrend and 
-                  trending_market):
+            # Short: Alligator bearish alignment, volume confirmed, weekly bearish trend
+            elif bearish and volume_ok and weekly_down:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price below KAMA OR RSI overbought OR weekly trend changes OR market becomes ranging
-            if (price < kama_val or 
-                rsi_val > 75 or 
-                not weekly_uptrend or 
-                not trending_market):
+            # Exit long: Alligator turns bearish OR volume dries up OR weekly trend turns bearish
+            if (not bullish or not volume_ok or not weekly_up):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price above KAMA OR RSI oversold OR weekly trend changes OR market becomes ranging
-            if (price > kama_val or 
-                rsi_val < 25 or 
-                not weekly_downtrend or 
-                not trending_market):
+            # Exit short: Alligator turns bullish OR volume dries up OR weekly trend turns bullish
+            if (not bearish or not volume_ok or not weekly_down):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -201,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_KAMA_RSI_Chop_Filter_v1"
-timeframe = "1d"
+name = "12h_1d_1w_Williams_Alligator_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
