@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d timeframe with 1w Donchian breakout and volume confirmation.
-# Long: Price breaks above weekly Donchian upper (20-period) + volume > 1.5x daily average volume (20-period).
-# Short: Price breaks below weekly Donchian lower (20-period) + volume > 1.5x daily average volume.
-# Exit: Price closes back inside the weekly Donchian channel.
-# Uses 1w for breakout structure, 1d for entry timing and volume confirmation.
-# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe.
+# Hypothesis: 12h timeframe with 1d Camarilla pivot levels and volume confirmation.
+# Long: Price crosses above Camarilla R3 (1d) + volume > 1.5x average volume (20-period).
+# Short: Price crosses below Camarilla S3 (1d) + volume > 1.5x average volume.
+# Uses 1d pivot levels for key support/resistance, volume for confirmation.
+# Position size: 0.25 (25% of capital).
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,29 +20,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for volume average
+    # 1d data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels for each 1d bar
+    camarilla_r3 = np.full(len(high_1d), np.nan)
+    camarilla_s3 = np.full(len(low_1d), np.nan)
+    for i in range(len(high_1d)):
+        # Camarilla formulas
+        range_ = high_1d[i] - low_1d[i]
+        camarilla_r3[i] = close_1d[i] + range_ * 1.1 / 6
+        camarilla_s3[i] = close_1d[i] - range_ * 1.1 / 6
+    
+    # Average volume (20-period) for volume confirmation
     avg_volume = np.full(n, np.nan)
     for i in range(20, n):
         avg_volume[i] = np.mean(volume[i-20:i])
     
-    # 1w data for Donchian channels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    # 1w Donchian channels (20-period)
-    donchian_high = np.full(len(high_1w), np.nan)
-    donchian_low = np.full(len(low_1w), np.nan)
-    for i in range(20, len(high_1w)):
-        donchian_high[i] = np.max(high_1w[i-20:i])
-        donchian_low[i] = np.min(low_1w[i-20:i])
-    
-    # Align 1w Donchian to 1d
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    # Align 1d Camarilla levels to 12h
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -50,7 +53,7 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
@@ -58,33 +61,33 @@ def generate_signals(prices):
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        upper = donchian_high_aligned[i]
-        lower = donchian_low_aligned[i]
+        r3 = camarilla_r3_aligned[i]
+        s3 = camarilla_s3_aligned[i]
         
         # Volume confirmation: current volume > 1.5x average volume
         volume_confirm = vol > 1.5 * avg_vol
         
         if position == 0:
-            # Long: break above weekly Donchian high + volume confirmation
-            if price > upper and volume_confirm:
+            # Long: cross above R3 + volume confirmation
+            if price > r3 and volume_confirm:
                 position = 1
                 signals[i] = position_size
-            # Short: break below weekly Donchian low + volume confirmation
-            elif price < lower and volume_confirm:
+            # Short: cross below S3 + volume confirmation
+            elif price < s3 and volume_confirm:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes back inside weekly Donchian channel
-            if price < upper and price > lower:
+            # Exit long: price crosses below S3 (opposite level)
+            if price < s3:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes back inside weekly Donchian channel
-            if price < upper and price > lower:
+            # Exit short: price crosses above R3 (opposite level)
+            if price > r3:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -92,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_Donchian_Volume"
-timeframe = "1d"
+name = "12h_1d_Camarilla_R3S3_Volume"
+timeframe = "12h"
 leverage = 1.0
