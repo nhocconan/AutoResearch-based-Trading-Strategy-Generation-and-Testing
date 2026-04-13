@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Bollinger Band squeeze breakout with weekly volume confirmation.
-# Bollinger squeeze identifies low volatility periods that precede breakouts.
-# Volume confirmation on breakout ensures institutional participation.
-# Weekly trend filter aligns with higher timeframe direction.
-# Target: 15-30 trades per year (60-120 total over 4 years) for 1d timeframe.
+# Hypothesis: 12h Donchian breakout with daily volume confirmation and weekly trend filter.
+# Donchian breakouts capture momentum in both bull and bear markets.
+# Volume confirmation ensures breakouts have institutional participation.
+# Weekly trend filter aligns with higher timeframe direction to avoid counter-trend trades.
+# Target: 12-37 trades per year (50-150 total over 4 years) for 12h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,119 +19,94 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for Bollinger Bands
+    # Daily data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     # Weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate Bollinger Bands (20, 2)
+    # Calculate 20-period Donchian channels
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    for i in range(20, n):
+        donchian_high[i] = np.max(high[i-20:i])
+        donchian_low[i] = np.min(low[i-20:i])
+    
+    # Calculate average volume (20-period) for daily confirmation
+    avg_volume_1d = np.full(len(df_1d), np.nan)
     close_1d = df_1d['close'].values
-    sma_20 = np.full(len(close_1d), np.nan)
-    std_20 = np.full(len(close_1d), np.nan)
+    volume_1d = df_1d['volume'].values
+    for i in range(20, len(df_1d)):
+        avg_volume_1d[i] = np.mean(volume_1d[i-20:i])
     
-    for i in range(19, len(close_1d)):
-        sma_20[i] = np.mean(close_1d[i-19:i+1])
-        std_20[i] = np.std(close_1d[i-19:i+1])
-    
-    upper = sma_20 + 2 * std_20
-    lower = sma_20 - 2 * std_20
-    bb_width = (upper - lower) / sma_20
-    
-    # Bollinger squeeze: BB width below 20-period percentile
-    bb_width_pct = np.full(len(bb_width), np.nan)
-    for i in range(39, len(bb_width)):
-        bb_width_pct[i] = np.percentile(bb_width[i-39:i+1], 25)
-    
-    squeeze = bb_width < bb_width_pct
-    
-    # Align squeeze signal to lower timeframe
-    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze.astype(float))
+    # Align daily average volume to 12h timeframe
+    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
     
     # Calculate weekly EMA trend filter
-    close_1w = df_1w['close'].values
-    ema_10 = np.zeros(len(close_1w))
-    ema_multiplier = 2 / (10 + 1)
-    ema_10[0] = close_1w[0]
-    for i in range(1, len(close_1w)):
-        ema_10[i] = (close_1w[i] - ema_10[i-1]) * ema_multiplier + ema_10[i-1]
+    ema_1w = np.zeros(len(close_1d))
+    ema_multiplier = 2 / (21 + 1)
+    ema_1w[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        ema_1w[i] = (close_1d[i] - ema_1w[i-1]) * ema_multiplier + ema_1w[i-1]
     
-    ema_10_aligned = align_htf_to_ltf(prices, df_1w, ema_10)
-    
-    # Calculate average volume (20-period) for volume confirmation
-    avg_volume = np.full(n, np.nan)
-    for i in range(19, n):
-        avg_volume[i] = np.mean(volume[i-19:i+1])
+    # Align weekly EMA to 12h timeframe
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(40, n):
+    for i in range(30, n):
         # Skip if any required data is not ready
-        if (np.isnan(squeeze_aligned[i]) or np.isnan(ema_10_aligned[i]) or 
-            np.isnan(avg_volume[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(avg_volume_1d_aligned[i]) or np.isnan(ema_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        avg_vol = avg_volume[i]
-        squeeze_signal = squeeze_aligned[i]
-        weekly_ema = ema_10_aligned[i]
+        avg_vol = avg_volume_1d_aligned[i]
+        weekly_ema = ema_1w_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x average volume
+        # Volume confirmation: current volume > 1.5x average daily volume
         volume_confirm = vol > 1.5 * avg_vol
         
         if position == 0:
-            # Long: breakout above upper BB with volume + above weekly EMA
-            if (price > upper[-1] if hasattr(upper, '__len__') else price > upper[i] if i < len(upper) else False) and \
-               volume_confirm and \
-               price > weekly_ema:
-                # Need to get upper band value for current day
-                day_idx = i // 24  # approximate days
-                if day_idx < len(upper) and not np.isnan(upper[day_idx]):
-                    if price > upper[day_idx] and volume_confirm and price > weekly_ema:
-                        position = 1
-                        signals[i] = position_size
-            # Short: breakout below lower BB with volume + below weekly EMA
-            elif price < lower[-1] if hasattr(lower, '__len__') else price < lower[i] if i < len(lower) else False:
-                day_idx = i // 24
-                if day_idx < len(lower) and not np.isnan(lower[day_idx]):
-                    if price < lower[day_idx] and volume_confirm and price < weekly_ema:
-                        position = -1
-                        signals[i] = -position_size
+            # Long: price breaks above Donchian high with volume + above weekly EMA
+            if (price > donchian_high[i] and 
+                volume_confirm and
+                price > weekly_ema):
+                position = 1
+                signals[i] = position_size
+            # Short: price breaks below Donchian low with volume + below weekly EMA
+            elif (price < donchian_low[i] and
+                  volume_confirm and
+                  price < weekly_ema):
+                position = -1
+                signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to middle BB or squeeze ends
-            day_idx = i // 24
-            if day_idx < len(sma_20) and not np.isnan(sma_20[day_idx]):
-                if price < sma_20[day_idx] or squeeze_signal < 0.5:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = position_size
-            else:
+            # Exit long: price falls below Donchian low
+            if price < donchian_low[i]:
+                position = 0
                 signals[i] = 0.0
+            else:
+                signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to middle BB or squeeze ends
-            day_idx = i // 24
-            if day_idx < len(sma_20) and not np.isnan(sma_20[day_idx]):
-                if price > sma_20[day_idx] or squeeze_signal < 0.5:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -position_size
-            else:
+            # Exit short: price rises above Donchian high
+            if price > donchian_high[i]:
+                position = 0
                 signals[i] = 0.0
+            else:
+                signals[i] = -position_size
     
     return signals
 
-name = "1d_20_Bollinger_Squeeze_Breakout_Volume_Trend_v1"
-timeframe = "1d"
+name = "12h_1d_1w_Donchian_Breakout_Volume_Trend_v1"
+timeframe = "12h"
 leverage = 1.0
