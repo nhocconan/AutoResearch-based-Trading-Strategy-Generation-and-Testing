@@ -8,12 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Camarilla pivot breakout with 1d volume spike and ADX regime filter
-    # Long: price breaks above H3 pivot AND volume > 1.5x 20-period avg AND ADX > 25 (trending)
-    # Short: price breaks below L3 pivot AND volume > 1.5x 20-period avg AND ADX > 25 (trending)
-    # Exit: price re-enters H3-L3 range OR volume dry-up OR ADX < 20 (range)
-    # Using 4h timeframe for optimal trade frequency, Camarilla for intraday structure,
-    # 1d volume for confirmation, ADX for trend regime (avoid whipsaws in ranging markets).
+    # Hypothesis: 4h Camarilla pivot breakout with 1d volume spike and 1w ADX regime filter
+    # Long: price breaks above H3 (1d) AND volume > 1.5x 20-period avg AND 1w ADX > 25 (trending)
+    # Short: price breaks below L3 (1d) AND volume > 1.5x 20-period avg AND 1w ADX > 25 (trending)
+    # Exit: price returns to Pivot Point (PP) or volume dry-up
+    # Using 4h for execution, 1d for Camarilla levels, 1w ADX for regime filter (avoid chop)
     # Discrete position sizing (0.25) to minimize fee churn.
     
     close = prices['close'].values
@@ -21,103 +20,96 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and volume confirmation
+    # Get daily data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels (based on previous day)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get weekly data for ADX regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Pivot point (PP) = (H + L + C) / 3
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    # Range = H - L
-    range_1d = high_1d - low_1d
+    # Calculate daily Camarilla levels (based on previous day's OHLC)
+    # H4 = close + 1.5 * (high - low)
+    # H3 = close + 1.25 * (high - low)
+    # H2 = close + 1.166 * (high - low)
+    # H1 = close + 1.083 * (high - low)
+    # PP = (high + low + close) / 3
+    # L1 = close - 1.083 * (high - low)
+    # L2 = close - 1.166 * (high - low)
+    # L3 = close - 1.25 * (high - low)
+    # L4 = close - 1.5 * (high - low)
     
-    # Camarilla levels
-    h3 = pp + (range_1d * 1.1 / 4)
-    l3 = pp - (range_1d * 1.1 / 4)
-    h4 = pp + (range_1d * 1.1 / 2)
-    l4 = pp - (range_1d * 1.1 / 2)
+    prev_high = df_1d['high'].values
+    prev_low = df_1d['low'].values
+    prev_close = df_1d['close'].values
     
-    # Align daily Camarilla levels to 4h (completed 1d bar only)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    # Calculate Camarilla levels
+    camarilla_h3 = prev_close + 1.25 * (prev_high - prev_low)
+    camarilla_l3 = prev_close - 1.25 * (prev_high - prev_low)
+    camarilla_pp = (prev_high + prev_low + prev_close) / 3
     
-    # Calculate daily volume for confirmation (>1.5x 20-period average)
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = np.full(len(vol_1d), np.nan)
-    for i in range(20, len(vol_1d)):
-        vol_ma_1d[i] = np.mean(vol_1d[i-20:i])
-    volume_spike_1d = vol_1d > (1.5 * vol_ma_1d)
-    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
+    # Align daily Camarilla levels to 4h
+    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
     
-    # Calculate 4h ADX(14) for regime filter
-    # ADX requires +DI, -DI, and TR
-    # +DM = max(high - prev_high, 0) if high - prev_high > prev_low - low else 0
-    # -DM = max(prev_low - low, 0) if prev_low - low > high - prev_high else 0
-    # TR = max(high - low, high - prev_close, prev_close - low)
-    # +DI = 100 * smoothed(+DM) / smoothed(TR)
-    # -DI = 100 * smoothed(-DM) / smoothed(TR)
-    # DX = 100 * |+DI - -DI| / (+DI + -DI)
-    # ADX = smoothed(DX)
+    # Calculate weekly ADX(14) for regime filter
+    # ADX = smoothed DX, where DX = |+DI - -DI| / (+DI + -DI) * 100
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate +DM and -DM
-    high_diff = high[1:] - high[:-1]
-    low_diff = low[:-1] - low[1:]
-    
-    plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0)
-    minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0)
-    
-    # Pad with zeros for first element
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    
-    # Calculate True Range (TR)
-    prev_close = np.concatenate([[close[0]], close[:-1]])
-    tr1 = high - low
-    tr2 = np.abs(high - prev_close)
-    tr3 = np.abs(low - prev_close)
+    # True Range (TR)
+    tr1 = np.abs(high_1w[1:] - low_1w[1:])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # prepend NaN for first element
     
-    # Wilder's smoothing function
+    # Directional Movement
+    up_move = high_1w[1:] - high_1w[:-1]
+    down_move = low_1w[:-1] - low_1w[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
+    
+    # Smoothed TR, +DM, -DM (Wilder's smoothing)
     def wilders_smoothing(data, period):
         result = np.full_like(data, np.nan)
         if len(data) < period:
             return result
         # First value is simple average
-        result[period-1] = np.mean(data[:period])
+        result[period-1] = np.nanmean(data[1:period])
         # Subsequent values: smoothed = (prev * (period-1) + current) / period
         for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
+            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
         return result
     
-    period = 14
-    # Smoothed +DM, -DM, and TR
-    smoothed_plus_dm = wilders_smoothing(plus_dm, period)
-    smoothed_minus_dm = wilders_smoothing(minus_dm, period)
-    smoothed_tr = wilders_smoothing(tr, period)
+    atr = wilders_smoothing(tr, 14)
+    plus_dm_smooth = wilders_smoothing(plus_dm, 14)
+    minus_dm_smooth = wilders_smoothing(minus_dm, 14)
     
     # Calculate +DI and -DI
-    plus_di = np.where(smoothed_tr != 0, 100 * smoothed_plus_dm / smoothed_tr, 0)
-    minus_di = np.where(smoothed_tr != 0, 100 * smoothed_minus_dm / smoothed_tr, 0)
+    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
+    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
     
-    # Calculate DX
+    # Calculate DX and ADX
     dx = np.where((plus_di + minus_di) != 0, 
                   100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = wilders_smoothing(dx, 14)
     
-    # Calculate ADX (smoothed DX)
-    adx = wilders_smoothing(dx, period)
+    # Align weekly ADX to 4h
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
-    # Get 4h volume for additional confirmation
-    vol_ma_4h = np.full(n, np.nan)
+    # Get 4h volume for confirmation (>1.5x 20-period average)
+    vol_ma = np.full(n, np.nan)
     for i in range(20, n):
-        vol_ma_4h[i] = np.mean(volume[i-20:i])
-    volume_spike_4h = volume > (1.5 * vol_ma_4h)
+        vol_ma[i] = np.mean(volume[i-20:i])
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -125,24 +117,24 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if data not ready
         if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(volume_spike_1d_aligned[i]) or np.isnan(adx[i])):
+            np.isnan(pp_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         # Regime filter: ADX > 25 = trending market
-        trending = adx[i] > 25
-        ranging = adx[i] < 20  # Exit condition for ranging
+        trending = adx_aligned[i] > 25
         
-        # Volume confirmation (either 1d or 4h spike)
-        vol_confirm = volume_spike_1d_aligned[i] or volume_spike_4h[i]
+        # Volume confirmation
+        vol_confirm = volume_spike[i]
         
-        # Entry logic: Camarilla breakout + volume confirmation + trending regime
-        long_entry = (close[i] > h3_aligned[i]) and vol_confirm and trending
-        short_entry = (close[i] < l3_aligned[i]) and vol_confirm and trending
+        # Entry logic: Camarilla breakout + regime filter + volume confirmation
+        long_entry = (close[i] > h3_aligned[i]) and trending and vol_confirm
+        short_entry = (close[i] < l3_aligned[i]) and trending and vol_confirm
         
-        # Exit logic: re-enter H3-L3 range OR volume dry-up OR ranging market
-        long_exit = (close[i] < l3_aligned[i]) or not vol_confirm or ranging
-        short_exit = (close[i] > h3_aligned[i]) or not vol_confirm or ranging
+        # Exit logic: price returns to PP or volume dry-up
+        long_exit = (close[i] < pp_aligned[i]) or not vol_confirm
+        short_exit = (close[i] > pp_aligned[i]) or not vol_confirm
         
         if long_entry and position != 1:
             position = 1
@@ -167,6 +159,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_camarilla_breakout_volume_adx_v1"
+name = "4h_1d_1w_camarilla_breakout_adx_volume_v1"
 timeframe = "4h"
 leverage = 1.0
