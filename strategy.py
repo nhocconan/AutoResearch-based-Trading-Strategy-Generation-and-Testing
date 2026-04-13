@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1d EMA trend filter and volume confirmation.
-# Alligator uses three SMAs (Jaw, Teeth, Lips) to identify trends and ranges.
-# In strong trends, the SMAs diverge (mouth open); in ranges, they converge (mouth closed).
-# Combined with 1d trend filter and volume spikes, it filters false signals.
-# Target: 12-37 trades per year (50-150 total over 4 years) for 12h timeframe.
+# Hypothesis: 4h Bollinger Bands squeeze + RSI mean reversion + 1d trend filter.
+# Bollinger Band squeeze identifies low volatility periods that precede breakouts.
+# RSI < 30 or > 70 with 1d EMA trend filter captures mean reversion in trending markets.
+# Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
+# Target: 20-50 trades per year (80-200 total over 4 years) for 4h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
     # 1-day data for trend filter
@@ -32,40 +32,51 @@ def generate_signals(prices):
     for i in range(1, len(close_1d)):
         ema50_1d[i] = (close_1d[i] - ema50_1d[i-1]) * ema_multiplier + ema50_1d[i-1]
     
-    # Align 1d EMA to 12h timeframe
+    # Align 1d EMA to 4h timeframe
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Williams Alligator on 12h timeframe
-    # Jaw: SMA(13, 8) - 13-period SMA shifted 8 bars forward
-    # Teeth: SMA(8, 5) - 8-period SMA shifted 5 bars forward
-    # Lips: SMA(5, 3) - 5-period SMA shifted 3 bars forward
-    jaw = np.full(n, np.nan)
-    teeth = np.full(n, np.nan)
-    lips = np.full(n, np.nan)
+    # Bollinger Bands (20, 2) on 4h
+    bb_length = 20
+    bb_mult = 2.0
+    basis = np.full(n, np.nan)
+    dev = np.full(n, np.nan)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
     
-    # Calculate SMAs
-    def calculate_sma(data, period):
-        sma = np.full(len(data), np.nan)
-        if len(data) < period:
-            return sma
-        sma[period-1] = np.mean(data[:period])
-        for i in range(period, len(data)):
-            sma[i] = sma[i-1] + (data[i] - data[i-period]) / period
-        return sma
+    for i in range(bb_length - 1, n):
+        basis[i] = np.mean(close[i - bb_length + 1:i + 1])
+        dev[i] = bb_mult * np.std(close[i - bb_length + 1:i + 1])
+        upper[i] = basis[i] + dev[i]
+        lower[i] = basis[i] - dev[i]
     
-    sma13 = calculate_sma(close, 13)
-    sma8 = calculate_sma(close, 8)
-    sma5 = calculate_sma(close, 5)
+    # Bollinger Band width (normalized)
+    bb_width = np.full(n, np.nan)
+    for i in range(bb_length - 1, n):
+        if basis[i] != 0:
+            bb_width[i] = (upper[i] - lower[i]) / basis[i]
     
-    # Shift SMAs to create Alligator lines
-    for i in range(8, n):
-        jaw[i] = sma13[i-8] if i-8 >= 0 and not np.isnan(sma13[i-8]) else np.nan
-    for i in range(5, n):
-        teeth[i] = sma8[i-5] if i-5 >= 0 and not np.isnan(sma8[i-5]) else np.nan
-    for i in range(3, n):
-        lips[i] = sma5[i-3] if i-3 >= 0 and not np.isnan(sma5[i-3]) else np.nan
+    # RSI (14) on 4h
+    rsi_length = 14
+    rsi = np.full(n, np.nan)
+    change = np.zeros(n)
+    change[1:] = close[1:] - close[:-1]
+    gain = np.where(change > 0, change, 0)
+    loss = np.where(change < 0, -change, 0)
     
-    # Average volume (20-period = 10 days) for volume confirmation
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    for i in range(rsi_length, n):
+        if i == rsi_length:
+            avg_gain[i] = np.mean(gain[1:rsi_length + 1])
+            avg_loss[i] = np.mean(loss[1:rsi_length + 1])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * (rsi_length - 1) + gain[i]) / rsi_length
+            avg_loss[i] = (avg_loss[i-1] * (rsi_length - 1) + loss[i]) / rsi_length
+        if avg_loss[i] != 0:
+            rs = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100 - (100 / (1 + rs))
+    
+    # Volume average (20-period)
     avg_volume = np.full(n, np.nan)
     for i in range(20, n):
         avg_volume[i] = np.mean(volume[i-20:i])
@@ -74,9 +85,9 @@ def generate_signals(prices):
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(20, n):
+    for i in range(max(bb_length, rsi_length, 20), n):
         # Skip if any required data is not ready
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+        if (np.isnan(bb_width[i]) or np.isnan(rsi[i]) or 
             np.isnan(ema50_1d_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
@@ -84,45 +95,47 @@ def generate_signals(prices):
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
+        bbw = bb_width[i]
+        rsi_val = rsi[i]
         ema_trend = ema50_1d_aligned[i]
         
-        # Alligator conditions
-        # Mouth open (trending): Lips > Teeth > Jaw (uptrend) or Lips < Teeth < Jaw (downtrend)
-        # Mouth closed (ranging): lines intertwined
-        lips_val = lips[i]
-        teeth_val = teeth[i]
-        jaw_val = jaw[i]
+        # Bollinger Band squeeze: low volatility (bottom 20% of BB width)
+        # Calculate percentile of BB width lookback
+        lookback = 50
+        if i >= lookback:
+            bbw_slice = bb_width[i-lookback:i+1]
+            bbw_valid = bbw_slice[~np.isnan(bbw_slice)]
+            if len(bbw_valid) > 0:
+                bbw_percentile = (bbw <= np.percentile(bbw_valid, 20)) if not np.isnan(bbw) else False
+            else:
+                bbw_percentile = False
+        else:
+            bbw_percentile = False
         
-        # Volume confirmation: current volume > 1.8x average volume
-        volume_confirm = vol > 1.8 * avg_vol
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirm = vol > 1.5 * avg_vol
         
         if position == 0:
-            # Long: Uptrend (Lips > Teeth > Jaw) + above 1d EMA50 + volume confirmation
-            if (lips_val > teeth_val and teeth_val > jaw_val and
-                price > ema_trend and
-                volume_confirm):
+            # Long: BB squeeze + RSI oversold (<30) + price above 1d EMA50 + volume
+            if bbw_percentile and rsi_val < 30 and price > ema_trend and volume_confirm:
                 position = 1
                 signals[i] = position_size
-            # Short: Downtrend (Lips < Teeth < Jaw) + below 1d EMA50 + volume confirmation
-            elif (lips_val < teeth_val and teeth_val < jaw_val and
-                  price < ema_trend and
-                  volume_confirm):
+            # Short: BB squeeze + RSI overbought (>70) + price below 1d EMA50 + volume
+            elif bbw_percentile and rsi_val > 70 and price < ema_trend and volume_confirm:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Trend changes to downtrend or price breaks below 1d EMA
-            if (lips_val < teeth_val or teeth_val < jaw_val or
-                price < ema_trend):
+            # Exit long: RSI > 50 or BB width expands (exit squeeze)
+            if rsi_val > 50 or (i >= lookback and not bbw_percentile):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Trend changes to uptrend or price breaks above 1d EMA
-            if (lips_val > teeth_val or teeth_val > jaw_val or
-                price > ema_trend):
+            # Exit short: RSI < 50 or BB width expands (exit squeeze)
+            if rsi_val < 50 or (i >= lookback and not bbw_percentile):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -130,6 +143,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_WilliamsAlligator_Trend_Volume"
-timeframe = "12h"
+name = "4h_1d_BB_Squeeze_RSI_Trend"
+timeframe = "4h"
 leverage = 1.0
