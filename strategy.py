@@ -1,11 +1,10 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation
-Hypothesis: Daily Camarilla pivot levels (S3/R3) provide strong support/resistance.
-Breakouts above R3 or below S3 on 12h chart with volume expansion capture institutional moves.
-Adds volume confirmation to reduce false breakouts. Works in both bull and bear markets
-by trading breakouts regardless of direction. Target: 15-25 trades/year per symbol.
+4h_1d_Camarilla_Pivot_Rebound_Volume_Confirmation_v1
+Hypothesis: Price often reverses from daily Camarilla S3/R3 levels rather than breaking through.
+We take counter-trend positions at these strong support/resistance zones with volume confirmation.
+Works in both bull (buy dips at S3) and bear (sell rallies at R3) markets by fading extremes.
+Target: 15-25 trades/year per symbol to minimize fee drag.
 """
 
 import numpy as np
@@ -32,25 +31,29 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla formulas
+    # Use previous day's close for calculations
     close_prev = np.roll(close_1d, 1)
     close_prev[0] = close_1d[0]  # first bar uses its own close
     
     range_1d = high_1d - low_1d
     
-    # Resistance levels (R3 used)
+    # Resistance levels (R3)
     R3 = close_prev + (range_1d * 1.2500 / 4)
     
-    # Support levels (S3 used)
+    # Support levels (S3)
     S3 = close_prev - (range_1d * 1.2500 / 4)
     
-    # Align levels to 12h timeframe
+    # Align levels to 4h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 1.3x 20-period average (less strict than breakout)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 1.5)
+    volume_confirmation = volume > (vol_ma_20 * 1.3)
+    
+    # Price proximity: within 0.5% of S3/R3 level
+    proximity_to_S3 = np.abs(close - S3_aligned) / S3_aligned < 0.005
+    proximity_to_R3 = np.abs(close - R3_aligned) / R3_aligned < 0.005
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -59,20 +62,21 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if any required data is not ready
         if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(volume_expansion[i])):
+            np.isnan(volume_confirmation[i]) or
+            np.isnan(proximity_to_S3[i]) or np.isnan(proximity_to_R3[i])):
             signals[i] = 0.0
             continue
         
-        # Long breakout: price breaks above R3 with volume expansion
-        long_breakout = close[i] > R3_aligned[i] and volume_expansion[i]
+        # Long setup: price near S3 with volume confirmation (buy the dip)
+        long_setup = proximity_to_S3[i] and volume_confirmation[i]
         
-        # Short breakdown: price breaks below S3 with volume expansion
-        short_breakout = close[i] < S3_aligned[i] and volume_expansion[i]
+        # Short setup: price near R3 with volume confirmation (sell the rally)
+        short_setup = proximity_to_R3[i] and volume_confirmation[i]
         
-        if long_breakout and position != 1:
+        if long_setup and position != 1:
             position = 1
             signals[i] = position_size
-        elif short_breakout and position != -1:
+        elif short_setup and position != -1:
             position = -1
             signals[i] = -position_size
         else:
@@ -81,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation"
-timeframe = "12h"
+name = "4h_1d_Camarilla_Pivot_Rebound_Volume_Confirmation_v1"
+timeframe = "4h"
 leverage = 1.0
