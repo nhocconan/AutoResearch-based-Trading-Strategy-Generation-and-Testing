@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-1d KAMA + RSI + Chop Filter Strategy.
-Trades in direction of Kaufman Adaptive Moving Average (KAMA) when RSI is not extreme,
-and only during choppy markets (Choppiness Index > 61.8) to avoid false signals in strong trends.
-Designed for 1d timeframe to target 30-100 total trades over 4 years (7-25/year).
-Uses 1h for trend filter to avoid counter-trend trades during strong moves.
+6h Elder Ray Index with Volume Confirmation and Trend Filter.
+Elder Ray measures bull/bear power via EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13.
+Long when Bull Power > 0 and rising, Bear Power < 0 and falling, with volume confirmation.
+Short when Bear Power < 0 and falling, Bull Power < 0 and rising, with volume confirmation.
+Uses 1-day EMA13 for Elder Ray calculation and 1-day ADX > 25 for trend filter.
+Targets 50-150 total trades over 4 years (12-37/year) on 6h timeframe.
+Works in both bull and bear markets by trading with institutional power imbalances.
 """
 
 import numpy as np
@@ -13,131 +15,101 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # KAMA parameters
-    er_len = 10
-    fast_sc = 2 / (2 + 1)
-    slow_sc = 2 / (30 + 1)
-    
-    # Calculate Efficiency Ratio
-    change = np.abs(np.diff(close, n=er_len))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # placeholder, will compute properly below
-    
-    # Proper ER calculation
-    er = np.zeros(n)
-    for i in range(er_len, n):
-        price_change = np.abs(close[i] - close[i-er_len])
-        price_volatility = np.sum(np.abs(np.diff(close[i-er_len:i+1])))
-        if price_volatility > 0:
-            er[i] = price_change / price_volatility
-        else:
-            er[i] = 0
-    
-    # Smoothing constant
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # KAMA
-    kama = np.full(n, np.nan)
-    kama[er_len] = close[er_len]
-    for i in range(er_len + 1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # RSI (14-period)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    avg_gain[14] = np.mean(gain[1:15])
-    avg_loss[14] = np.mean(loss[1:15])
-    
-    for i in range(15, n):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
-    
-    rs = np.zeros(n)
-    rsi = np.zeros(n)
-    for i in range(14, n):
-        if avg_loss[i] != 0:
-            rs[i] = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs[i]))
-        else:
-            rsi[i] = 100
-    
-    # Choppiness Index (14-period)
-    chop_len = 14
-    atr = np.zeros(n)
-    tr = np.zeros(n)
-    
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr_sum = np.zeros(n)
-    for i in range(chop_len, n):
-        atr_sum[i] = np.sum(tr[i-chop_len+1:i+1])
-    
-    max_high = np.zeros(n)
-    min_low = np.zeros(n)
-    for i in range(chop_len-1, n):
-        max_high[i] = np.max(high[i-chop_len+1:i+1])
-        min_low[i] = np.min(low[i-chop_len+1:i+1])
-    
-    chop = np.zeros(n)
-    for i in range(chop_len-1, n):
-        if atr_sum[i] > 0 and (max_high[i] - min_low[i]) > 0:
-            chop[i] = 100 * np.log10(atr_sum[i] / (max_high[i] - min_low[i])) / np.log10(chop_len)
-        else:
-            chop[i] = 50
-    
-    # Get 1h data for trend filter (avoid counter-trend trades)
-    df_1h = get_htf_data(prices, '1h')
-    if len(df_1h) < 50:
+    # Get 1d data for Elder Ray calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_1h = df_1h['close'].values
-    # Simple trend: price above/below 20-period EMA
-    ema_20 = pd.Series(close_1h).ewm(span=20, adjust=False).mean().values
-    uptrend_1h = close_1h > ema_20
-    downtrend_1h = close_1h < ema_20
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    uptrend_1h_aligned = align_htf_to_ltf(prices, df_1h, uptrend_1h.astype(float))
-    downtrend_1h_aligned = align_htf_to_ltf(prices, df_1h, downtrend_1h.astype(float))
+    # EMA13 for Elder Ray
+    ema13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray Components
+    bull_power = high_1d - ema13  # High - EMA13
+    bear_power = low_1d - ema13   # Low - EMA13
+    
+    # Slope of Elder Ray (3-period change)
+    bull_power_slope = pd.Series(bull_power).diff(3).values
+    bear_power_slope = pd.Series(bear_power).diff(3).values
+    
+    # Elder Ray Signals: Bullish when BP>0 and rising, Bearish when BP<0 and falling
+    bullish_signal = (bull_power > 0) & (bull_power_slope > 0)
+    bearish_signal = (bear_power < 0) & (bear_power_slope < 0)
+    
+    # Align Elder Ray signals to 6h timeframe
+    bullish_aligned = align_htf_to_ltf(prices, df_1d, bullish_signal.astype(float))
+    bearish_aligned = align_htf_to_ltf(prices, df_1d, bearish_signal.astype(float))
+    
+    # Volume confirmation: volume > 1.3x 20-period average (1d)
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume_1d > (vol_ma_20 * 1.3)
+    vol_confirm_aligned = align_htf_to_ltf(prices, df_1d, vol_confirm.astype(float))
+    
+    # 1-day ADX (14-period) for trend filter
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr0 = np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])
+    tr = np.concatenate([[tr0], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # ADX > 25 = trending market
+    trending = adx > 25
+    trending_aligned = align_htf_to_ltf(prices, df_1d, trending.astype(float))
     
     signals = np.zeros(n)
-    position = 0
-    position_size = 0.25
+    position = 0  # 0: flat, 1: long, -1: short
+    position_size = 0.25  # 25% of capital
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or
-            np.isnan(uptrend_1h_aligned[i]) or np.isnan(downtrend_1h_aligned[i])):
+        if (np.isnan(bullish_aligned[i]) or 
+            np.isnan(bearish_aligned[i]) or 
+            np.isnan(vol_confirm_aligned[i]) or 
+            np.isnan(trending_aligned[i])):
+            signals[i] = 0.0
             continue
         
-        # KAMA direction
-        kama_up = close[i] > kama[i]
-        kama_down = close[i] < kama[i]
-        
-        # RSI not extreme (avoid overbought/oversold)
-        rsi_not_overbought = rsi[i] < 70
-        rsi_not_oversold = rsi[i] > 30
-        
-        # Chop filter: only trade in choppy markets
-        choppy = chop[i] > 61.8
-        
         # Entry conditions
-        long_entry = kama_up and rsi_not_overbought and choppy and uptrend_1h_aligned[i] > 0.5
-        short_entry = kama_down and rsi_not_oversold and choppy and downtrend_1h_aligned[i] > 0.5
+        long_entry = bullish_aligned[i] > 0.5 and vol_confirm_aligned[i] > 0.5 and trending_aligned[i] > 0.5
+        short_entry = bearish_aligned[i] > 0.5 and vol_confirm_aligned[i] > 0.5 and trending_aligned[i] > 0.5
         
-        # Exit when KAMA direction changes or RSI extreme
-        exit_long = position == 1 and (not kama_up or rsi[i] >= 70)
-        exit_short = position == -1 and (not kama_down or rsi[i] <= 30)
+        # Exit when Elder Ray signal reverses
+        exit_long = position == 1 and bearish_aligned[i] > 0.5
+        exit_short = position == -1 and bullish_aligned[i] > 0.5
         
         # Execute signals
         if long_entry and position != 1:
@@ -149,6 +121,7 @@ def generate_signals(prices):
         elif exit_long or exit_short:
             position = 0
             signals[i] = 0.0
+        # Hold current position
         else:
             if position == 1:
                 signals[i] = position_size
@@ -159,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_kama_rsi_chop_filter"
-timeframe = "1d"
+name = "6h_elder_ray_volume_trend"
+timeframe = "6h"
 leverage = 1.0
