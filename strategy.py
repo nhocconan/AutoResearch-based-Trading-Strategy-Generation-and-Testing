@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_1w_camilla_breakout_v1
-Hypothesis: On 1d timeframe, weekly Camarilla H4/L4 breakouts with volume expansion and weekly ADX trend filter capture institutional moves. Works in bull markets (breakouts continue) and bear markets (mean-reversion fails, so breakouts are rarer but stronger). Target: 10-25 trades/year to avoid fee drag.
+12h_1d_camarilla_breakout_vol_trend_v1
+Hypothesis: On 12h timeframe, price breaking above Camarilla H3 or below L3 with daily volume expansion and daily ADX trend filter captures institutional breakout moves. Works in bull markets (breakouts continue) and bear markets (mean-reversion fails, so breakouts are rarer but stronger when they occur). Target: 12-37 trades/year to avoid fee drag.
 """
 
 import numpy as np
@@ -18,36 +18,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get daily data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla levels from previous week's range
-    # H4 = Close + 1.1 * (High - Low) / 2
-    # L4 = Close - 1.1 * (High - Low) / 2
-    range_1w = high_1w - low_1w
-    camarilla_h4 = close_1w + 1.1 * range_1w / 2
-    camarilla_l4 = close_1w - 1.1 * range_1w / 2
+    # Calculate Camarilla levels from previous day's range
+    # H3 = Close + 1.1 * (High - Low) / 4
+    # L3 = Close - 1.1 * (High - Low) / 4
+    range_1d = high_1d - low_1d
+    camarilla_h3 = close_1d + 1.1 * range_1d / 4
+    camarilla_l3 = close_1d - 1.1 * range_1d / 4
     
-    # Weekly volume expansion: current volume > 1.5x 10-period average
-    vol_ma_10 = pd.Series(volume_1w).rolling(window=10, min_periods=10).mean().values
-    volume_expansion = volume_1w > (vol_ma_10 * 1.5)
+    # Daily volume expansion: current volume > 1.5x 10-period average
+    vol_ma_10 = pd.Series(volume_1d).rolling(window=10, min_periods=10).mean().values
+    volume_expansion = volume_1d > (vol_ma_10 * 1.5)
     
     # Calculate ADX (14-period) for trend strength
-    tr1 = np.abs(high_1w - low_1w)
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = np.nan
     
-    up_move = np.where(high_1w - np.roll(high_1w, 1) > 0, high_1w - np.roll(high_1w, 1), 0)
-    down_move = np.where(np.roll(low_1w, 1) - low_1w > 0, np.roll(low_1w, 1) - low_1w, 0)
+    up_move = np.where(high_1d - np.roll(high_1d, 1) > 0, high_1d - np.roll(high_1d, 1), 0)
+    down_move = np.where(np.roll(low_1d, 1) - low_1d > 0, np.roll(low_1d, 1) - low_1d, 0)
     up_move[0] = 0
     down_move[0] = 0
     
@@ -74,11 +74,11 @@ def generate_signals(prices):
     adx = wilders_smooth(dx, period)
     strong_trend = adx > 20  # Moderate trend filter
     
-    # Align all signals to daily timeframe
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l4)
-    volume_expansion_aligned = align_htf_to_ltf(prices, df_1w, volume_expansion.astype(float))
-    strong_trend_aligned = align_htf_to_ltf(prices, df_1w, strong_trend.astype(float))
+    # Align all signals to 12h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    volume_expansion_aligned = align_htf_to_ltf(prices, df_1d, volume_expansion.astype(float))
+    strong_trend_aligned = align_htf_to_ltf(prices, df_1d, strong_trend.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -86,22 +86,22 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h4_aligned[i]) or 
-            np.isnan(camarilla_l4_aligned[i]) or 
+        if (np.isnan(camarilla_h3_aligned[i]) or 
+            np.isnan(camarilla_l3_aligned[i]) or 
             np.isnan(volume_expansion_aligned[i]) or 
             np.isnan(strong_trend_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: Break of Camarilla H4/L4 with volume and trend
-        long_break = close[i] > camarilla_h4_aligned[i]
-        short_break = close[i] < camarilla_l4_aligned[i]
+        # Entry conditions: Break of Camarilla H3/L3 with volume and trend
+        long_break = close[i] > camarilla_h3_aligned[i]
+        short_break = close[i] < camarilla_l3_aligned[i]
         
         long_entry = long_break and volume_expansion_aligned[i] > 0.5 and strong_trend_aligned[i] > 0.5
         short_entry = short_break and volume_expansion_aligned[i] > 0.5 and strong_trend_aligned[i] > 0.5
         
-        # Exit when price returns to previous week's close (mean reversion to equilibrium)
-        prev_close_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
+        # Exit when price returns to previous day's close (mean reversion to equilibrium)
+        prev_close_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
         exit_long = position == 1 and close[i] <= prev_close_aligned[i]
         exit_short = position == -1 and close[i] >= prev_close_aligned[i]
         
@@ -126,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_camilla_breakout_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_breakout_vol_trend_v1"
+timeframe = "12h"
 leverage = 1.0
