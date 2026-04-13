@@ -13,41 +13,37 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d Donchian channels (20-period) - use previous bar's high/low
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
-    lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
-    
-    # 1d average volume (20-period) - previous bar
-    vol_series = pd.Series(volume)
-    avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
-    
-    # 1d EMA200 trend filter
-    ema_200_1d = pd.Series(close).ewm(span=200, min_periods=200, adjust=False).mean().values
-    
-    # 1d ATR (14-period) for stop-loss
+    # 1d ATR (14-period) for volatility
     high_low = high - low
     high_close = np.abs(high - np.roll(close, 1))
     low_close = np.abs(low - np.roll(close, 1))
     tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    tr[0] = high_low[0]  # first value
+    tr[0] = high_low[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().shift(1).values
     
-    # 12h trend filter (EMA50)
-    df_12h = get_htf_data(prices, '12h')
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Weekly trend filter using 1w EMA50
+    df_1w = get_htf_data(prices, '1w')
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # 1d RSI (14-period)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25
     
-    start = max(20, 200, 14, 50)
+    start = max(14, 14)
     for i in range(start, n):
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(avg_vol[i]) or np.isnan(ema_200_1d[i]) or 
-            np.isnan(atr[i]) or np.isnan(ema_50_12h_aligned[i])):
+        if (np.isnan(atr[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
@@ -55,44 +51,33 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long: breakout above upper band + volume confirmation + price above EMA200 + 12h uptrend
-            if (price > upper[i] and vol > 2.0 * avg_vol[i] and 
-                price > ema_200_1d[i] and ema_50_12h_aligned[i] > ema_50_12h_aligned[i-1]):
+            # Long: RSI oversold + weekly uptrend
+            if (rsi[i] < 30 and price > ema_50_1w_aligned[i]):
                 position = 1
                 signals[i] = position_size
-            # Short: breakout below lower band + volume confirmation + price below EMA200 + 12h downtrend
-            elif (price < lower[i] and vol > 2.0 * avg_vol[i] and 
-                  price < ema_200_1d[i] and ema_50_12h_aligned[i] < ema_50_12h_aligned[i-1]):
+            # Short: RSI overbought + weekly downtrend
+            elif (rsi[i] > 70 and price < ema_50_1w_aligned[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below lower band OR below EMA200 OR stop-loss hit
-            if (price < lower[i] or price < ema_200_1d[i] or 
-                price < (entry_price := entry_price_long) - 2.0 * atr[i]):
+            # Exit long: RSI overbought OR price breaks weekly trend
+            if (rsi[i] > 70 or price < ema_50_1w_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes above upper band OR above EMA200 OR stop-loss hit
-            if (price > upper[i] or price > ema_200_1d[i] or 
-                price > (entry_price := entry_price_short) + 2.0 * atr[i]):
+            # Exit short: RSI oversold OR price breaks weekly trend
+            if (rsi[i] < 30 or price > ema_50_1w_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -position_size
-        
-        # Track entry price for stop-loss calculation
-        if position != 0 and signals[i] != 0 and (i == start or signals[i-1] == 0):
-            if position == 1:
-                entry_price_long = close[i]
-            else:
-                entry_price_short = close[i]
     
     return signals
 
-name = "4h_1d_Donchian_Volume_EMA200Trend_12hEMA50"
-timeframe = "4h"
+name = "1d_RSI_WeeklyTrend_Filter"
+timeframe = "1d"
 leverage = 1.0
