@@ -32,7 +32,7 @@ def generate_signals(prices):
     close_1d_series = pd.Series(close_1d)
     ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align indicators to 4h timeframe
+    # Align indicators to 12h timeframe
     high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
     low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
@@ -86,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_ema50_breakout"
-timeframe = "4h"
+name = "12h_1d_donchian_ema50_breakout"
+timeframe = "12h"
 leverage = 1.0
