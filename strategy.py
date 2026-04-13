@@ -68,7 +68,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.25
+    position_size = 0.20
     
     for i in range(200, n):
         # Skip if data not ready
@@ -118,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_ema200_rsi_momentum_filter_v1"
-timeframe = "6h"
+name = "1h_1d_ema200_rsi_momentum_filter_v1"
+timeframe = "1h"
 leverage = 1.0
