@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -13,37 +13,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily high/low for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
-        return np.zeros(n)
+    # Daily Donchian channels (20-period) - use previous day's high/low
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
+    lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Calculate Camarilla levels from daily OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    range_1d = high_1d - low_1d
-    # Camarilla levels: H4 = close + 1.1/2 * range, L4 = close - 1.1/2 * range
-    H4 = close_1d + 1.1 * range_1d / 2
-    L4 = close_1d - 1.1 * range_1d / 2
-    
-    # Align Camarilla levels to 4h timeframe
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    
-    # Volume confirmation: 20-period average volume
+    # Daily average volume (20-period) - previous day
     vol_series = pd.Series(volume)
     avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
+    
+    # Weekly EMA200 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
+        return np.zeros(n)
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25
     
-    start = 20
+    start = max(20, 200)
     for i in range(start, n):
-        if (np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or 
-            np.isnan(avg_vol[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(avg_vol[i]) or np.isnan(ema_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -51,28 +46,26 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long: price touches or breaks below L4 (support) with volume confirmation
-            if price <= L4_aligned[i] and vol > 1.5 * avg_vol[i]:
+            # Long: breakout above upper band + volume confirmation + price above weekly EMA200
+            if (price > upper[i] and vol > 1.5 * avg_vol[i] and price > ema_1w_aligned[i]):
                 position = 1
                 signals[i] = position_size
-            # Short: price touches or breaks above H4 (resistance) with volume confirmation
-            elif price >= H4_aligned[i] and vol > 1.5 * avg_vol[i]:
+            # Short: breakout below lower band + volume confirmation + price below weekly EMA200
+            elif (price < lower[i] and vol > 1.5 * avg_vol[i] and price < ema_1w_aligned[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price moves back above midpoint or stops loss
-            midpoint = (H4_aligned[i] + L4_aligned[i]) / 2
-            if price >= midpoint:
+            # Exit long: price closes below lower band OR below weekly EMA200
+            if price < lower[i] or price < ema_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price moves back below midpoint
-            midpoint = (H4_aligned[i] + L4_aligned[i]) / 2
-            if price <= midpoint:
+            # Exit short: price closes above upper band OR above weekly EMA200
+            if price > upper[i] or price > ema_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -80,6 +73,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_Pivot_Volume"
-timeframe = "4h"
+name = "12h_1w_Donchian_Volume_EMA200Trend"
+timeframe = "12h"
 leverage = 1.0
