@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-6h_1w_pullback_reversion
-Hypothesis: In strong weekly uptrends (price > weekly 200-EMA), buy pullbacks to the 6-hour 20-EMA with volume confirmation. In strong weekly downtrends (price < weekly 200-EMA), sell rallies to the 6-hour 20-EMA with volume confirmation. Uses weekly trend filter to avoid counter-trend trades, targeting 15-30 trades/year. Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
+12h_donchian_breakout_volume_trend
+Hypothesis: Combines 12h Donchian channel breakouts with volume confirmation and 1d ADX trend filter to capture strong trending moves. Works in bull markets (breakout continuation) and bear markets (breakdown continuation). Target: 15-25 trades/year to minimize fee drag. Uses both long and short positions for symmetry.
 """
 
 import numpy as np
@@ -18,31 +18,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h data
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Weekly 200 EMA for trend filter
-    close_1w_series = pd.Series(close_1w)
-    ema200_1w = close_1w_series.ewm(span=200, adjust=False, min_periods=200).mean().values
-    weekly_uptrend = close_1w > ema200_1w
-    weekly_downtrend = close_1w < ema200_1w
+    # Calculate Donchian channels (20-period) on 12h
+    def rolling_max(arr, window):
+        res = np.full_like(arr, np.nan)
+        for i in range(len(arr)):
+            if i < window - 1:
+                res[i] = np.nan
+            else:
+                res[i] = np.max(arr[i-window+1:i+1])
+        return res
     
-    # 6-hour 20 EMA for entry
-    close_series = pd.Series(close)
-    ema20_6h = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    def rolling_min(arr, window):
+        res = np.full_like(arr, np.nan)
+        for i in range(len(arr)):
+            if i < window - 1:
+                res[i] = np.nan
+            else:
+                res[i] = np.min(arr[i-window+1:i+1])
+        return res
     
-    # 6-hour volume confirmation: current volume > 1.3x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (vol_ma_20 * 1.3)
+    upper_channel = rolling_max(high_12h, 20)
+    lower_channel = rolling_min(low_12h, 20)
     
-    # Align weekly signals to 6h timeframe
-    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
-    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend.astype(float))
+    # Breakout signals
+    breakout_up = high_12h > upper_channel
+    breakout_down = low_12h < lower_channel
+    
+    # Volume confirmation: current volume > 1.3x 20-period average
+    vol_ma_20 = np.full_like(volume_12h, np.nan)
+    for i in range(len(volume_12h)):
+        if i < 19:
+            vol_ma_20[i] = np.nan
+        else:
+            vol_ma_20[i] = np.mean(volume_12h[i-19:i+1])
+    volume_expansion = volume_12h > (vol_ma_20 * 1.3)
+    
+    # Get 1d data for ADX trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate ADX (14-period) on 1d
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = np.nan
+    
+    up_move = np.where(high_1d - np.roll(high_1d, 1) > 0, high_1d - np.roll(high_1d, 1), 0)
+    down_move = np.where(np.roll(low_1d, 1) - low_1d > 0, np.roll(low_1d, 1) - low_1d, 0)
+    up_move[0] = 0
+    down_move[0] = 0
+    
+    def wilders_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        result[period-1] = np.nanmean(data[:period])
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+            else:
+                result[i] = np.nan
+        return result
+    
+    period = 14
+    atr = wilders_smooth(tr, period)
+    plus_dm = wilders_smooth(up_move, period)
+    minus_dm = wilders_smooth(down_move, period)
+    
+    plus_di = 100 * plus_dm / atr
+    minus_di = 100 * minus_dm / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilders_smooth(dx, period)
+    strong_trend = adx > 25
+    
+    # Align all signals to 12h timeframe
+    breakout_up_aligned = align_htf_to_ltf(prices, df_12h, breakout_up.astype(float))
+    breakout_down_aligned = align_htf_to_ltf(prices, df_12h, breakout_down.astype(float))
+    volume_expansion_aligned = align_htf_to_ltf(prices, df_12h, volume_expansion.astype(float))
+    strong_trend_aligned = align_htf_to_ltf(prices, df_1d, strong_trend.astype(float))
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -50,33 +119,20 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(weekly_uptrend_aligned[i]) or 
-            np.isnan(weekly_downtrend_aligned[i]) or 
-            np.isnan(ema20_6h[i]) or 
-            np.isnan(volume_confirm[i])):
+        if (np.isnan(breakout_up_aligned[i]) or 
+            np.isnan(breakout_down_aligned[i]) or 
+            np.isnan(volume_expansion_aligned[i]) or 
+            np.isnan(strong_trend_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: weekly uptrend + price at 6h 20-EMA + volume
-        long_entry = (weekly_uptrend_aligned[i] > 0.5 and 
-                     close[i] >= ema20_6h[i] * 0.998 and  # Allow small tolerance
-                     close[i] <= ema20_6h[i] * 1.002 and
-                     volume_confirm[i] > 0.5)
+        # Entry conditions
+        long_entry = breakout_up_aligned[i] > 0.5 and volume_expansion_aligned[i] > 0.5 and strong_trend_aligned[i] > 0.5
+        short_entry = breakout_down_aligned[i] > 0.5 and volume_expansion_aligned[i] > 0.5 and strong_trend_aligned[i] > 0.5
         
-        # Short entry: weekly downtrend + price at 6h 20-EMA + volume
-        short_entry = (weekly_downtrend_aligned[i] > 0.5 and 
-                      close[i] >= ema20_6h[i] * 0.998 and
-                      close[i] <= ema20_6h[i] * 1.002 and
-                      volume_confirm[i] > 0.5)
-        
-        # Exit: reverse signal or weekly trend change
-        exit_long = (position == 1 and 
-                    (weekly_downtrend_aligned[i] > 0.5 or  # Weekly trend turned down
-                     short_entry))  # Opposite signal
-        
-        exit_short = (position == -1 and 
-                     (weekly_uptrend_aligned[i] > 0.5 or  # Weekly trend turned up
-                      long_entry))  # Opposite signal
+        # Exit conditions: opposite breakout or loss of trend
+        exit_long = position == 1 and (breakout_down_aligned[i] > 0.5 or strong_trend_aligned[i] <= 0.5)
+        exit_short = position == -1 and (breakout_up_aligned[i] > 0.5 or strong_trend_aligned[i] <= 0.5)
         
         # Execute signals
         if long_entry and position != 1:
@@ -85,10 +141,7 @@ def generate_signals(prices):
         elif short_entry and position != -1:
             position = -1
             signals[i] = -position_size
-        elif exit_long:
-            position = 0
-            signals[i] = 0.0
-        elif exit_short:
+        elif exit_long or exit_short:
             position = 0
             signals[i] = 0.0
         # Hold current position
@@ -97,6 +150,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_pullback_reversion"
-timeframe = "6h"
+name = "12h_donchian_breakout_volume_trend"
+timeframe = "12h"
 leverage = 1.0
