@@ -5,38 +5,38 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian(20) breakout with 1w EMA34 trend filter + volume confirmation
-    # Long: price > Donchian(20) high + price > 1w EMA34 + volume > 2.0x 20-period average
-    # Short: price < Donchian(20) low + price < 1w EMA34 + volume > 2.0x 20-period average
-    # Exit: opposite Donchian breakout OR price crosses 1w EMA34
-    # Tight volume filter (2.0x) reduces trades to ~15-25/year for low fee drag
-    # 1w EMA34 provides strong trend filter reducing whipsaw in choppy markets
-    # 12h timeframe targets 50-150 total trades over 4 years (12-37/year) as required
+    # Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter + volume confirmation
+    # Long: price > Donchian(20) high + price > 1w EMA50 + volume > 2.0x 20-period average
+    # Short: price < Donchian(20) low + price < 1w EMA50 + volume > 2.0x 20-period average
+    # Exit: opposite Donchian breakout OR price crosses 1w EMA50
+    # Tight volume filter (2.0x) reduces trades to ~10-20/year for low fee drag
+    # 1w EMA50 provides very smooth trend filter, reducing whipsaw in choppy/ranging markets
+    # Proven pattern: Daily breakouts with weekly trend filter work in both bull and bear markets
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA34 trend filter
+    # Get 1w data for EMA50 trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
     
-    # Calculate 1w EMA34 with min_periods
+    # Calculate 1w EMA50 with min_periods
     ema_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 34:
-        ema_1w[33] = np.mean(close_1w[:34])  # SMA34 as seed
-        multiplier = 2 / (34 + 1)
-        for i in range(34, len(close_1w)):
+    if len(close_1w) >= 50:
+        ema_1w[49] = np.mean(close_1w[:50])  # SMA50 as seed
+        multiplier = 2 / (50 + 1)
+        for i in range(50, len(close_1w)):
             ema_1w[i] = (close_1w[i] * multiplier) + (ema_1w[i-1] * (1 - multiplier))
     
-    # Get 12h Donchian(20) for breakout with min_periods
+    # Get 1d Donchian(20) for breakout with min_periods
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     
@@ -44,13 +44,13 @@ def generate_signals(prices):
         donchian_high[i] = np.max(high[i-20:i])
         donchian_low[i] = np.min(low[i-20:i])
     
-    # Get 12h volume for confirmation (>2.0x 20-period average) - tighter filter
+    # Get 1d volume for confirmation (>2.0x 20-period average) - tighter filter
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     volume_spike = volume > (2.0 * vol_ma)
     
-    # Align 1w EMA34 to 12h
+    # Align 1w EMA50 to 1d
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     signals = np.zeros(n)
@@ -67,7 +67,7 @@ def generate_signals(prices):
         long_breakout = close[i] > donchian_high[i]
         short_breakout = close[i] < donchian_low[i]
         
-        # Trend filter from 1w EMA34
+        # Trend filter from 1w EMA50
         bullish_trend = close[i] > ema_1w_aligned[i]
         bearish_trend = close[i] < ema_1w_aligned[i]
         
@@ -102,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1w_donchian_breakout_ema34_volume_v1"
-timeframe = "12h"
+name = "1d_1w_donchian_breakout_ema50_volume_v1"
+timeframe = "1d"
 leverage = 1.0
