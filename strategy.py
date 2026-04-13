@@ -5,105 +5,101 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1h primary with 4h/1d HTF - 4h Donchian breakout + 1d volume confirmation
-    # Uses higher timeframe for signal direction (4h trend + 1d regime) and 1h for precise entry timing
-    # Session filter (08-20 UTC) reduces noise trades. Target: 60-150 total trades over 4 years (15-37/year)
+    # Hypothesis: 6h primary with 1w HTF - Weekly Camarilla pivot breakout with volume confirmation
+    # Weekly Camarilla levels (R3/S3 for mean reversion, R4/S4 for breakout) provide institutional reference points
+    # Volume confirmation filters false breakouts. Works in both bull (breakout continuation) and bear (mean reversion at extremes)
+    # Target: 50-150 total trades over 4 years (12-37/year) for low fee drag
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    volume = prices['volume'].values if 'volume' in prices.columns else np.ones(len(prices))
     
-    # Get 4h data for HTF Donchian channels (trend direction)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get weekly data for HTF Camarilla pivots
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Get 1d data for HTF volume confirmation and regime filter
+    # Get 1d data for volume context (more stable than 6h volume alone)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    volume_1d = df_1d['volume'].values if 'volume' in df_1d.columns else np.ones(len(df_1d))
     
-    # Calculate 4h Donchian channels (20-period) for trend
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Calculate weekly Camarilla pivot levels (based on prior week)
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # R4 = C + Range * 1.1/2
+    # R3 = C + Range * 1.1/4
+    # S3 = C - Range * 1.1/4
+    # S4 = C - Range * 1.1/2
+    typical_price = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
+    
+    camarilla_r4 = close_1w + range_1w * 1.1 / 2
+    camarilla_r3 = close_1w + range_1w * 1.1 / 4
+    camarilla_s3 = close_1w - range_1w * 1.1 / 4
+    camarilla_s4 = close_1w - range_1w * 1.1 / 2
     
     # Calculate 1d volume average (20-period) for confirmation
     vol_avg_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1d ATR (14-period) for volatility filter
-    def calculate_atr(high, low, close, window=14):
-        tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - np.roll(close, 1)[1:]))
-        tr1 = np.maximum(tr1, np.abs(low[1:] - np.roll(close, 1)[1:]))
-        tr = np.concatenate([[np.nan], tr1])
-        return pd.Series(tr).rolling(window=window, min_periods=window).mean().values
-    
-    atr_1d = calculate_atr(high_1d, low_1d, close_1d, window=14)
-    atr_ma_10 = pd.Series(atr_1d).rolling(window=10, min_periods=10).mean().values
-    
-    # Align HTF indicators to 1h primary timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    # Align all HTF indicators to 6h primary timeframe
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
     vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
-    atr_ma_10_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_10)
-    
-    # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.20  # 20% position size (discrete level to minimize fee churn)
+    position_size = 0.25  # 25% position size
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(vol_avg_20_aligned[i]) or
-            np.isnan(atr_ma_10_aligned[i])):
+        if (np.isnan(camarilla_r4_aligned[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(camarilla_s4_aligned[i]) or
+            np.isnan(vol_avg_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: only trade during 08-20 UTC to reduce noise
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
+        # Volume confirmation: current 6h volume > 1.2x 20-period 1d average
+        # Using 1d volume average for stability vs noisy 6h volume
+        volume_confirmed = volume[i] > 1.2 * vol_avg_20_aligned[i]
         
-        # Volume confirmation: current 1h volume > 1.2x 20-period 1d average
-        # Note: comparing 1h volume to 1d average volume (scaled appropriately)
-        volume_confirmed = volume[i] > 1.2 * (vol_avg_20_aligned[i] / 24)  # 1d avg / 24 ≈ 1h avg
+        # Mean reversion at extreme levels (R3/S3) - fade the extreme
+        mean_revert_long = close[i] <= camarilla_s3_aligned[i] and volume_confirmed
+        mean_revert_short = close[i] >= camarilla_r3_aligned[i] and volume_confirmed
         
-        # Volatility filter: avoid extremely low volatility (choppy markets)
-        vol_filter = True  # Simplified - using price action instead of ATR for 1h
+        # Breakout continuation at extreme levels (R4/S4) - break the extreme
+        breakout_long = close[i] >= camarilla_r4_aligned[i] and volume_confirmed
+        breakout_short = close[i] <= camarilla_s4_aligned[i] and volume_confirmed
         
-        # Breakout conditions using 4h Donchian on 1h close
-        breakout_up = close[i] > donchian_high_aligned[i]
-        breakout_down = close[i] < donchian_low_aligned[i]
+        # Exit conditions: return to pivot area (mean reversion) or opposite extreme (breakout)
+        exit_long = position == 1 and (close[i] <= camarilla_r3_aligned[i] or close[i] >= camarilla_s4_aligned[i])
+        exit_short = position == -1 and (close[i] >= camarilla_s3_aligned[i] or close[i] <= camarilla_r4_aligned[i])
         
-        # Entry conditions
-        enter_long = breakout_up and volume_confirmed and vol_filter and in_session
-        enter_short = breakout_down and volume_confirmed and vol_filter and in_session
-        
-        # Exit conditions: price returns to 4h Donchian middle (mean reversion within trend)
-        donchian_mid = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2
-        exit_long = position == 1 and close[i] <= donchian_mid
-        exit_short = position == -1 and close[i] >= donchian_mid
-        
-        # Execute signals
-        if enter_long and position != 1:
+        # Execute signals - prioritize breakout over mean reversion when both triggered
+        if breakout_long and position != 1:
             position = 1
             signals[i] = position_size
-        elif enter_short and position != -1:
+        elif breakout_short and position != -1:
+            position = -1
+            signals[i] = -position_size
+        elif mean_revert_long and position != 1 and position != -1:  # only if flat
+            position = 1
+            signals[i] = position_size
+        elif mean_revert_short and position != 1 and position != -1:  # only if flat
             position = -1
             signals[i] = -position_size
         elif position == 1 and exit_long:
@@ -123,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4h_1d_donchian_breakout_volume_session_v1"
-timeframe = "1h"
+name = "6h_1w_camarilla_breakout_meanrev_v1"
+timeframe = "6h"
 leverage = 1.0
