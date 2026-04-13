@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_1d_Donchian_Breakout_Volume_Trend_Filter
-Hypothesis: Breakouts above/below 4h Donchian channels with volume confirmation and 1d trend filter.
-Works in both bull and bear markets by only taking long when 1d close > 1d EMA50 and short when 1d close < 1d EMA50.
-Volume confirmation ensures breakouts have conviction. Target: 20-40 trades/year on 4h (80-160 total over 4 years).
+6h_12h_1d_VWAP_Deviation_MeanReversion
+Hypothesis: In 6h timeframe, price often deviates from 12h VWAP during short-term momentum bursts but reverts to the mean. 
+We take mean-reversion trades when price deviates >1.5 standard deviations from 12h VWAP, confirmed by 1d trend filter (price above/below 20 EMA).
+Works in both bull and bear markets because mean reversion occurs in all regimes, and trend filter ensures we trade with higher timeframe momentum.
+Target: 15-30 trades/year on 6h (60-120 total over 4 years).
 """
 
 import numpy as np
@@ -20,41 +21,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h Donchian channel (20-period high/low)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for VWAP calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Daily EMA50 for trend
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate VWAP on 12h: typical price * volume / cumulative volume
+    typical_price_12h = (df_12h['high'] + df_12h['low'] + df_12h['close']) / 3.0
+    vwap_12h = (typical_price_12h * df_12h['volume']).cumsum() / df_12h['volume'].cumsum()
+    vwap_12h_values = vwap_12h.values
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_expansion = volume > (vol_ma_20 * 1.5)
+    # Calculate standard deviation of price deviation from VWAP over last 20 periods
+    price_deviation_12h = (typical_price_12h - vwap_12h).values
+    # Rolling std of deviation
+    deviation_std_20 = pd.Series(price_deviation_12h).rolling(window=20, min_periods=20).std()
+    deviation_std_20_values = deviation_std_20.values
+    
+    # Get 1d data for trend filter: 20 EMA
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Align all data to 6h timeframe
+    vwap_12h_aligned = align_htf_to_ltf(prices, df_12h, vwap_12h_values)
+    deviation_std_20_aligned = align_htf_to_ltf(prices, df_12h, deviation_std_20_values)
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% of capital
     
-    for i in range(lookback, n):
+    for i in range(20, n):
         # Skip if any required data is not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_expansion[i])):
+        if (np.isnan(vwap_12h_aligned[i]) or np.isnan(deviation_std_20_aligned[i]) or 
+            np.isnan(ema_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long: breakout above Donchian high with volume expansion and 1d bullish trend
-        long_condition = (high[i] > highest_high[i]) and volume_expansion[i] and (close[i] > ema50_1d_aligned[i])
+        # Typical price for current 6h bar
+        typical_price = (high[i] + low[i] + close[i]) / 3.0
         
-        # Short: breakdown below Donchian low with volume expansion and 1d bearish trend
-        short_condition = (low[i] < lowest_low[i]) and volume_expansion[i] and (close[i] < ema50_1d_aligned[i])
+        # Deviation from 12h VWAP
+        deviation = typical_price - vwap_12h_aligned[i]
+        
+        # Avoid division by zero
+        if deviation_std_20_aligned[i] == 0:
+            signals[i] = 0.0
+            continue
+            
+        # Z-score of deviation
+        z_score = deviation / deviation_std_20_aligned[i]
+        
+        # Determine 1d trend: bullish if price > EMA20, bearish if price < EMA20
+        # Note: we use close price for trend determination
+        trend_bullish = close[i] > ema_20_1d_aligned[i]
+        
+        # Mean reversion conditions:
+        # Long: price significantly below VWAP (z-score < -1.5) in uptrend
+        # Short: price significantly above VWAP (z-score > 1.5) in downtrend
+        long_condition = (z_score < -1.5) and trend_bullish
+        short_condition = (z_score > 1.5) and (not trend_bullish)
         
         if long_condition and position != 1:
             position = 1
@@ -75,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Donchian_Breakout_Volume_Trend_Filter"
-timeframe = "4h"
+name = "6h_12h_1d_VWAP_Deviation_MeanReversion"
+timeframe = "6h"
 leverage = 1.0
