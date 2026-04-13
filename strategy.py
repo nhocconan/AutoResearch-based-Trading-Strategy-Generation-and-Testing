@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_12h_Camarilla_Pivot_Volume_Trend
-Hypothesis: Trade reversals at Camarilla pivot levels (H3/L3) on 4h using 12h trend filter and volume confirmation.
-Camarilla levels from the prior 12h period act as intraday support/resistance. Price approaching H3/L3 with
-volume exhaustion often reverses. The 12h EMA20 ensures we trade in direction of higher timeframe trend,
-avoiding counter-trend whipsaws. Target: 25-35 trades/year to minimize fee drag.
+4h_1d_Weekly_Trend_Breakout_v2
+Hypothesis: Trade breakouts from weekly high/low on 4h timeframe with volume confirmation and 1d trend filter.
+Weekly high/low act as strong support/resistance in both bull and bear markets. 
+Breakouts above weekly high signal institutional buying; breakdowns below weekly low signal distribution.
+1d EMA50 ensures trades align with intermediate-term trend. Volume filter confirms participation.
+Target: 20-30 trades/year to minimize fee drift.
 """
 
 import numpy as np
@@ -21,58 +22,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla pivot calculation (using prior completed 12h bar)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get weekly data for high/low
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 10:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from prior 12h bar (H-L range)
-    # H4 = C + 1.1*(H-L)/2, L4 = C - 1.1*(H-L)/2 (inner band)
-    # H6 = C + 1.5*(H-L)/2, L6 = C - 1.5*(H-L)/2 (outer band)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
     
-    # Use prior completed 12h bar to avoid look-ahead
-    range_12h = high_12h - low_12h
-    camarilla_h4 = close_12h + 1.1 * range_12h / 2.0
-    camarilla_l4 = close_12h - 1.1 * range_12h / 2.0
-    camarilla_h6 = close_12h + 1.5 * range_12h / 2.0
-    camarilla_l6 = close_12h - 1.5 * range_12h / 2.0
+    # Align weekly high/low to 4h
+    weekly_high_aligned = align_htf_to_ltf(prices, df_weekly, high_weekly)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_weekly, low_weekly)
     
-    # Align Camarilla levels to 4h (using prior completed 12h bar)
-    h4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h4)
-    l4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l4)
-    h6_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h6)
-    l6_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l6)
+    # Get daily data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Get 12h EMA20 for trend filter
-    ema_20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume condition: current volume < 0.5x 20-period average (low volume = exhaustion)
+    # Volume confirmation: current volume > 2.5x 20-period average (stricter to reduce trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_exhaustion = volume < (vol_ma_20 * 0.5)
+    volume_expansion = volume > (vol_ma_20 * 2.5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25
     
-    for i in range(20, n):
+    for i in range(100, n):
         # Skip if any required data is not ready
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
-            np.isnan(h6_aligned[i]) or np.isnan(l6_aligned[i]) or 
-            np.isnan(ema_20_aligned[i]) or np.isnan(volume_exhaustion[i])):
+        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Long: price near L4/L6 with volume exhaustion and above 12h EMA20
-        near_support = (close[i] <= l4_aligned[i] * 1.002) or (close[i] <= l6_aligned[i] * 1.002)
-        long_condition = near_support and volume_exhaustion[i] and (close[i] > ema_20_aligned[i])
+        # Long: breakout above weekly high with volume expansion and price above daily EMA50
+        long_condition = (close[i] > weekly_high_aligned[i]) and volume_expansion[i] and (close[i] > ema_50_aligned[i])
         
-        # Short: price near H4/H6 with volume exhaustion and below 12h EMA20
-        near_resistance = (close[i] >= h4_aligned[i] * 0.998) or (close[i] >= h6_aligned[i] * 0.998)
-        short_condition = near_resistance and volume_exhaustion[i] and (close[i] < ema_20_aligned[i])
+        # Short: breakdown below weekly low with volume expansion and price below daily EMA50
+        short_condition = (close[i] < weekly_low_aligned[i]) and volume_expansion[i] and (close[i] < ema_50_aligned[i])
         
         if long_condition and position != 1:
             position = 1
@@ -86,6 +76,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_Camarilla_Pivot_Volume_Trend"
+name = "4h_1d_Weekly_Trend_Breakout_v2"
 timeframe = "4h"
 leverage = 1.0
