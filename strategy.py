@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_1d_Weekly_Trend_Breakout_v2
-Hypothesis: Trade breakouts from weekly high/low on 4h timeframe with volume confirmation and 1d trend filter.
-Weekly high/low act as strong support/resistance in both bull and bear markets. 
-Breakouts above weekly high signal institutional buying; breakdowns below weekly low signal distribution.
-1d EMA50 ensures trades align with intermediate-term trend. Volume filter confirms participation.
-Target: 20-30 trades/year to minimize fee drift.
+1d_1w_Weekly_Pullback_Reversal
+Hypothesis: Trade pullbacks to weekly support/resistance on 1d timeframe with RSI confirmation.
+In bull markets, price pulls back to weekly low (support) before continuing up.
+In bear markets, price pulls back to weekly high (resistance) before continuing down.
+RSI(2) identifies overextended pullbacks for high-probability reversal entries.
+Weekly levels are strong institutional reference points that hold across regimes.
+Target: 15-25 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -20,9 +21,8 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get weekly data for high/low
+    # Get weekly data for support/resistance levels
     df_weekly = get_htf_data(prices, '1w')
     if len(df_weekly) < 10:
         return np.zeros(n)
@@ -30,22 +30,19 @@ def generate_signals(prices):
     high_weekly = df_weekly['high'].values
     low_weekly = df_weekly['low'].values
     
-    # Align weekly high/low to 4h
+    # Align weekly high/low to 1d
     weekly_high_aligned = align_htf_to_ltf(prices, df_weekly, high_weekly)
     weekly_low_aligned = align_htf_to_ltf(prices, df_weekly, low_weekly)
     
-    # Get daily data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume confirmation: current volume > 2.5x 20-period average (stricter to reduce trades)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 2.5)
+    # RSI(2) for short-term overextension
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
+    avg_loss = loss.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -54,15 +51,15 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any required data is not ready
         if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(volume_expansion[i])):
+            np.isnan(rsi_values[i])):
             signals[i] = 0.0
             continue
         
-        # Long: breakout above weekly high with volume expansion and price above daily EMA50
-        long_condition = (close[i] > weekly_high_aligned[i]) and volume_expansion[i] and (close[i] > ema_50_aligned[i])
+        # Long: pullback to weekly low with RSI < 30 (oversold)
+        long_condition = (low[i] <= weekly_low_aligned[i] * 1.002) and (rsi_values[i] < 30)
         
-        # Short: breakdown below weekly low with volume expansion and price below daily EMA50
-        short_condition = (close[i] < weekly_low_aligned[i]) and volume_expansion[i] and (close[i] < ema_50_aligned[i])
+        # Short: pullback to weekly high with RSI > 70 (overbought)
+        short_condition = (high[i] >= weekly_high_aligned[i] * 0.998) and (rsi_values[i] > 70)
         
         if long_condition and position != 1:
             position = 1
@@ -76,6 +73,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Weekly_Trend_Breakout_v2"
-timeframe = "4h"
+name = "1d_1w_Weekly_Pullback_Reversal"
+timeframe = "1d"
 leverage = 1.0
