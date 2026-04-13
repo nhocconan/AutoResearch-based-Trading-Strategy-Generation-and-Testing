@@ -3,11 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h timeframe with 12h Donchian breakout and volume confirmation.
-# Long: Price breaks above 12h Donchian(20) high + volume > 1.5x average volume.
-# Short: Price breaks below 12h Donchian(20) low + volume > 1.5x average volume.
-# Uses 12h Donchian channels for trend structure, 4h for execution with volume confirmation.
-# Target: 100-200 total trades over 4 years (25-50/year) for 4h timeframe.
+# Hypothesis: 1h timeframe with 4h/1d trend alignment and volume confirmation.
+# Long: 1h close above 4h EMA(21) AND 1h close above 1d VWAP AND volume > 1.5x 20-period average volume.
+# Short: 1h close below 4h EMA(21) AND 1h close below 1d VWAP AND volume > 1.5x 20-period average volume.
+# Exit: When price crosses back below/above the 4h EMA(21).
+# Uses 4h EMA for trend direction, 1d VWAP for institutional reference, volume for conviction.
+# Time filter: 08-20 UTC to avoid low-liquidity hours.
+# Target: 60-150 total trades over 4 years = 15-37/year for 1h.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,71 +21,92 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12h data for Donchian channels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # 4h data for EMA trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 21:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # 1d data for VWAP
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
+        return np.zeros(n)
     
-    # Calculate Donchian channels (20-period) on 12h data
-    donchian_high = np.full(len(high_12h), np.nan)
-    donchian_low = np.full(len(low_12h), np.nan)
-    for i in range(20, len(high_12h)):
-        donchian_high[i] = np.max(high_12h[i-20:i])
-        donchian_low[i] = np.min(low_12h[i-20:i])
+    # Calculate 4h EMA(21)
+    close_4h = df_4h['close'].values
+    ema_4h = np.full(len(close_4h), np.nan)
+    if len(close_4h) >= 21:
+        ema_4h[20] = np.mean(close_4h[:21])  # Simple average for first value
+        for i in range(21, len(close_4h)):
+            ema_4h[i] = (close_4h[i] * 2 + ema_4h[i-1] * 19) / 21  # EMA formula
+    
+    # Calculate 1d VWAP (volume-weighted average price)
+    vwap_1d = np.full(len(df_1d), np.nan)
+    for i in range(len(df_1d)):
+        if i == 0:
+            vwap_1d[i] = (df_1d['close'].iloc[i] * df_1d['volume'].iloc[i]) / df_1d['volume'].iloc[i]
+        else:
+            typical_price = (df_1d['high'].iloc[i] + df_1d['low'].iloc[i] + df_1d['close'].iloc[i]) / 3
+            vwap_1d[i] = (vwap_1d[i-1] * df_1d['volume'].iloc[i-1] + typical_price * df_1d['volume'].iloc[i]) / (df_1d['volume'].iloc[i-1] + df_1d['volume'].iloc[i])
     
     # Average volume (20-period) for volume confirmation
     avg_volume = np.full(n, np.nan)
     for i in range(20, n):
         avg_volume[i] = np.mean(volume[i-20:i])
     
-    # Align 12h Donchian levels to 4h
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    # Align 4h EMA and 1d VWAP to 1h
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.25  # 25% position size
+    position_size = 0.20  # 20% position size
+    
+    # Pre-calculate hour filter for performance
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     for i in range(20, n):
         # Skip if any required data is not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(vwap_1d_aligned[i]) or 
             np.isnan(avg_volume[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Apply session filter: 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        upper = donchian_high_aligned[i]
-        lower = donchian_low_aligned[i]
+        ema = ema_4h_aligned[i]
+        vwap = vwap_1d_aligned[i]
         
         # Volume confirmation: current volume > 1.5x average volume
         volume_confirm = vol > 1.5 * avg_vol
         
         if position == 0:
-            # Long: price breaks above Donchian high + volume confirmation
-            if (price > upper and volume_confirm):
+            # Long: price above both EMA and VWAP + volume confirmation
+            if (price > ema and price > vwap and volume_confirm):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below Donchian low + volume confirmation
-            elif (price < lower and volume_confirm):
+            # Short: price below both EMA and VWAP + volume confirmation
+            elif (price < ema and price < vwap and volume_confirm):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below Donchian low
-            if price < lower:
+            # Exit long: price closes below EMA (trend change)
+            if price < ema:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes above Donchian high
-            if price > upper:
+            # Exit short: price closes above EMA (trend change)
+            if price > ema:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -91,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_Donchian_Breakout_Volume"
-timeframe = "4h"
+name = "1h_4h_1d_EMA_VWAP_Volume_Filter"
+timeframe = "1h"
 leverage = 1.0
