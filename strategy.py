@@ -1,26 +1,35 @@
 #!/usr/bin/env python3
 """
-1h_4d_Pivot_Reversion
-Hypothesis: Mean reversion from daily pivot levels with volume confirmation on 1h timeframe.
-Uses daily pivot (R1/S1) as dynamic support/resistance. Mean reversion works in range-bound markets (2025-2026)
-and during pullbacks in trending markets. Volume confirmation filters false signals. 1h provides timely entries
-while daily pivot provides structure. Target: 20-30 trades/year.
+12h_1d_Camarilla_Breakout
+Hypothesis: Trade breakouts from 1d Camarilla pivot levels (H4/L4) on 12h timeframe with volume confirmation.
+Uses 1d Camarilla levels as strong support/resistance that institutions respect. Works in bull (breakouts above H4)
+and bear (breakdowns below L4) markets. Volume filter ensures institutional participation. Target: 15-25 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_daily_pivot(high, low, close):
-    """Calculate daily pivot points (standard)."""
-    P = (high + low + close) / 3.0
-    R1 = 2 * P - low
-    S1 = 2 * P - high
-    return P, R1, S1
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels."""
+    range_val = high - low
+    range_val = np.where(range_val == 0, 1e-10, range_val)
+    C = close
+    H = high
+    L = low
+    R1 = C + ((H - L) * 1.0833)
+    R2 = C + ((H - L) * 1.1666)
+    R3 = C + ((H - L) * 1.2500)
+    R4 = C + ((H - L) * 1.5000)
+    S1 = C - ((H - L) * 1.0833)
+    S2 = C - ((H - L) * 1.1666)
+    S3 = C - ((H - L) * 1.2500)
+    S4 = C - ((H - L) * 1.5000)
+    return R1, R2, R3, R4, S1, S2, S3, S4
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -28,7 +37,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot levels
+    # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -37,45 +46,33 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily pivot levels
-    _, R1_1d, S1_1d = calculate_daily_pivot(high_1d, low_1d, close_1d)
+    # Calculate 1d Camarilla levels
+    R1_1d, R2_1d, R3_1d, R4_1d, S1_1d, S2_1d, S3_1d, S4_1d = calculate_camarilla(high_1d, low_1d, close_1d)
     
-    # Align daily pivot to 1h timeframe
-    R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
-    S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
+    # Align all data to 12h timeframe
+    R4_1d_aligned = align_htf_to_ltf(prices, df_1d, R4_1d)
+    S4_1d_aligned = align_htf_to_ltf(prices, df_1d, S4_1d)
     
-    # Volume filter: volume > 1.5x 24-period average (avoid low-volume noise)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean()
-    volume_filter = volume > (vol_ma_24 * 1.5)
-    
-    # RSI filter to avoid overbought/oversold extremes
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volume_expansion = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.20
+    position_size = 0.25
     
-    for i in range(50, n):
-        # Skip if data not ready
-        if (np.isnan(R1_1d_aligned[i]) or np.isnan(S1_1d_aligned[i]) or 
-            np.isnan(volume_filter[i]) or np.isnan(rsi_values[i])):
+    for i in range(20, n):
+        # Skip if any required data is not ready
+        if (np.isnan(R4_1d_aligned[i]) or np.isnan(S4_1d_aligned[i]) or 
+            np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Mean reversion from daily R1/S1 with volume and RSI filters
-        long_condition = (close[i] < S1_1d_aligned[i]) and volume_filter[i] and (rsi_values[i] < 35)
-        short_condition = (close[i] > R1_1d_aligned[i]) and volume_filter[i] and (rsi_values[i] > 65)
+        # Long: breakout above R4 with volume expansion
+        long_condition = (close[i] > R4_1d_aligned[i]) and volume_expansion[i]
         
-        # Exit when price crosses back to pivot level
-        exit_long = close[i] > (S1_1d_aligned[i] + (R1_1d_aligned[i] - S1_1d_aligned[i]) * 0.3)
-        exit_short = close[i] < (R1_1d_aligned[i] - (R1_1d_aligned[i] - S1_1d_aligned[i]) * 0.3)
+        # Short: breakdown below S4 with volume expansion
+        short_condition = (close[i] < S4_1d_aligned[i]) and volume_expansion[i]
         
         if long_condition and position != 1:
             position = 1
@@ -83,15 +80,12 @@ def generate_signals(prices):
         elif short_condition and position != -1:
             position = -1
             signals[i] = -position_size
-        elif (position == 1 and exit_long) or (position == -1 and exit_short):
-            position = 0
-            signals[i] = 0.0
         else:
             # Hold current position
             signals[i] = position_size if position == 1 else (-position_size if position == -1 else 0.0)
     
     return signals
 
-name = "1h_4d_Pivot_Reversion"
-timeframe = "1h"
+name = "12h_1d_Camarilla_Breakout"
+timeframe = "12h"
 leverage = 1.0
