@@ -1,83 +1,92 @@
-# 1d_1w_HTF_Trend_Filtered_Trend
-# Hypothesis: Use weekly EMA cross (21/55) as primary trend filter on daily chart.
-# Enter long when daily close > weekly EMA21 and daily EMA21 crosses above EMA55.
-# Enter short when daily close < weekly EMA21 and daily EMA21 crosses below EMA55.
-# Exit on opposite signal or weekly EMA cross reversal.
-# This reduces whipsaw by requiring alignment between daily momentum and weekly trend.
-# Target: 15-25 trades/year per symbol, works in bull via trend continuation and
-# in bear via trend reversals confirmed by higher timeframe.
+#!/usr/bin/env python3
+"""
+4h_1d_Camarilla_Reversal_with_Volume
+Hypothesis: Mean reversion at daily Camarilla levels (H3/L3) with volume confirmation.
+In ranging markets (common in 2025), price tends to revert from extreme daily levels.
+Volume filter ensures institutional interest at these levels. Works in both bull and bear
+by fading extremes rather than chasing breakouts. Target: 20-30 trades/year.
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels."""
+    range_val = high - low
+    range_val = np.where(range_val == 0, 1e-10, range_val)
+    C = close
+    H = high
+    L = low
+    R1 = C + ((H - L) * 1.0833)
+    R2 = C + ((H - L) * 1.1666)
+    R3 = C + ((H - L) * 1.2500)
+    R4 = C + ((H - L) * 1.5000)
+    S1 = C - ((H - L) * 1.0833)
+    S2 = C - ((H - L) * 1.1666)
+    S3 = C - ((H - L) * 1.2500)
+    S4 = C - ((H - L) * 1.5000)
+    return R1, R2, R3, R4, S1, S2, S3, S4
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 55:
+    # Get 1d data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate weekly EMA21 and EMA55
-    close_1w = df_1w['close'].values
-    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema55_1w = pd.Series(close_1w).ewm(span=55, adjust=False, min_periods=55).mean().values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align weekly EMAs to daily timeframe
-    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
-    ema55_1w_aligned = align_htf_to_ltf(prices, df_1w, ema55_1w)
+    # Calculate 1d Camarilla levels
+    R1_1d, R2_1d, R3_1d, R4_1d, S1_1d, S2_1d, S3_1d, S4_1d = calculate_camarilla(high_1d, low_1d, close_1d)
     
-    # Calculate daily EMAs for entry timing
-    ema21_daily = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema55_daily = pd.Series(close).ewm(span=55, adjust=False, min_periods=55).mean().values
+    # Align all data to 4h timeframe
+    R3_1d_aligned = align_htf_to_ltf(prices, df_1d, R3_1d)
+    S3_1d_aligned = align_htf_to_ltf(prices, df_1d, S3_1d)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volume_expansion = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(ema21_1w_aligned[i]) or np.isnan(ema55_1w_aligned[i]) or
-            np.isnan(ema21_daily[i]) or np.isnan(ema55_daily[i])):
+        if (np.isnan(R3_1d_aligned[i]) or np.isnan(S3_1d_aligned[i]) or 
+            np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Check weekly trend alignment
-        weekly_uptrend = ema21_1w_aligned[i] > ema55_1w_aligned[i]
-        weekly_downtrend = ema21_1w_aligned[i] < ema55_1w_aligned[i]
+        # Long: price touches S3 with volume expansion (oversold bounce)
+        long_condition = (close[i] <= S3_1d_aligned[i]) and volume_expansion[i]
         
-        # Daily EMA cross signals
-        daily_bullish_cross = ema21_daily[i] > ema55_daily[i] and ema21_daily[i-1] <= ema55_daily[i-1]
-        daily_bearish_cross = ema21_daily[i] < ema55_daily[i] and ema21_daily[i-1] >= ema55_daily[i-1]
+        # Short: price touches R3 with volume expansion (overbought rejection)
+        short_condition = (close[i] >= R3_1d_aligned[i]) and volume_expansion[i]
         
-        # Long: weekly uptrend + daily bullish cross
-        if weekly_uptrend and daily_bullish_cross and position != 1:
+        if long_condition and position != 1:
             position = 1
             signals[i] = position_size
-        # Short: weekly downtrend + daily bearish cross
-        elif weekly_downtrend and daily_bearish_cross and position != -1:
+        elif short_condition and position != -1:
             position = -1
             signals[i] = -position_size
-        # Exit: weekly trend reversal or opposite daily cross
-        elif position == 1 and (not weekly_uptrend or daily_bearish_cross):
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and (not weekly_downtrend or daily_bullish_cross):
-            position = 0
-            signals[i] = 0.0
         else:
             # Hold current position
             signals[i] = position_size if position == 1 else (-position_size if position == -1 else 0.0)
     
     return signals
 
-name = "1d_1w_HTF_Trend_Filtered_Trend"
-timeframe = "1d"
+name = "4h_1d_Camarilla_Reversal_with_Volume"
+timeframe = "4h"
 leverage = 1.0
