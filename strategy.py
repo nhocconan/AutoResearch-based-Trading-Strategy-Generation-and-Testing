@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,29 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
-    
-    # Calculate 20-period Donchian channels on 12h
-    donchian_high = np.full(len(high_12h), np.nan)
-    donchian_low = np.full(len(low_12h), np.nan)
-    for i in range(20, len(high_12h)):
-        donchian_high[i] = np.max(high_12h[i-20:i])
-        donchian_low[i] = np.min(low_12h[i-20:i])
-    
-    # Calculate 20-period average volume on 12h
-    avg_volume_12h = np.full(len(volume_12h), np.nan)
-    for i in range(20, len(volume_12h)):
-        avg_volume_12h[i] = np.mean(volume_12h[i-20:i])
-    
-    # Get 1d data for weekly pivot calculation
+    # Get 1d data for pivot calculation (weekly pivot using prior week)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 10:
         return np.zeros(n)
@@ -44,18 +22,16 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points (using prior week data)
-    # We'll use the previous week's high, low, close for current week pivot
+    # Calculate weekly pivot points (using prior week's high, low, close)
     week_high = np.full(len(high_1d), np.nan)
-    week_low = np.full(len(low_1d), np.nan)
+    week_low = np.full(len(high_1d), np.nan)
     week_close = np.full(len(close_1d), np.nan)
     
-    for i in range(7, len(high_1d)):  # Need at least 7 days for a week
+    for i in range(7, len(high_1d)):
         week_high[i] = np.max(high_1d[i-7:i])
         week_low[i] = np.min(low_1d[i-7:i])
         week_close[i] = close_1d[i-1]  # Previous day's close as weekly close
     
-    # Calculate pivot points and support/resistance levels
     pivot = np.full(len(high_1d), np.nan)
     r1 = np.full(len(high_1d), np.nan)
     s1 = np.full(len(high_1d), np.nan)
@@ -74,52 +50,49 @@ def generate_signals(prices):
             r3[i] = week_high[i] + 2 * (pivot[i] - week_low[i])
             s3[i] = week_low[i] - 2 * (week_high[i] - pivot[i])
     
-    # Align all indicators to 6h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
-    avg_volume_12h_aligned = align_htf_to_ltf(prices, df_12h, avg_volume_12h)
+    # Get 12h data for volume confirmation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    
+    volume_12h = df_12h['volume'].values
+    
+    # Calculate 20-period average volume on 12h
+    avg_volume_12h = np.full(len(volume_12h), np.nan)
+    for i in range(20, len(volume_12h)):
+        avg_volume_12h[i] = np.mean(volume_12h[i-20:i])
+    
+    # Align indicators to 6h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r3)  # Using r3 as r4 approximation
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s3)  # Using s3 as s4 approximation
+    avg_volume_12h_aligned = align_htf_to_ltf(prices, df_12h, avg_volume_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25
     
-    for i in range(200, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or
-            np.isnan(avg_volume_12h_aligned[i]) or
-            np.isnan(pivot_aligned[i]) or
+        if (np.isnan(pivot_aligned[i]) or 
             np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i])):
+            np.isnan(s3_aligned[i]) or
+            np.isnan(avg_volume_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > average volume
-        # Find the corresponding 12h index for current 6h bar
+        # Volume confirmation: current 6h volume > average 12h volume
         vol_confirm = volume[i] > avg_volume_12h_aligned[i]
         
-        # Donchian breakout conditions
-        donchian_breakout_long = close[i] > donchian_high_aligned[i]
-        donchian_breakout_short = close[i] < donchian_low_aligned[i]
+        # Pivot-based entry conditions
+        # Long when price crosses above S3 with volume
+        # Short when price crosses below R3 with volume
+        long_entry = (close[i] > s3_aligned[i]) and vol_confirm and (close[i-1] <= s3_aligned[i-1])
+        short_entry = (close[i] < r3_aligned[i]) and vol_confirm and (close[i-1] >= r3_aligned[i-1])
         
-        # Weekly pivot conditions
-        # Long when price is above S3 (support) and showing strength
-        # Short when price is below R3 (resistance) and showing weakness
-        pivot_support = close[i] > s3_aligned[i]
-        pivot_resistance = close[i] < r3_aligned[i]
-        
-        # Entry conditions with confluence
-        long_entry = donchian_breakout_long and vol_confirm and pivot_support
-        short_entry = donchian_breakout_short and vol_confirm and pivot_resistance
-        
-        # Exit conditions: opposite Donchian breakout or pivot reversal
-        exit_long = position == 1 and (donchian_breakout_short or close[i] < pivot_aligned[i])
-        exit_short = position == -1 and (donchian_breakout_long or close[i] > pivot_aligned[i])
+        # Exit conditions: price returns to pivot level
+        exit_long = position == 1 and close[i] <= pivot_aligned[i]
+        exit_short = position == -1 and close[i] >= pivot_aligned[i]
         
         # Execute signals
         if long_entry and position != 1:
@@ -142,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_1d_donchian_pivot_volume_confluence"
+name = "6h_12h_1d_pivot_volume_breakout"
 timeframe = "6h"
 leverage = 1.0
