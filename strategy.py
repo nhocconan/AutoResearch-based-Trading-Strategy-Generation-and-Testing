@@ -8,11 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Donchian(20) breakout with weekly Camarilla pivot filter + volume confirmation
-    # Long: price > Donchian(20) high AND price > weekly S3 pivot AND volume > 2.0x 20-period average
-    # Short: price < Donchian(20) low AND price < weekly R3 pivot AND volume > 2.0x 20-period average
-    # Exit: opposite Donchian breakout OR price crosses weekly H3/L3 pivot
-    # Using 6h timeframe to reduce noise and trade frequency, weekly Camarilla pivots for strong structure,
+    # Hypothesis: 12h Donchian(20) breakout with daily Camarilla pivot filter + volume confirmation
+    # Long: price > Donchian(20) high AND price > daily S3 pivot AND volume > 1.8x 20-period average
+    # Short: price < Donchian(20) low AND price < daily R3 pivot AND volume > 1.8x 20-period average
+    # Exit: opposite Donchian breakout OR price crosses daily H3/L3 pivot
+    # Using 12h timeframe to minimize trade frequency and fee drag, daily Camarilla pivots for strong structure,
     # and volume spike confirmation to avoid false breakouts. Discrete position sizing (0.25) to minimize fee churn.
     
     close = prices['close'].values
@@ -20,36 +20,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get daily data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly Camarilla pivot levels (H3, L3, S3, R3)
-    # Formula based on previous weekly candle: H4 = close + 1.1*(high-low)*1.1/2, L4 = close - 1.1*(high-low)*1.1/2
-    # Then: H3 = H4 - (H4-L4)/2, L3 = L4 + (H4-L4)/2, S3 = L4 - (H4-L4)*1.1/6, R3 = H4 + (H4-L4)*1.1/6
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate daily Camarilla pivot levels (H3, L3, S3, R3)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly Camarilla levels with proper seeding
-    H4 = np.full(len(close_1w), np.nan)
-    L4 = np.full(len(close_1w), np.nan)
-    for i in range(1, len(close_1w)):
-        H4[i] = close_1w[i-1] + 1.1 * (high_1w[i-1] - low_1w[i-1]) * 1.1 / 2
-        L4[i] = close_1w[i-1] - 1.1 * (high_1w[i-1] - low_1w[i-1]) * 1.1 / 2
+    # Calculate daily Camarilla levels with proper seeding
+    H4 = np.full(len(close_1d), np.nan)
+    L4 = np.full(len(close_1d), np.nan)
+    for i in range(1, len(close_1d)):
+        H4[i] = close_1d[i-1] + 1.1 * (high_1d[i-1] - low_1d[i-1]) * 1.1 / 2
+        L4[i] = close_1d[i-1] - 1.1 * (high_1d[i-1] - low_1d[i-1]) * 1.1 / 2
     
-    H3 = np.full(len(close_1w), np.nan)
-    L3 = np.full(len(close_1w), np.nan)
-    S3 = np.full(len(close_1w), np.nan)
-    R3 = np.full(len(close_1w), np.nan)
-    for i in range(1, len(close_1w)):
+    H3 = np.full(len(close_1d), np.nan)
+    L3 = np.full(len(close_1d), np.nan)
+    S3 = np.full(len(close_1d), np.nan)
+    R3 = np.full(len(close_1d), np.nan)
+    for i in range(1, len(close_1d)):
         H3[i] = H4[i] - (H4[i] - L4[i]) / 2
         L3[i] = L4[i] + (H4[i] - L4[i]) / 2
         S3[i] = L4[i] - (H4[i] - L4[i]) * 1.1 / 6
         R3[i] = H4[i] + (H4[i] - L4[i]) * 1.1 / 6
     
-    # Get 6h Donchian(20) for breakout with min_periods
+    # Get 12h Donchian(20) for breakout with min_periods
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     
@@ -57,17 +55,17 @@ def generate_signals(prices):
         donchian_high[i] = np.max(high[i-20:i])
         donchian_low[i] = np.min(low[i-20:i])
     
-    # Get 6h volume for confirmation (>2.0x 20-period average)
+    # Get 12h volume for confirmation (>1.8x 20-period average)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (1.8 * vol_ma)
     
-    # Align weekly Camarilla levels to 6h
-    H3_aligned = align_htf_to_ltf(prices, df_1w, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1w, L3)
-    S3_aligned = align_htf_to_ltf(prices, df_1w, S3)
-    R3_aligned = align_htf_to_ltf(prices, df_1w, R3)
+    # Align daily Camarilla levels to 12h
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -120,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_donchian_breakout_camarilla_pivot_volume_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_breakout_camarilla_pivot_volume_v1"
+timeframe = "12h"
 leverage = 1.0
