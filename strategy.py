@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian breakout with 12h volume confirmation and 4h volatility regime.
-Uses 4h Donchian channels (20-period) for trend direction, 12h volume spike (volume > 1.8x 20-period average)
-to confirm breakout strength, and 4h volatility regime (ATR ratio < 0.7 = low volatility) to avoid false breakouts
-in high volatility. Long when price breaks above 4h Donchian upper in low volatility with volume spike.
-Short when price breaks below 4h Donchian lower in low volatility with volume spike.
-Target: 60-120 total trades over 4 years (15-30/year) to avoid fee drag.
+Hypothesis: 1h strategy using 4h/1d CAMARILLA PIVOT levels with volume confirmation and session filter.
+CAMARILLA PIVOT calculates support/resistance levels based on previous day's range.
+Long when price breaks above H4 resistance with volume spike during active session (08-20 UTC).
+Short when price breaks below L4 support with volume spike during active session.
+Uses 4h trend filter (price > 4h EMA20) to avoid counter-trend trades.
+Designed for 60-150 total trades over 4 years (15-37/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,79 +22,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for volume confirmation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 1d data for CAMARILLA pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    volume_12h = df_12h['volume'].values
+    # Calculate CAMARILLA pivot levels from previous day
+    # H4 = Close + 1.5 * (High - Low)
+    # L4 = Close - 1.5 * (High - Low)
+    # H3 = Close + 1.25 * (High - Low)
+    # L3 = Close - 1.25 * (High - Low)
+    # H2 = Close + 1.083 * (High - Low)
+    # L2 = Close - 1.083 * (High - Low)
+    # H1 = Close + 1.0/1.1 * (High - Low)
+    # L1 = Close - 1.0/1.1 * (High - Low)
     
-    # Calculate 12h volume spike (volume > 1.8x 20-period average)
-    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_12h > (vol_ma_20 * 1.8)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_12h, vol_spike.astype(float))
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Get 4h data for Donchian channels and volatility regime
+    # Handle first value (no previous day)
+    prev_close[0] = df_1d['close'].iloc[0]
+    prev_high[0] = df_1d['high'].iloc[0]
+    prev_low[0] = df_1d['low'].iloc[0]
+    
+    # Calculate pivot levels
+    range_hl = prev_high - prev_low
+    h4 = prev_close + 1.5 * range_hl
+    l4 = prev_close - 1.5 * range_hl
+    h3 = prev_close + 1.25 * range_hl
+    l3 = prev_close - 1.25 * range_hl
+    
+    # Align H4 and L4 levels to 1h timeframe
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    
+    # Get 4h data for trend filter (EMA20)
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(df_4h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Calculate 4h Donchian channels (20-period)
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Volume confirmation: volume > 1.5x 20-period EMA of volume
+    vol_ema_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_spike = volume > (vol_ema_20 * 1.5)
     
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
-    
-    # Calculate 4h ATR for volatility regime
-    # TR = max(high-low, |high-close_prev|, |low-close_prev|)
-    tr1 = high_4h[1:] - low_4h[1:]
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr_4h = np.concatenate([[np.max([high_4h[0] - low_4h[0], np.abs(high_4h[0] - close_4h[0]), np.abs(low_4h[0] - close_4h[0])])], 
-                           np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate 4h ATR ratio (current ATR / 50-period average ATR) for volatility regime
-    atr_ma_50 = pd.Series(atr_4h).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr_4h / atr_ma_50
-    
-    # Volatility regime: ATR ratio < 0.7 = low volatility (good for breakouts)
-    low_volatility = atr_ratio < 0.7
-    
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_4h, atr_ratio)
-    low_volatility_aligned = align_htf_to_ltf(prices, df_4h, low_volatility.astype(float))
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.25  # 25% of capital
+    position_size = 0.20  # 20% of capital
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(vol_spike_aligned[i]) or 
-            np.isnan(low_volatility_aligned[i])):
+        if (np.isnan(h4_aligned[i]) or 
+            np.isnan(l4_aligned[i]) or 
+            np.isnan(ema_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: Donchian breakout + volume spike + low volatility
-        breakout_long = close[i] > donchian_high_aligned[i]
-        breakout_short = close[i] < donchian_low_aligned[i]
-        vol_confirm = vol_spike_aligned[i] > 0.5  # True if volume spike
-        vol_regime = low_volatility_aligned[i] > 0.5  # True if low volatility
+        # Entry conditions
+        # Long: price breaks above H4 resistance + volume spike + session + uptrend
+        long_breakout = close[i] > h4_aligned[i]
+        long_volume = vol_spike[i]
+        long_session = session_filter[i]
+        long_trend = close[i] > ema_4h_aligned[i]  # Above 4h EMA = uptrend
         
-        long_entry = breakout_long and vol_confirm and vol_regime
-        short_entry = breakout_short and vol_confirm and vol_regime
+        # Short: price breaks below L4 support + volume spike + session + downtrend
+        short_breakout = close[i] < l4_aligned[i]
+        short_volume = vol_spike[i]
+        short_session = session_filter[i]
+        short_trend = close[i] < ema_4h_aligned[i]  # Below 4h EMA = downtrend
         
-        # Exit when price returns to opposite Donchian level (mean reversion within channel)
-        exit_long = position == 1 and close[i] < donchian_low_aligned[i]
-        exit_short = position == -1 and close[i] > donchian_high_aligned[i]
+        long_entry = long_breakout and long_volume and long_session and long_trend
+        short_entry = short_breakout and short_volume and short_session and short_trend
+        
+        # Exit when price returns to opposite level (mean reversion within CAMARILLA range)
+        exit_long = position == 1 and close[i] < l4_aligned[i]
+        exit_short = position == -1 and close[i] > h4_aligned[i]
         
         # Execute signals
         if long_entry and position != 1:
@@ -117,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_donchian_vol_volatility_v1"
-timeframe = "4h"
+name = "1h_1d_camarilla_pivot_volume_session"
+timeframe = "1h"
 leverage = 1.0
