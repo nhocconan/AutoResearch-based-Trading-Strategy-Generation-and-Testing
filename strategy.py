@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-1d_1w_CamarillaPivot_Breakout_TrendFilter_v1
-Hypothesis: Camarilla pivot levels from daily timeframe identify key support/resistance. 
-Breakouts above R4 or below S4 with weekly ADX trend filter capture strong momentum moves. 
-This strategy works in both bull and bear markets by following strong trends only. 
-Target: 10-20 trades/year to minimize fee drag.
+4h_1d_DonchianBreakout_VolumeTrend_v2
+Hypothesis: Price breaking above/below 4-hour Donchian channels (20-period) with daily volume confirmation and trend filter captures momentum moves. Uses higher timeframe (1d) for volume and trend context to filter false breakouts. Designed for low trade frequency (<400 total) to minimize fee drag in both bull and bear markets.
 """
 
 import numpy as np
@@ -19,108 +16,67 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots
+    # Get daily data for volume and trend filters
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla pivot levels for previous day
-    # Typical price = (high + low + close) / 3
-    typical_price = (high_1d + low_1d + close_1d) / 3.0
-    range_hl = high_1d - low_1d
+    # Calculate 4-hour Donchian channels (20-period)
+    # Using 4h high/low directly from prices
+    high_4h = high
+    low_4h = low
     
-    # Camarilla levels
-    R4 = close_1d + (range_hl * 1.1 / 2)
-    R3 = close_1d + (range_hl * 1.1 / 4)
-    R2 = close_1d + (range_hl * 1.1 / 6)
-    R1 = close_1d + (range_hl * 1.1 / 12)
-    S1 = close_1d - (range_hl * 1.1 / 12)
-    S2 = close_1d - (range_hl * 1.1 / 6)
-    S3 = close_1d - (range_hl * 1.1 / 4)
-    S4 = close_1d - (range_hl * 1.1 / 2)
+    # Rolling max/min for upper/lower bands
+    upper_donchian = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lower_donchian = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Get weekly data for ADX trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
+    # Daily volume confirmation: volume > 1.5x 20-day average
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_confirmed = volume_1d > (vol_ma_20 * 1.5)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Daily trend filter: price above/below 50-day SMA
+    sma_50 = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
+    price_above_sma = close_1d > sma_50
+    price_below_sma = close_1d < sma_50
     
-    # Calculate ADX (14-period)
-    tr1 = np.abs(high_1w - low_1w)
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = np.nan
-    
-    up_move = np.where(high_1w - np.roll(high_1w, 1) > 0, high_1w - np.roll(high_1w, 1), 0)
-    down_move = np.where(np.roll(low_1w, 1) - low_1w > 0, np.roll(low_1w, 1) - low_1w, 0)
-    up_move[0] = 0
-    down_move[0] = 0
-    
-    def wilders_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        result[period-1] = np.nanmean(data[:period])
-        for i in range(period, len(data)):
-            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-            else:
-                result[i] = np.nan
-        return result
-    
-    period = 14
-    atr = wilders_smooth(tr, period)
-    plus_dm = wilders_smooth(up_move, period)
-    minus_dm = wilders_smooth(down_move, period)
-    
-    plus_di = 100 * plus_dm / atr
-    minus_di = 100 * minus_dm / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilders_smooth(dx, period)
-    strong_trend = adx > 25  # Strong trend filter
-    
-    # Align all signals to daily timeframe (since price is daily)
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
-    strong_trend_aligned = align_htf_to_ltf(prices, df_1w, strong_trend.astype(float))
+    # Align all daily signals to 4h timeframe
+    upper_donchian_aligned = align_htf_to_ltf(prices, df_1d, upper_donchian)
+    lower_donchian_aligned = align_htf_to_ltf(prices, df_1d, lower_donchian)
+    volume_confirmed_aligned = align_htf_to_ltf(prices, df_1d, volume_confirmed.astype(float))
+    price_above_sma_aligned = align_htf_to_ltf(prices, df_1d, price_above_sma.astype(float))
+    price_below_sma_aligned = align_htf_to_ltf(prices, df_1d, price_below_sma.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% of capital
     
-    for i in range(2, n):  # Start from 2 to ensure we have previous day's pivots
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(R4_aligned[i]) or 
-            np.isnan(S4_aligned[i]) or 
-            np.isnan(strong_trend_aligned[i])):
+        if (np.isnan(upper_donchian_aligned[i]) or 
+            np.isnan(lower_donchian_aligned[i]) or 
+            np.isnan(volume_confirmed_aligned[i]) or 
+            np.isnan(price_above_sma_aligned[i]) or 
+            np.isnan(price_below_sma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Use previous day's pivots for breakout (avoid look-ahead)
-        R4_prev = R4_aligned[i-1]
-        S4_prev = S4_aligned[i-1]
+        # Entry conditions: Break of Donchian channels with daily volume and trend confirmation
+        long_break = close[i] > upper_donchian_aligned[i]
+        short_break = close[i] < lower_donchian_aligned[i]
         
-        # Entry conditions: Break of R4 or S4 with strong weekly trend
-        long_break = close[i] > R4_prev
-        short_break = close[i] < S4_prev
+        long_entry = long_break and volume_confirmed_aligned[i] > 0.5 and price_above_sma_aligned[i] > 0.5
+        short_entry = short_break and volume_confirmed_aligned[i] > 0.5 and price_below_sma_aligned[i] > 0.5
         
-        long_entry = long_break and strong_trend_aligned[i] > 0.5
-        short_entry = short_break and strong_trend_aligned[i] > 0.5
-        
-        # Exit when price returns to previous day's close (mean reversion to equilibrium)
-        prev_close = close_1d[-1] if i-1 < len(close_1d) else close[i-1]
-        # Simplified: exit when price crosses the previous day's close
-        exit_long = position == 1 and close[i] < close[i-1]
-        exit_short = position == -1 and close[i] > close[i-1]
+        # Exit when price returns to opposite Donchian band (mean reversion)
+        exit_long = position == 1 and close[i] <= lower_donchian_aligned[i]
+        exit_short = position == -1 and close[i] >= upper_donchian_aligned[i]
         
         # Execute signals
         if long_entry and position != 1:
@@ -143,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_CamarillaPivot_Breakout_TrendFilter_v1"
-timeframe = "1d"
+name = "4h_1d_DonchianBreakout_VolumeTrend_v2"
+timeframe = "4h"
 leverage = 1.0
