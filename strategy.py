@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Breakout_MultiTF
-Hypothesis: Trade 12h breakouts from 1d Camarilla pivot levels (H4/L4) with volume confirmation.
-Uses 1d Camarilla levels as institutional support/resistance. Works in bull (breakouts above H4)
-and bear (breakdowns below L4) markets. Volume filter ensures institutional participation.
-Target: 15-30 trades/year (60-120 total over 4 years).
+4h_1d_Triple_Pivot_Momentum
+Hypothesis: Combine 1d Camarilla pivot levels with 4h momentum and volume confirmation to capture institutional breakouts.
+Works in bull markets (breakouts above H3/H4) and bear markets (breakdowns below L3/L4). Uses multiple confirmation layers
+to reduce false signals and maintain low trade frequency. Target: 20-30 trades/year.
 """
 
 import numpy as np
@@ -30,7 +29,7 @@ def calculate_camarilla(high, low, close):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -50,30 +49,40 @@ def generate_signals(prices):
     # Calculate 1d Camarilla levels
     R1_1d, R2_1d, R3_1d, R4_1d, S1_1d, S2_1d, S3_1d, S4_1d = calculate_camarilla(high_1d, low_1d, close_1d)
     
-    # Align all data to 12h timeframe
+    # Align all data to 4h timeframe
+    R3_1d_aligned = align_htf_to_ltf(prices, df_1d, R3_1d)
     R4_1d_aligned = align_htf_to_ltf(prices, df_1d, R4_1d)
-    S4_1d_aligned = align_htf_to_ltf(prices, df_1d, S4_1d)
+    L3_1d_aligned = align_htf_to_ltf(prices, df_1d, S3_1d)
+    L4_1d_aligned = align_htf_to_ltf(prices, df_1d, S4_1d)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 2.0x 20-period average (stricter filter)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 1.5)
+    volume_expansion = volume > (vol_ma_20 * 2.0)
+    
+    # 4h momentum filter: price > 20-period EMA for longs, < 20-period EMA for shorts
+    close_series = pd.Series(close)
+    ema_20 = close_series.ewm(span=20, min_periods=20, adjust=False).mean().values
+    price_above_ema = close > ema_20
+    price_below_ema = close < ema_20
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if any required data is not ready
-        if (np.isnan(R4_1d_aligned[i]) or np.isnan(S4_1d_aligned[i]) or 
-            np.isnan(volume_expansion[i])):
+        if (np.isnan(R3_1d_aligned[i]) or np.isnan(R4_1d_aligned[i]) or 
+            np.isnan(L3_1d_aligned[i]) or np.isnan(L4_1d_aligned[i]) or 
+            np.isnan(volume_expansion[i]) or np.isnan(price_above_ema[i]) or 
+            np.isnan(price_below_ema[i])):
             signals[i] = 0.0
             continue
         
-        # Long: breakout above R4 with volume expansion
-        long_condition = (close[i] > R4_1d_aligned[i]) and volume_expansion[i]
+        # Long: breakout above R3 with volume expansion and price above EMA
+        long_condition = (close[i] > R3_1d_aligned[i]) and volume_expansion[i] and price_above_ema[i]
         
-        # Short: breakdown below S4 with volume expansion
-        short_condition = (close[i] < S4_1d_aligned[i]) and volume_expansion[i]
+        # Short: breakdown below L3 with volume expansion and price below EMA
+        short_condition = (close[i] < L3_1d_aligned[i]) and volume_expansion[i] and price_below_ema[i]
         
         if long_condition and position != 1:
             position = 1
@@ -87,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_Breakout_MultiTF"
-timeframe = "12h"
+name = "4h_1d_Triple_Pivot_Momentum"
+timeframe = "4h"
 leverage = 1.0
