@@ -5,15 +5,15 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian(20) breakout with 1d ATR volatility filter (ATR10 < ATR30) and volume confirmation (>1.5x 20-bar avg)
+    # Hypothesis: 4h Donchian(20) breakout with 1d ATR volatility filter (ATR10 < ATR30) and volume confirmation (>1.5x 20-bar avg)
     # Enter long on breakout above Donchian high, short on breakout below Donchian low
     # Exit when price crosses Donchian midpoint
     # Volatility filter ensures breakouts occur during low volatility (pre-breakout compression)
     # Works in bull (breakouts with trend) and bear (only volatility-aligned breaks taken).
-    # Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+    # Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
     # Using 1d HTF for ATR reduces noise vs 12h and improves regime detection.
     
     close = prices['close'].values
@@ -21,25 +21,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian channels (primary timeframe)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 4h data for Donchian channels (primary timeframe)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate 12h Donchian channels (20-period)
+    # Calculate 4h Donchian channels (20-period)
     donchian_window = 20
-    donchian_high_12h = pd.Series(high_12h).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    donchian_low_12h = pd.Series(low_12h).rolling(window=donchian_window, min_periods=donchian_window).min().values
-    donchian_mid_12h = (donchian_high_12h + donchian_low_12h) / 2.0
+    donchian_high_4h = pd.Series(high_4h).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    donchian_low_4h = pd.Series(low_4h).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    donchian_mid_4h = (donchian_high_4h + donchian_low_4h) / 2.0
     
-    # Align 12h Donchian levels to 12h timeframe (no-op but for consistency)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high_12h)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low_12h)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_12h, donchian_mid_12h)
+    # Align 4h Donchian levels to 4h timeframe (no-op but for consistency)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_4h)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_4h)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_4h, donchian_mid_4h)
     
     # Get 1d data for ATR-based volatility filter (HTF)
     df_1d = get_htf_data(prices, '1d')
@@ -61,7 +61,7 @@ def generate_signals(prices):
     atr_10_1d = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     atr_30_1d = pd.Series(tr).ewm(span=30, adjust=False, min_periods=30).mean().values
     
-    # Align 1d ATR values to 12h timeframe
+    # Align 1d ATR values to 4h timeframe
     atr_10_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_10_1d)
     atr_30_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_30_1d)
     
@@ -119,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_donchian_atr_vol_filter_volume_v2"
-timeframe = "12h"
+name = "4h_1d_donchian_atr_vol_filter_volume_v2"
+timeframe = "4h"
 leverage = 1.0
