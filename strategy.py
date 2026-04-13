@@ -8,7 +8,7 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with 12h volume spike and 12h chop regime filter
+    # Hypothesis: 4h Donchian(20) breakout with 12h volume spike and 12h Chop regime filter
     # Long: price > Donchian(20) high AND 12h volume > 2.0 * 20-period avg volume AND 12h Chop > 61.8 (ranging)
     # Short: price < Donchian(20) low AND 12h volume > 2.0 * 20-period avg volume AND 12h Chop > 61.8 (ranging)
     # Exit: price crosses Donchian midpoint OR Chop < 38.2 (trending market begins)
