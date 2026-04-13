@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_1d_1w_Camarilla_Breakout_Trend_Filter
-Hypothesis: Daily Camarilla pivot levels provide institutional-grade support/resistance.
-Breakouts above H4 or below L4 with volume expansion indicate strong momentum.
-Weekly trend filter (price above/below weekly EMA20) ensures alignment with higher timeframe trend,
-reducing whipsaws in choppy markets. Targets 15-30 trades/year on 12h timeframe.
-Works in bull markets via momentum continuation and bear markets via trend-following short signals.
+1h_4d_Pullback_to_VWAP_with_Momentum_Filter
+Hypothesis: In strong trends (4h EMA50 > EMA200), price pulls back to 1h VWAP offering high-probability entry.
+Momentum filter (1h RSI > 50 for longs, < 50 for shorts) ensures alignment with short-term momentum.
+Works in bull (buy pullbacks) and bear (sell rallies) by trading with the 4h trend.
+Targets 20-40 trades/year via strict trend + pullback + momentum confluence.
 """
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,60 +21,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # 4h trend filter: EMA50 > EMA200 for uptrend, < for downtrend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 200:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200_4h = pd.Series(close_4h).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    ema_200_aligned = align_htf_to_ltf(prices, df_4h, ema_200_4h)
     
-    # Calculate Camarilla pivot levels for each daily bar
-    # H4 = close + 1.5 * (high - low)
-    # L4 = close - 1.5 * (high - low)
-    camarilla_h4 = close_1d + 1.5 * (high_1d - low_1d)
-    camarilla_l4 = close_1d - 1.5 * (high_1d - low_1d)
+    # 1h VWAP calculation (typical price * volume)
+    typical_price = (high + low + close) / 3.0
+    tpv = typical_price * volume
+    cum_tpv = np.nancumsum(tpv)
+    cum_vol = np.nancumsum(volume)
+    vwap = np.divide(cum_tpv, cum_vol, out=np.full_like(cum_tpv, np.nan), where=cum_vol!=0)
     
-    # Align daily Camarilla levels to 12h
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    
-    # Get weekly data for trend filter (EMA20)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Volume confirmation: current volume > 1.8x 30-period average
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean()
-    volume_expansion = volume > (vol_ma_30 * 1.8)
+    # 1h RSI for momentum filter
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.25
+    position_size = 0.20
     
-    for i in range(50, n):
+    for i in range(200, n):
         # Skip if any required data is not ready
-        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(volume_expansion[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or
+            np.isnan(vwap[i]) or np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions:
-        # 1. Breakout above H4 with volume expansion
-        # 2. Price above weekly EMA20 for uptrend alignment
-        breakout_long = (close[i] > camarilla_h4_aligned[i]) and volume_expansion[i]
-        long_condition = breakout_long and (close[i] > ema_20_1w_aligned[i])
+        # Determine trend direction from 4h
+        uptrend = ema_50_aligned[i] > ema_200_aligned[i]
+        downtrend = ema_50_aligned[i] < ema_200_aligned[i]
         
-        # Short conditions:
-        # 1. Breakdown below L4 with volume expansion
-        # 2. Price below weekly EMA20 for downtrend alignment
-        breakdown_short = (close[i] < camarilla_l4_aligned[i]) and volume_expansion[i]
-        short_condition = breakdown_short and (close[i] < ema_20_1w_aligned[i])
+        # Long: uptrend + price at or below VWAP + RSI > 50 (bullish momentum)
+        long_condition = uptrend and (close[i] <= vwap[i]) and (rsi[i] > 50)
+        
+        # Short: downtrend + price at or above VWAP + RSI < 50 (bearish momentum)
+        short_condition = downtrend and (close[i] >= vwap[i]) and (rsi[i] < 50)
         
         if long_condition and position != 1:
             position = 1
@@ -89,6 +81,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_1w_Camarilla_Breakout_Trend_Filter"
-timeframe = "12h"
+name = "1h_4d_Pullback_to_VWAP_with_Momentum_Filter"
+timeframe = "1h"
 leverage = 1.0
