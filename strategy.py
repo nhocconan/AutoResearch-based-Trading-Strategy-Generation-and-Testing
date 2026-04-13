@@ -8,103 +8,94 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Hypothesis: 6h Elder Ray + 1d ADX regime filter + volume confirmation
-    # Works in both bull and bear: Elder Ray captures bull/bear power, 1d ADX filters weak trends,
-    # volume confirms momentum, ATR-based risk control
-    # Target: 12-37 trades/year (50-150 over 4 years) to minimize fee drag
+    # Hypothesis: 12h Donchian channel breakout with 1d trend filter and volume confirmation
+    # Works in both bull and bear: Donchian captures breakouts, 1d EMA filters false signals,
+    # volume confirms momentum, ATR stoploss controls risk
+    # Target: 12-30 trades/year to minimize fee drag (12h timeframe)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values if 'volume' in prices.columns else np.ones(len(prices))
     
-    # Get 1d data for HTF indicators
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data for Donchian channels (primary timeframe)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values if 'volume' in df_1d.columns else np.ones(len(df_1d))
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Elder Ray components for 1d (requires EMA13)
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power_1d = high_1d - ema13_1d  # High - EMA13
-    bear_power_1d = low_1d - ema13_1d   # Low - EMA13
+    # Get 1d data for trend filter and volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Calculate 1d ADX for regime filter (requires +DI, -DI, TR)
-    # Calculate True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr_1d = np.concatenate([[np.nan], tr_1d])
+    # Get daily OHLCV
+    daily_open = df_1d['open'].values
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
+    daily_volume = df_1d['volume'].values if 'volume' in df_1d.columns else np.ones(len(df_1d))
     
-    # Calculate +DM and -DM
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
+    # Calculate Donchian channels (20-period) on 12h data
+    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Smoothed values (Wilder's smoothing = EMA with alpha=1/period)
-    atr_1d = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_di_1d = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
-    minus_di_1d = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    adx_1d = pd.Series(dx_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Get 1d data for trend filter (EMA 50)
+    ema_50_1d = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 1d volume confirmation (20-period average)
-    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Get 1d volume for confirmation (20-period average)
+    vol_avg_20_1d = pd.Series(daily_volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align all HTF indicators to 6h primary timeframe
-    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Align all HTF indicators to 12h primary timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
-    atr_multiplier = 2.5  # ATR stoploss multiplier
+    atr_multiplier = 2.0  # ATR stoploss multiplier
     
-    # Calculate 6h ATR for stoploss
-    tr6 = np.maximum(np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1])), np.abs(low[1:] - close[:-1]))
-    tr6 = np.concatenate([[np.nan], tr6])
-    atr_6h = pd.Series(tr6).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate 12h ATR for stoploss
+    tr = np.maximum(np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1])), np.abs(low[1:] - close[:-1]))
+    tr = np.concatenate([[np.nan], tr])
+    atr_12h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     # Track entry price for stoploss
     entry_price = np.full(n, np.nan)
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(bull_power_1d_aligned[i]) or 
-            np.isnan(bear_power_1d_aligned[i]) or
-            np.isnan(adx_1d_aligned[i]) or
+        if (np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or
             np.isnan(vol_avg_20_1d_aligned[i]) or
-            np.isnan(atr_6h[i])):
+            np.isnan(atr_12h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.2x 20-period average
-        idx_1d = i // 4  # 6h bars per 1d (24/6 = 4)
-        if idx_1d >= len(volume_1d):
+        # Volume confirmation: current 1d volume > 1.3x 20-period average
+        idx_1d = i // 2  # 12h bars per day (24h/12h = 2)
+        if idx_1d >= len(daily_volume):
             signals[i] = 0.0
             continue
-        volume_confirmed = volume_1d[idx_1d] > 1.2 * vol_avg_20_1d_aligned[i]
+        volume_confirmed = daily_volume[idx_1d] > 1.3 * vol_avg_20_1d_aligned[i]
         
-        # Regime filter: ADX > 20 indicates trending market
-        trending = adx_1d_aligned[i] > 20
+        # Trend direction from 1d EMA(50)
+        trend_up = close[i] > ema_50_1d_aligned[i]
+        trend_down = close[i] < ema_50_1d_aligned[i]
         
-        # Entry conditions: Elder Ray signals + trend + volume
-        enter_long = (bull_power_1d_aligned[i] > 0) and trending and volume_confirmed
-        enter_short = (bear_power_1d_aligned[i] < 0) and trending and volume_confirmed
+        # Entry conditions: Donchian breakout + trend + volume
+        enter_long = (close[i] > donchian_high_aligned[i]) and trend_up and volume_confirmed
+        enter_short = (close[i] < donchian_low_aligned[i]) and trend_down and volume_confirmed
         
         # Stoploss conditions
-        exit_long = position == 1 and not np.isnan(entry_price[i-1]) and close[i] < entry_price[i-1] - atr_multiplier * atr_6h[i]
-        exit_short = position == -1 and not np.isnan(entry_price[i-1]) and close[i] > entry_price[i-1] + atr_multiplier * atr_6h[i]
+        exit_long = position == 1 and not np.isnan(entry_price[i-1]) and close[i] < entry_price[i-1] - atr_multiplier * atr_12h[i]
+        exit_short = position == -1 and not np.isnan(entry_price[i-1]) and close[i] > entry_price[i-1] + atr_multiplier * atr_12h[i]
         
         # Execute signals
         if enter_long and position != 1:
@@ -137,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_elder_ray_adx_volume_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_breakout_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
