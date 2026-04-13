@@ -8,47 +8,50 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout + 1d EMA(50) trend + volume spike + ATR stoploss
-    # Long when: price breaks above Donchian(20) upper band AND price > 1d EMA50 AND volume > 1.8x 20-bar avg volume
-    # Short when: price breaks below Donchian(20) lower band AND price < 1d EMA50 AND volume > 1.8x 20-bar avg volume
-    # Exit when: price touches Donchian(20) midpoint OR adverse 1d EMA50 crossover OR ATR-based stoploss
-    # Uses discrete sizing (0.25) targeting 75-200 total trades over 4 years.
-    # Donchian provides structure, 1d EMA50 filters counter-trend moves, volume confirms validity, ATR stop manages risk.
-    # Works in bull (trend continuation) and bear (mean-reversion at midpoint with tight stops).
+    # Hypothesis: 1d Camarilla pivot breakout + 1w EMA(21) trend + volume confirmation
+    # Long when: price breaks above Camarilla H3 (1d) AND price > 1w EMA21 AND volume > 2.0x 20-bar avg volume
+    # Short when: price breaks below Camarilla L3 (1d) AND price < 1w EMA21 AND volume > 2.0x 20-bar avg volume
+    # Exit when: price crosses Camarilla pivot point (PP) OR adverse 1w EMA21 crossover
+    # Uses discrete sizing (0.25) targeting 30-100 total trades over 4 years.
+    # Camarilla levels provide precise support/resistance; 1w EMA21 filters counter-trend moves on weekly trend;
+    # Volume spike confirms breakout validity. Works in bull (trend continuation) and bear (mean-reversion at PP).
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA(50) trend filter
+    # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA(50) trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate Camarilla pivot levels from previous 1d bar
+    PP_1d = (high_1d + low_1d + close_1d) / 3.0
+    H3_1d = PP_1d + (high_1d - low_1d) * 1.1 / 4.0
+    L3_1d = PP_1d - (high_1d - low_1d) * 1.1 / 4.0
     
-    # Calculate Donchian(20) channels
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    midpoint = (highest_high + lowest_low) / 2.0
+    # Get 1w data for EMA(21) trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 21:
+        return np.zeros(n)
     
-    # Calculate volume confirmation: volume > 1.8x 20-bar average volume
+    close_1w = df_1w['close'].values
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    
+    # Align HTF indicators to 1d timeframe (wait for completed bars)
+    PP_1d_aligned = align_htf_to_ltf(prices, df_1d, PP_1d)
+    H3_1d_aligned = align_htf_to_ltf(prices, df_1d, H3_1d)
+    L3_1d_aligned = align_htf_to_ltf(prices, df_1d, L3_1d)
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    
+    # Calculate volume confirmation: volume > 2.0x 20-bar average volume
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (1.8 * avg_volume)
-    
-    # Calculate ATR(14) for stoploss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    volume_confirmed = volume > (2.0 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -56,34 +59,26 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(avg_volume[i]) or np.isnan(atr[i])):
+        if (np.isnan(PP_1d_aligned[i]) or np.isnan(H3_1d_aligned[i]) or np.isnan(L3_1d_aligned[i]) or
+            np.isnan(ema_21_1w_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
-        # Donchian breakout conditions (using current bar)
-        breakout_up = close[i] > highest_high[i]  # break above upper band
-        breakout_down = close[i] < lowest_low[i]  # break below lower band
+        # Camarilla breakout conditions (using previous bar's levels to avoid look-ahead)
+        breakout_up = close[i] > H3_1d_aligned[i-1]  # break above previous H3
+        breakout_down = close[i] < L3_1d_aligned[i-1]  # break below previous L3
         
-        # 1d EMA50 trend filter
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # 1w EMA21 trend filter
+        uptrend = close[i] > ema_21_1w_aligned[i]
+        downtrend = close[i] < ema_21_1w_aligned[i]
         
         # Entry conditions with volume confirmation
         long_entry = breakout_up and uptrend and volume_confirmed[i] and position != 1
         short_entry = breakout_down and downtrend and volume_confirmed[i] and position != -1
         
         # Exit conditions
-        exit_long = (position == 1 and (
-            close[i] < midpoint[i] or  # price touches midpoint
-            not uptrend or             # trend filter fails
-            close[i] < (signals[i-1] * ema_50_1d_aligned[i] if i>0 and signals[i-1]!=0 else 0) - 2.5 * atr[i]  # ATR stoploss
-        ))
-        exit_short = (position == -1 and (
-            close[i] > midpoint[i] or  # price touches midpoint
-            not downtrend or           # trend filter fails
-            close[i] > (signals[i-1] * ema_50_1d_aligned[i] if i>0 and signals[i-1]!=0 else 0) + 2.5 * atr[i]  # ATR stoploss
-        ))
+        exit_long = (position == 1 and (close[i] < PP_1d_aligned[i] or not uptrend))
+        exit_short = (position == -1 and (close[i] > PP_1d_aligned[i] or not downtrend))
         
         # Execute signals
         if long_entry:
@@ -109,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_donchian_breakout_ema_volume_atr_v1"
-timeframe = "4h"
+name = "1d_1w_camarilla_breakout_ema21_volume_v1"
+timeframe = "1d"
 leverage = 1.0
