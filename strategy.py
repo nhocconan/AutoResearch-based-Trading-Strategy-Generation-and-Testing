@@ -8,92 +8,109 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1d Donchian(20) breakout with 1w EMA200 trend filter and volume confirmation
-    # Long: price breaks above 20-period high AND volume > 1.5x 20-period average AND price > 1w EMA200
-    # Short: price breaks below 20-period low AND volume > 1.5x 20-period average AND price < 1w EMA200
-    # Exit: Donchian(10) opposite breakout or close crosses 1w EMA200
-    # Using 1d for price action and volume, 1w only for trend filter
-    # Discrete position sizing (0.25) to minimize fee churn
-    # Target: 20-50 trades over 4 years (5-12/year) to avoid fee drag
+    # Hypothesis: 6h Elder Ray (Bull/Bear Power) + 12h ADX regime filter
+    # Long: Bull Power > 0 AND Bear Power < 0 AND 12h ADX > 25 (trending) AND 12h +DI > -DI
+    # Short: Bear Power < 0 AND Bull Power > 0 AND 12h ADX > 25 AND 12h -DI > +DI
+    # Exit: Elder Power divergence or ADX < 20 (range) -> flatten
+    # Using 12h for regime (ADX) and 6h for Elder Ray calculation
+    # Discrete position sizing (0.25) to minimize fee drag
+    # Target: 50-150 total trades over 4 years (~12-37/year)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Get 1d data for Donchian channels and volume (call ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for ADX regime filter (call ONCE before loop)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Get 1w data for EMA200 trend filter (call ONCE before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 1d Donchian(20) channels (based on previous 20 bars)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 12h ADX (14-period)
+    period = 14
+    # True Range
+    tr1 = np.abs(high_12h[1:] - low_12h[1:])
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align with index
     
-    # Donchian(20) high = max(high of last 20 periods)
-    donch_high_20 = np.full(len(high_1d), np.nan)
-    donch_low_20 = np.full(len(low_1d), np.nan)
+    # Directional Movement
+    up_move = high_12h[1:] - high_12h[:-1]
+    down_move = low_12h[:-1] - low_12h[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[0.0], plus_dm])
+    minus_dm = np.concatenate([[0.0], minus_dm])
     
-    for i in range(20, len(high_1d)):
-        donch_high_20[i] = np.max(high_1d[i-20:i])
-        donch_low_20[i] = np.min(low_1d[i-20:i])
+    # Smoothed TR, +DM, -DM (using Wilder's smoothing = EMA with alpha=1/period)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        alpha = 1.0 / period
+        # First value: simple average
+        if len(data) >= period:
+            result[period-1] = np.nanmean(data[:period])
+        # Wilder smoothing: today = prev * (1-1/period) + current * (1/period)
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]):
+                result[i] = result[i-1] * (1 - alpha) + data[i] * alpha
+        return result
     
-    # Calculate 1d Donchian(10) for exit
-    donch_high_10 = np.full(len(high_1d), np.nan)
-    donch_low_10 = np.full(len(low_1d), np.nan)
+    atr = wilders_smoothing(tr, period)
+    plus_dm_smooth = wilders_smoothing(plus_dm, period)
+    minus_dm_smooth = wilders_smoothing(minus_dm, period)
     
-    for i in range(10, len(high_1d)):
-        donch_high_10[i] = np.max(high_1d[i-10:i])
-        donch_low_10[i] = np.min(low_1d[i-10:i])
+    # +DI and -DI
+    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
+    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
     
-    # Align 1d Donchian levels to 1d (no shift needed as we use completed bars)
-    donch_high_20_aligned = align_htf_to_ltf(prices, df_1d, donch_high_20)
-    donch_low_20_aligned = align_htf_to_ltf(prices, df_1d, donch_low_20)
-    donch_high_10_aligned = align_htf_to_ltf(prices, df_1d, donch_high_10)
-    donch_low_10_aligned = align_htf_to_ltf(prices, df_1d, donch_low_10)
+    # DX and ADX
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = wilders_smoothing(dx, period)
     
-    # 1d Volume confirmation: >1.5x 20-period average
-    vol_1d = df_1d['volume'].values
-    vol_ma = np.full(len(vol_1d), np.nan)
-    for i in range(20, len(vol_1d)):
-        vol_ma[i] = np.mean(vol_1d[i-20:i])
-    volume_spike_1d = vol_1d > (1.5 * vol_ma)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
+    # Align 12h ADX, +DI, -DI to 6h
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    plus_di_12h_aligned = align_htf_to_ltf(prices, df_12h, plus_di)
+    minus_di_12h_aligned = align_htf_to_ltf(prices, df_12h, minus_di)
     
-    # 1w EMA200 for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # 6h Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):  # warmup for EMA13 and Wilder smoothing
         # Skip if data not ready
-        if (np.isnan(donch_high_20_aligned[i]) or np.isnan(donch_low_20_aligned[i]) or
-            np.isnan(ema_1w_aligned[i]) or np.isnan(volume_spike_aligned[i])):
+        if (np.isnan(adx_12h_aligned[i]) or np.isnan(plus_di_12h_aligned[i]) or 
+            np.isnan(minus_di_12h_aligned[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        vol_confirm = volume_spike_aligned[i]
+        # Regime filter: only trade when 12h ADX > 25 (trending market)
+        regime_trending = adx_12h_aligned[i] > 25
         
-        # Trend filter: only long if price > 1w EMA200, only short if price < 1w EMA200
-        long_trend_ok = close[i] > ema_1w_aligned[i]
-        short_trend_ok = close[i] < ema_1w_aligned[i]
+        # Elder Ray signals
+        long_signal = bull_power[i] > 0 and bear_power[i] < 0
+        short_signal = bear_power[i] < 0 and bull_power[i] > 0  # same as above, kept for clarity
         
-        # Entry logic: Donchian(20) breakout + volume + trend
-        long_entry = (close[i] > donch_high_20_aligned[i]) and vol_confirm and long_trend_ok
-        short_entry = (close[i] < donch_low_20_aligned[i]) and vol_confirm and short_trend_ok
+        # Direction from 12h DI crossover
+        long_dir = plus_di_12h_aligned[i] > minus_di_12h_aligned[i]
+        short_dir = minus_di_12h_aligned[i] > plus_di_12h_aligned[i]
         
-        # Exit logic: Donchian(10) opposite breakout or trend reversal
-        long_exit = (close[i] < donch_low_10_aligned[i]) or (close[i] < ema_1w_aligned[i])
-        short_exit = (close[i] > donch_high_10_aligned[i]) or (close[i] > ema_1w_aligned[i])
+        # Entry logic
+        long_entry = long_signal and regime_trending and long_dir
+        short_entry = short_signal and regime_trending and short_dir
+        
+        # Exit logic: ADX < 20 (range) or Elder Power divergence
+        long_exit = (adx_12h_aligned[i] < 20) or (bull_power[i] <= 0)
+        short_exit = (adx_12h_aligned[i] < 20) or (bear_power[i] >= 0)
         
         if long_entry and position != 1:
             position = 1
@@ -118,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_donchian_breakout_volume_trend_v1"
-timeframe = "1d"
+name = "6h_12h_elder_ray_adx_regime_v1"
+timeframe = "6h"
 leverage = 1.0
