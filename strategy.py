@@ -8,30 +8,19 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Camarilla pivot breakout with 12h/1d volume confirmation
-    # Uses 12h Camarilla levels (R3/S3, R4/S4) for breakout/fade logic
-    # Volume confirmation from 1d to avoid false breakouts
+    # Hypothesis: 4h Donchian breakout with 1d volume confirmation and chop regime filter
+    # Uses Donchian(20) for structure, 1d volume for confirmation, and choppiness index for regime
     # Discrete sizing (0.25) to minimize fee drag
-    # Target: 12-30 trades/year to stay within 6h optimal range
+    # Target: 15-35 trades/year to stay within 4h optimal range
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values if 'volume' in prices.columns else np.ones(len(prices))
-    open_time = prices['open_time']
     
-    # Get 12h data for Camarilla pivot calculation (HTF for structure)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Get 1d data for volume confirmation
+    # Get 1d data for volume and chop regime (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -39,72 +28,64 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values if 'volume' in df_1d.columns else np.ones(len(df_1d))
     
-    # Calculate 12h Camarilla pivot levels (based on previous 12h bar)
-    # Camarilla: Pivot = (H + L + C)/3
-    # R4 = Pivot + (H-L)*1.1/2, R3 = Pivot + (H-L)*1.1/4
-    # S3 = Pivot - (H-L)*1.1/4, S4 = Pivot - (H-L)*1.1/2
-    prev_high = np.roll(high_12h, 1)
-    prev_low = np.roll(low_12h, 1)
-    prev_close = np.roll(close_12h, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Calculate 1d ATR(14) for choppiness index
+    tr_1d = np.maximum(high_1d[1:] - low_1d[1:], 
+                       np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), 
+                                  np.abs(low_1d[1:] - close_1d[:-1])))
+    tr_1d = np.concatenate([[np.nan], tr_1d])  # align length
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     
-    pivot_12h = (prev_high + prev_low + prev_close) / 3.0
-    range_12h = prev_high - prev_low
+    # Calculate 1d true range sum and ATR sum for choppiness
+    tr_sum_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
+    atr_sum_14 = atr_1d * 14  # approximate
+    chop_1d = 100 * np.log10(tr_sum_14 / atr_sum_14) / np.log10(14)
     
-    r3_12h = pivot_12h + range_12h * 1.1 / 4.0
-    r4_12h = pivot_12h + range_12h * 1.1 / 2.0
-    s3_12h = pivot_12h - range_12h * 1.1 / 4.0
-    s4_12h = pivot_12h - range_12h * 1.1 / 2.0
-    
-    # Align Camarilla levels to 6h timeframe
-    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
-    r4_12h_aligned = align_htf_to_ltf(prices, df_12h, r4_12h)
-    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
-    s4_12h_aligned = align_htf_to_ltf(prices, df_12h, s4_12h)
-    
-    # Calculate 1d volume average (20-period) for confirmation
+    # Align 1d indicators to 4h
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    
+    # Calculate 4h Donchian channels (20-period)
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
-    
-    # Track entry price for stoploss
     entry_price = np.full(n, np.nan)
     
-    for i in range(50, n):
+    for i in range(lookback, n):
         # Skip if data not ready
-        if (np.isnan(r3_12h_aligned[i]) or 
-            np.isnan(r4_12h_aligned[i]) or
-            np.isnan(s3_12h_aligned[i]) or
-            np.isnan(s4_12h_aligned[i]) or
-            np.isnan(vol_avg_20_1d_aligned[i])):
+        if (np.isnan(chop_1d_aligned[i]) or 
+            np.isnan(vol_avg_20_1d_aligned[i]) or
+            np.isnan(highest_high[i]) or
+            np.isnan(lowest_low[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.3x 20-period average
-        idx_1d = i // 4  # 1d bars in 6h timeframe (4 bars per day)
+        # Regime filter: chop > 61.8 = ranging (mean reversion), chop < 38.2 = trending
+        # In ranging markets, we fade Donchian touches; in trending, we breakout
+        is_ranging = chop_1d_aligned[i] > 61.8
+        is_trending = chop_1d_aligned[i] < 38.2
+        
+        # Volume confirmation: current 1d volume > 1.5x 20-period average
+        idx_1d = i // 96  # 4h bars per 1d (24*60/4/4 = 96)
         if idx_1d >= len(volume_1d):
             signals[i] = 0.0
             continue
-        volume_confirmed = volume_1d[idx_1d] > 1.3 * vol_avg_20_1d_aligned[i]
+        volume_confirmed = volume_1d[idx_1d] > 1.5 * vol_avg_20_1d_aligned[i]
         
-        # Breakout conditions: price breaks R4/S4 with volume
-        breakout_long = (close[i] > r4_12h_aligned[i]) and volume_confirmed
-        breakout_short = (close[i] < s4_12h_aligned[i]) and volume_confirmed
+        # Donchian breakout/fade logic
+        breakout_long = (close[i] > highest_high[i]) and volume_confirmed and is_trending
+        breakout_short = (close[i] < lowest_low[i]) and volume_confirmed and is_trending
+        fade_long = (close[i] < lowest_low[i]) and volume_confirmed and is_ranging
+        fade_short = (close[i] > highest_high[i]) and volume_confirmed and is_ranging
         
-        # Fade conditions: price rejects R3/S3 with volume
-        fade_long = (close[i] < s3_12h_aligned[i]) and volume_confirmed
-        fade_short = (close[i] > r3_12h_aligned[i]) and volume_confirmed
-        
-        # Stoploss: based on 12h ATR (simplified using daily range from 12h)
-        idx_12h = i // 2  # 12h bars in 6h timeframe (2 bars per 12h)
-        if idx_12h < len(high_12h) and idx_12h < len(low_12h):
-            daily_range_12h = high_12h[idx_12h] - low_12h[idx_12h]
-            stop_distance = daily_range_12h * 0.3  # 30% of 12h range
+        # ATR-based stoploss (using 1d ATR)
+        idx_1d_atr = i // 96
+        if idx_1d_atr < len(atr_1d) and not np.isnan(atr_1d[idx_1d_atr]):
+            stop_distance = atr_1d[idx_1d_atr] * 2.0  # 2x ATR stop
         else:
             stop_distance = 0
         
@@ -150,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_1d_camarilla_breakout_volume_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_chop_volume_v1"
+timeframe = "4h"
 leverage = 1.0
