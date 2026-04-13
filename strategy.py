@@ -8,108 +8,69 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1d Camarilla pivot breakout with 1w trend filter and volume confirmation
-    # Long when: price breaks above H3 (resistance) AND 1w close > 1w open (bullish week) AND volume > 1.5x 20-period average
-    # Short when: price breaks below L3 (support) AND 1w close < 1w open (bearish week) AND volume > 1.5x 20-period average
-    # Exit when: price returns to mean (Pivot level) OR adverse 1w trend reversal
-    # Uses discrete sizing (0.25) targeting 30-100 trades over 4 years.
-    # Works in bull/bear via 1w trend filter preventing counter-trend trades.
+    # Hypothesis: 12h Donchian(20) breakout with 1d trend filter and volume confirmation
+    # Long when: price breaks above Donchian(20) high AND 1d EMA50 uptrend AND volume > 1.5x 20-period average
+    # Short when: price breaks below Donchian(20) low AND 1d EMA50 downtrend AND volume > 1.5x 20-period average
+    # Exit when: price crosses Donchian(20) midpoint OR adverse 1d EMA50 crossover
+    # Uses discrete sizing (0.25) targeting 50-150 trades over 4 years.
+    # Donchian provides objective breakout levels, 1d EMA50 filters counter-trend trades, volume confirms validity.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels (based on previous day)
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla levels from previous day's OHLC
-    # H4 = close + 1.5*(high-low), H3 = close + 1.0*(high-low), H2 = close + 0.5*(high-low)
-    # L3 = close - 1.0*(high-low), L2 = close - 0.5*(high-low), L1 = close - 1.5*(high-low)
-    # Pivot = (high + low + close)/3
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    # Calculate 1d EMA50
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Previous day's values (shift by 1 to avoid look-ahead)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
-    # First day will have invalid data (rolled from last day) - will be filtered by min_periods logic
+    # Calculate Donchian(20) channels
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    donchian_mid = (highest_high + lowest_low) / 2.0
     
-    # Calculate Camarilla levels for previous day
-    camarilla_H3 = prev_close_1d + 1.0 * (prev_high_1d - prev_low_1d)  # H3 resistance
-    camarilla_L3 = prev_close_1d - 1.0 * (prev_high_1d - prev_low_1d)  # L3 support
-    camarilla_pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3.0  # Pivot point
-    
-    # Align 1d levels to 1d timeframe (no additional delay needed as these are based on completed day)
-    camarilla_H3_1d = align_htf_to_ltf(prices, df_1d, camarilla_H3)
-    camarilla_L3_1d = align_htf_to_ltf(prices, df_1d, camarilla_L3)
-    camarilla_pivot_1d = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    open_1w = df_1w['open'].values
-    
-    # 1w bullish/bearish trend (based on weekly close vs open)
-    weekly_bullish = close_1w > open_1w
-    weekly_bearish = close_1w < open_1w
-    
-    # Align 1w trend to 1d timeframe
-    weekly_bullish_1d = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
-    weekly_bearish_1d = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (1.5 * volume_ma)
+    # Calculate volume filter: 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_threshold = vol_ma * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
     
-    for i in range(100, n):  # Start after warmup period
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_H3_1d[i]) or np.isnan(camarilla_L3_1d[i]) or 
-            np.isnan(camarilla_pivot_1d[i]) or np.isnan(weekly_bullish_1d[i]) or 
-            np.isnan(weekly_bearish_1d[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Breakout conditions
-        long_breakout = close[i] > camarilla_H3_1d[i]
-        short_breakout = close[i] < camarilla_L3_1d[i]
+        # Donchian breakout conditions
+        breakout_up = close[i] > highest_high[i]
+        breakout_down = close[i] < lowest_low[i]
         
-        # Entry conditions
-        long_entry = (long_breakout and 
-                     weekly_bullish_1d[i] > 0.5 and  # Bullish week
-                     volume_confirmed[i] and 
-                     position != 1)
-                     
-        short_entry = (short_breakout and 
-                      weekly_bearish_1d[i] > 0.5 and  # Bearish week
-                      volume_confirmed[i] and 
-                      position != -1)
+        # 1d EMA50 trend filter
+        uptrend = close[i] > ema50_1d_aligned[i]
+        downtrend = close[i] < ema50_1d_aligned[i]
         
-        # Exit conditions: return to pivot or adverse weekly trend
-        exit_long = (position == 1 and 
-                    (close[i] < camarilla_pivot_1d[i] or  # Price returned to pivot
-                     weekly_bearish_1d[i] > 0.5))  # Weekly trend turned bearish
+        # Volume confirmation
+        volume_confirm = volume[i] > vol_threshold[i]
         
-        exit_short = (position == -1 and 
-                     (close[i] > camarilla_pivot_1d[i] or  # Price returned to pivot
-                      weekly_bullish_1d[i] > 0.5))  # Weekly trend turned bullish
+        # Exit conditions
+        exit_long = (position == 1 and (close[i] < donchian_mid[i] or not uptrend))
+        exit_short = (position == -1 and (close[i] > donchian_mid[i] or not downtrend))
         
         # Execute signals
-        if long_entry:
+        if breakout_up and uptrend and volume_confirm and position != 1:
             position = 1
             signals[i] = position_size
-        elif short_entry:
+        elif breakout_down and downtrend and volume_confirm and position != -1:
             position = -1
             signals[i] = -position_size
         elif position == 1 and exit_long:
@@ -129,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_camarilla_breakout_volume_trend_v1"
-timeframe = "1d"
+name = "12h_1d_donchian_breakout_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
