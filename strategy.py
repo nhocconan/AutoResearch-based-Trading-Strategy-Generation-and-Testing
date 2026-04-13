@@ -8,12 +8,12 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with 12h EMA34 trend filter and volume confirmation
-    # Long: price breaks above upper band AND 12h EMA34 > price (uptrend) AND volume > 1.3x avg
-    # Short: price breaks below lower band AND 12h EMA34 < price (downtrend) AND volume > 1.3x avg
-    # Exit: price touches opposite band or retests breakout level
-    # Using 4h timeframe for optimal trade frequency (target 19-50/year), Donchian for structure,
-    # 12h EMA34 for trend filter, and volume confirmation to avoid false breakouts.
+    # Hypothesis: 1d KAMA trend + RSI mean reversion + chop regime filter
+    # Long: KAMA upward AND RSI < 40 (oversold in uptrend) AND chop < 61.8 (trending)
+    # Short: KAMA downward AND RSI > 60 (overbought in downtrend) AND chop < 61.8 (trending)
+    # Exit: RSI crosses 50 or chop > 61.8 (range) or opposite KAMA signal
+    # Using 1d timeframe for low trade frequency (target 7-25/year), KAMA for adaptive trend,
+    # RSI for mean reversion entries within trend, and chop filter to avoid whipsaws.
     # Discrete position sizing (0.25) to minimize fee churn.
     
     close = prices['close'].values
@@ -21,69 +21,120 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
+    # Calculate daily KAMA(10,2,30) - adaptive trend
+    def calculate_kama(close, er_length=10, fast_sc=2, slow_sc=30):
+        n = len(close)
+        if n < er_length:
+            return np.full(n, np.nan)
+        
+        # Efficiency Ratio
+        change = np.abs(np.diff(close, n=er_length))
+        volatility = np.sum(np.abs(np.diff(close)), axis=0) if hasattr(np.diff(close), 'shape') else np.nan
+        # Proper volatility calculation: sum of absolute changes over er_length period
+        volatility = np.full(n, np.nan)
+        for i in range(er_length, n):
+            volatility[i] = np.sum(np.abs(np.diff(close[i-er_length:i])))
+        
+        er = np.where(volatility > 0, change / volatility, 0)
+        er = np.concatenate([np.full(er_length, np.nan), er])
+        
+        # Smoothing Constants
+        sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
+        
+        # KAMA calculation
+        kama = np.full(n, np.nan)
+        kama[er_length] = close[er_length]  # seed
+        for i in range(er_length+1, n):
+            if not np.isnan(kama[i-1]) and not np.isnan(sc[i]):
+                kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    close_12h = df_12h['close'].values
+    kama = calculate_kama(close, 10, 2, 30)
+    kama_up = kama > np.roll(kama, 1)  # upward slope
+    kama_down = kama < np.roll(kama, 1)  # downward slope
     
-    # Calculate 12h EMA(34)
-    ema_34_12h = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= 34:
-        multiplier = 2 / (34 + 1)
-        ema_34_12h[33] = np.mean(close_12h[:34])
-        for i in range(34, len(close_12h)):
-            ema_34_12h[i] = (close_12h[i] * multiplier) + (ema_34_12h[i-1] * (1 - multiplier))
+    # Calculate daily RSI(14)
+    def calculate_rsi(close, period=14):
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.full_like(close, np.nan)
+        avg_loss = np.full_like(close, np.nan)
+        
+        if len(close) > period:
+            avg_gain[period] = np.mean(gain[:period])
+            avg_loss[period] = np.mean(loss[:period])
+            
+            for i in range(period+1, len(close)):
+                avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+                avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    # Align 12h EMA to 4h
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    rsi = calculate_rsi(close, 14)
+    rsi_oversold = rsi < 40
+    rsi_overbought = rsi > 60
+    rsi_exit = (rsi > 50) & (rsi < 60)  # exit long when RSI > 50
+    rsi_exit_short = (rsi < 50) & (rsi > 40)  # exit short when RSI < 50
     
-    # Calculate 4h Donchian channels (20-period)
-    upper_band = np.full(n, np.nan)
-    lower_band = np.full(n, np.nan)
+    # Calculate daily Chopiness Index(14) for regime filter
+    def calculate_chop(high, low, close, period=14):
+        n = len(close)
+        if n < period:
+            return np.full(n, np.nan)
+        
+        # True Range
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = high[0] - low[0]  # first period
+        
+        # Sum of TR over period
+        tr_sum = np.full(n, np.nan)
+        for i in range(period, n):
+            tr_sum[i] = np.sum(tr[i-period+1:i+1])
+        
+        # Highest high and lowest low over period
+        max_high = np.full(n, np.nan)
+        min_low = np.full(n, np.nan)
+        for i in range(period-1, n):
+            max_high[i] = np.max(high[i-period+1:i+1])
+            min_low[i] = np.min(low[i-period+1:i+1])
+        
+        # Chop formula: 100 * log10(sum(tr) / (max_high - min_low)) / log10(period)
+        denominator = max_high - min_low
+        chop = np.full(n, np.nan)
+        for i in range(period-1, n):
+            if denominator[i] > 0:
+                chop[i] = 100 * np.log10(tr_sum[i] / denominator[i]) / np.log10(period)
+            else:
+                chop[i] = 50  # neutral when no range
+        return chop
     
-    for i in range(20, n):
-        upper_band[i] = np.max(high[i-20:i])
-        lower_band[i] = np.min(low[i-20:i])
-    
-    # Get 4h volume for confirmation (>1.3x 20-period average)
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (1.3 * vol_ma)
+    chop = calculate_chop(high, low, close, 14)
+    chop_filter = chop < 61.8  # trending market (chop < 61.8)
+    chop_exit = chop > 61.8   # exit when range/choppy
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):  # start after warmup
         # Skip if data not ready
-        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
-            np.isnan(volume_spike[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: EMA34 > price = uptrend, EMA34 < price = downtrend
-        uptrend = ema_34_12h_aligned[i] > close[i]
-        downtrend = ema_34_12h_aligned[i] < close[i]
+        # Entry logic
+        long_entry = kama_up[i] and rsi_oversold[i] and chop_filter[i]
+        short_entry = kama_down[i] and rsi_overbought[i] and chop_filter[i]
         
-        # Donchian breakout conditions
-        breakout_upper = close[i] > upper_band[i]
-        breakout_lower = close[i] < lower_band[i]
-        
-        # Exit conditions: touch opposite band or retest breakout level
-        touch_lower = close[i] < lower_band[i]  # Exit long on lower band touch
-        touch_upper = close[i] > upper_band[i]  # Exit short on upper band touch
-        retest_upper = close[i] < upper_band[i] and position == 1  # Long exit on upper band retest
-        retest_lower = close[i] > lower_band[i] and position == -1  # Short exit on lower band retest
-        
-        # Entry logic: Donchian breakout + trend filter + volume confirmation
-        long_entry = breakout_upper and uptrend and volume_spike[i]
-        short_entry = breakout_lower and downtrend and volume_spike[i]
-        
-        # Exit logic: opposite band touch or breakout level retest
-        long_exit = touch_lower or retest_upper
-        short_exit = touch_upper or retest_lower
+        # Exit logic
+        long_exit = rsi_exit[i] or chop_exit[i] or kama_down[i]
+        short_exit = rsi_exit_short[i] or chop_exit[i] or kama_up[i]
         
         if long_entry and position != 1:
             position = 1
@@ -108,6 +159,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_donchian_breakout_ema34_volume_v1"
-timeframe = "4h"
+name = "1d_kama_rsi_chop_regime_v1"
+timeframe = "1d"
 leverage = 1.0
