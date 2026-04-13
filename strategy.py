@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_12h_adx_cci_momentum
-Hypothesis: Uses 12h CCI extremes (>150 or <-150) with 12h ADX>25 and volume expansion to capture strong momentum bursts. Works in bull markets (continuation) and bear markets (exhaustion/reversal). Target: 20-40 trades/year to minimize fee drag. Only long positions to avoid whipsaw in bear markets.
+4h_12h_cci_volume_momentum_v2
+Hypothesis: Uses 12h CCI extremes (>150 or <-150) with volume expansion to capture momentum bursts. 
+Long on CCI oversold (<-150) with volume expansion; short on CCI overbought (>150) with volume expansion.
+Uses 12h ADX>25 to filter for trending conditions only. Position size 0.25. Target: 20-40 trades/year.
+Works in bull markets (continuation) and bear markets (reversal from extremes).
 """
 
 import numpy as np
@@ -37,7 +40,7 @@ def generate_signals(prices):
     cci = (typical_price - sma_tp) / (0.015 * mean_deviation)
     cci = cci.values
     
-    # Extreme levels (more stringent to reduce trades)
+    # Extreme levels
     cci_overbought = cci > 150
     cci_oversold = cci < -150
     
@@ -85,9 +88,10 @@ def generate_signals(prices):
     cci_oversold_aligned = align_htf_to_ltf(prices, df_12h, cci_oversold.astype(float))
     volume_expansion_aligned = align_htf_to_ltf(prices, df_12h, volume_expansion.astype(float))
     strong_trend_aligned = align_htf_to_ltf(prices, df_12h, strong_trend.astype(float))
+    cci_aligned = align_htf_to_ltf(prices, df_12h, cci)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long
+    position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% of capital
     
     for i in range(60, n):
@@ -95,33 +99,39 @@ def generate_signals(prices):
         if (np.isnan(cci_overbought_aligned[i]) or 
             np.isnan(cci_oversold_aligned[i]) or 
             np.isnan(volume_expansion_aligned[i]) or 
-            np.isnan(strong_trend_aligned[i])):
+            np.isnan(strong_trend_aligned[i]) or
+            np.isnan(cci_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Entry: CCI oversold with volume and trend (long only to avoid whipsaw)
-        long_entry = cci_oversold_aligned[i] > 0.5 and volume_expansion_aligned[i] > 0.5 and strong_trend_aligned[i] > 0.5
+        # Entry conditions
+        long_entry = (cci_oversold_aligned[i] > 0.5 and 
+                     volume_expansion_aligned[i] > 0.5 and 
+                     strong_trend_aligned[i] > 0.5)
+        short_entry = (cci_overbought_aligned[i] > 0.5 and 
+                      volume_expansion_aligned[i] > 0.5 and 
+                      strong_trend_aligned[i] > 0.5)
         
-        # Exit: CCI returns to neutral or overbought
-        cci_aligned = align_htf_to_ltf(prices, df_12h, cci)
-        exit_long = position == 1 and (cci_aligned[i] >= -50 or cci_aligned[i] > 100)
+        # Exit conditions
+        exit_long = position == 1 and (cci_aligned[i] >= -50)
+        exit_short = position == -1 and (cci_aligned[i] <= 50)
         
         # Execute signals
         if long_entry and position != 1:
             position = 1
             signals[i] = position_size
-        elif exit_long:
+        elif short_entry and position != -1:
+            position = -1
+            signals[i] = -position_size
+        elif exit_long or exit_short:
             position = 0
             signals[i] = 0.0
         # Hold current position
         else:
-            if position == 1:
-                signals[i] = position_size
-            else:
-                signals[i] = 0.0
+            signals[i] = position * position_size
     
     return signals
 
-name = "4h_12h_adx_cci_momentum"
+name = "4h_12h_cci_volume_momentum_v2"
 timeframe = "4h"
 leverage = 1.0
