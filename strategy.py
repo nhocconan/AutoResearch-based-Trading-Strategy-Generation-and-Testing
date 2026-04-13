@@ -8,10 +8,10 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Camarilla pivot breakout from 1d + 1d volume spike + ADX>25 trend filter.
-    # Long when price breaks above Camarilla H3 level with volume confirmation and strong trend.
-    # Short when price breaks below Camarilla L3 level with volume confirmation and strong trend.
-    # Exit when price returns to Camarilla pivot point (mean reversion to equilibrium).
+    # Hypothesis: 4h Camarilla pivot breakout from 1d with volume confirmation and ADX trend filter.
+    # Long when price breaks above Camarilla H3 level with volume spike and ADX>25.
+    # Short when price breaks below Camarilla L3 level with volume spike and ADX>25.
+    # Exit when price returns to Camarilla pivot point (mean reversion).
     # Discrete size 0.25 to minimize fee churn. Target: 80-150 total trades over 4 years.
     
     close = prices['close'].values
