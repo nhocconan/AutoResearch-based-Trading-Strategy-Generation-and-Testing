@@ -1,3 +1,4 @@
+# This is the header for the solution.
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,49 +6,34 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 300:
         return np.zeros(n)
     
-    # Price arrays
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # 1d Donchian channels (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
+    lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Daily Donchian channels (20-period) - previous bar's high/low
-    high_series_1d = pd.Series(high_1d)
-    low_series_1d = pd.Series(low_1d)
-    upper_1d = high_series_1d.rolling(window=20, min_periods=20).max().shift(1).values
-    lower_1d = low_series_1d.rolling(window=20, min_periods=20).min().shift(1).values
+    # 1d average volume (20-period)
+    vol_series = pd.Series(volume)
+    avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
-    # Daily average volume (20-period) - previous bar
-    vol_series_1d = pd.Series(volume_1d)
-    avg_vol_1d = vol_series_1d.rolling(window=20, min_periods=20).mean().shift(1).values
+    # 1d EMA200 trend filter
+    ema_200_1d = pd.Series(close).ewm(span=200, min_periods=200, adjust=False).mean().values
     
-    # Daily EMA200 trend filter
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, min_periods=200, adjust=False).mean().values
-    
-    # Daily ATR (14-period) for stop-loss
-    high_low_1d = high_1d - low_1d
-    high_close_1d = np.abs(high_1d - np.roll(close_1d, 1))
-    low_close_1d = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(high_low_1d, np.maximum(high_close_1d, low_close_1d))
-    tr_1d[0] = high_low_1d[0]
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().shift(1).values
-    
-    # Align daily indicators to 12h timeframe
-    upper_12h = align_htf_to_ltf(prices, df_1d, upper_1d)
-    lower_12h = align_htf_to_ltf(prices, df_1d, lower_1d)
-    avg_vol_12h = align_htf_to_ltf(prices, df_1d, avg_vol_1d)
-    ema_200_12h = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # 1d ATR (14-period)
+    high_low = high - low
+    high_close = np.abs(high - np.roll(close, 1))
+    low_close = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    tr[0] = high_low[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().shift(1).values
     
     signals = np.zeros(n)
     position = 0
@@ -55,8 +41,8 @@ def generate_signals(prices):
     
     start = max(20, 200, 14)
     for i in range(start, n):
-        if (np.isnan(upper_12h[i]) or np.isnan(lower_12h[i]) or 
-            np.isnan(avg_vol_12h[i]) or np.isnan(ema_200_12h[i]) or np.isnan(atr_12h[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(avg_vol[i]) or np.isnan(ema_200_1d[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -65,27 +51,27 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: breakout above upper band + volume confirmation + price above EMA200
-            if (price > upper_12h[i] and vol > 2.0 * avg_vol_12h[i] and price > ema_200_12h[i]):
+            if (price > upper[i] and vol > 2.0 * avg_vol[i] and price > ema_200_1d[i]):
                 position = 1
                 signals[i] = position_size
             # Short: breakout below lower band + volume confirmation + price below EMA200
-            elif (price < lower_12h[i] and vol > 2.0 * avg_vol_12h[i] and price < ema_200_12h[i]):
+            elif (price < lower[i] and vol > 2.0 * avg_vol[i] and price < ema_200_1d[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Exit long: price closes below lower band OR below EMA200 OR stop-loss hit
-            if (price < lower_12h[i] or price < ema_200_12h[i] or 
-                price < entry_price_long - 2.0 * atr_12h[i]):
+            if (price < lower[i] or price < ema_200_1d[i] or 
+                price < entry_price_long - 2.0 * atr[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
             # Exit short: price closes above upper band OR above EMA200 OR stop-loss hit
-            if (price > upper_12h[i] or price > ema_200_12h[i] or 
-                price > entry_price_short + 2.0 * atr_12h[i]):
+            if (price > upper[i] or price > ema_200_1d[i] or 
+                price > entry_price_short + 2.0 * atr[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -100,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Donchian_Volume_EMA200Trend_ATR"
-timeframe = "12h"
+name = "1d_1w_Donchian_Volume_EMA200Trend_ATR"
+timeframe = "1d"
 leverage = 1.0
