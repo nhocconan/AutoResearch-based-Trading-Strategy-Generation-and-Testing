@@ -5,13 +5,13 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with 1d weekly pivot alignment
+    # Hypothesis: 1d Donchian(20) breakout with 1w weekly pivot alignment
     # Weekly pivot from previous 5 trading days provides institutional bias
     # Volume > 1.5x 20-period average confirms breakout validity
-    # Target: 20-50 trades/year (80-200 total over 4 years) for low fee drag
+    # Target: 30-100 total trades over 4 years (7-25/year) for low fee drag
     # Works in both bull and bear via directional pivot bias and breakout confirmation
     
     close = prices['close'].values
@@ -46,7 +46,7 @@ def generate_signals(prices):
     weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
     weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
     
-    # Get 4h Donchian(20) for breakout
+    # Get 1d Donchian(20) for breakout
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     
@@ -54,13 +54,13 @@ def generate_signals(prices):
         donchian_high[i] = np.max(high[i-20:i])
         donchian_low[i] = np.min(low[i-20:i])
     
-    # Get 4h volume for confirmation (>1.5x 20-period average)
+    # Get 1d volume for confirmation (>1.5x 20-period average)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     volume_spike = volume > (1.5 * vol_ma)
     
-    # Align all indicators to LTF (4h)
+    # Align all indicators to LTF (1d)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
@@ -70,7 +70,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if data not ready
         if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
             np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(donchian_high[i]) or 
@@ -121,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_breakout_weekly_pivot_volume_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_breakout_weekly_pivot_volume_v1"
+timeframe = "1d"
 leverage = 1.0
