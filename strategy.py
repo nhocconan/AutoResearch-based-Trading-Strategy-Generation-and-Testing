@@ -5,88 +5,100 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Hypothesis: 6h Camarilla pivot breakout with volume confirmation and 1w trend filter
-    # Long: Close breaks above R4 + volume > 1.5x 20-period average + price > 1w EMA200 (uptrend)
-    # Short: Close breaks below S4 + volume > 1.5x 20-period average + price < 1w EMA200 (downtrend)
-    # Exit: Close retreats to R3/S3 levels or opposite pivot break
-    # Uses 1w EMA200 for major trend alignment to avoid counter-trend trades
-    # Camarilla R4/S4 represent strong breakout levels; R3/S3 represent pullback targets
-    # Volume filter ensures breakouts have conviction
-    # Target: 60-120 total trades over 4 years (15-30/year) to balance opportunity and fees
+    # Hypothesis: 12h Donchian breakout with 1d volume confirmation and chop regime filter
+    # Long: price breaks above Donchian(20) high + 1d volume > 1.5x 20-period average + chop < 61.8
+    # Short: price breaks below Donchian(20) low + 1d volume > 1.5x 20-period average + chop < 61.8
+    # Exit: price crosses Donchian midpoint or opposite breakout
+    # Uses Donchian channels for structure, volume for conviction, chop filter to avoid whipsaws in ranging markets
+    # Works in bull (breakouts in uptrend) and bear (breakdowns in downtrend) with regime filter reducing false signals
+    # Target: 50-150 total trades over 4 years (12-37/year) for optimal fee efficiency
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 6h data for primary timeframe
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 5:
+    # Get 12h data for primary timeframe
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Get 1w data for EMA200 trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    # Get 1d data for volume and chop filters (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 6h Camarilla levels (based on previous day's range)
-    # Camarilla: R4 = Close + 1.1*(High-Low)*1.1/2, S4 = Close - 1.1*(High-Low)*1.1/2
-    # R3 = Close + 1.1*(High-Low)*1.1/4, S3 = Close - 1.1*(High-Low)*1.1/4
-    # Using 6h bar's range as proxy for previous period (common in intraday)
-    range_6h = high_6h - low_6h
-    camarilla_multiplier = 1.1 * 1.1 / 2  # 1.21/2 = 0.605 for R4/S4
-    camarilla_multiplier_half = 1.1 * 1.1 / 4  # 1.21/4 = 0.3025 for R3/S3
+    # Calculate 12h Donchian channels (20-period)
+    highest_high_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    lowest_low_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donchian_mid_12h = (highest_high_12h + lowest_low_12h) / 2.0
     
-    r4 = close_6h + range_6h * camarilla_multiplier
-    s4 = close_6h - range_6h * camarilla_multiplier
-    r3 = close_6h + range_6h * camarilla_multiplier_half
-    s3 = close_6h - range_6h * camarilla_multiplier_half
+    # Calculate 1d volume average (20-period)
+    volume_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1w EMA200 for trend filter
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate 1d choppiness index (14-period)
+    # Chop = 100 * log10(sum(ATR) / (log10(highest_high - lowest_low) * period)) / log10(period)
+    tr1 = pd.Series(high_1d).rolling(window=2).max().values - pd.Series(low_1d).rolling(window=2).shift(1).values
+    tr2 = abs(pd.Series(high_1d).rolling(window=2).shift(1).values - pd.Series(low_1d).rolling(window=2).shift(1).values)
+    tr = np.maximum(tr1, tr2)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    sum_atr_14 = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop_denominator = np.log10(highest_high_14 - lowest_low_14) * 14
+    chop = np.where(
+        (chop_denominator > 0) & (sum_atr_14 > 0),
+        100 * np.log10(sum_atr_14 / chop_denominator) / np.log10(14),
+        50.0  # neutral when undefined
+    )
     
-    # Align 1w EMA200 to 6h timeframe
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
-    
-    # Volume filter: 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma_20 * 1.5)
+    # Align 1d indicators to 12h timeframe
+    volume_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
     
-    for i in range(20, n):  # start from 20 to have enough data for volume MA
+    for i in range(20, n):  # start from 20 to have enough data for Donchian
         # Skip if data not ready
-        if (np.isnan(ema_200_1w_aligned[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(r4[i]) or np.isnan(s4[i]) or np.isnan(r3[i]) or np.isnan(s3[i])):
+        if (np.isnan(highest_high_12h[i]) or np.isnan(lowest_low_12h[i]) or 
+            np.isnan(volume_ma_1d_aligned[i]) or np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Breakout conditions
-        breakout_long = close[i] > r4[i] and volume_filter[i]
-        breakout_short = close[i] < s4[i] and volume_filter[i]
+        # Donchian breakout conditions
+        breakout_up = close[i] > highest_high_12h[i]
+        breakout_down = close[i] < lowest_low_12h[i]
         
-        # Trend filter from 1w EMA200
-        uptrend = close[i] > ema_200_1w_aligned[i]
-        downtrend = close[i] < ema_200_1w_aligned[i]
+        # Volume confirmation: current 1d volume > 1.5x 20-period average
+        # We need to get the current 1d volume aligned to 12h
+        # Since we don't have direct 1d volume in 12h alignment, we use the volume from prices
+        # but check if it's elevated relative to the 1d volume average
+        volume_confirm = volume[i] > 1.5 * volume_ma_1d_aligned[i]
         
-        # Exit conditions: retreat to R3/S3 or opposite breakout
-        exit_long = position == 1 and (close[i] < r3[i] or breakout_short)
-        exit_short = position == -1 and (close[i] > s3[i] or breakout_long)
+        # Chop regime filter: avoid ranging markets (chop > 61.8 = ranging)
+        chop_filter = chop_aligned[i] < 61.8
         
         # Entry conditions
-        long_entry = breakout_long and uptrend and position != 1
-        short_entry = breakout_short and downtrend and position != -1
+        long_entry = breakout_up and volume_confirm and chop_filter and position != 1
+        short_entry = breakout_down and volume_confirm and chop_filter and position != -1
+        
+        # Exit conditions: price crosses Donchian midpoint or opposite breakout
+        exit_long = position == 1 and (close[i] < donchian_mid_12h[i] or breakout_down)
+        exit_short = position == -1 and (close[i] > donchian_mid_12h[i] or breakout_up)
         
         # Execute signals
         if long_entry:
@@ -112,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_camarilla_breakout_volume_filter_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_volume_chop_filter_v1"
+timeframe = "12h"
 leverage = 1.0
