@@ -1,82 +1,66 @@
-#1/1
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
-from math import log
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Relative Strength Index (RSI) with weekly moving average filter and volume confirmation.
-# RSI captures overbought/oversold conditions, while weekly MA defines the primary trend.
-# Volume confirmation ensures institutional participation. Works in both bull and bear markets
-# by taking long signals only when price > weekly MA (uptrend) and short when price < weekly MA (downtrend).
-# Target: 12-37 trades per year (50-150 total over 4 years) for 6h timeframe.
+# Hypothesis: 4h Williams %R with 1d trend filter and volume confirmation.
+# Williams %R identifies overbought/oversold conditions. In trending markets,
+# we take pullbacks: long when %R > -80 (oversold) in uptrend, short when %R < -20 (overbought) in downtrend.
+# Uses 1d EMA50 for trend filter and volume spike for confirmation to avoid whipsaws.
+# Target: 20-50 trades per year (80-200 total over 4 years) for 4h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Daily data for Williams %R calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate weekly EMA(20) for trend filter
-    close_1w = df_1w['close'].values
-    ema20_1w = np.zeros(len(close_1w))
-    ema_multiplier = 2 / (20 + 1)
-    ema20_1w[0] = close_1w[0]
-    for i in range(1, len(close_1w)):
-        ema20_1w[i] = (close_1w[i] - ema20_1w[i-1]) * ema_multiplier + ema20_1w[i-1]
+    # Calculate 14-period Williams %R on daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly high and low for RSI calculation
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    williams_r = np.full(len(close_1d), -50.0)  # Initialize with neutral value
+    for i in range(13, len(close_1d)):
+        highest_high = np.max(high_1d[i-13:i+1])
+        lowest_low = np.min(low_1d[i-13:i+1])
+        if highest_high - lowest_low != 0:
+            williams_r[i] = -100 * (highest_high - close_1d[i]) / (highest_high - lowest_low)
+        else:
+            williams_r[i] = -50.0
     
-    # Align weekly EMA20 to 6h timeframe
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Calculate 1-day EMA(50) for trend filter
+    ema50_1d = np.zeros(len(close_1d))
+    ema_multiplier = 2 / (50 + 1)
+    ema50_1d[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        ema50_1d[i] = (close_1d[i] - ema50_1d[i-1]) * ema_multiplier + ema50_1d[i-1]
     
-    # Calculate RSI(14) on weekly timeframe
-    # First calculate price changes
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Align indicators to 4h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate average gain and loss
-    avg_gain = np.zeros(len(close_1w))
-    avg_loss = np.zeros(len(close_1w))
-    avg_gain[0] = np.mean(gain[:14]) if len(gain) >= 14 else 0
-    avg_loss[0] = np.mean(loss[:14]) if len(loss) >= 14 else 0
-    
-    for i in range(1, len(close_1w)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    # Calculate RSI
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi_1w = 100 - (100 / (1 + rs))
-    rsi_1w = np.where(avg_loss == 0, 100, rsi_1w)
-    rsi_1w = np.where(avg_gain == 0, 0, rsi_1w)
-    
-    # Align weekly RSI to 6h timeframe
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
-    
-    # Calculate average volume (24-period = 6 days) for volume confirmation
+    # Calculate average volume (12-period = 6 hours) for volume confirmation
     avg_volume = np.full(n, np.nan)
-    for i in range(24, n):
-        avg_volume[i] = np.mean(volume[i-24:i])
+    for i in range(12, n):
+        avg_volume[i] = np.mean(volume[i-12:i])
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(24, n):
+    for i in range(12, n):
         # Skip if any required data is not ready
-        if (np.isnan(ema20_1w_aligned[i]) or np.isnan(rsi_1w_aligned[i]) or 
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
@@ -84,39 +68,39 @@ def generate_signals(prices):
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
-        weekly_ema = ema20_1w_aligned[i]
-        rsi_value = rsi_1w_aligned[i]
+        ema_trend = ema50_1d_aligned[i]
+        wr = williams_r_aligned[i]
         
         # Volume confirmation: current volume > 1.5x average volume
         volume_confirm = vol > 1.5 * avg_vol
         
         if position == 0:
-            # Long: RSI < 30 (oversold) + above weekly EMA20 + volume confirmation
-            if (rsi_value < 30 and
-                price > weekly_ema and
+            # Long: Williams %R > -80 (oversold) + above daily EMA50 + volume confirmation
+            if (wr > -80 and
+                price > ema_trend and
                 volume_confirm):
                 position = 1
                 signals[i] = position_size
-            # Short: RSI > 70 (overbought) + below weekly EMA20 + volume confirmation
-            elif (rsi_value > 70 and
-                  price < weekly_ema and
+            # Short: Williams %R < -20 (overbought) + below daily EMA50 + volume confirmation
+            elif (wr < -20 and
+                  price < ema_trend and
                   volume_confirm):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI > 50 or trend turns down
-            if (rsi_value > 50 or
-                price < weekly_ema):
+            # Exit long: Williams %R < -20 (overbought) or trend turns down
+            if (wr < -20 or
+                price < ema_trend):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: RSI < 50 or trend turns up
-            if (rsi_value < 50 or
-                price > weekly_ema):
+            # Exit short: Williams %R > -80 (oversold) or trend turns up
+            if (wr > -80 or
+                price > ema_trend):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -124,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_RSI_Trend_Volume"
-timeframe = "6h"
+name = "4h_1d_WilliamsR_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
