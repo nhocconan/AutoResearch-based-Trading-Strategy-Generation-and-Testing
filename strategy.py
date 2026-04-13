@@ -5,101 +5,99 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with 12h HMA(21) trend filter and volume confirmation.
-    # Long when price breaks above Donchian upper band AND 12h HMA rising AND volume > 1.5x avg.
-    # Short when price breaks below Donchian lower band AND 12h HMA falling AND volume > 1.5x avg.
-    # Uses discrete position sizing (0.25) to minimize fee churn and manage drawdown.
-    # Target: 80-160 total trades over 4 years (20-40/year) to balance alpha and fee drag.
+    # Hypothesis: 4h trend + 1h mean reversion in ranging markets.
+    # Long when 4h EMA20 uptrend, ADX < 20 (range), and price touches 1h VWAP with rejection.
+    # Short when 4h EMA20 downtrend, ADX < 20, and price rejects 1h VWAP.
+    # Uses 4h for trend filter, 1h for entry timing to reduce whipsaw.
+    # Target: 60-120 total trades over 4 years (15-30/year) to minimize fee drag.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for HMA trend filter (call ONCE before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 4h data for trend filter (call ONCE before loop)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate HMA(21) on 12h: WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
-    def wma(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        weights = np.arange(1, period + 1)
-        return np.convolve(arr, weights, mode='valid') / weights.sum()
+    # Calculate 4h EMA20 for trend
+    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
     
-    def hma(arr, period):
-        half_period = period // 2
-        sqrt_period = int(np.sqrt(period))
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        wma_half = wma(arr, half_period)
-        wma_full = wma(arr, period)
-        # Align arrays: wma_half starts at index half_period-1, wma_full at period-1
-        raw_hma = 2 * wma_half[-len(wma_full):] - wma_full
-        hma_vals = wma(raw_hma, sqrt_period)
-        # Pad to original length
-        result = np.full_like(arr, np.nan)
-        result[period-1:] = hma_vals
-        return result
+    # Calculate 1h ADX(14) for regime
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Directional Movement
+    up_move = high[1:] - high[:-1]
+    down_move = low[:-1] - low[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
+    # Smoothed TR, +DM, -DM (Wilder's smoothing = EMA with alpha=1/period)
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    hma_12h = hma(close_12h, 21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
-    
-    # Calculate Donchian(20) on 4h
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    
-    # Calculate average volume for confirmation
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1h VWAP
+    typical_price = (high + low + close) / 3
+    pv = typical_price * volume
+    cum_pv = np.cumsum(pv)
+    cum_vol = np.cumsum(volume)
+    vwap = cum_pv / cum_vol
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(hma_12h_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(ema20_4h_aligned[i]) or np.isnan(adx[i]) or np.isnan(vwap[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x average
-        volume_confirmed = volume[i] > 1.5 * avg_volume[i]
+        # Trend filter: 4h EMA20 slope
+        if i >= 51:
+            ema20_prev = ema20_4h_aligned[i-1]
+            ema20_curr = ema20_4h_aligned[i]
+            trend_up = ema20_curr > ema20_prev
+            trend_down = ema20_curr < ema20_prev
+        else:
+            trend_up = False
+            trend_down = False
         
-        # Donchian breakout conditions
-        long_breakout = close[i] > highest_high[i-1]  # Break above previous upper band
-        short_breakout = close[i] < lowest_low[i-1]   # Break below previous lower band
+        # Regime filter: only trade in ranging markets (ADX < 20)
+        ranging = adx[i] < 20
         
-        # HMA trend filter: rising for long, falling for short
-        hma_rising = hma_12h_aligned[i] > hma_12h_aligned[i-1]
-        hma_falling = hma_12h_aligned[i] < hma_12h_aligned[i-1]
+        # VWAP rejection conditions (price touches VWAP and closes back inside range)
+        long_setup = (low[i] <= vwap[i]) and (close[i] > vwap[i]) and trend_up and ranging
+        short_setup = (high[i] >= vwap[i]) and (close[i] < vwap[i]) and trend_down and ranging
         
-        # Entry conditions
-        long_entry = long_breakout and volume_confirmed and hma_rising
-        short_entry = short_breakout and volume_confirmed and hma_falling
-        
-        # Exit conditions: Donchian middle band or opposite breakout
-        middle_band = (highest_high[i] + lowest_low[i]) / 2
-        long_exit = close[i] < middle_band
-        short_exit = close[i] > middle_band
+        # Exit conditions: price returns to 4h EMA20
+        long_exit = close[i] >= ema20_4h_aligned[i]
+        short_exit = close[i] <= ema20_4h_aligned[i]
         
         # Fixed position size (discrete levels to minimize fee churn)
-        position_size = 0.25
+        position_size = 0.20
         
-        # Entry logic
-        if long_entry and position != 1:
+        # Entry conditions
+        if long_setup and position != 1:
             position = 1
             signals[i] = position_size
-        elif short_entry and position != -1:
+        elif short_setup and position != -1:
             position = -1
             signals[i] = -position_size
-        # Exit logic
+        # Exit conditions
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -117,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_donchian_hma_volume_filter_v1"
-timeframe = "4h"
+name = "4h_1h_ema20_vwap_rejection_v1"
+timeframe = "1h"
 leverage = 1.0
