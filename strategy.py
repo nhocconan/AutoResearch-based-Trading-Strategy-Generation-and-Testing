@@ -8,113 +8,127 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Williams %R extreme reversal with 1d trend filter and volume confirmation
-    # Williams %R identifies overbought/oversold conditions; 1d EMA50 filters counter-trend trades;
-    # volume confirms momentum; discrete sizing minimizes fee drag
-    # Target: 12-30 trades/year to avoid overtrading on 6h timeframe
+    # Hypothesis: 4h Donchian channel breakout with 1d trend filter and volume confirmation
+    # Works in both bull and bear: Donchian captures breakouts, 1d trend filters false breakouts,
+    # volume confirms momentum, ATR stoploss controls risk
+    # Target: 20-50 trades/year to minimize fee drag (400 max total over 4 years)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values if 'volume' in prices.columns else np.ones(len(prices))
     
-    # Get 6h data for Williams %R calculation
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
+    # Get 4h data for Donchian levels (primary timeframe)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
-    volume_6h = df_6h['volume'].values if 'volume' in df_6h.columns else np.ones(len(df_6h))
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values if 'volume' in df_4h.columns else np.ones(len(df_4h))
     
     # Get 1d data for trend filter and volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    # Get daily OHLC
     daily_open = df_1d['open'].values
     daily_high = df_1d['high'].values
     daily_low = df_1d['low'].values
     daily_close = df_1d['close'].values
     daily_volume = df_1d['volume'].values if 'volume' in df_1d.columns else np.ones(len(df_1d))
     
-    # Calculate Williams %R (14-period) on 6h data
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high_14 = pd.Series(high_6h).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_6h).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high_14 - close_6h) / (highest_high_14 - lowest_low_14) * -100
+    # Calculate Donchian channels for each day (20-period high/low)
+    donchian_high_20 = pd.Series(daily_high).rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = pd.Series(daily_low).rolling(window=20, min_periods=20).min().values
     
-    # Get 1d EMA(50) for trend filter
+    # Get 1d data for trend filter (EMA 50)
     ema_50_1d = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Get 1d volume for confirmation (20-period average)
     vol_avg_20_1d = pd.Series(daily_volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align all HTF indicators to 6h primary timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_6h, williams_r)
+    # Align all HTF indicators to 4h primary timeframe
+    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
+    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
+    atr_multiplier = 2.0  # ATR stoploss multiplier
+    
+    # Calculate 4h ATR for stoploss
+    tr = np.maximum(np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1])), np.abs(low[1:] - close[:-1]))
+    tr = np.concatenate([[np.nan], tr])
+    atr_4h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Track entry price for stoploss
+    entry_price = np.full(n, np.nan)
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(williams_r_aligned[i]) or 
+        if (np.isnan(donchian_high_20_aligned[i]) or 
+            np.isnan(donchian_low_20_aligned[i]) or
             np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(vol_avg_20_1d_aligned[i])):
+            np.isnan(vol_avg_20_1d_aligned[i]) or
+            np.isnan(atr_4h[i])):
             signals[i] = 0.0
             continue
         
-        # Map 6h bar to 1d index for volume confirmation
-        idx_1d = i // 4  # 4x 6h bars per day
+        # Volume confirmation: current 1d volume > 1.3x 20-period average
+        idx_1d = i // 6
         if idx_1d >= len(daily_volume):
             signals[i] = 0.0
             continue
-        
-        # Volume confirmation: current 1d volume > 1.5x 20-period average
-        volume_confirmed = daily_volume[idx_1d] > 1.5 * vol_avg_20_1d_aligned[i]
+        volume_confirmed = daily_volume[idx_1d] > 1.3 * vol_avg_20_1d_aligned[i]
         
         # Trend direction from 1d EMA(50)
         trend_up = close[i] > ema_50_1d_aligned[i]
         trend_down = close[i] < ema_50_1d_aligned[i]
         
-        # Entry conditions: Williams %R extreme + trend alignment + volume
-        # Long: Oversold (< -80) + uptrend + volume
-        # Short: Overbought (> -20) + downtrend + volume
-        enter_long = (williams_r_aligned[i] < -80) and trend_up and volume_confirmed
-        enter_short = (williams_r_aligned[i] > -20) and trend_down and volume_confirmed
+        # Entry conditions: Donchian breakout + trend + volume
+        enter_long = (close[i] > donchian_high_20_aligned[i]) and trend_up and volume_confirmed
+        enter_short = (close[i] < donchian_low_20_aligned[i]) and trend_down and volume_confirmed
         
-        # Exit conditions: Williams %R returns to neutral zone (-50)
-        exit_long = position == 1 and williams_r_aligned[i] > -50
-        exit_short = position == -1 and williams_r_aligned[i] < -50
+        # Stoploss conditions
+        exit_long = position == 1 and not np.isnan(entry_price[i-1]) and close[i] < entry_price[i-1] - atr_multiplier * atr_4h[i]
+        exit_short = position == -1 and not np.isnan(entry_price[i-1]) and close[i] > entry_price[i-1] + atr_multiplier * atr_4h[i]
         
         # Execute signals
         if enter_long and position != 1:
             position = 1
             signals[i] = position_size
+            entry_price[i] = close[i]  # record entry price at close (filled next bar open)
         elif enter_short and position != -1:
             position = -1
             signals[i] = -position_size
+            entry_price[i] = close[i]  # record entry price at close (filled next bar open)
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
+            entry_price[i] = np.nan
         elif position == -1 and exit_short:
             position = 0
             signals[i] = 0.0
+            entry_price[i] = np.nan
         # Hold current position
         else:
             if position == 1:
                 signals[i] = position_size
+                entry_price[i] = entry_price[i-1] if i > 0 else np.nan
             elif position == -1:
                 signals[i] = -position_size
+                entry_price[i] = entry_price[i-1] if i > 0 else np.nan
             else:
                 signals[i] = 0.0
+                entry_price[i] = np.nan
     
     return signals
 
-name = "6h_1d_williamsr_extreme_trend_volume_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_breakout_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
