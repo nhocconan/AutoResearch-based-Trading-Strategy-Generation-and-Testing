@@ -8,17 +8,14 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with 12h volume spike and 12h Chop regime filter
-    # Long: price > Donchian(20) high AND 12h volume > 2.0 * 20-period avg volume AND 12h Chop > 61.8 (ranging)
-    # Short: price < Donchian(20) low AND 12h volume > 2.0 * 20-period avg volume AND 12h Chop > 61.8 (ranging)
-    # Exit: price crosses Donchian midpoint OR Chop < 38.2 (trending market begins)
-    # Uses discrete position sizing (0.25) to minimize fee churn
-    # Target: 75-150 total trades over 4 years (~19-38/year) to stay within limits
+    # Hypothesis: 4h price breaks Donchian(20) with 12h volume spike and ranging market (Chop > 61.8)
+    # Uses 12h timeframe for volume and Chop regime filter to avoid look-ahead
+    # Discrete position sizing (0.25) to minimize fee churn
+    # Target: 75-150 total trades over 4 years (~19-38/year)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
     # Get 4h data for Donchian channels (call ONCE before loop)
     df_4h = get_htf_data(prices, '4h')
