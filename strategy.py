@@ -8,12 +8,12 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1d Camarilla pivot breakout with 1w ATR regime filter and volume confirmation
-    # Long: Close > H3 AND 1w ATR ratio < 0.8 (low volatility regime) AND volume > 1.5x avg
-    # Short: Close < L3 AND 1w ATR ratio < 0.8 (low volatility regime) AND volume > 1.5x avg
-    # Exit: Close < H3 for longs OR Close > L3 for shorts OR volatility expansion (ATR ratio > 1.2)
-    # Using 1d timeframe for low trade frequency, Camarilla for intraday structure,
-    # 1w ATR for volatility regime filter (avoid choppy markets), volume for confirmation.
+    # Hypothesis: 6h Camarilla pivot breakout with 1d volume confirmation
+    # Long: price breaks above R4 with volume > 1.5x 20-period average
+    # Short: price breaks below S4 with volume > 1.5x 20-period average
+    # Exit: price retreats to R3/S3 level or volume drops below average
+    # Using 6h timeframe for moderate trade frequency, Camarilla pivots from 1d
+    # for institutional levels, volume confirmation to avoid false breakouts.
     # Discrete position sizing (0.25) to minimize fee churn.
     
     close = prices['close'].values
@@ -21,66 +21,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for ATR regime filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly ATR(14) for regime filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate Camarilla pivots from previous day
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # R4 = Pivot + Range * 1.1/2
+    # R3 = Pivot + Range * 1.1/4
+    # S3 = Pivot - Range * 1.1/4
+    # S4 = Pivot - Range * 1.1/2
     
-    # True Range calculation
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_1w = np.concatenate([[np.nan], tr_1w])  # Align with original length
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # ATR calculation with Wilder's smoothing
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(data[period-1:period*2-1])
-        # Subsequent values: smoothed = (prev * (period-1) + current) / period
-        for i in range(period*2-1, len(data)):
-            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # Previous day's values
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    atr_1w = wilders_smoothing(tr_1w, 14)
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    rng = prev_high - prev_low
     
-    # Calculate ATR ratio (current ATR / 20-period average ATR) for regime filter
-    atr_ma_1w = np.full(len(atr_1w), np.nan)
-    for i in range(34, len(atr_1w)):  # 20 + 14 for proper lookback
-        atr_ma_1w[i] = np.mean(atr_1w[i-20:i])
+    r4 = pivot + rng * 1.1 / 2.0
+    r3 = pivot + rng * 1.1 / 4.0
+    s3 = pivot - rng * 1.1 / 4.0
+    s4 = pivot - rng * 1.1 / 2.0
     
-    atr_ratio_1w = np.where(atr_ma_1w > 0, atr_1w / atr_ma_1w, 1.0)
-    atr_ratio_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_ratio_1w)
+    # Align daily pivots to 6h
+    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Calculate daily Camarilla pivot levels (based on previous day)
-    # H4 = close + 1.5 * (high - low)
-    # H3 = close + 1.0 * (high - low)
-    # H2 = close + 0.5 * (high - low)
-    # H1 = close + 0.25 * (high - low)
-    # L1 = close - 0.25 * (high - low)
-    # L2 = close - 0.5 * (high - low)
-    # L3 = close - 1.0 * (high - low)
-    # L4 = close - 1.5 * (high - low)
-    
-    # Shift high/low/close by 1 to use previous day's data
-    prev_high = np.concatenate([[np.nan], high[:-1]])
-    prev_low = np.concatenate([[np.nan], low[:-1]])
-    prev_close = np.concatenate([[np.nan], close[:-1]])
-    
-    camarilla_range = prev_high - prev_low
-    h3 = prev_close + 1.0 * camarilla_range
-    l3 = prev_close - 1.0 * camarilla_range
-    
-    # Get daily volume for confirmation (>1.5x 20-period average)
+    # Volume confirmation: >1.5x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -91,24 +71,22 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(atr_ratio_1w_aligned[i]) or np.isnan(h3[i]) or np.isnan(l3[i]) or 
+        if (np.isnan(r4_6h[i]) or np.isnan(r3_6h[i]) or 
+            np.isnan(s3_6h[i]) or np.isnan(s4_6h[i]) or 
             np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: ATR ratio < 0.8 = low volatility (trending regime)
-        low_vol_regime = atr_ratio_1w_aligned[i] < 0.8
-        
         # Volume confirmation
         vol_confirm = volume_spike[i]
         
-        # Entry logic: Camarilla breakout + low volatility regime + volume confirmation
-        long_entry = (close[i] > h3[i]) and low_vol_regime and vol_confirm
-        short_entry = (close[i] < l3[i]) and low_vol_regime and vol_confirm
+        # Entry logic: Camarilla breakout with volume
+        long_entry = (close[i] > r4_6h[i]) and vol_confirm
+        short_entry = (close[i] < s4_6h[i]) and vol_confirm
         
-        # Exit logic: Close back inside H3/L3 OR volatility expansion (ATR ratio > 1.2)
-        long_exit = (close[i] < h3[i]) or (atr_ratio_1w_aligned[i] > 1.2)
-        short_exit = (close[i] > l3[i]) or (atr_ratio_1w_aligned[i] > 1.2)
+        # Exit logic: retreat to R3/S3 or volume dry-up
+        long_exit = (close[i] < r3_6h[i]) or not vol_confirm
+        short_exit = (close[i] > s3_6h[i]) or not vol_confirm
         
         if long_entry and position != 1:
             position = 1
@@ -133,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_camarilla_pivot_breakout_v1"
-timeframe = "1d"
+name = "6h_1d_camarilla_breakout_volume_v1"
+timeframe = "6h"
 leverage = 1.0
