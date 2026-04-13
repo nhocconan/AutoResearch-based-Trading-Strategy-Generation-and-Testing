@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,9 +23,9 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     vol_1d = df_1d['volume'].values
     
-    # Calculate 20-period EMA on 1d (trend filter)
+    # Calculate 40-period EMA on 1d (trend filter)
     close_1d_series = pd.Series(close_1d)
-    ema_20_1d = close_1d_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_40_1d = close_1d_series.ewm(span=40, adjust=False, min_periods=40).mean().values
     
     # Calculate RSI(14) on 1d
     delta = np.diff(close_1d, prepend=close_1d[0])
@@ -45,8 +45,8 @@ def generate_signals(prices):
     # Calculate 20-period SMA on 1w
     sma_20_1w = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
     
-    # Align indicators to daily timeframe
-    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    # Align indicators to 4h timeframe
+    ema_40_aligned = align_htf_to_ltf(prices, df_1d, ema_40_1d)
     rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
     sma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_20_1w)
     
@@ -54,17 +54,17 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema_20_aligned[i]) or 
+        if (np.isnan(ema_40_aligned[i]) or 
             np.isnan(rsi_14_aligned[i]) or
             np.isnan(sma_20_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below EMA20
-        above_ema = close[i] > ema_20_aligned[i]
-        below_ema = close[i] < ema_20_aligned[i]
+        # Trend filter: price above/below EMA40
+        above_ema = close[i] > ema_40_aligned[i]
+        below_ema = close[i] < ema_40_aligned[i]
         
         # RSI conditions: avoid extreme levels
         rsi_not_overbought = rsi_14_aligned[i] < 70
@@ -79,8 +79,8 @@ def generate_signals(prices):
         short_entry = below_ema and rsi_not_oversold and below_weekly_sma
         
         # Exit conditions: opposite signal or RSI extreme
-        exit_long = position == 1 and (below_ema or rsi_14_aligned[i] > 80)
-        exit_short = position == -1 and (above_ema or rsi_14_aligned[i] < 20)
+        exit_long = position == 1 and (below_ema or rsi_14_aligned[i] > 75)
+        exit_short = position == -1 and (above_ema or rsi_14_aligned[i] < 25)
         
         # Execute signals
         if long_entry and position != 1:
@@ -103,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_ema20_rsi14_weekly_sma20_filter_v3"
-timeframe = "1d"
+name = "4h_ema40_rsi14_weekly_sma20_filter"
+timeframe = "4h"
 leverage = 1.0
