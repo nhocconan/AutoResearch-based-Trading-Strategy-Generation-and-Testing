@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot levels with volume confirmation and 1d trend filter.
-# Camarilla levels provide precise support/resistance levels derived from prior day's range.
-# Breakout above resistance or breakdown below support with volume confirmation indicates momentum.
-# 1d EMA filter ensures alignment with higher timeframe trend to avoid counter-trend trades.
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+# Hypothesis: 4h ATR-based breakout with volume confirmation and weekly trend filter.
+# Uses ATR-based breakout levels (similar to Donchian but volatility-adjusted) to capture
+# breakouts in both trending and ranging markets. Volume confirmation ensures breakouts
+# have conviction. Weekly trend filter avoids counter-trend trades. Designed for 4-8
+# trades per month (~48-96/year) to minimize fee drag while capturing significant moves.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,14 +19,15 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for multi-timeframe analysis
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate ATR (14-period) for pivot levels and volatility filter
-    atr_period = 14
+    # ATR-based breakout levels (20-period)
+    atr_period = 20
     tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
@@ -34,105 +35,83 @@ def generate_signals(prices):
     for i in range(atr_period, n):
         atr[i] = np.mean(tr[i-atr_period+1:i+1])
     
-    # Calculate average volume (20-period) for volume confirmation
+    # ATR-based channels: midpoint ± ATR multiplier
+    avg_price = (high + low) / 2
+    atr_mult = 1.5
+    upper_band = np.zeros(n)
+    lower_band = np.zeros(n)
+    for i in range(atr_period, n):
+        avg = np.mean(avg_price[i-atr_period+1:i+1])
+        upper_band[i] = avg + atr_mult * atr[i]
+        lower_band[i] = avg - atr_mult * atr[i]
+    
+    # Volume confirmation (20-period average)
     avg_volume = np.zeros(n)
     for i in range(20, n):
         avg_volume[i] = np.mean(volume[i-20:i])
     
-    # Calculate daily EMA (21-period) for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = np.zeros(len(close_1d))
-    ema_1d[0] = close_1d[0]
-    alpha = 2 / (21 + 1)
-    for i in range(1, len(close_1d)):
-        ema_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_1d[i-1]
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Weekly trend filter: 50-period SMA
+    close_1w = df_1w['close'].values
+    sma_1w = np.zeros(len(close_1w))
+    for i in range(50, len(close_1w)):
+        sma_1w[i] = np.mean(close_1w[i-50:i])
+    sma_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_1w)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(atr[i]) or 
-            np.isnan(avg_volume[i]) or 
-            np.isnan(ema_1d_aligned[i])):
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(atr[i]) or np.isnan(avg_volume[i]) or 
+            np.isnan(sma_1w_aligned[i])):
             signals[i] = 0.0
             continue
-        
-        # Calculate Camarilla levels using previous day's OHLC
-        # Need to get previous day's data - we'll use the 1d data for this
-        # Find the index of the previous completed day in 1d data
-        current_time = prices.iloc[i]['open_time']
-        # Find previous day's data in 1d dataframe
-        prev_day_mask = df_1d['open_time'] < current_time
-        if not prev_day_mask.any():
-            signals[i] = 0.0
-            continue
-        
-        prev_day_idx = prev_day_mask.sum() - 1  # index of previous day
-        if prev_day_idx < 0:
-            signals[i] = 0.0
-            continue
-            
-        prev_high = df_1d.iloc[prev_day_idx]['high']
-        prev_low = df_1d.iloc[prev_day_idx]['low']
-        prev_close = df_1d.iloc[prev_day_idx]['close']
-        
-        # Calculate Camarilla levels
-        range_val = prev_high - prev_low
-        if range_val <= 0:
-            signals[i] = 0.0
-            continue
-            
-        # Camarilla resistance levels
-        r4 = prev_close + range_val * 1.1 / 2
-        r3 = prev_close + range_val * 1.1 / 4
-        # Camarilla support levels
-        s3 = prev_close - range_val * 1.1 / 4
-        s4 = prev_close - range_val * 1.1 / 2
         
         price = close[i]
         vol = volume[i]
         avg_vol = avg_volume[i]
+        upper = upper_band[i]
+        lower = lower_band[i]
         atr_val = atr[i]
-        daily_ema = ema_1d_aligned[i]
+        weekly_sma = sma_1w_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirm = vol > 1.5 * avg_vol
+        # Volume confirmation: current volume > 1.3x average volume
+        volume_confirm = vol > 1.3 * avg_vol
         
         # ATR filter: ATR > 0 (always true, but keeps structure)
         atr_filter = atr_val > 0
         
         if position == 0:
-            # Long: price breaks above R3 + volume + price above daily EMA
-            if (price > r3 and 
+            # Long: price breaks above upper band + volume + price above weekly SMA
+            if (price > upper and 
                 volume_confirm and 
                 atr_filter and
-                price > daily_ema):
+                price > weekly_sma):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below S3 + volume + price below daily EMA
-            elif (price < s3 and 
+            # Short: price breaks below lower band + volume + price below weekly SMA
+            elif (price < lower and 
                   volume_confirm and 
                   atr_filter and
-                  price < daily_ema):
+                  price < weekly_sma):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below S3 OR volume drops
-            if (price < s3 or 
-                vol < 0.5 * avg_vol):
+            # Exit long: price breaks below lower band OR volatility drops significantly
+            if (price < lower or 
+                atr_val < 0.5 * np.mean(atr[max(0, i-20):i+1])):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above R3 OR volume drops
-            if (price > r3 or 
-                vol < 0.5 * avg_vol):
+            # Exit short: price breaks above upper band OR volatility drops significantly
+            if (price > upper or 
+                atr_val < 0.5 * np.mean(atr[max(0, i-20):i+1])):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -140,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_Pivot_Breakout_Volume_Filter_v1"
+name = "4h_1w_ATR_Breakout_Volume_Filter_v1"
 timeframe = "4h"
 leverage = 1.0
