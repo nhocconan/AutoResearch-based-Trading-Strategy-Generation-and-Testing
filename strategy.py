@@ -1,13 +1,16 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot breakout with 12h volume confirmation.
-# Camarilla levels from 12h data provide institutional support/resistance.
-# Breakout at R4/S4 with volume > 1.5x 12h average volume confirms institutional interest.
-# Works in bull/bear as it captures breakouts in either direction.
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
+# Hypothesis: 4h Donchian breakout with volume confirmation and ATR filter.
+# Donchian channels capture breakouts in both bull and bear markets.
+# Volume confirmation ensures breakouts have conviction.
+# ATR filter avoids false breakouts in low volatility.
+# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+# Uses 1-day SMA as trend filter and volume spike for confirmation.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,77 +22,97 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12h data for Camarilla levels and volume average
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Daily data for multi-timeframe analysis
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 12h bar
-    # R4 = C + (H-L)*1.1/2, S4 = C - (H-L)*1.1/2
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Calculate Donchian channels (20-period) on 4h data
+    period = 20
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
     
-    camarilla_r4 = np.zeros(len(close_12h))
-    camarilla_s4 = np.zeros(len(close_12h))
+    for i in range(period-1, n):
+        donchian_high[i] = np.max(high[i-period+1:i+1])
+        donchian_low[i] = np.min(low[i-period+1:i+1])
     
-    for i in range(1, len(close_12h)):
-        hl_range = high_12h[i-1] - low_12h[i-1]
-        camarilla_r4[i] = close_12h[i-1] + hl_range * 1.1 / 2
-        camarilla_s4[i] = close_12h[i-1] - hl_range * 1.1 / 2
+    # Calculate ATR (14-period) for volatility filter
+    atr_period = 14
+    tr = np.zeros(n)
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    # Align Camarilla levels to 6h timeframe (will use previous 12h bar's levels)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s4)
+    atr = np.zeros(n)
+    for i in range(atr_period, n):
+        atr[i] = np.mean(tr[i-atr_period+1:i+1])
     
-    # Calculate 12h average volume (20-period) for volume confirmation
-    vol_12h = df_12h['volume'].values
-    avg_vol_12h = np.zeros(len(vol_12h))
-    for i in range(20, len(vol_12h)):
-        avg_vol_12h[i] = np.mean(vol_12h[i-20:i])
-    avg_vol_12h_aligned = align_htf_to_ltf(prices, df_12h, avg_vol_12h)
+    # Calculate average volume (20-period) for volume confirmation
+    avg_volume = np.zeros(n)
+    for i in range(20, n):
+        avg_volume[i] = np.mean(volume[i-20:i])
+    
+    # Align daily trend filter
+    close_1d = df_1d['close'].values
+    sma_1d = np.zeros(len(close_1d))
+    for i in range(20, len(close_1d)):
+        sma_1d[i] = np.mean(close_1d[i-20:i])
+    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if any required data is not ready
-        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or 
-            np.isnan(avg_vol_12h_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(atr[i]) or np.isnan(avg_volume[i]) or 
+            np.isnan(sma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        r4 = camarilla_r4_aligned[i]
-        s4 = camarilla_s4_aligned[i]
-        avg_vol = avg_vol_12h_aligned[i]
+        avg_vol = avg_volume[i]
+        donch_high = donchian_high[i]
+        donch_low = donchian_low[i]
+        atr_val = atr[i]
+        daily_sma = sma_1d_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x average 12h volume
+        # Volume confirmation: current volume > 1.5x average volume
         volume_confirm = vol > 1.5 * avg_vol
         
+        # ATR filter: ATR > 0 (always true, but keeps structure)
+        atr_filter = atr_val > 0
+        
         if position == 0:
-            # Long: price breaks above R4 with volume confirmation
-            if price > r4 and volume_confirm:
+            # Long: price breaks above Donchian high + volume + price above daily SMA
+            if (price > donch_high and 
+                volume_confirm and 
+                atr_filter and
+                price > daily_sma):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below S4 with volume confirmation
-            elif price < s4 and volume_confirm:
+            # Short: price breaks below Donchian low + volume + price below daily SMA
+            elif (price < donch_low and 
+                  volume_confirm and 
+                  atr_filter and
+                  price < daily_sma):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns below R4 (failed breakout)
-            if price < r4:
+            # Exit long: price breaks below Donchian low OR volume drops
+            if (price < donch_low or 
+                vol < 0.5 * avg_vol):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns above S4 (failed breakout)
-            if price > s4:
+            # Exit short: price breaks above Donchian high OR volume drops
+            if (price > donch_high or 
+                vol < 0.5 * avg_vol):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -97,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_Camarilla_Breakout_Volume_v1"
-timeframe = "6h"
+name = "4h_1d_Donchian_Breakout_Volume_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
