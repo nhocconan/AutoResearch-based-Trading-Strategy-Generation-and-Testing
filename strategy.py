@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-4h_1d_Kelly_Criterion_With_Volatility_Scaling
-Hypothesis: Kelly criterion-based position sizing with volatility scaling adapts to market conditions,
-providing optimal risk-adjusted returns. Uses daily volatility (ATR) to scale position size and
-4h EMA crossover for trend direction. Volatility scaling reduces size in high volatility (crisis)
-periods and increases in low volatility, improving Sharpe ratio. Targets 20-40 trades/year.
+12h_1d_Williams_Fractal_Breakout
+Hypothesis: Williams fractals on 1d provide high-probability reversal zones. 
+Breakouts above bearish fractals or below bullish fractals with volume confirmation
+indicate institutional momentum. Trades in direction of 1w EMA200 trend to avoid 
+counter-trend whipsaws. Works in bull markets (breakouts continue) and bear markets 
+(mean reversion at fractal levels). Targets 12-37 trades/year on 12h timeframe.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,85 +22,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR calculation
+    # Get daily data for Williams fractals
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate True Range and ATR(14) on daily
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0  # First value has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate Williams fractals
+    bearish_fractal, bullish_fractal = compute_williams_fractals(high_1d, low_1d)
     
-    # Get 4h data for EMA crossover
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Need 2 extra daily bars for fractal confirmation (per rule 2b)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    
+    # Get weekly data for EMA200 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    close_1w = df_1w['close'].values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    # Align daily ATR and 4h EMAs to 4h timeframe
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    ema_20_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
-    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Volatility-adjusted Kelly scaling: base Kelly fraction scaled by inverse volatility
-    # Use 20-day average ATR as reference for normalization
-    atr_ma_20 = pd.Series(atr_14_aligned).rolling(window=20, min_periods=20).mean()
-    # Avoid division by zero and extreme values
-    vol_ratio = np.where(atr_ma_20 > 0, atr_ma_20.iloc if hasattr(atr_ma_20, 'iloc') else atr_ma_20, 1.0)
-    vol_ratio = np.nan_to_num(vol_ratio, nan=1.0, posinf=1.0, neginf=1.0)
-    # Invert volatility: higher vol -> lower position size
-    vol_scaling = np.where(vol_ratio > 0, 1.0 / vol_ratio, 1.0)
-    vol_scaling = np.clip(vol_scaling, 0.5, 2.0)  # Limit scaling to reasonable range
+    # Volume confirmation: current volume > 1.5x 50-period average
+    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean()
+    volume_expansion = volume > (vol_ma_50 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    base_size = 0.25  # Base position size before volatility scaling
+    position_size = 0.25
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if any required data is not ready
-        if (np.isnan(atr_14_aligned[i]) or np.isnan(ema_20_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_scaling[i])):
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
+            np.isnan(ema_200_aligned[i]) or np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Calculate volatility-adjusted position size
-        vol_adj_size = base_size * vol_scaling[i]
-        vol_adj_size = min(vol_adj_size, 0.40)  # Enforce max position size
+        # Long conditions:
+        # 1. Breakout above bearish fractal (resistance break)
+        # 2. Volume expansion
+        # 3. Above weekly EMA200 (bullish trend filter)
+        breakout_long = (close[i] > bearish_fractal_aligned[i]) and volume_expansion[i]
+        long_condition = breakout_long and (close[i] > ema_200_aligned[i])
         
-        # EMA crossover signals
-        ema_bullish = ema_20_aligned[i] > ema_50_aligned[i]
-        ema_bearish = ema_20_aligned[i] < ema_50_aligned[i]
+        # Short conditions:
+        # 1. Breakdown below bullish fractal (support break)
+        # 2. Volume expansion
+        # 3. Below weekly EMA200 (bearish trend filter)
+        breakdown_short = (close[i] < bullish_fractal_aligned[i]) and volume_expansion[i]
+        short_condition = breakdown_short and (close[i] < ema_200_aligned[i])
         
-        if ema_bullish and position != 1:
+        if long_condition and position != 1:
             position = 1
-            signals[i] = vol_adj_size
-        elif ema_bearish and position != -1:
+            signals[i] = position_size
+        elif short_condition and position != -1:
             position = -1
-            signals[i] = -vol_adj_size
+            signals[i] = -position_size
         else:
-            # Hold current position with volatility-adjusted size
-            if position == 1:
-                signals[i] = vol_adj_size
-            elif position == -1:
-                signals[i] = -vol_adj_size
-            else:
-                signals[i] = 0.0
+            # Hold current position
+            signals[i] = position_size if position == 1 else (-position_size if position == -1 else 0.0)
     
     return signals
 
-name = "4h_1d_Kelly_Criterion_With_Volatility_Scaling"
-timeframe = "4h"
+name = "12h_1d_Williams_Fractal_Breakout"
+timeframe = "12h"
 leverage = 1.0
