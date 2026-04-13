@@ -8,17 +8,26 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h primary with 1d HTF - 1d Camarilla pivot levels + 4h volume spike + 4h chop regime filter
-    # Uses proven Camarilla structure from daily timeframe for entries, with 4h timing precision
-    # Volume spike confirms institutional interest, chop filter avoids ranging markets
-    # Target: 20-50 trades over 4 years (5-12/year) for low fee drag
+    # Hypothesis: 1d primary with 1w HTF - Williams Alligator + volume confirmation
+    # Alligator (Jaw/Teeth/Lips) identifies trend direction and strength
+    # Volume confirmation filters false breakouts
+    # Target: 30-100 trades over 4 years (7-25/year) for low fee drag
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values if 'volume' in prices.columns else np.ones(len(prices))
     
-    # Get 1d data for HTF Camarilla levels
+    # Get 1w data for HTF Williams Alligator
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Get 1d data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -26,55 +35,41 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values if 'volume' in df_1d.columns else np.ones(len(df_1d))
     
-    # Calculate 1d Camarilla levels (based on previous day)
-    # Camarilla: H4 = Close + 1.1*(High-Low)/2, L4 = Close - 1.1*(High-Low)/2
-    # H3 = Close + 1.1*(High-Low)/4, L3 = Close - 1.1*(High-Low)/4
-    # H2 = Close + 1.1*(High-Low)/6, L2 = Close - 1.1*(High-Low)/6
-    # H1 = Close + 1.1*(High-Low)/12, L1 = Close - 1.1*(High-Low)/12
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan  # First bar has no previous
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Calculate Williams Alligator (13,8,5) smoothed with 5,3,2
+    # Jaw: 13-period SMMA smoothed by 8
+    # Teeth: 8-period SMMA smoothed by 5
+    # Lips: 5-period SMMA smoothed by 3
+    def smma(data, period):
+        """Smoothed Moving Average"""
+        if len(data) < period:
+            return np.full_like(data, np.nan, dtype=float)
+        result = np.full_like(data, np.nan, dtype=float)
+        # First value is SMA
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: SMMA = (PREV_SMMA*(period-1) + PRICE) / period
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    camarilla_range = prev_high - prev_low
-    camarilla_H4 = prev_close + 1.1 * camarilla_range / 2
-    camarilla_L4 = prev_close - 1.1 * camarilla_range / 2
-    camarilla_H3 = prev_close + 1.1 * camarilla_range / 4
-    camarilla_L3 = prev_close - 1.1 * camarilla_range / 4
-    camarilla_H2 = prev_close + 1.1 * camarilla_range / 6
-    camarilla_L2 = prev_close - 1.1 * camarilla_range / 6
-    camarilla_H1 = prev_close + 1.1 * camarilla_range / 12
-    camarilla_L1 = prev_close - 1.1 * camarilla_range / 12
+    # Calculate Alligator lines
+    jaw_raw = smma(close_1w, 13)
+    teeth_raw = smma(close_1w, 8)
+    lips_raw = smma(close_1w, 5)
     
-    # Calculate 4h ATR (10-period) for chop filter
-    def calculate_atr(high, low, close, window=10):
-        tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - np.roll(close, 1)[1:]))
-        tr1 = np.maximum(tr1, np.abs(low[1:] - np.roll(close, 1)[1:]))
-        tr = np.concatenate([[np.nan], tr1])
-        return pd.Series(tr).rolling(window=window, min_periods=window).mean().values
+    jaw = smma(jaw_raw, 8)
+    teeth = smma(teeth_raw, 5)
+    lips = smma(lips_raw, 3)
     
-    atr_4h = calculate_atr(high, low, close, window=10)
-    atr_ma_20 = pd.Series(atr_4h).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1d volume average (20-period)
+    vol_avg_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 4h volume average (20-period)
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Align HTF Camarilla levels to 4h timeframe
-    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
-    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
-    camarilla_H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3)
-    camarilla_L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3)
-    camarilla_H2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H2)
-    camarilla_L2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L2)
-    camarilla_H1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H1)
-    camarilla_L1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L1)
-    
-    # Align 4h indicators
-    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)  # Using 1d alignment for 4h data
-    atr_ma_20_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_20)
+    # Align all HTF/LTF indicators to 1d primary timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1w, lips)
+    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -82,29 +77,28 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_H4_aligned[i]) or 
-            np.isnan(camarilla_L4_aligned[i]) or
-            np.isnan(vol_avg_20_aligned[i]) or
-            np.isnan(atr_ma_20_aligned[i])):
+        if (np.isnan(jaw_aligned[i]) or 
+            np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or
+            np.isnan(vol_avg_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0x 20-period average
-        volume_confirmed = volume[i] > 2.0 * vol_avg_20_aligned[i]
+        # Volume confirmation: current volume > 1.3x 20-day average
+        volume_confirmed = volume_1d[i] > 1.3 * vol_avg_20_aligned[i]
         
-        # Chop regime filter: avoid extremely low volatility (choppy markets)
-        vol_filter = atr_4h[i] > 0.5 * atr_ma_20_aligned[i]
+        # Alligator conditions: Lips > Teeth > Jaw = bullish alignment
+        # Lips < Teeth < Jaw = bearish alignment
+        bullish_alignment = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
+        bearish_alignment = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
         
-        # Entry conditions: touch Camarilla H4/L4 with volume and volatility
-        touch_H4 = abs(close[i] - camarilla_H4_aligned[i]) < 0.001 * close[i]  # Within 0.1%
-        touch_L4 = abs(close[i] - camarilla_L4_aligned[i]) < 0.001 * close[i]  # Within 0.1%
+        # Entry conditions
+        enter_long = bullish_alignment and volume_confirmed
+        enter_short = bearish_alignment and volume_confirmed
         
-        enter_long = touch_L4 and volume_confirmed and vol_filter
-        enter_short = touch_H4 and volume_confirmed and vol_filter
-        
-        # Exit conditions: price reaches opposite Camarilla level or midpoint
-        exit_long = position == 1 and (close[i] >= camarilla_H4_aligned[i] or close[i] <= camarilla_L4_aligned[i])
-        exit_short = position == -1 and (close[i] <= camarilla_L4_aligned[i] or close[i] >= camarilla_H4_aligned[i])
+        # Exit conditions: opposite alignment or lips crosses jaw
+        exit_long = position == 1 and (not bullish_alignment or lips_aligned[i] <= jaw_aligned[i])
+        exit_short = position == -1 and (not bearish_alignment or lips_aligned[i] >= jaw_aligned[i])
         
         # Execute signals
         if enter_long and position != 1:
@@ -130,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_camarilla_touch_volume_vol_filter_v1"
-timeframe = "4h"
+name = "1d_1w_alligator_volume_v1"
+timeframe = "1d"
 leverage = 1.0
