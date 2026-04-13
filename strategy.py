@@ -1,36 +1,20 @@
 #!/usr/bin/env python3
 """
-4h_12h_Camarilla_Breakout_Volume
-Hypothesis: Breakout above R4 or below S4 of 12h Camarilla levels with volume expansion.
-12h Camarilla provides stronger support/resistance than 1h/4h, reducing false breakouts.
-Volume confirmation ensures institutional participation. Works in both bull (breakouts up)
-and bear (breakdowns down) markets. Target: 20-30 trades/year.
+1h_4d_Swing_Reversal
+Hypothesis: Identify swing reversals on 1h using 4h/1d trend context and volume confirmation.
+In bull markets: buy pullbacks in uptrend; in bear markets: sell rallies in downtrend.
+Uses 4h EMA for trend direction, 1d RSI for overbought/oversold conditions, and volume spikes for confirmation.
+Designed for low trade frequency (15-30/year) to minimize fee drag while capturing meaningful swings.
+Works in both bull (buy dips) and bear (sell rallies) markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels."""
-    range_val = high - low
-    range_val = np.where(range_val == 0, 1e-10, range_val)
-    C = close
-    H = high
-    L = low
-    R1 = C + ((H - L) * 1.0833)
-    R2 = C + ((H - L) * 1.1666)
-    R3 = C + ((H - L) * 1.2500)
-    R4 = C + ((H - L) * 1.5000)
-    S1 = C - ((H - L) * 1.0833)
-    S2 = C - ((H - L) * 1.1666)
-    S3 = C - ((H - L) * 1.2500)
-    S4 = C - ((H - L) * 1.5000)
-    return R1, R2, R3, R4, S1, S2, S3, S4
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -38,42 +22,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla levels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 4h data for trend (EMA21)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Calculate 12h Camarilla levels
-    R1_12h, R2_12h, R3_12h, R4_12h, S1_12h, S2_12h, S3_12h, S4_12h = calculate_camarilla(high_12h, low_12h, close_12h)
+    # Get 1d data for RSI (14-period)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Align all data to 4h timeframe
-    R4_12h_aligned = align_htf_to_ltf(prices, df_12h, R4_12h)
-    S4_12h_aligned = align_htf_to_ltf(prices, df_12h, S4_12h)
+    close_1d = df_1d['close'].values
+    # Calculate RSI manually
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d = rsi_1d.values
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume spike: current volume > 2.0 x 20-period average (conservative)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 1.5)
+    volume_spike = volume > (vol_ma_20 * 2.0)
+    
+    # Session filter: 08:00-20:00 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.25
+    position_size = 0.20  # Fixed size to minimize churn
     
-    for i in range(50, n):
-        # Skip if any required data is not ready
-        if (np.isnan(R4_12h_aligned[i]) or np.isnan(S4_12h_aligned[i]) or 
-            np.isnan(volume_expansion[i])):
+    for i in range(100, n):
+        # Skip if any data not ready or outside session
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(volume_spike[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
         
-        # Long: breakout above R4 with volume expansion
-        long_condition = (close[i] > R4_12h_aligned[i]) and volume_expansion[i]
+        # Long condition: price above 4h EMA (uptrend), RSI oversold (<30), volume spike
+        long_condition = (close[i] > ema_4h_aligned[i]) and (rsi_1d_aligned[i] < 30) and volume_spike[i]
         
-        # Short: breakdown below S4 with volume expansion
-        short_condition = (close[i] < S4_12h_aligned[i]) and volume_expansion[i]
+        # Short condition: price below 4h EMA (downtrend), RSI overbought (>70), volume spike
+        short_condition = (close[i] < ema_4h_aligned[i]) and (rsi_1d_aligned[i] > 70) and volume_spike[i]
         
         if long_condition and position != 1:
             position = 1
@@ -87,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_Camarilla_Breakout_Volume"
-timeframe = "4h"
+name = "1h_4d_Swing_Reversal"
+timeframe = "1h"
 leverage = 1.0
