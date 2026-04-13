@@ -8,90 +8,133 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1h Camarilla breakout with 4h volume confirmation and 1d trend filter
-    # Enter long when price breaks above R4 with volume > 1.5x 20-bar avg AND 1d close > 20 EMA
-    # Enter short when price breaks below S4 with volume > 1.5x 20-bar avg AND 1d close < 20 EMA
-    # Exit when price crosses the 1d close (midpoint)
-    # Uses 1d for Camarilla levels and trend, 4h for volume confirmation, 1h for timing
-    # Target: 60-150 total trades over 4 years (15-37/year) to minimize fee drag
+    # Hypothesis: 6h Elder Ray + 1d ADX regime filter
+    # Bull regime: ADX(1d) > 25 AND Bull Power > 0 → long on 6h Bull Power crossing above zero
+    # Bear regime: ADX(1d) > 25 AND Bear Power < 0 → short on 6h Bear Power crossing below zero
+    # Exit when power crosses zero opposite direction
+    # Uses Elder Ray (Bull/Bear Power) to measure trend strength relative to EMA13
+    # ADX regime filter ensures we only trade strong trends, avoiding whipsaws in ranging markets
+    # Works in bull (continuation longs) and bear (continuation shorts) by adapting to regime
+    # Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot and trend (HTF)
+    # Get 6h data for primary timeframe and Elder Ray calculation
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
+        return np.zeros(n)
+    
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    
+    # Get 1d data for ADX regime filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA20 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema_20_1d = close_1d_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate EMA13 for 6h (Elder Ray base)
+    ema13_6h = pd.Series(close_6h).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate 1d Camarilla levels (based on previous day's OHLC)
-    cam_high_low = high_1d - low_1d
-    camarilla_r4 = close_1d + (cam_high_low * 1.1 / 2)
-    camarilla_s4 = close_1d - (cam_high_low * 1.1 / 2)
-    camarilla_mid = close_1d  # midpoint is the 1d close
+    # Calculate Elder Ray components for 6h
+    bull_power_6h = high_6h - ema13_6h  # Bull Power = High - EMA13
+    bear_power_6h = low_6h - ema13_6h   # Bear Power = Low - EMA13
     
-    # Align 1d Camarilla levels and EMA to 1h timeframe
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    camarilla_mid_aligned = align_htf_to_ltf(prices, df_1d, camarilla_mid)
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    # Calculate ADX for 1d (regime filter)
+    # True Range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0  # first value has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Get 4h data for volume confirmation (HTF)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    volume_4h = df_4h['volume'].values
+    # Smooth TR, DM+, DM- with Wilder's smoothing (alpha = 1/period)
+    atr_period = 14
+    alpha = 1.0 / atr_period
+    atr = np.zeros_like(tr)
+    dm_plus_smooth = np.zeros_like(dm_plus)
+    dm_minus_smooth = np.zeros_like(dm_minus)
     
-    # Calculate 4h 20-bar average volume
-    volume_4h_series = pd.Series(volume_4h)
-    avg_volume_4h = volume_4h_series.rolling(window=20, min_periods=20).mean().values
+    # Initialize first values
+    if len(tr) >= atr_period:
+        atr[atr_period-1] = np.mean(tr[:atr_period])
+        dm_plus_smooth[atr_period-1] = np.mean(dm_plus[:atr_period])
+        dm_minus_smooth[atr_period-1] = np.mean(dm_minus[:atr_period])
+        
+        # Wilder's smoothing for remaining values
+        for i in range(atr_period, len(tr)):
+            atr[i] = alpha * tr[i] + (1 - alpha) * atr[i-1]
+            dm_plus_smooth[i] = alpha * dm_plus[i] + (1 - alpha) * dm_plus_smooth[i-1]
+            dm_minus_smooth[i] = alpha * dm_minus[i] + (1 - alpha) * dm_minus_smooth[i-1]
     
-    # Align 4h volume average to 1h timeframe
-    avg_volume_4h_aligned = align_htf_to_ltf(prices, df_4h, avg_volume_4h)
+    # Avoid division by zero
+    dm_plus_smooth = np.where(dm_plus_smooth == 0, 1e-10, dm_plus_smooth)
+    dm_minus_smooth = np.where(dm_minus_smooth == 0, 1e-10, dm_minus_smooth)
+    atr_safe = np.where(atr == 0, 1e-10, atr)
     
-    # Volume confirmation: volume > 1.5x 4h 20-bar average volume
-    volume_confirmed = volume > (1.5 * avg_volume_4h_aligned)
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / atr_safe
+    di_minus = 100 * dm_minus_smooth / atr_safe
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # DX and ADX
+    dx = np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100
+    adx = np.zeros_like(dx)
+    
+    # Wilder's smoothing for ADX
+    if len(dx) >= atr_period:
+        adx[atr_period-1] = np.mean(dx[:atr_period])
+        for i in range(atr_period, len(dx)):
+            adx[i] = alpha * dx[i] + (1 - alpha) * adx[i-1]
+    
+    # Align 1d ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Align 6h Elder Ray components to 6h timeframe (no alignment needed, but for consistency)
+    bull_power_6h_aligned = align_htf_to_ltf(prices, df_6h, bull_power_6h)
+    bear_power_6h_aligned = align_htf_to_ltf(prices, df_6h, bear_power_6h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
-    for i in range(20, n):  # start from 20 to ensure indicators are ready
-        # Skip if data not ready or outside session
-        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or np.isnan(camarilla_mid_aligned[i]) or
-            np.isnan(ema_20_1d_aligned[i]) or np.isnan(volume_confirmed[i]) or not session_filter[i]):
+    for i in range(1, n):
+        # Skip if data not ready
+        if (np.isnan(bull_power_6h_aligned[i]) or np.isnan(bear_power_6h_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(ema13_6h[i])):
             signals[i] = 0.0
             continue
         
-        # Camarilla breakout conditions (using current bar's close vs current bar's levels)
-        breakout_up = close[i] > camarilla_r4_aligned[i]  # break above R4
-        breakout_down = close[i] < camarilla_s4_aligned[i]  # break below S4
+        # Regime conditions
+        strong_trend = adx_aligned[i] > 25
+        bull_regime = strong_trend and (bull_power_6h_aligned[i] > 0)
+        bear_regime = strong_trend and (bear_power_6h_aligned[i] < 0)
         
-        # Trend filter: 1d close above/below 20 EMA
-        uptrend = close_1d_aligned[i] > ema_20_1d_aligned[i] if 'close_1d_aligned' in locals() else close[i] > ema_20_1d_aligned[i]
-        downtrend = close_1d_aligned[i] < ema_20_1d_aligned[i] if 'close_1d_aligned' in locals() else close[i] < ema_20_1d_aligned[i]
+        # Entry conditions: power crossing zero in direction of regime
+        bull_cross_up = (bull_power_6h_aligned[i-1] <= 0 and bull_power_6h_aligned[i] > 0)
+        bear_cross_down = (bear_power_6h_aligned[i-1] >= 0 and bear_power_6h_aligned[i] < 0)
         
-        # Entry conditions with volume confirmation and trend filter
-        long_entry = breakout_up and volume_confirmed[i] and uptrend and position != 1
-        short_entry = breakout_down and volume_confirmed[i] and downtrend and position != -1
+        long_entry = bull_regime and bull_cross_up and position != 1
+        short_entry = bear_regime and bear_cross_down and position != -1
         
-        # Exit conditions
-        exit_long = (position == 1 and close[i] < camarilla_mid_aligned[i])
-        exit_short = (position == -1 and close[i] > camarilla_mid_aligned[i])
+        # Exit conditions: power crossing zero opposite direction
+        exit_long = (position == 1 and bear_power_6h_aligned[i] > 0)  # Bear Power positive = exit long
+        exit_short = (position == -1 and bull_power_6h_aligned[i] < 0)  # Bull Power negative = exit short
         
         # Execute signals
         if long_entry:
@@ -117,6 +160,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4d_camarilla_breakout_volume_trend_v1"
-timeframe = "1h"
+name = "6h_1d_elder_ray_adx_regime_v1"
+timeframe = "6h"
 leverage = 1.0
