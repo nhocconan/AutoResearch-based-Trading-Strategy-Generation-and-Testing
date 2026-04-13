@@ -13,7 +13,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for Donchian channels and volume
+    # Daily data for 6-hour analysis
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -23,9 +23,10 @@ def generate_signals(prices):
     if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 20-day Donchian channel on daily high/low
+    # Calculate 20-day Donchian channel on daily
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    
     donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
@@ -36,7 +37,7 @@ def generate_signals(prices):
     volume_1d = df_1d['volume'].values
     volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all data to 4-hour timeframe
+    # Align all data to 6-hour timeframe
     donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
@@ -53,10 +54,10 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current 4h volume > 1.5x daily volume MA (adjusted for 4h)
-        # 6 4h periods per day, so daily MA/6 = approximate 4h period MA
-        volume_4h_approx_ma = volume_ma_20_1d_aligned[i] / 6
-        volume_condition = volume[i] > (volume_4h_approx_ma * 1.5)
+        # Volume condition: current 6h volume > 1.5x daily volume MA (adjusted for 6h)
+        # 4 6h periods per day, so daily MA/4 = approximate 6h period MA
+        volume_6h_approx_ma = volume_ma_20_1d_aligned[i] / 4
+        volume_condition = volume[i] > (volume_6h_approx_ma * 1.5)
         
         # Trend filter: weekly EMA20 direction
         # Long when price > weekly EMA20
@@ -96,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d1w_Donchian_Breakout_Volume_Trend_Filter_v1"
-timeframe = "4h"
+name = "6h_1d1w_Donchian_Breakout_Volume_Trend_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
