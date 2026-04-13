@@ -8,13 +8,13 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Donchian(20) breakout + 1d weekly pivot confirmation + volume spike
-    # Long when: price breaks above 6h Donchian upper (20) AND price > 1d weekly pivot R4 AND volume > 1.5x 20-bar avg
-    # Short when: price breaks below 6h Donchian lower (20) AND price < 1d weekly pivot S4 AND volume > 1.5x 20-bar avg
-    # Exit when: price crosses 6h Donchian midpoint OR weekly pivot PP
-    # Uses discrete sizing (0.25) targeting 50-150 total trades over 4 years.
-    # Donchian provides structure; weekly pivot R4/S4 filters weak breaks; volume confirms validity.
-    # Works in bull (breakouts with continuation) and bear (strong down breaks only).
+    # Hypothesis: 12h Donchian(15) breakout + 1d weekly pivot R4/S4 filter + volume confirmation
+    # Long when: price breaks above 12h Donchian upper (15) AND close > weekly R4 AND volume > 1.8x 20-bar avg
+    # Short when: price breaks below 12h Donchian lower (15) AND close < weekly S4 AND volume > 1.8x 20-bar avg
+    # Exit when: price crosses 12h Donchian midpoint OR weekly pivot PP
+    # Uses discrete sizing (0.25) targeting 12-37 trades/year on 12h timeframe.
+    # Weekly pivot acts as strong institutional level filter; volume confirms breakout validity.
+    # Works in bull (strong continuation breaks) and bear (only strong down breaks traded).
     
     close = prices['close'].values
     high = prices['high'].values
@@ -30,11 +30,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot levels from previous 1d bar (using prior week's H/L/C)
-    # We approximate weekly by using rolling window of 5 days on 1d data
-    # For simplicity, we use prior 1d bar's weekly pivot (standard in many platforms)
-    # Weekly PP = (Weekly_H + Weekly_L + Weekly_C) / 3
-    # We'll use 5-day rolling high/low/close on 1d to approximate weekly
+    # Calculate weekly pivot levels from 5-day rolling window on 1d data
     if len(high_1d) >= 5:
         weekly_high = pd.Series(high_1d).rolling(window=5, min_periods=5).max().values
         weekly_low = pd.Series(low_1d).rolling(window=5, min_periods=5).min().values
@@ -48,20 +44,20 @@ def generate_signals(prices):
     R4_weekly = PP_weekly + (weekly_high - weekly_low) * 1.1 / 2.0  # R4 = PP + 1.1*(H-L)
     S4_weekly = PP_weekly - (weekly_high - weekly_low) * 1.1 / 2.0  # S4 = PP - 1.1*(H-L)
     
-    # Calculate 6h Donchian channels (20-period)
-    donchian_window = 20
+    # Calculate 12h Donchian channels (15-period for fewer signals)
+    donchian_window = 15
     donchian_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
     donchian_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     donchian_mid = (donchian_high + donchian_low) / 2.0
     
-    # Align HTF indicators to 6h timeframe (wait for completed 1d bar)
+    # Align HTF indicators to 12h timeframe (wait for completed 1d bar)
     R4_weekly_aligned = align_htf_to_ltf(prices, df_1d, R4_weekly)
     S4_weekly_aligned = align_htf_to_ltf(prices, df_1d, S4_weekly)
     PP_weekly_aligned = align_htf_to_ltf(prices, df_1d, PP_weekly)
     
-    # Calculate volume confirmation: volume > 1.5x 20-bar average volume
+    # Volume confirmation: volume > 1.8x 20-bar average volume (stricter for fewer trades)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (1.5 * avg_volume)
+    volume_confirmed = volume > (1.8 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -115,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_donchian_weekly_pivot_volume_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_weekly_pivot_volume_v1"
+timeframe = "12h"
 leverage = 1.0
