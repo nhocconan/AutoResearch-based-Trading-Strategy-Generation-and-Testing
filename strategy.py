@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1d RSI(14) mean reversion filter.
-# In strong trends, price breaks Donchian channels and continues. In ranging markets,
-# RSI extremes reverse. Combining both adapts to market regime.
-# Uses 1d RSI to avoid counter-trend entries in strong trends, improving win rate.
-# Target: 15-25 trades per year (60-100 total over 4 years) for 6h timeframe.
+# Hypothesis: 12h Donchian breakout with weekly trend filter and volume confirmation.
+# Weekly trend ensures alignment with higher timeframe direction.
+# Donchian breakouts capture momentum in trending markets.
+# Volume confirmation ensures breakouts have institutional participation.
+# Target: 12-30 trades per year (48-120 total over 4 years) for 12h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,73 +19,91 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for RSI filter
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    # Daily data for Donchian channels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Donchian channels (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
+    # Calculate weekly EMA trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = np.zeros(len(close_1w))
+    ema_multiplier = 2 / (21 + 1)
+    ema_1w[0] = close_1w[0]
+    for i in range(1, len(close_1w)):
+        ema_1w[i] = (close_1w[i] - ema_1w[i-1]) * ema_multiplier + ema_1w[i-1]
+    
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # Calculate daily Donchian channels (20-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    upper_channel = np.full(len(high_1d), np.nan)
+    lower_channel = np.full(len(low_1d), np.nan)
+    
+    for i in range(20, len(high_1d)):
+        upper_channel[i] = np.max(high_1d[i-20:i])
+        lower_channel[i] = np.min(low_1d[i-20:i])
+    
+    upper_channel_aligned = align_htf_to_ltf(prices, df_1d, upper_channel)
+    lower_channel_aligned = align_htf_to_ltf(prices, df_1d, lower_channel)
+    
+    # Calculate average volume (20-period) for volume confirmation
+    avg_volume = np.full(n, np.nan)
     for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
-    
-    # Calculate 14-period RSI on daily timeframe
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])  # First average of first 14 gains
-    avg_loss[13] = np.mean(loss[1:14])  # First average of first 14 losses
-    
-    for i in range(14, len(close_1d)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi_14 = 100 - (100 / (1 + rs))
-    
-    # Align daily RSI to 6h timeframe
-    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
+        avg_volume[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(rsi_14_aligned[i])):
+        if (np.isnan(ema_1w_aligned[i]) or 
+            np.isnan(upper_channel_aligned[i]) or 
+            np.isnan(lower_channel_aligned[i]) or 
+            np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        vol = volume[i]
+        avg_vol = avg_volume[i]
+        weekly_ema = ema_1w_aligned[i]
+        upper = upper_channel_aligned[i]
+        lower = lower_channel_aligned[i]
+        
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirm = vol > 1.5 * avg_vol
         
         if position == 0:
-            # Long: price breaks above Donchian high AND daily RSI not overbought (<70)
-            if price > donchian_high[i] and rsi_14_aligned[i] < 70:
+            # Long: price breaks above upper Donchian channel with volume + above weekly EMA
+            if price > upper and volume_confirm and price > weekly_ema:
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below Donchian low AND daily RSI not oversold (>30)
-            elif price < donchian_low[i] and rsi_14_aligned[i] > 30:
+            # Short: price breaks below lower Donchian channel with volume + below weekly EMA
+            elif price < lower and volume_confirm and price < weekly_ema:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to Donchian low (mean reversion) or RSI overbought
-            if price < donchian_low[i] or rsi_14_aligned[i] >= 70:
+            # Exit long: price returns to midline or breaks below lower channel
+            midline = (upper + lower) / 2
+            if price < midline or price < lower:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to Donchian high (mean reversion) or RSI oversold
-            if price > donchian_high[i] or rsi_14_aligned[i] <= 30:
+            # Exit short: price returns to midline or breaks above upper channel
+            midline = (upper + lower) / 2
+            if price > midline or price > upper:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -93,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Donchian_RSI_Filter_v1"
-timeframe = "6h"
+name = "12h_1d_1w_Donchian_Breakout_Volume_Trend_v1"
+timeframe = "12h"
 leverage = 1.0
