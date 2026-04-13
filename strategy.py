@@ -3,107 +3,124 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h timeframe with 12h Williams Alligator and 1d trend filter.
-# Williams Alligator uses smoothed medians (Jaws, Teeth, Lips) to detect trends.
-# Long: Price above all three lines (bullish alignment) + price > 1d EMA50.
-# Short: Price below all three lines (bearish alignment) + price < 1d EMA50.
-# Exit: Price crosses back through the middle line (Teeth).
-# Uses 12h for trend structure (Alligator), 1d for trend filter, 6h for entry/exit.
-# Williams Alligator is less common than basic MAs, offering potential edge.
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
+# Hypothesis: 4h strategy using 1-day Bollinger Bands squeeze and mean reversion.
+# Long: Bollinger Bands width at 20-day low + price below lower band + volume spike.
+# Short: Bollinger Bands width at 20-day low + price above upper band + volume spike.
+# Exit: Price crosses back inside Bollinger Bands.
+# Bollinger squeeze indicates low volatility, often preceding mean-reverting moves.
+# Volume spike confirms participation in the breakout/mean reversion.
+# Works in both bull and bear markets as it captures reversals from overextended conditions.
+# Target: 20-50 trades per year (~80-200 total over 4 years) to avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # 12h data for Williams Alligator
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 13:
-        return np.zeros(n)
+    # Session filter: 08-20 UTC (pre-compute hours)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    median_12h = (df_12h['high'].values + df_12h['low'].values) / 2.0
-    
-    # Williams Alligator lines (all use SMMA-like smoothing via EMA with specific periods)
-    # Jaws: 13-period SMMA shifted 8 bars ahead
-    # Teeth: 8-period SMMA shifted 5 bars ahead  
-    # Lips: 5-period SMMA shifted 3 bars ahead
-    jaws = pd.Series(median_12h).ewm(span=13, adjust=False).mean().values
-    teeth = pd.Series(median_12h).ewm(span=8, adjust=False).mean().values
-    lips = pd.Series(median_12h).ewm(span=5, adjust=False).mean().values
-    
-    # Apply the forward shifts (Alligator specific)
-    jaws = np.roll(jaws, 8)
-    teeth = np.roll(teeth, 5)
-    lips = np.roll(lips, 3)
-    # Set invalid values from roll to NaN
-    jaws[:8] = np.nan
-    teeth[:5] = np.nan
-    lips[:3] = np.nan
-    
-    # 1d data for EMA50 trend filter
+    # 1d data for Bollinger Bands
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Align 12h Alligator lines to 6h
-    jaws_aligned = align_htf_to_ltf(prices, df_12h, jaws)
-    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
+    # Bollinger Bands (20-period, 2 std dev)
+    sma_20 = np.full(len(close_1d), np.nan)
+    std_20 = np.full(len(close_1d), np.nan)
+    bb_upper = np.full(len(close_1d), np.nan)
+    bb_lower = np.full(len(close_1d), np.nan)
+    bb_width = np.full(len(close_1d), np.nan)
     
-    # Align 1d EMA50 to 6h
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    for i in range(20, len(close_1d)):
+        sma_20[i] = np.mean(close_1d[i-20:i])
+        std_20[i] = np.std(close_1d[i-20:i])
+        bb_upper[i] = sma_20[i] + 2 * std_20[i]
+        bb_lower[i] = sma_20[i] - 2 * std_20[i]
+        bb_width[i] = bb_upper[i] - bb_lower[i]
+    
+    # Bollinger Bands width percentile (20-day lookback)
+    bb_width_percentile = np.full(len(bb_width), np.nan)
+    for i in range(40, len(bb_width)):  # Need 20 for BB + 20 for percentile lookback
+        window = bb_width[i-20:i]
+        if not np.all(np.isnan(window)):
+            bb_width_percentile[i] = (np.sum(window < bb_width[i]) / 20) * 100
+    
+    # Average volume (20-period) for volume confirmation
+    avg_volume_1d = np.full(len(volume), np.nan)
+    for i in range(20, len(volume)):
+        avg_volume_1d[i] = np.mean(volume[i-20:i])
+    
+    # Align 1d indicators to 4h
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
+    bb_width_percentile_aligned = align_htf_to_ltf(prices, df_1d, bb_width_percentile)
+    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(13, n):  # Start after max lookback
+    for i in range(40, n):  # Start after sufficient lookback
         # Skip if any required data is not ready
-        if (np.isnan(jaws_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or 
+            np.isnan(bb_width_percentile_aligned[i]) or np.isnan(avg_volume_1d_aligned[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Session filter: 08-20 UTC
+        hour = hours[i]
+        if not (8 <= hour <= 20):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        jaw = jaws_aligned[i]
-        tooth = teeth_aligned[i]
-        lip = lips_aligned[i]
-        ema_trend = ema_50_1d_aligned[i]
+        vol = volume[i]
+        avg_vol = avg_volume_1d_aligned[i]
+        upper = bb_upper_aligned[i]
+        lower = bb_lower_aligned[i]
+        width_percentile = bb_width_percentile_aligned[i]
+        
+        # Volume confirmation: current volume > 2.0x average volume
+        volume_confirm = vol > 2.0 * avg_vol
+        
+        # Bollinger squeeze condition: width at or below 10th percentile (low volatility)
+        squeeze_condition = width_percentile <= 10
         
         if position == 0:
-            # Bullish alignment: Lips > Teeth > Jaws (all above)
-            bullish_align = (lip > tooth) and (tooth > jaw)
-            # Bearish alignment: Lips < Teeth < Jaws (all below)
-            bearish_align = (lip < tooth) and (tooth < jaw)
-            
-            # Long: bullish alignment + above EMA50
-            if bullish_align and (price > ema_trend):
+            # Long: squeeze + price at or below lower band + volume spike
+            if (squeeze_condition and 
+                price <= lower and
+                volume_confirm):
                 position = 1
                 signals[i] = position_size
-            # Short: bearish alignment + below EMA50
-            elif bearish_align and (price < ema_trend):
+            # Short: squeeze + price at or above upper band + volume spike
+            elif (squeeze_condition and 
+                  price >= upper and
+                  volume_confirm):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below Teeth (middle line) or below EMA50
-            if (price < tooth) or (price < ema_trend):
+            # Exit long: price crosses above the middle (SMA) or stop if too adverse
+            if price >= sma_20[i] if i < len(sma_20) and not np.isnan(sma_20[i]) else False:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above Teeth (middle line) or above EMA50
-            if (price > tooth) or (price > ema_trend):
+            # Exit short: price crosses below the middle (SMA)
+            if price <= sma_20[i] if i < len(sma_20) and not np.isnan(sma_20[i]) else False:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -111,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_1d_Williams_Alligator_EMA"
-timeframe = "6h"
+name = "4h_1d_Bollinger_Squeeze_MeanReversion"
+timeframe = "4h"
 leverage = 1.0
