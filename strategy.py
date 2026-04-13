@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h Bollinger Band Squeeze Breakout with Volume Confirmation and 1-day ADX Trend Filter.
-Trades breakouts from low volatility (Bollinger Band squeeze) confirmed by volume spikes,
-only in trending markets (1-day ADX > 25) to avoid false breakouts in ranging conditions.
-Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year).
-Works in both bull and bear markets by trading breakouts in the direction of the trend.
+4h Triangular Moving Average (TMA) Slope with Volume Confirmation and 12h Trend Filter.
+Trades in direction of TMA slope on 4h timeframe, confirmed by volume spikes,
+only when 12h timeframe shows strong trend (ADX > 25). Designed for 4h timeframe
+to target 75-200 total trades over 4 years (19-50/year).
+Works in both bull and bear markets by trading with the trend.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,65 +21,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Bollinger Bands
+    # Get 4h data for TMA calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
+        return np.zeros(n)
+    
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    
+    # Triangular Moving Average (TMA) = SMA of SMA
+    tma_period = 21
+    sma1 = pd.Series(close_4h).rolling(window=tma_period, min_periods=tma_period).mean().values
+    tma = pd.Series(sma1).rolling(window=tma_period, min_periods=tma_period).mean().values
+    
+    # TMA slope: positive = uptrend, negative = downtrend
+    tma_slope = np.diff(tma, prepend=tma[0])
+    
+    # Get 12h data for ADX trend filter
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) < 30:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2
-    sma = pd.Series(close_12h).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std = pd.Series(close_12h).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper = sma + (bb_std * std)
-    lower = sma - (bb_std * std)
-    bb_width = upper - lower
-    
-    # Bollinger Band Squeeze: width < 20-period average width
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    squeeze = bb_width < bb_width_ma
-    
-    # Breakout: close > upper band (long) or close < lower band (short)
-    breakout_up = close_12h > upper
-    breakout_down = close_12h < lower
-    
-    # Align to 12h timeframe (primary)
-    squeeze_aligned = align_htf_to_ltf(prices, df_12h, squeeze.astype(float))
-    breakout_up_aligned = align_htf_to_ltf(prices, df_12h, breakout_up.astype(float))
-    breakout_down_aligned = align_htf_to_ltf(prices, df_12h, breakout_down.astype(float))
-    
-    # Get 1d data for volume and ADX
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
-    
-    volume_1d = df_1d['volume'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Volume spike: volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_1d > (vol_ma_20 * 1.5)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
-    
-    # 1-day ADX (14-period) for trend filter
     # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], 
-                        np.maximum(tr1, np.maximum(tr2, tr3))])
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr0 = np.max([high_12h[0] - low_12h[0], np.abs(high_12h[0] - close_12h[0]), np.abs(low_12h[0] - close_12h[0])])
+    tr = np.concatenate([[tr0], np.maximum(tr1, np.maximum(tr2, tr3))])
     
     # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
+                       np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
+    dm_minus = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
+                        np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
     dm_plus = np.concatenate([[0], dm_plus])
     dm_minus = np.concatenate([[0], dm_minus])
     
@@ -96,9 +75,17 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # ADX > 25 = trending market (good for breakouts)
-    trending = adx > 25
-    trending_aligned = align_htf_to_ltf(prices, df_1d, trending.astype(float))
+    # ADX > 25 = strong trend
+    strong_trend = adx > 25
+    
+    # Volume spike: volume > 1.8x 20-period average on 4h
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma_20 * 1.8)
+    
+    # Align indicators to lower timeframe (4h)
+    tma_slope_aligned = align_htf_to_ltf(prices, df_4h, tma_slope)
+    strong_trend_aligned = align_htf_to_ltf(prices, df_12h, strong_trend.astype(float))
+    vol_spike_aligned = align_htf_to_ltf(prices, df_4h, vol_spike.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -106,26 +93,23 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(squeeze_aligned[i]) or 
-            np.isnan(breakout_up_aligned[i]) or 
-            np.isnan(breakout_down_aligned[i]) or 
-            np.isnan(vol_spike_aligned[i]) or 
-            np.isnan(trending_aligned[i])):
+        if (np.isnan(tma_slope_aligned[i]) or 
+            np.isnan(strong_trend_aligned[i]) or 
+            np.isnan(vol_spike_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: Bollinger breakout + volume spike + trending market
-        long_entry = (breakout_up_aligned[i] > 0.5 and 
+        # Entry conditions: TMA slope direction + volume spike + strong trend
+        long_entry = (tma_slope_aligned[i] > 0 and 
                       vol_spike_aligned[i] > 0.5 and 
-                      trending_aligned[i] > 0.5)
-        short_entry = (breakout_down_aligned[i] > 0.5 and 
+                      strong_trend_aligned[i] > 0.5)
+        short_entry = (tma_slope_aligned[i] < 0 and 
                        vol_spike_aligned[i] > 0.5 and 
-                       trending_aligned[i] > 0.5)
+                       strong_trend_aligned[i] > 0.5)
         
-        # Exit when price returns to middle Bollinger Band (SMA)
-        sma_aligned = align_htf_to_ltf(prices, df_12h, sma)
-        exit_long = position == 1 and close[i] <= sma_aligned[i]
-        exit_short = position == -1 and close[i] >= sma_aligned[i]
+        # Exit when TMA slope changes sign
+        exit_long = position == 1 and tma_slope_aligned[i] <= 0
+        exit_short = position == -1 and tma_slope_aligned[i] >= 0
         
         # Execute signals
         if long_entry and position != 1:
@@ -148,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_bb_squeeze_breakout_volume_trend"
-timeframe = "12h"
+name = "4h_tma_slope_volume_trend"
+timeframe = "4h"
 leverage = 1.0
