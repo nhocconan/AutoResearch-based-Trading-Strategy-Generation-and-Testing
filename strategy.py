@@ -8,12 +8,12 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Camarilla pivot breakout from 1d with volume confirmation.
+    # Hypothesis: 12h Camarilla pivot breakout from 1d with volume confirmation.
     # Long when price breaks above Camarilla H3 level with volume spike.
     # Short when price breaks below Camarilla L3 level with volume spike.
     # Exit when price returns to Camarilla pivot point (mean reversion).
-    # Uses 1d Camarilla levels aligned to 4h bars. Discrete size 0.25 to minimize fee churn.
-    # Target: 75-200 total trades over 4 years (19-50/year).
+    # Uses 1d Camarilla levels aligned to 12h bars. Discrete size 0.25 to minimize fee churn.
+    # Target: 50-150 total trades over 4 years (12-37/year).
     
     close = prices['close'].values
     high = prices['high'].values
@@ -52,7 +52,7 @@ def generate_signals(prices):
     volume_series = pd.Series(volume_1d)
     vol_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     
-    # Align HTF indicators to 4h timeframe
+    # Align HTF indicators to 12h timeframe
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
@@ -105,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_camarilla_breakout_volume_v1"
-timeframe = "4h"
+name = "12h_1d_camarilla_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
