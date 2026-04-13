@@ -13,22 +13,22 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12h data for ATR and price action
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    # Daily data for pivot levels and volume
+    # Daily data for pivot levels and volatility
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Calculate daily ATR for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate daily Camarilla pivot levels (using previous day's data)
+    # Previous day's OHLC for Camarilla pivot levels
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
@@ -37,34 +37,18 @@ def generate_signals(prices):
     pivot = (prev_high + prev_low + prev_close) / 3
     range_hl = prev_high - prev_low
     
-    # Resistance levels
-    r3 = pivot + (range_hl * 1.1 / 4)
-    r4 = pivot + (range_hl * 1.1 / 2)
+    # Key levels: S1, S2, R1, R2 (most significant)
+    s1 = pivot - (range_hl * 1.1 / 12)
+    s2 = pivot - (range_hl * 1.1 / 6)
+    r1 = pivot + (range_hl * 1.1 / 12)
+    r2 = pivot + (range_hl * 1.1 / 6)
     
-    # Support levels
-    s3 = pivot - (range_hl * 1.1 / 4)
-    s4 = pivot - (range_hl * 1.1 / 2)
-    
-    # 12h ATR for volatility filter
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Weekly EMA for trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean()
-    
-    # Align all data to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w.values)
+    # Align all data to 4h timeframe
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -72,44 +56,41 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(s4_aligned[i]) or np.isnan(atr_12h_aligned[i]) or np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or
+            np.isnan(atr_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when ATR is above its 50-period average (avoid low volatility)
-        atr_ma_50 = pd.Series(atr_12h_aligned).rolling(window=50, min_periods=50).mean()[i]
-        vol_filter = atr_12h_aligned[i] > atr_ma_50
+        # Volatility filter: only trade when ATR is above its 50-period average (avoid low volatility chop)
+        atr_ma_50 = pd.Series(atr_1d_aligned[:i+1]).rolling(window=50, min_periods=50).mean().iloc[-1] if i >= 99 else np.nan
+        if np.isnan(atr_ma_50) or atr_1d_aligned[i] < atr_ma_50:
+            signals[i] = 0.0 if position == 0 else (position_size if position == 1 else -position_size)
+            continue
         
-        # Trend filter: only long when price > weekly EMA50, short when price < weekly EMA50
-        long_trend = close[i] > ema_50_1w_aligned[i]
-        short_trend = close[i] < ema_50_1w_aligned[i]
-        
-        # Entry conditions: breakout of S3/R3 with volume and trend confirmation
-        # Long when price breaks above S3 with volatility and uptrend
-        # Short when price breaks below R3 with volatility and downtrend
-        long_breakout = close[i] > s3_aligned[i] and close[i-1] <= s3_aligned[i-1]
-        short_breakout = close[i] < r3_aligned[i] and close[i-1] >= r3_aligned[i-1]
+        # Entry conditions: price near S1/S2 for long, R1/R2 for short
+        near_support = (close[i] <= s1_aligned[i] * 1.005) or (close[i] <= s2_aligned[i] * 1.005)
+        near_resistance = (close[i] >= r1_aligned[i] * 0.995) or (close[i] >= r2_aligned[i] * 0.995)
         
         if position == 0:
-            if long_breakout and vol_filter and long_trend:
+            if near_support:
                 position = 1
                 signals[i] = position_size
-            elif short_breakout and vol_filter and short_trend:
+            elif near_resistance:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit when price reaches S4 (strong support) or shows reversal
-            if close[i] <= s4_aligned[i] or close[i] < ema_50_1w_aligned[i]:
+            # Exit when price reaches pivot level or shows rejection
+            if close[i] >= ((s1_aligned[i] + s2_aligned[i]) / 2) * 1.002:  # Midpoint of S1-S2
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit when price reaches R4 (strong resistance) or shows reversal
-            if close[i] >= r4_aligned[i] or close[i] > ema_50_1w_aligned[i]:
+            # Exit when price reaches pivot level or shows rejection
+            if close[i] <= ((r1_aligned[i] + r2_aligned[i]) / 2) * 0.998:  # Midpoint of R1-R2
                 position = 0
                 signals[i] = 0.0
             else:
@@ -117,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_1d1w_Camarilla_Breakout_ATR_Volume_Filter_v1"
-timeframe = "6h"
+name = "4h_1d_Camarilla_Pivot_Volatility_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
