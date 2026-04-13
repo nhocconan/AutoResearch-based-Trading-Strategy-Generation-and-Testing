@@ -1,58 +1,76 @@
-#!/usr/bin/env python3
-"""
-1d_1w_rsi_extreme_mean_reversion_v2
-Hypothesis: In bear markets (2025-2026), extreme daily RSI readings combined with weekly trend exhaustion provide high-probability mean reversion opportunities. Uses RSI < 25 for longs and RSI > 75 for shorts, filtered by weekly ADX < 20 to identify ranging/weak trend conditions where mean reversion works best. Targets 15-25 trades/year to minimize fee drag.
-"""
+# 12h_1d_1w_camarilla_breakout_volume
+# Hypothesis: Combines 1-day and 1-week price action with volume expansion on 12h chart
+# Uses 1-day high/low range to calculate breakout levels, confirmed by 12h volume expansion
+# and filtered by 1-week ADX to avoid choppy markets. Works in both bull and bear markets
+# by trading breakouts in the direction of higher timeframe trend. Targets 12-37 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_rsi(close, period=14):
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
     
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    avg_gain[period] = np.mean(gain[1:period+1])
-    avg_loss[period] = np.mean(loss[1:period+1])
+    # Get 1d data for breakout levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    for i in range(period+1, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
-def calculate_adx(high, low, close, period=14):
-    plus_dm = np.zeros_like(high)
-    minus_dm = np.zeros_like(high)
-    tr = np.zeros_like(high)
+    # Calculate breakout levels: previous day high/low + 0.5x ATR
+    hl_range = high_1d - low_1d
+    atr_1d = pd.Series(hl_range).rolling(window=14, min_periods=14).mean().values
+    upper_breakout = high_1d + 0.5 * atr_1d
+    lower_breakout = low_1d - 0.5 * atr_1d
     
-    for i in range(1, len(high)):
-        plus_dm[i] = max(high[i] - high[i-1], 0)
-        minus_dm[i] = max(low[i-1] - low[i], 0)
-        if plus_dm[i] < minus_dm[i]:
-            plus_dm[i] = 0
-        if minus_dm[i] < plus_dm[i]:
-            minus_dm[i] = 0
-            
-        tr[i] = max(high[i] - low[i], 
-                   abs(high[i] - close[i-1]), 
-                   abs(low[i] - close[i-1]))
+    # Volume confirmation: 12h volume > 1.8x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_expansion = volume > (vol_ma_20 * 1.8)
     
-    atr = np.zeros_like(high)
-    plus_di = np.zeros_like(high)
-    minus_di = np.zeros_like(high)
-    dx = np.zeros_like(high)
+    # Get 1w data for ADX trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
+        return np.zeros(n)
     
-    if len(high) > period:
-        atr[period-1] = np.mean(tr[1:period]) if period > 1 else tr[1]
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate ADX (14) on weekly data
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(high[i] - high[i-1], 0)
+            minus_dm[i] = max(low[i-1] - low[i], 0)
+            if plus_dm[i] < minus_dm[i]:
+                plus_dm[i] = 0
+            if minus_dm[i] < plus_dm[i]:
+                minus_dm[i] = 0
+                
+            tr[i] = max(high[i] - low[i], 
+                       abs(high[i] - close[i-1]), 
+                       abs(low[i] - close[i-1]))
+        
+        # Smooth with Wilder's smoothing
+        atr = np.zeros_like(high)
         plus_dm_smooth = np.zeros_like(high)
         minus_dm_smooth = np.zeros_like(high)
+        dx = np.zeros_like(high)
+        
+        atr[period-1] = np.mean(tr[1:period]) if period > 1 else tr[1]
         plus_dm_smooth[period-1] = np.mean(plus_dm[1:period]) if period > 1 else plus_dm[1]
         minus_dm_smooth[period-1] = np.mean(minus_dm[1:period]) if period > 1 else minus_dm[1]
         
@@ -65,71 +83,47 @@ def calculate_adx(high, low, close, period=14):
                 plus_di[i] = 100 * plus_dm_smooth[i] / atr[i]
                 minus_di[i] = 100 * minus_dm_smooth[i] / atr[i]
                 dx[i] = (abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])) * 100
-    
-    adx = np.zeros_like(high)
-    if len(high) > 2*period-1:
+        
+        # Calculate ADX as smoothed DX
+        adx = np.zeros_like(high)
         adx[2*period-2] = np.mean(dx[period-1:2*period-1]) if (2*period-1) < len(dx) else 0
         for i in range(2*period-1, len(high)):
             adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
             
-    return adx
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 50:
-        return np.zeros(n)
+        return adx
     
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    
-    # Get 1d data for RSI calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    
-    # Calculate daily RSI
-    rsi_1d = calculate_rsi(close_1d, 14)
-    
-    # Get 1w data for ADX trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly ADX
     adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
     
-    # Align all signals to daily timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Align all signals to 12h timeframe
+    upper_breakout_aligned = align_htf_to_ltf(prices, df_1d, upper_breakout)
+    lower_breakout_aligned = align_htf_to_ltf(prices, df_1d, lower_breakout)
+    volume_expansion_aligned = align_htf_to_ltf(prices, df_1d, volume_expansion.astype(float))
     adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% of capital
     
-    for i in range(30, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(rsi_1d_aligned[i]) or 
+        if (np.isnan(upper_breakout_aligned[i]) or 
+            np.isnan(lower_breakout_aligned[i]) or 
+            np.isnan(volume_expansion_aligned[i]) or 
             np.isnan(adx_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade when ADX < 20 (ranging/weak trend)
-        ranging_market = adx_1w_aligned[i] < 20
+        # Trend filter: only trade when ADX > 20 (avoid choppy markets)
+        strong_trend = adx_1w_aligned[i] > 20
         
-        # Entry conditions: extreme RSI with ranging market filter
-        long_entry = (rsi_1d_aligned[i] < 25) and ranging_market
-        short_entry = (rsi_1d_aligned[i] > 75) and ranging_market
+        # Entry conditions: price breaks out of previous day's range with volume expansion
+        long_entry = (high[i] > upper_breakout_aligned[i]) and volume_expansion_aligned[i] > 0.5 and strong_trend
+        short_entry = (low[i] < lower_breakout_aligned[i]) and volume_expansion_aligned[i] > 0.5 and strong_trend
         
-        # Exit conditions: RSI returns to neutral zone
-        exit_long = position == 1 and rsi_1d_aligned[i] > 50
-        exit_short = position == -1 and rsi_1d_aligned[i] < 50
+        # Exit conditions: return to previous day's close
+        prev_close_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+        exit_long = position == 1 and close[i] <= prev_close_aligned[i]
+        exit_short = position == -1 and close[i] >= prev_close_aligned[i]
         
         # Execute signals
         if long_entry and position != 1:
@@ -152,6 +146,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_rsi_extreme_mean_reversion_v2"
-timeframe = "1d"
+name = "12h_1d_1w_camarilla_breakout_volume"
+timeframe = "12h"
 leverage = 1.0
