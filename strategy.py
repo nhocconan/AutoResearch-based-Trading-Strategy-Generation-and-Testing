@@ -8,85 +8,92 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
-    # Hypothesis: 6h Williams %R reversal + 12h trend filter + volume spike
-    # Long when: Williams %R(14) crosses above -80 (oversold) AND 12h EMA50 > EMA200 (uptrend) AND volume > 2x 20-bar avg
-    # Short when: Williams %R(14) crosses below -20 (overbought) AND 12h EMA50 < EMA200 (downtrend) AND volume > 2x 20-bar avg
-    # Exit when: Williams %R crosses opposite extreme (-20 for long, -80 for short) OR trend filter fails
-    # Uses discrete sizing (0.25) targeting 50-150 total trades over 4 years (12-37/year).
-    # Williams %R identifies exhaustion points; 12h EMA filter ensures alignment with higher timeframe trend.
-    # Volume spike confirms institutional participation at turning points.
+    # Hypothesis: 4h Donchian(20) breakout + 1d ATR-based volatility filter + volume confirmation
+    # Long when: price breaks above 4h Donchian upper (20) AND 1d ATR(14) < 1d ATR(50) AND volume > 1.5x 20-bar avg
+    # Short when: price breaks below 4h Donchian lower (20) AND 1d ATR(14) < 1d ATR(50) AND volume > 1.5x 20-bar avg
+    # Exit when: price crosses 4h Donchian midpoint
+    # Uses discrete sizing (0.25) targeting 75-200 total trades over 4 years (19-50/year).
+    # ATR filter ensures breakouts occur during low volatility (pre-breakout compression) to avoid false breakouts in high volatility.
+    # Works in bull (breakouts with trend) and bear (only volatility-aligned breaks taken).
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 6h data for Williams %R (primary timeframe)
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 14:
+    # Get 4h data for Donchian channels (primary timeframe)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate Williams %R for 6h: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_6h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_6h).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_6h) / (highest_high - lowest_low)
-    # Handle division by zero (when highest_high == lowest_low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate 4h Donchian channels (20-period)
+    donchian_window = 20
+    donchian_high_4h = pd.Series(high_4h).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    donchian_low_4h = pd.Series(low_4h).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    donchian_mid_4h = (donchian_high_4h + donchian_low_4h) / 2.0
     
-    # Align 6h Williams %R to 15m timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_6h, williams_r)
+    # Align 4h Donchian levels to 15m timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_4h)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_4h)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_4h, donchian_mid_4h)
     
-    # Get 12h data for EMA trend filter (HTF)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 200:
+    # Get 1d data for ATR-based volatility filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h EMAs for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200_12h = pd.Series(close_12h).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate True Range for 1d
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = np.nan  # first value has no previous close
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Align 12h EMA values to 6h timeframe
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    ema_200_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_200_12h)
+    # Calculate ATR(14) and ATR(50) for 1d
+    atr_14_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_50_1d = pd.Series(tr).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Trend filter: EMA50 > EMA200 for uptrend, EMA50 < EMA200 for downtrend
-    uptrend = ema_50_12h_aligned > ema_200_12h_aligned
-    downtrend = ema_50_12h_aligned < ema_200_12h_aligned
+    # Align 1d ATR values to 4h timeframe
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    atr_50_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_50_1d)
     
-    # Volume confirmation: volume > 2x 20-bar average volume
+    # Volatility filter: ATR(14) < ATR(50) (low volatility regime)
+    vol_filter = atr_14_1d_aligned < atr_50_1d_aligned
+    
+    # Calculate volume confirmation: volume > 1.5x 20-bar average volume
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * avg_volume)
+    volume_confirmed = volume > (1.5 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
     
-    for i in range(200, n):  # Start after EMA200 warmup
+    for i in range(donchian_window, n):
         # Skip if data not ready
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_50_12h_aligned[i]) or np.isnan(ema_200_12h_aligned[i]) or 
-            np.isnan(avg_volume[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(donchian_mid_aligned[i]) or
+            np.isnan(atr_14_1d_aligned[i]) or np.isnan(atr_50_1d_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
-        # Williams %R crossover signals (using current bar vs previous bar)
-        wr_cross_above_80 = (williams_r_aligned[i-1] <= -80) and (williams_r_aligned[i] > -80)
-        wr_cross_below_20 = (williams_r_aligned[i-1] >= -20) and (williams_r_aligned[i] < -20)
-        wr_cross_above_20 = (williams_r_aligned[i-1] <= -20) and (williams_r_aligned[i] > -20)
-        wr_cross_below_80 = (williams_r_aligned[i-1] >= -80) and (williams_r_aligned[i] < -80)
+        # Donchian breakout conditions (using current bar's close vs previous bar's levels)
+        breakout_up = close[i] > donchian_high_aligned[i-1]  # break above previous Donchian high
+        breakout_down = close[i] < donchian_low_aligned[i-1]  # break below previous Donchian low
         
-        # Entry conditions
-        long_entry = wr_cross_above_80 and uptrend[i] and volume_spike[i] and position != 1
-        short_entry = wr_cross_below_20 and downtrend[i] and volume_spike[i] and position != -1
+        # Entry conditions with volatility filter and volume confirmation
+        long_entry = breakout_up and vol_filter[i] and volume_confirmed[i] and position != 1
+        short_entry = breakout_down and vol_filter[i] and volume_confirmed[i] and position != -1
         
         # Exit conditions
-        exit_long = position == 1 and (wr_cross_above_20 or not uptrend[i])
-        exit_short = position == -1 and (wr_cross_below_80 or not downtrend[i])
+        exit_long = (position == 1 and close[i] < donchian_mid_aligned[i])
+        exit_short = (position == -1 and close[i] > donchian_mid_aligned[i])
         
         # Execute signals
         if long_entry:
@@ -112,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_williamsr_ema_trend_volume_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_atr_vol_filter_volume_v1"
+timeframe = "4h"
 leverage = 1.0
