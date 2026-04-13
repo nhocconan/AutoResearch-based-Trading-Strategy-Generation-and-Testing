@@ -8,12 +8,12 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with 1d volume spike and ADX regime filter
-    # Long: price breaks above upper Donchian AND ADX(14) > 20 AND volume > 2x 20-period avg
-    # Short: price breaks below lower Donchian AND ADX(14) > 20 AND volume > 2x 20-period avg
-    # Exit: price returns to middle of Donchian channel OR opposite breakout
-    # Using 4h timeframe for optimal trade frequency (target 19-50/year), Donchian for structure,
-    # ADX to filter weak trends, volume spike to confirm institutional interest.
+    # Hypothesis: 12h Williams %R extreme with 1d ADX regime filter and volume confirmation
+    # Long: Williams %R < -80 (oversold) AND ADX(14) > 25 (trending) AND volume > 1.5x avg
+    # Short: Williams %R > -20 (overbought) AND ADX(14) > 25 (trending) AND volume > 1.5x avg
+    # Exit: Williams %R crosses above -50 (for longs) or below -50 (for shorts)
+    # Using 12h timeframe for optimal trade frequency (target 12-37/year), Williams %R for momentum extremes,
+    # ADX to filter ranging markets, and volume confirmation to avoid false signals.
     # Discrete position sizing (0.25) to minimize fee churn.
     
     close = prices['close'].values
@@ -21,7 +21,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ADX and volume regime filters
+    # Get daily data for ADX regime filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -45,7 +45,7 @@ def generate_signals(prices):
     plus_dm = np.concatenate([[np.nan], plus_dm])
     minus_dm = np.concatenate([[np.nan], minus_dm])
     
-    # Wilder's smoothing function
+    # Smoothed values (Wilder's smoothing)
     def wilders_smoothing(data, period):
         result = np.full_like(data, np.nan)
         if len(data) < period:
@@ -71,64 +71,54 @@ def generate_signals(prices):
                   np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14) * 100, 0)
     adx = wilders_smoothing(dx, 14)
     
-    # Align daily ADX to 4h
+    # Align daily ADX to 12h
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Calculate 4h Donchian channels (20-period)
-    upper_donchian = np.full(n, np.nan)
-    lower_donchian = np.full(n, np.nan)
-    middle_donchian = np.full(n, np.nan)
+    # Calculate 12h Williams %R (14-period)
+    def williams_r(high, low, close, period):
+        highest_high = np.full_like(high, np.nan)
+        lowest_low = np.full_like(low, np.nan)
+        for i in range(period-1, len(high)):
+            highest_high[i] = np.max(high[i-period+1:i+1])
+            lowest_low[i] = np.min(low[i-period+1:i+1])
+        wr = np.where((highest_high - lowest_low) != 0, 
+                      -100 * ((highest_high - close) / (highest_high - lowest_low)), 
+                      -50)
+        return wr
     
+    wr = williams_r(high, low, close, 14)
+    
+    # Get 12h volume for confirmation (>1.5x 20-period average)
+    vol_ma = np.full(n, np.nan)
     for i in range(20, n):
-        upper_donchian[i] = np.max(high[i-20:i])
-        lower_donchian[i] = np.min(low[i-20:i])
-        middle_donchian[i] = (upper_donchian[i] + lower_donchian[i]) / 2
-    
-    # Calculate daily volume spike filter (>2x 20-period average)
-    vol_ma_1d = np.full(len(df_1d), np.nan)
-    for i in range(20, len(df_1d)):
-        vol_ma_1d[i] = np.mean(df_1d['volume'].values[i-20:i])
-    
-    volume_spike_1d = np.full(len(df_1d), False)
-    for i in range(20, len(df_1d)):
-        if not np.isnan(vol_ma_1d[i]):
-            volume_spike_1d[i] = df_1d['volume'].values[i] > (2.0 * vol_ma_1d[i])
-    
-    # Align daily volume spike to 4h
-    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
+        vol_ma[i] = np.mean(volume[i-20:i])
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(upper_donchian[i]) or 
-            np.isnan(lower_donchian[i]) or np.isnan(middle_donchian[i]) or
-            np.isnan(volume_spike_1d_aligned[i])):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(wr[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filters
-        trending_market = adx_1d_aligned[i] > 20
-        vol_spike = bool(volume_spike_1d_aligned[i])
+        # Regime filter: ADX > 25 indicates trending market
+        trending_market = adx_1d_aligned[i] > 25
         
-        # Donchian breakout conditions
-        breakout_upper = close[i] > upper_donchian[i]
-        breakout_lower = close[i] < lower_donchian[i]
+        # Williams %R conditions
+        oversold = wr[i] < -80
+        overbought = wr[i] > -20
+        exit_long = wr[i] > -50  # Exit long when crosses above -50
+        exit_short = wr[i] < -50  # Exit short when crosses below -50
         
-        # Exit conditions: return to middle or opposite breakout
-        return_to_middle = (position == 1 and close[i] < middle_donchian[i]) or \
-                          (position == -1 and close[i] > middle_donchian[i])
-        opposite_breakout = (position == 1 and breakout_lower) or \
-                           (position == -1 and breakout_upper)
+        # Entry logic: Williams %R extreme + trending market + volume confirmation
+        long_entry = oversold and trending_market and volume_spike[i]
+        short_entry = overbought and trending_market and volume_spike[i]
         
-        # Entry logic: Donchian breakout + trending market + volume confirmation
-        long_entry = breakout_upper and trending_market and vol_spike
-        short_entry = breakout_lower and trending_market and vol_spike
-        
-        # Exit logic: return to middle or opposite breakout
-        long_exit = return_to_middle or opposite_breakout
-        short_exit = return_to_middle or opposite_breakout
+        # Exit logic: Williams %R crosses -50
+        long_exit = exit_long
+        short_exit = exit_short
         
         if long_entry and position != 1:
             position = 1
@@ -153,6 +143,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_breakout_adx_volume_v2"
-timeframe = "4h"
+name = "12h_1d_williams_r_extreme_adx_volume_v1"
+timeframe = "12h"
 leverage = 1.0
