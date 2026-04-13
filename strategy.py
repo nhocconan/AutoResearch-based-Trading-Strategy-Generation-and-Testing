@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h_12h_camarilla_breakout_volume
-Hypothesis: On 4h timeframe, price breaking above 12h Camarilla H3 or below L3 with 12h volume expansion and 12h ADX trend filter captures institutional breakout moves. Works in bull markets (breakouts continue) and bear markets (mean-reversion fails, so breakouts are rarer but stronger when they occur). Target: 20-50 trades/year to avoid fee drag.
+4h_12h_cci_extremes_volume
+Hypothesis: On 4h timeframe, extreme CCI readings (>100 or <-100) on the 12h chart with volume expansion and 12h ADX trend filter capture momentum extremes that often reverse or continue. Works in bull markets (momentum continuations) and bear markets (extreme readings signal exhaustion/reversal). Target: 15-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
@@ -18,9 +18,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla levels
+    # Get 12h data for CCI calculation
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    if len(df_12h) < 30:
         return np.zeros(n)
     
     high_12h = df_12h['high'].values
@@ -28,16 +28,22 @@ def generate_signals(prices):
     close_12h = df_12h['close'].values
     volume_12h = df_12h['volume'].values
     
-    # Calculate Camarilla levels from previous 12h bar's range
-    # H3 = Close + 1.1 * (High - Low) / 4
-    # L3 = Close - 1.1 * (High - Low) / 4
-    range_12h = high_12h - low_12h
-    camarilla_h3 = close_12h + 1.1 * range_12h / 4
-    camarilla_l3 = close_12h - 1.1 * range_12h / 4
+    # Calculate CCI (20-period) on 12h data
+    typical_price = (high_12h + low_12h + close_12h) / 3
+    sma_tp = pd.Series(typical_price).rolling(window=20, min_periods=20).mean()
+    mean_deviation = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(
+        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
+    )
+    cci = (typical_price - sma_tp) / (0.015 * mean_deviation)
+    cci = cci.values
     
-    # 12h volume expansion: current volume > 1.5x 10-period average
-    vol_ma_10 = pd.Series(volume_12h).rolling(window=10, min_periods=10).mean().values
-    volume_expansion = volume_12h > (vol_ma_10 * 1.5)
+    # Extreme levels
+    cci_overbought = cci > 100
+    cci_oversold = cci < -100
+    
+    # 12h volume expansion: current volume > 1.3x 15-period average
+    vol_ma_15 = pd.Series(volume_12h).rolling(window=15, min_periods=15).mean().values
+    volume_expansion = volume_12h > (vol_ma_15 * 1.3)
     
     # Calculate ADX (14-period) for trend strength
     tr1 = np.abs(high_12h - low_12h)
@@ -72,11 +78,11 @@ def generate_signals(prices):
     minus_di = 100 * minus_dm / atr
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = wilders_smooth(dx, period)
-    strong_trend = adx > 20  # Moderate trend filter
+    strong_trend = adx > 25  # Strong trend filter
     
     # Align all signals to 4h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l3)
+    cci_overbought_aligned = align_htf_to_ltf(prices, df_12h, cci_overbought.astype(float))
+    cci_oversold_aligned = align_htf_to_ltf(prices, df_12h, cci_oversold.astype(float))
     volume_expansion_aligned = align_htf_to_ltf(prices, df_12h, volume_expansion.astype(float))
     strong_trend_aligned = align_htf_to_ltf(prices, df_12h, strong_trend.astype(float))
     
@@ -86,24 +92,21 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i]) or 
+        if (np.isnan(cci_overbought_aligned[i]) or 
+            np.isnan(cci_oversold_aligned[i]) or 
             np.isnan(volume_expansion_aligned[i]) or 
             np.isnan(strong_trend_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: Break of Camarilla H3/L3 with volume and trend
-        long_break = close[i] > camarilla_h3_aligned[i]
-        short_break = close[i] < camarilla_l3_aligned[i]
+        # Entry conditions: CCI extreme with volume and trend
+        long_entry = cci_oversold_aligned[i] > 0.5 and volume_expansion_aligned[i] > 0.5 and strong_trend_aligned[i] > 0.5
+        short_entry = cci_overbought_aligned[i] > 0.5 and volume_expansion_aligned[i] > 0.5 and strong_trend_aligned[i] > 0.5
         
-        long_entry = long_break and volume_expansion_aligned[i] > 0.5 and strong_trend_aligned[i] > 0.5
-        short_entry = short_break and volume_expansion_aligned[i] > 0.5 and strong_trend_aligned[i] > 0.5
-        
-        # Exit when price returns to previous 12h close (mean reversion to equilibrium)
-        prev_close_aligned = align_htf_to_ltf(prices, df_12h, close_12h)
-        exit_long = position == 1 and close[i] <= prev_close_aligned[i]
-        exit_short = position == -1 and close[i] >= prev_close_aligned[i]
+        # Exit when CCI returns to neutral zone (-50 to 50)
+        cci_aligned = align_htf_to_ltf(prices, df_12h, cci)
+        exit_long = position == 1 and cci_aligned[i] >= -50
+        exit_short = position == -1 and cci_aligned[i] <= 50
         
         # Execute signals
         if long_entry and position != 1:
@@ -126,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_camarilla_breakout_volume"
+name = "4h_12h_cci_extremes_volume"
 timeframe = "4h"
 leverage = 1.0
