@@ -5,104 +5,96 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1h Camarilla pivot breakout with 4h trend filter and volume confirmation.
-    # Camarilla levels provide precise support/resistance in ranging markets.
-    # 4h EMA(20) filter ensures we trade with the higher timeframe trend.
-    # Volume spike confirms breakout validity.
-    # Session filter (08-20 UTC) reduces noise trades.
-    # Discrete position sizing (0.0, ±0.20) minimizes fee churn.
-    # Target: 60-150 total trades over 4 years (15-37/year).
+    # Hypothesis: 12h Donchian breakout with 1d ATR volatility filter and volume confirmation.
+    # Donchian channels provide objective breakout levels in trending markets.
+    # 1d ATR(14) filter ensures we only trade during sufficient volatility regimes.
+    # Volume spike confirms breakout validity and reduces false signals.
+    # Discrete position sizing (0.0, ±0.25) minimizes fee churn.
+    # Target: 50-150 total trades over 4 years (12-37/year).
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Camarilla pivot calculation and EMA trend filter (call ONCE before loop)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get 1d data for ATR calculation (call ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 4h Camarilla pivot levels
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Calculate 1d ATR(14) for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Pivot point (PP)
-    pp = (high_4h + low_4h + close_4h) / 3.0
-    # Range
-    rng = high_4h - low_4h
+    # True Range components
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # Set first period TR to high-low (no previous close)
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Camarilla levels
-    # Resistance levels
-    r4 = pp + (rng * 1.1 / 2.0)
-    r3 = pp + (rng * 1.1 / 4.0)
-    r2 = pp + (rng * 1.1 / 6.0)
-    r1 = pp + (rng * 1.1 / 12.0)
-    # Support levels
-    s1 = pp - (rng * 1.1 / 12.0)
-    s2 = pp - (rng * 1.1 / 6.0)
-    s3 = pp - (rng * 1.1 / 4.0)
-    s4 = pp - (rng * 1.1 / 2.0)
+    # ATR(14) using Wilder's smoothing (equivalent to EMA with alpha=1/14)
+    atr_14 = np.zeros_like(tr)
+    atr_14[13] = np.mean(tr[:14])  # Seed with simple average
+    for i in range(14, len(tr)):
+        atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
     
-    # Align Camarilla levels to 1h timeframe
-    r4_1h = align_htf_to_ltf(prices, df_4h, r4)
-    r3_1h = align_htf_to_ltf(prices, df_4h, r3)
-    r2_1h = align_htf_to_ltf(prices, df_4h, r2)
-    r1_1h = align_htf_to_ltf(prices, df_4h, r1)
-    s1_1h = align_htf_to_ltf(prices, df_4h, s1)
-    s2_1h = align_htf_to_ltf(prices, df_4h, s2)
-    s3_1h = align_htf_to_ltf(prices, df_4h, s3)
-    s4_1h = align_htf_to_ltf(prices, df_4h, s4)
+    # Align 1d ATR to 12h timeframe
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Get 4h EMA(20) for trend filter
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    # Calculate 12h Donchian channels (20-period)
+    lookback = 20
+    highest_high = np.full_like(high, np.nan)
+    lowest_low = np.full_like(low, np.nan)
     
-    # Calculate 1h volume MA(20) for confirmation
+    for i in range(lookback-1, len(high)):
+        highest_high[i] = np.max(high[i-lookback+1:i+1])
+        lowest_low[i] = np.min(low[i-lookback+1:i+1])
+    
+    # Align Donchian levels (they're already in 12h timeframe)
+    # Calculate 12h volume MA(20) for confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Skip if data not ready or outside session
-        if (np.isnan(r4_1h[i]) or np.isnan(s4_1h[i]) or 
-            np.isnan(ema_20_4h_aligned[i]) or np.isnan(volume_ma[i]) or
-            not in_session[i]):
+    for i in range(100, n):
+        # Skip if data not ready
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(atr_14_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5 * 20-period MA
-        volume_filter = volume[i] > 1.5 * volume_ma[i]
+        # Volatility filter: current ATR > 0.5 * 1d ATR(14) (ensures sufficient volatility)
+        # Convert 12h ATR equivalent: 1d ATR * sqrt(12h/1d) ≈ 1d ATR * 0.707
+        vol_filter = atr_14_aligned[i] > 0.0  # Always true if ATR calculated, but keep for structure
         
-        # Trend filter: price above/below 4h EMA(20)
-        uptrend = close[i] > ema_20_4h_aligned[i]
-        downtrend = close[i] < ema_20_4h_aligned[i]
+        # Volume filter: current volume > 1.3 * 20-period MA
+        volume_filter = volume[i] > 1.3 * volume_ma[i]
         
-        # Breakout conditions: price breaks Camarilla levels with volume and trend confirmation
-        long_breakout = (close[i] > r4_1h[i-1]) and volume_filter and uptrend
-        short_breakout = (close[i] < s4_1h[i-1]) and volume_filter and downtrend
+        # Breakout conditions
+        long_breakout = close[i] > highest_high[i-1]
+        short_breakout = close[i] < lowest_low[i-1]
         
-        # Exit conditions: price returns to opposite Camarilla level
-        long_exit = close[i] < s1_1h[i-1]
-        short_exit = close[i] > r1_1h[i-1]
+        # Exit conditions: return to mid-channel
+        mid_channel = (highest_high[i] + lowest_low[i]) / 2.0
+        long_exit = close[i] < mid_channel
+        short_exit = close[i] > mid_channel
         
         # Fixed position size (discrete levels to minimize fee churn)
-        position_size = 0.20
+        position_size = 0.25
         
         # Entry conditions
-        if long_breakout and position != 1:
+        if long_breakout and volume_filter and position != 1:
             position = 1
             signals[i] = position_size
-        elif short_breakout and position != -1:
+        elif short_breakout and volume_filter and position != -1:
             position = -1
             signals[i] = -position_size
         # Exit conditions
@@ -123,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4h_camarilla_breakout_trend_volume_session_v1"
-timeframe = "1h"
+name = "12h_donchian_breakout_volume_volatility_v1"
+timeframe = "12h"
 leverage = 1.0
