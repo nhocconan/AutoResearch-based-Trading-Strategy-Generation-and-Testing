@@ -5,14 +5,14 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian(20) breakout + 1d Camarilla pivot structure + volume confirmation
+    # Hypothesis: 4h Donchian(20) breakout + 1d Camarilla pivot structure + volume confirmation
     # Long when: price breaks above Donchian(20) high AND price > Camarilla H3 (1d) AND volume > 1.5x avg volume
     # Short when: price breaks below Donchian(20) low AND price < Camarilla L3 (1d) AND volume > 1.5x avg volume
     # Exit when: price crosses Donchian midpoint OR volume drops below average
-    # Uses discrete sizing (0.25) targeting 50-150 trades over 4 years.
+    # Uses discrete sizing (0.25) targeting 75-200 trades over 4 years.
     # Works in bull/bear via Camarilla pivot structure providing dynamic support/resistance levels.
     
     close = prices['close'].values
@@ -39,13 +39,13 @@ def generate_signals(prices):
     h4_1d = close_1d + 1.5 * range_1d
     l4_1d = close_1d - 1.5 * range_1d
     
-    # Align 1d Camarilla levels to 12h timeframe
+    # Align 1d Camarilla levels to 4h timeframe
     h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
     l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
     h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
     l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
     
-    # Calculate Donchian(20) channels on 12h
+    # Calculate Donchian(20) channels on 4h
     lookback = 20
     donchian_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     donchian_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
@@ -59,7 +59,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if data not ready
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
@@ -110,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_donchian_camarilla_volume_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_camarilla_volume_v1"
+timeframe = "4h"
 leverage = 1.0
