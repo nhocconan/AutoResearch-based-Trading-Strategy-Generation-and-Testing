@@ -8,16 +8,16 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Hypothesis: 4h Camarilla H3/L3 mean reversion with 1d volume confirmation and 1d trend filter
+    # Hypothesis: 4h Donchian breakout with 1d volume confirmation and chop regime filter
     # Designed for low trade frequency (19-50/year) to minimize fee drag
-    # Works in bull/bear markets by fading extremes at key daily levels with volume confirmation
+    # Works in trending markets via breakouts; chop filter avoids whipsaws in ranging markets
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values if 'volume' in prices.columns else np.ones(len(prices))
     
-    # Get 1d data for HTF Camarilla levels, volume, and trend
+    # Get 1d data for HTF volume and chop regime
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -27,64 +27,70 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values if 'volume' in df_1d.columns else np.ones(len(df_1d))
     
-    # Calculate 1d Camarilla pivot levels (based on previous day)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
-    
-    # Camarilla levels (H3/L3 are the key mean reversion levels)
-    camarilla_h3 = prev_close_1d + 1.125 * (prev_high_1d - prev_low_1d)
-    camarilla_l3 = prev_close_1d - 1.125 * (prev_high_1d - prev_low_1d)
-    
-    # Calculate 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
     # Calculate 1d volume average (20-period)
     vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all HTF indicators to 4h primary timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate 1d ATR for chop regime (ATR(14))
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate 1d true range average for chop (using TR)
+    tr_avg_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate 1d high-low range for chop
+    hl_range_1d = high_1d - low_1d
+    hl_avg_14_1d = pd.Series(hl_range_1d).rolling(window=14, min_periods=14).mean().values
+    
+    # Choppiness Index: CHOP = 100 * log10(sum(TR14) / (sum(HL14) * 14)) / log10(14)
+    # Simplified: CHOP > 61.8 = ranging, CHOP < 38.2 = trending
+    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    sum_hl_14 = pd.Series(hl_range_1d).rolling(window=14, min_periods=14).sum().values
+    chop = 100 * np.log10(sum_tr_14 / (sum_hl_14 * 14)) / np.log10(14)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Align HTF indicators to 4h
     vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Calculate 4h Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(ema50_1d_aligned[i]) or
-            np.isnan(vol_avg_20_1d_aligned[i])):
+        if (np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or
+            np.isnan(vol_avg_20_1d_aligned[i]) or
+            np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x 20-period average
-        volume_confirmed = volume_1d[i] > 1.5 * vol_avg_20_1d_aligned[i]
+        # Volume confirmation: current 4h volume > 1.5x 20-period 1d volume average
+        # Use 4h volume but compare to 1d average volume (scaled)
+        volume_confirmed = volume[i] > 1.5 * vol_avg_20_1d_aligned[i]
         
-        # Mean reversion conditions at Camarilla H3/L3 levels
-        reversion_long = close[i] < camarilla_l3_aligned[i]  # Price below L3 -> long (expect bounce up)
-        reversion_short = close[i] > camarilla_h3_aligned[i]  # Price above H3 -> short (expect bounce down)
+        # Regime filter: only trade when trending (CHOP < 38.2)
+        trending_regime = chop_aligned[i] < 38.2
         
-        # Trend filter: only trade in direction of 1d EMA50
-        # For long: price above EMA50; for short: price below EMA50
-        trend_filter_long = close[i] > ema50_1d_aligned[i]
-        trend_filter_short = close[i] < ema50_1d_aligned[i]
+        # Donchian breakout conditions
+        breakout_long = close[i] > high_20[i-1]  # Break above 20-period high
+        breakout_short = close[i] < low_20[i-1]  # Break below 20-period low
         
-        # Entry conditions
-        enter_long = reversion_long and volume_confirmed and trend_filter_long
-        enter_short = reversion_short and volume_confirmed and trend_filter_short
+        # Entry conditions: breakout + volume + trending regime
+        enter_long = breakout_long and volume_confirmed and trending_regime
+        enter_short = breakout_short and volume_confirmed and trending_regime
         
-        # Exit conditions: price returns to Camarilla H4/L4 levels (stronger levels)
-        camarilla_h4 = prev_close_1d + 1.5 * (prev_high_1d - prev_low_1d)
-        camarilla_l4 = prev_close_1d - 1.5 * (prev_high_1d - prev_low_1d)
-        camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-        camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-        
-        exit_long = position == 1 and close[i] >= camarilla_h4_aligned[i]
-        exit_short = position == -1 and close[i] <= camarilla_l4_aligned[i]
+        # Exit conditions: opposite Donchian breakout or middle line
+        donchian_mid = (high_20[i] + low_20[i]) / 2
+        exit_long = position == 1 and (close[i] < donchian_mid or breakout_short)
+        exit_short = position == -1 and (close[i] > donchian_mid or breakout_long)
         
         # Execute signals
         if enter_long and position != 1:
@@ -110,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_camarilla_meanreversion_volume_trend_v1"
+name = "4h_1d_donchian_breakout_volume_chop_v1"
 timeframe = "4h"
 leverage = 1.0
