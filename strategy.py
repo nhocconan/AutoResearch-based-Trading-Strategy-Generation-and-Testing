@@ -8,7 +8,7 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with 1d volume expansion (volume > 1.5 * ATR) and ADX > 20 trend filter
+    # Hypothesis: 4h Donchian(20) breakout with 1d volume expansion and ADX trend filter
     # Long when price > upper Donchian + volume expansion + ADX > 20
     # Short when price < lower Donchian + volume expansion + ADX > 20
     # Exit when price crosses middle Donchian OR ADX < 15 (trend weakening)
