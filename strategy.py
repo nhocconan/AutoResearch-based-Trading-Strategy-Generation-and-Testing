@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-4h_1D_Camarilla_Pivot_Breakout_Volume_Confirmation_v11
+4h_1D_Camarilla_Pivot_Breakout_Volume_Confirmation_v12
 Hypothesis: 4h price breaks above/below daily Camarilla R4/S4 levels with daily volume > 1.8x 20-period average and daily close >/ < daily VWAP for trend filter.
 Long when price breaks above R4 + volume condition + close > VWAP.
 Short when price breaks below S4 + volume condition + close < VWAP.
@@ -111,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1D_Camarilla_Pivot_Breakout_Volume_Confirmation_v11"
+name = "4h_1D_Camarilla_Pivot_Breakout_Volume_Confirmation_v12"
 timeframe = "4h"
 leverage = 1.0
