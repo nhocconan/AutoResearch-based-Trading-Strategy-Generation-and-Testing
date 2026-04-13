@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band Squeeze with 1d Trend Filter and Volume Confirmation
-# Bollinger Bands squeeze (low volatility) indicates impending breakout.
-# Daily trend filter ensures we only take breakouts in direction of higher timeframe trend.
-# Volume confirmation validates breakout strength.
+# Hypothesis: 12h Donchian breakout with 1w trend filter and volume confirmation.
+# Uses weekly Donchian channels for trend direction, daily ATR for volatility filtering.
+# 12h price breaks weekly Donchian channels with volume confirmation and volatility filter.
 # Target: 50-150 total trades over 4 years (12-37/year) to stay within profitable range.
-# Works in both bull and bear markets by filtering for trend direction.
+# Weekly trend filter ensures we only trade in the direction of the higher timeframe trend.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,39 +19,46 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for multi-timeframe analysis
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # 6h Bollinger Bands (20, 2.0)
-    close_series = pd.Series(close)
-    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2.0 * bb_std
-    bb_lower = bb_middle - 2.0 * bb_std
-    bb_width = bb_upper - bb_lower
+    # Daily data for ATR and volume
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # Bollinger Band Squeeze: width below 20-period average width
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    squeeze_condition = bb_width < bb_width_ma
+    # Calculate weekly Donchian channels (20-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Daily trend: EMA(50) vs EMA(200)
+    # Donchian upper and lower bands
+    donchian_high_20_1w = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_low_20_1w = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate daily ATR for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    daily_uptrend = ema_50_1d > ema_200_1d
-    daily_downtrend = ema_50_1d < ema_200_1d
     
-    # Daily volume confirmation
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = np.nan
+    tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate daily volume average
     volume_1d = df_1d['volume'].values
-    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all data to 6h timeframe
-    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze_condition.astype(float))
-    daily_uptrend_aligned = align_htf_to_ltf(prices, df_1d, daily_uptrend.astype(float))
-    daily_downtrend_aligned = align_htf_to_ltf(prices, df_1d, daily_downtrend.astype(float))
-    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
+    # Align all data to 12-hour timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high_20_1w)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low_20_1w)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    volume_avg_aligned = align_htf_to_ltf(prices, df_1d, volume_avg_20_1d)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
@@ -60,40 +66,41 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is not ready
-        if (np.isnan(squeeze_aligned[i]) or np.isnan(daily_uptrend_aligned[i]) or
-            np.isnan(daily_downtrend_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(atr_aligned[i]) or np.isnan(volume_avg_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current 6h volume > 1.5x daily volume MA (adjusted for 6h)
-        # 4 6h periods per day, so daily MA/4 = approximate 6h period MA
-        volume_6h_approx_ma = volume_ma_20_1d_aligned[i] / 4
-        volume_condition = volume[i] > (volume_6h_approx_ma * 1.5)
+        # Volatility filter: current ATR > 0.5 * average ATR
+        atr_filter = atr_aligned[i] > (np.nanmean(atr_aligned[max(0, i-50):i]) * 0.5)
         
-        # Bollinger Band breakout conditions
-        breakout_up = close[i] > bb_upper[i]
-        breakout_down = close[i] < bb_lower[i]
+        # Volume condition: current 12h volume > 1.2 * daily volume average
+        # Adjust daily average to approximate 12h period (2 periods per day)
+        volume_12h_avg_approx = volume_avg_aligned[i] / 2
+        volume_condition = volume[i] > (volume_12h_avg_approx * 1.2)
         
-        # Entry conditions: Bollinger Band breakout with squeeze, trend alignment, and volume
+        # Entry conditions: Donchian breakout with volatility and volume filters
         if position == 0:
-            if squeeze_aligned[i] > 0.5 and breakout_up and daily_uptrend_aligned[i] > 0.5 and volume_condition:
+            # Long when price breaks above weekly Donchian high
+            if close[i] > donchian_high_aligned[i] and atr_filter and volume_condition:
                 position = 1
                 signals[i] = position_size
-            elif squeeze_aligned[i] > 0.5 and breakout_down and daily_downtrend_aligned[i] > 0.5 and volume_condition:
+            # Short when price breaks below weekly Donchian low
+            elif close[i] < donchian_low_aligned[i] and atr_filter and volume_condition:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit when price returns to middle band or trend changes
-            if close[i] < bb_middle[i] or daily_downtrend_aligned[i] > 0.5:
+            # Exit when price crosses below weekly Donchian low or loses filters
+            if (close[i] < donchian_low_aligned[i]) or (not atr_filter) or (not volume_condition):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit when price returns to middle band or trend changes
-            if close[i] > bb_middle[i] or daily_uptrend_aligned[i] > 0.5:
+            # Exit when price crosses above weekly Donchian high or loses filters
+            if (close[i] > donchian_high_aligned[i]) or (not atr_filter) or (not volume_condition):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -101,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Bollinger_Squeeze_Trend_Volume_v1"
-timeframe = "6h"
+name = "12h_1w_Donchian_Breakout_Volume_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
