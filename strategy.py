@@ -8,7 +8,7 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with volume spike and 12h ADX > 25 trend filter.
+    # Hypothesis: 4h Donchian(20) breakout with volume confirmation and 12h ADX > 25 trend filter.
     # Works in both bull and bear markets by only taking trades in the direction of the 12h trend.
     # Uses discrete position size 0.25 to minimize fee churn. Target: 75-200 total trades over 4 years.
     
