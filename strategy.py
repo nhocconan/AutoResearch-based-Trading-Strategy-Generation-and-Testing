@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Camarilla Pivot Breakout with Volume Spike and Daily Trend Filter.
-Trades breakouts above/below daily Camarilla pivot levels (H3/L3) confirmed by volume spikes,
+4h Donchian Breakout with Volume Spike and Daily Trend Filter.
+Trades breakouts above/below 20-period Donchian channels confirmed by volume spikes,
 only when daily price is above/below 50-period EMA to filter range-bound conditions.
 Designed for 4h timeframe to target 75-200 total trades over 4 years (19-50/year).
-Uses price action at key institutional levels with volume confirmation for institutional participation.
+Uses price action at key levels with volume confirmation for institutional participation.
 """
 
 import numpy as np
@@ -21,7 +21,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation
+    # Get daily data for Donchian calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -30,18 +30,13 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla Pivot Levels (based on previous day)
-    # Pivot = (H + L + C) / 3
-    # H3 = C + (H - L) * 1.1 / 2
-    # L3 = C - (H - L) * 1.1 / 2
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_hl = high_1d - low_1d
-    H3 = close_1d + (range_hl * 1.1 / 2)
-    L3 = close_1d - (range_hl * 1.1 / 2)
+    # Donchian Channels (20-period)
+    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
     # Breakout conditions
-    breakout_up = high_1d > H3
-    breakout_down = low_1d < L3
+    breakout_up = high_1d > upper_20
+    breakout_down = low_1d < lower_20
     
     # Align signals to 4h timeframe
     breakout_up_aligned = align_htf_to_ltf(prices, df_1d, breakout_up.astype(float))
@@ -80,7 +75,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: Camarilla breakout + volume spike + daily trend
+        # Entry conditions: Donchian breakout + volume spike + daily trend
         long_entry = (breakout_up_aligned[i] > 0.5 and 
                       vol_spike_aligned[i] > 0.5 and 
                       uptrend_aligned[i] > 0.5)
@@ -88,11 +83,12 @@ def generate_signals(prices):
                        vol_spike_aligned[i] > 0.5 and 
                        downtrend_aligned[i] > 0.5)
         
-        # Exit when price returns to pivot level
-        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+        # Exit when price returns to middle of Donchian channel
+        middle_20 = (upper_20 + lower_20) / 2
+        middle_20_aligned = align_htf_to_ltf(prices, df_1d, middle_20)
         
-        exit_long = position == 1 and close[i] <= pivot_aligned[i]
-        exit_short = position == -1 and close[i] >= pivot_aligned[i]
+        exit_long = position == 1 and close[i] <= middle_20_aligned[i]
+        exit_short = position == -1 and close[i] >= middle_20_aligned[i]
         
         # Execute signals
         if long_entry and position != 1:
@@ -115,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_camarilla_pivot_breakout"
+name = "4h_1d_donchian_breakout_v1"
 timeframe = "4h"
 leverage = 1.0
