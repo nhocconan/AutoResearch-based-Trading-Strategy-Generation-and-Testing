@@ -8,18 +8,18 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Camarilla pivot breakout with 1d trend filter (ADX > 25) and volume confirmation.
-    # Long when price breaks above R3 pivot with ADX > 25 and volume > 1.5x average.
-    # Short when price breaks below S3 pivot with ADX > 25 and volume > 1.5x average.
-    # Uses breakouts in trending markets to capture momentum, avoids false breakouts in ranging markets.
-    # Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+    # Hypothesis: 4h Donchian(20) breakout with 1d trend filter (ADX > 25) and volume confirmation.
+    # Long when price breaks above Donchian upper with ADX > 25 and volume > 1.5x average.
+    # Short when price breaks below Donchian lower with ADX > 25 and volume > 1.5x average.
+    # Exit when price crosses Donchian middle (mean-reversion in ranging markets).
+    # Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot and ADX (call ONCE before loop)
+    # Get 1d data for ADX trend filter (call ONCE before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -27,12 +27,6 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla pivot levels for 1d
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r3_1d = pivot_1d + range_1d * 1.1
-    s3_1d = pivot_1d - range_1d * 1.1
     
     # Calculate ADX(14) on 1d for trend filter
     # True Range
@@ -54,12 +48,18 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Align HTF indicators to 12h timeframe
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    # Align HTF ADX to 4h timeframe
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Calculate volume average (20-period) on 12h
+    # Calculate Donchian channels on 4h (20-period)
+    # Upper channel: highest high of last 20 periods
+    upper_channel = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    # Lower channel: lowest low of last 20 periods
+    lower_channel = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Middle channel: average of upper and lower
+    middle_channel = (upper_channel + lower_channel) / 2
+    
+    # Calculate volume average (20-period) on 4h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -67,8 +67,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(upper_channel[i]) or 
+            np.isnan(lower_channel[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -79,14 +79,12 @@ def generate_signals(prices):
         volume_confirm = volume[i] > 1.5 * vol_ma[i]
         
         # Breakout conditions
-        long_breakout = (high[i] > r3_1d_aligned[i]) and trending and volume_confirm
-        short_breakout = (low[i] < s3_1d_aligned[i]) and trending and volume_confirm
+        long_breakout = (high[i] > upper_channel[i]) and trending and volume_confirm
+        short_breakout = (low[i] < lower_channel[i]) and trending and volume_confirm
         
-        # Exit conditions: price returns to pivot level
-        pivot_1d = (high_1d + low_1d + close_1d) / 3
-        pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-        long_exit = close[i] < pivot_1d_aligned[i]
-        short_exit = close[i] > pivot_1d_aligned[i]
+        # Exit conditions: price crosses middle channel (mean reversion)
+        long_exit = close[i] < middle_channel[i]
+        short_exit = close[i] > middle_channel[i]
         
         # Fixed position size (discrete levels to minimize fee churn)
         position_size = 0.25
@@ -116,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_camarilla_breakout_adx_volume_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_breakout_adx_volume_v1"
+timeframe = "4h"
 leverage = 1.0
