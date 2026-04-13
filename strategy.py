@@ -8,15 +8,15 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and 1d ADX regime filter
-    # Long when price breaks above 20-period high + 1d volume > 1.3x 20-period average + 1d ADX > 25
-    # Short when price breaks below 20-period low + 1d volume > 1.3x 20-period average + 1d ADX > 25
-    # Exit when price crosses 10-period moving average in opposite direction
+    # Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and ADX regime filter
+    # Long when price breaks above Camarilla H4 resistance + 1d volume > 1.5x 20-period average + 1d ADX > 20
+    # Short when price breaks below Camarilla L4 support + 1d volume > 1.5x 20-period average + 1d ADX > 20
+    # Exit when price crosses 20-period EMA in opposite direction
     # Uses discrete position sizing (0.25) to minimize fee churn and manage drawdown
     # Target: 50-150 total trades over 4 years (~12-37/year) to avoid fee drag
+    # Camarilla levels provide institutional reference points
     # Volume filter ensures breakouts occur with institutional participation
     # ADX filter ensures we only trade in trending markets, avoiding chop
-    # Weekly pivot direction from 1w timeframe filters trades: only long above weekly pivot, short below
     
     close = prices['close'].values
     high = prices['high'].values
@@ -74,25 +74,30 @@ def generate_signals(prices):
     
     adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
     
+    # Calculate Camarilla levels from 1d OHLC
+    # H4 = Close + 1.1 * (High - Low) / 2
+    # L4 = Close - 1.1 * (High - Low) / 2
+    camarilla_high = df_1d['close'].values + 1.1 * (df_1d['high'].values - df_1d['low'].values) / 2
+    camarilla_low = df_1d['close'].values - 1.1 * (df_1d['high'].values - df_1d['low'].values) / 2
+    
     # Align indicators to 4h timeframe
     vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
+    camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Pre-calculate Donchian channels for 4h timeframe
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
-    ma_10 = pd.Series(close).rolling(window=10, min_periods=10).mean().values
+    # Pre-calculate 4h EMA for exit
+    close_series = pd.Series(close)
+    ema_20 = close_series.ewm(span=20, min_periods=20, adjust=False).mean().values
     
     for i in range(100, n):
         # Skip if data not ready
         if (np.isnan(vol_ma_aligned[i]) or np.isnan(adx_aligned[i]) or
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(ma_10[i])):
+            np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]) or
+            np.isnan(ema_20[i])):
             signals[i] = 0.0
             continue
         
@@ -100,23 +105,23 @@ def generate_signals(prices):
         volume_1d_current = df_1d['volume'].values
         vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d_current)
         
-        # Volume filter: current 1d volume > 1.3 * 20-period average
-        volume_confirmation = vol_1d_aligned[i] > 1.3 * vol_ma_aligned[i]
+        # Volume filter: current 1d volume > 1.5 * 20-period average
+        volume_confirmation = vol_1d_aligned[i] > 1.5 * vol_ma_aligned[i]
         
-        # ADX filter: trending market (ADX > 25)
-        trending_market = adx_aligned[i] > 25
+        # ADX filter: trending market (ADX > 20)
+        trending_market = adx_aligned[i] > 20
         
         # Breakout conditions with filters
-        bullish_breakout = (close[i] > donchian_high[i] and 
+        bullish_breakout = (close[i] > camarilla_high_aligned[i] and 
                            volume_confirmation and 
                            trending_market)
-        bearish_breakout = (close[i] < donchian_low[i] and 
+        bearish_breakout = (close[i] < camarilla_low_aligned[i] and 
                            volume_confirmation and 
                            trending_market)
         
-        # Exit conditions: cross 10-period MA in opposite direction
-        long_exit = close[i] < ma_10[i]
-        short_exit = close[i] > ma_10[i]
+        # Exit conditions: cross 20-period EMA in opposite direction
+        long_exit = close[i] < ema_20[i]
+        short_exit = close[i] > ema_20[i]
         
         if bullish_breakout and position != 1:
             position = 1
@@ -141,6 +146,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_breakout_volume_adx_v1"
+name = "4h_1d_camarilla_breakout_volume_adx_v1"
 timeframe = "4h"
 leverage = 1.0
