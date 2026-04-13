@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation_v4
-Hypothesis: Daily Camarilla pivot levels (S4/R4) provide stronger support/resistance than S3/R3.
-Breakouts above R4 or below S4 on 4h chart with volume expansion capture institutional moves.
-Adds volume confirmation to reduce false breakouts. Works in both bull and bear markets
-by trading breakouts regardless of direction. Target: 15-25 trades/year per symbol.
+1d_1w_KAMA_Trend_Filter_With_Volume_Confirmation_v2
+Hypothesis: Kaufman Adaptive Moving Average (KAMA) adapts to market noise,
+providing reliable trend direction in both trending and ranging markets.
+Combined with weekly trend filter (KAMA slope) and daily volume confirmation,
+this strategy captures sustained moves while avoiding false signals in chop.
+Designed for 1d timeframe with weekly trend filter to reduce whipsaw in bear markets.
+Target: 15-25 trades/year per symbol.
 """
 
 import numpy as np
@@ -13,65 +15,85 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each daily bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate KAMA on daily close
+    def kama(close, er_period=10, fast=2, slow=30):
+        change = np.abs(np.diff(close, n=1))
+        change = np.insert(change, 0, 0)  # align length
+        
+        volatility = np.zeros_like(close)
+        for i in range(len(close)):
+            if i == 0:
+                volatility[i] = 0
+            else:
+                volatility[i] = np.sum(np.abs(np.diff(close[max(0, i-er_period+1):i+1])))
+        
+        er = np.zeros_like(close)
+        for i in range(len(close)):
+            if volatility[i] > 0:
+                er[i] = change[i] / volatility[i]
+            else:
+                er[i] = 0
+        
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        kama_vals = np.zeros_like(close)
+        kama_vals[0] = close[0]
+        for i in range(1, len(close)):
+            kama_vals[i] = kama_vals[i-1] + sc[i] * (close[i] - kama_vals[i-1])
+        return kama_vals
     
-    # Camarilla formulas
-    close_prev = np.roll(close_1d, 1)
-    close_prev[0] = close_1d[0]  # first bar uses its own close
+    kama_daily = kama(close, er_period=10, fast=2, slow=30)
     
-    range_1d = high_1d - low_1d
+    # Calculate weekly KAMA for trend filter
+    close_1w = df_1w['close'].values
+    kama_weekly = kama(close_1w, er_period=10, fast=2, slow=30)
+    kama_weekly_aligned = align_htf_to_ltf(prices, df_1w, kama_weekly)
     
-    # Resistance levels (R4 used for stronger breakout)
-    R4 = close_prev + (range_1d * 1.5000 / 2)
-    
-    # Support levels (S4 used for stronger breakdown)
-    S4 = close_prev - (range_1d * 1.5000 / 2)
-    
-    # Align levels to 4h timeframe
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
-    
-    # Volume confirmation: current volume > 1.8x 20-period average (stricter)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_expansion = volume > (vol_ma_20 * 1.8)
+    # Volume confirmation: current volume > 1.3x 20-day average
+    vol_ma_20 = np.zeros(n)
+    vol_series = pd.Series(volume)
+    for i in range(n):
+        if i < 19:
+            vol_ma_20[i] = np.nan
+        else:
+            vol_ma_20[i] = vol_series.iloc[i-19:i+1].mean()
+    volume_expansion = volume > (vol_ma_20 * 1.3)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25
     
-    for i in range(200, n):
+    for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or 
+        if (np.isnan(kama_daily[i]) or np.isnan(kama_weekly_aligned[i]) or 
             np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Long breakout: price breaks above R4 with volume expansion
-        long_breakout = close[i] > R4_aligned[i] and volume_expansion[i]
+        # Long condition: price above daily KAMA AND weekly KAMA rising AND volume expansion
+        long_condition = (close[i] > kama_daily[i] and 
+                         kama_weekly_aligned[i] > kama_weekly_aligned[i-1] and
+                         volume_expansion[i])
         
-        # Short breakdown: price breaks below S4 with volume expansion
-        short_breakout = close[i] < S4_aligned[i] and volume_expansion[i]
+        # Short condition: price below daily KAMA AND weekly KAMA falling AND volume expansion
+        short_condition = (close[i] < kama_daily[i] and 
+                          kama_weekly_aligned[i] < kama_weekly_aligned[i-1] and
+                          volume_expansion[i])
         
-        if long_breakout and position != 1:
+        if long_condition and position != 1:
             position = 1
             signals[i] = position_size
-        elif short_breakout and position != -1:
+        elif short_condition and position != -1:
             position = -1
             signals[i] = -position_size
         else:
@@ -80,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_Pivot_Breakout_Volume_Confirmation_v4"
-timeframe = "4h"
+name = "1d_1w_KAMA_Trend_Filter_With_Volume_Confirmation_v2"
+timeframe = "1d"
 leverage = 1.0
