@@ -5,111 +5,80 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Hypothesis: 6h Elder Ray + 1d ADX regime filter
-    # Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
-    # Long when Bull Power > 0 and Bear Power < 0 and ADX(1d) > 25 (trending)
-    # Short when Bear Power > 0 and Bull Power < 0 and ADX(1d) > 25 (trending)
-    # Exit when power values converge (|Bull Power| < threshold and |Bear Power| < threshold)
-    # Uses 1d HTF for ADX regime (trending vs ranging) and 6h for Elder Ray timing
-    # Works in bull (strong Bull Power) and bear (strong Bear Power) markets
-    # ADX filter avoids whipsaws in ranging markets
-    # Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+    # Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ATR stoploss
+    # Enter long when price breaks above Donchian(20) high with volume > 1.5x 20-bar avg
+    # Enter short when price breaks below Donchian(20) low with volume > 1.5x 20-bar avg
+    # Exit long when price touches Donchian(20) low or ATR-based stoploss hit
+    # Exit short when price touches Donchian(20) high or ATR-based stoploss hit
+    # Uses 1d HTF for volume confirmation (more stable than 4h) and 4h for entry timing
+    # Donchian channels provide clear structure for breakouts in both bull and bear markets
+    # Volume confirmation ensures breakouts have participation to avoid false signals
+    # ATR stoploss manages risk during adverse moves
+    # Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    
-    # Get 6h data for primary timeframe
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
-        return np.zeros(n)
-    
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
-    
-    # Get 1d data for ADX regime filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate 13-period EMA for Elder Ray (6h)
-    close_6h_series = pd.Series(close_6h)
-    ema_13 = close_6h_series.ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray components (6h)
-    bull_power = high_6h - ema_13  # Bull Power = High - EMA
-    bear_power = ema_13 - low_6h   # Bear Power = EMA - Low
-    
-    # Calculate ADX for regime filter (1d)
-    # True Range
-    tr1 = pd.Series(high_1d - low_1d)
-    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
-    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Movement
-    up_move = pd.Series(high_1d - np.roll(high_1d, 1))
-    down_move = pd.Series(np.roll(low_1d, 1) - low_1d)
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed DM
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / atr
-    minus_di = 100 * minus_dm_smooth / atr
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Align 1d ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume filter (optional confirmation)
     volume = prices['volume'].values
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (1.5 * avg_volume)
+    
+    # Get 4h data for primary timeframe
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # Get 1d data for volume confirmation (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
+        return np.zeros(n)
+    
+    volume_1d = df_1d['volume'].values
+    
+    # Calculate 4h Donchian channels (20-period)
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
+    
+    # Calculate ATR(14) for stoploss
+    tr1 = pd.Series(high_4h).shift(1) - pd.Series(low_4h).shift(1)
+    tr2 = abs(pd.Series(high_4h).shift(1) - pd.Series(close_4h))
+    tr3 = abs(pd.Series(low_4h).shift(1) - pd.Series(close_4h))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Align 1d volume confirmation to 4h timeframe
+    avg_volume_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_confirmed_1d = volume_1d > (1.5 * avg_volume_1d)
+    volume_confirmed_aligned = align_htf_to_ltf(prices, df_1d, volume_confirmed_1d.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
-    power_threshold = 0.0  # convergence threshold for exit
     
-    for i in range(1, n):  # start from 1 to access previous bar
+    for i in range(20, n):  # start from 20 to ensure Donchian and ATR are ready
         # Skip if data not ready
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(adx_aligned[i]) or
-            np.isnan(avg_volume[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(donchian_mid[i]) or
+            np.isnan(atr[i]) or np.isnan(volume_confirmed_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Regime: only trade when ADX > 25 (trending market)
-        is_trending = adx_aligned[i] > 25.0
+        # Donchian breakout conditions
+        breakout_up = close[i] > donchian_high[i]  # break above upper channel
+        breakout_down = close[i] < donchian_low[i]  # break below lower channel
         
-        # Elder Ray signals
-        strong_bull = bull_power[i] > 0 and bear_power[i] < 0  # bulls in control
-        strong_bear = bear_power[i] > 0 and bull_power[i] < 0  # bears in control
-        converging = (abs(bull_power[i]) < power_threshold and 
-                     abs(bear_power[i]) < power_threshold)  # power converging
-        
-        # Entry conditions
-        long_entry = strong_bull and is_trending and volume_confirmed[i] and position != 1
-        short_entry = strong_bear and is_trending and volume_confirmed[i] and position != -1
+        # Entry conditions with volume confirmation
+        long_entry = breakout_up and volume_confirmed_aligned[i] and position != 1
+        short_entry = breakout_down and volume_confirmed_aligned[i] and position != -1
         
         # Exit conditions
-        exit_long = (position == 1 and converging)
-        exit_short = (position == -1 and converging)
+        exit_long = (position == 1 and (close[i] < donchian_low[i] or close[i] < (donchian_mid[i] - 1.5 * atr[i])))
+        exit_short = (position == -1 and (close[i] > donchian_high[i] or close[i] > (donchian_mid[i] + 1.5 * atr[i])))
         
         # Execute signals
         if long_entry:
@@ -135,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_elder_ray_adx_regime_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_volume_atr_stop_v1"
+timeframe = "4h"
 leverage = 1.0
