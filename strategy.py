@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-1D Weekly CCI Trend with Daily Volume Confirmation.
-Uses weekly CCI to identify strong trends, enters on daily pullbacks with volume spikes.
-Designed to work in both bull and bear markets by following the weekly trend direction.
-Targets 30-100 trades over 4 years with strict entry conditions.
+4h Camarilla Pivot Breakout with Volume Spike and Daily Trend Filter.
+Trades breakouts above/below daily Camarilla pivot levels (H3/L3) confirmed by volume spikes,
+only when daily price is above/below 50-period EMA to filter range-bound conditions.
+Designed for 4h timeframe to target 75-200 total trades over 4 years (19-50/year).
+Uses price action at key institutional levels with volume confirmation for institutional participation.
 """
 
 import numpy as np
@@ -12,75 +13,86 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Get daily data for entry timing
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
+    
+    # Get daily data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Camarilla Pivot Levels (based on previous day)
+    # Pivot = (H + L + C) / 3
+    # H3 = C + (H - L) * 1.1 / 2
+    # L3 = C - (H - L) * 1.1 / 2
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_hl = high_1d - low_1d
+    H3 = close_1d + (range_hl * 1.1 / 2)
+    L3 = close_1d - (range_hl * 1.1 / 2)
+    
+    # Breakout conditions
+    breakout_up = high_1d > H3
+    breakout_down = low_1d < L3
+    
+    # Align signals to 4h timeframe
+    breakout_up_aligned = align_htf_to_ltf(prices, df_1d, breakout_up.astype(float))
+    breakout_down_aligned = align_htf_to_ltf(prices, df_1d, breakout_down.astype(float))
+    
+    # Daily EMA (50-period) for trend filter
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Trend: price above EMA = uptrend, below EMA = downtrend
+    uptrend = close_1d > ema_50
+    downtrend = close_1d < ema_50
+    
+    # Align trend signals to 4h timeframe
+    uptrend_aligned = align_htf_to_ltf(prices, df_1d, uptrend.astype(float))
+    downtrend_aligned = align_htf_to_ltf(prices, df_1d, downtrend.astype(float))
+    
+    # Get daily volume for confirmation
     volume_1d = df_1d['volume'].values
     
-    # Get weekly data for CCI trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    # Weekly CCI (20-period)
-    tp_1w = (high_1w + low_1w + close_1w) / 3
-    sma_tp = pd.Series(tp_1w).rolling(window=20, min_periods=20).mean().values
-    mad = pd.Series(tp_1w).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
-    cci_20 = (tp_1w - sma_tp) / (0.015 * mad)
-    
-    # Trend: CCI > 100 = strong uptrend, CCI < -100 = strong downtrend
-    strong_uptrend = cci_20 > 100
-    strong_downtrend = cci_20 < -100
-    
-    # Align weekly trend to daily
-    strong_uptrend_aligned = align_htf_to_ltf(prices, df_1w, strong_uptrend.astype(float))
-    strong_downtrend_aligned = align_htf_to_ltf(prices, df_1w, strong_downtrend.astype(float))
-    
-    # Daily volume confirmation
-    vol_ma_10 = pd.Series(volume_1d).rolling(window=10, min_periods=10).mean().values
-    vol_spike = volume_1d > (vol_ma_10 * 1.5)
+    # Volume spike: volume > 1.8x 20-period average
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_1d > (vol_ma_20 * 1.8)
     vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
-    
-    # Daily pullback entry: price near 20-period EMA in trend direction
-    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    pullback_long = close_1d <= ema_20 * 1.02  # Within 2% above EMA
-    pullback_short = close_1d >= ema_20 * 0.98  # Within 2% below EMA
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% of capital
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(strong_uptrend_aligned[i]) or 
-            np.isnan(strong_downtrend_aligned[i]) or 
-            np.isnan(vol_spike_aligned[i])):
+        if (np.isnan(breakout_up_aligned[i]) or 
+            np.isnan(breakout_down_aligned[i]) or 
+            np.isnan(vol_spike_aligned[i]) or 
+            np.isnan(uptrend_aligned[i]) or 
+            np.isnan(downtrend_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: strong weekly trend + volume spike + daily pullback
-        long_entry = (strong_uptrend_aligned[i] > 0.5 and 
+        # Entry conditions: Camarilla breakout + volume spike + daily trend
+        long_entry = (breakout_up_aligned[i] > 0.5 and 
                       vol_spike_aligned[i] > 0.5 and 
-                      pullback_long)
-        short_entry = (strong_downtrend_aligned[i] > 0.5 and 
+                      uptrend_aligned[i] > 0.5)
+        short_entry = (breakout_down_aligned[i] > 0.5 and 
                        vol_spike_aligned[i] > 0.5 and 
-                       pullback_short)
+                       downtrend_aligned[i] > 0.5)
         
-        # Exit when trend weakens (CCI returns to normal range)
-        exit_long = position == 1 and strong_uptrend_aligned[i] < 0.5
-        exit_short = position == -1 and strong_downtrend_aligned[i] < 0.5
+        # Exit when price returns to pivot level
+        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+        
+        exit_long = position == 1 and close[i] <= pivot_aligned[i]
+        exit_short = position == -1 and close[i] >= pivot_aligned[i]
         
         # Execute signals
         if long_entry and position != 1:
@@ -103,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_weekly_cci_volume_pullback"
-timeframe = "1d"
+name = "4h_1d_camarilla_pivot_breakout"
+timeframe = "4h"
 leverage = 1.0
