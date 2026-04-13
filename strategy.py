@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-1d_1w_RSI_CCI_Confluence_Strategy
-Hypothesis: RSI(14) and CCI(20) confluence on daily timeframe with weekly trend filter (EMA50) identifies high-probability reversals in both bull and bear markets.
-Weekly EMA50 ensures we trade with the higher timeframe trend, while daily RSI < 30 and CCI < -100 identify oversold conditions for longs,
-and RSI > 70 and CCI > 100 identify overbought conditions for shorts. Volume confirmation filters for institutional participation.
-Target: 15-25 trades/year.
+6h_1d_Adaptive_Range_Breakout_with_Volume_and_ADX
+Hypothesis: In ranging markets (ADX < 25), price tends to revert from daily support/resistance; 
+in trending markets (ADX >= 25), breakouts of daily high/low with volume continuation are traded.
+This adapts to both bull and bear regimes by using volatility-based position sizing and ADX regime filter.
+Target: 15-30 trades per year.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,90 +21,96 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data for range and trend filters
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate RSI(14) on daily closes
-    def calculate_rsi(series, period):
-        delta = np.diff(series)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.full_like(series, np.nan)
-        avg_loss = np.full_like(series, np.nan)
-        
-        # First average
-        avg_gain[period] = np.mean(gain[:period])
-        avg_loss[period] = np.mean(loss[:period])
-        
-        # Wilder smoothing
-        for i in range(period + 1, len(series)):
-            avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
-        
-        rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+    # Calculate daily ATR(14) for volatility normalization
+    tr_1d = np.maximum(
+        high_1d[1:] - low_1d[1:],
+        np.maximum(
+            np.abs(high_1d[1:] - close_1d[:-1]),
+            np.abs(low_1d[1:] - close_1d[:-1])
+        )
+    )
+    tr_1d = np.concatenate([[np.nan], tr_1d])
+    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    rsi = calculate_rsi(close, 14)
+    # Calculate daily range: (high - low) / ATR
+    daily_range = (high_1d - low_1d) / atr_1d
+    daily_range_aligned = align_htf_to_ltf(prices, df_1d, daily_range)
     
-    # Calculate CCI(20)
-    def calculate_cci(high, low, close, period):
-        tp = (high + low + close) / 3
-        sma_tp = np.full_like(tp, np.nan)
-        mad = np.full_like(tp, np.nan)
-        
-        for i in range(period - 1, len(tp)):
-            sma_tp[i] = np.mean(tp[i - period + 1:i + 1])
-            mad[i] = np.mean(np.abs(tp[i - period + 1:i + 1] - sma_tp[i]))
-        
-        cci = np.full_like(tp, np.nan)
-        valid = (sma_tp != 0) & (~np.isnan(sma_tp)) & (~np.isnan(mad))
-        cci[valid] = (tp[valid] - sma_tp[valid]) / (0.015 * mad[valid])
-        return cci
+    # Calculate ADX(14) on daily data to determine regime
+    # +DM and -DM
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[0.0], plus_dm])
+    minus_dm = np.concatenate([[0.0], minus_dm])
     
-    cci = calculate_cci(high, low, close, 20)
+    # Smoothed +DM, -DM, TR
+    atr_1d_for_adx = atr_1d  # already calculated
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_1d_smooth = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values  # same as atr_1d
     
-    # Volume confirmation: current volume > 1.3x 20-day average
+    # DI+ and DI-
+    plus_di = 100 * plus_dm_smooth / atr_1d_smooth
+    minus_di = 100 * minus_dm_smooth / atr_1d_smooth
+    
+    # DX and ADX
+    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
+    dx = np.where((plus_di + minus_di) != 0, dx, 0)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Daily high and low for breakout levels
+    daily_high = high_1d
+    daily_low = low_1d
+    daily_high_aligned = align_htf_to_ltf(prices, df_1d, daily_high)
+    daily_low_aligned = align_htf_to_ltf(prices, df_1d, daily_low)
+    
+    # Volume confirmation: current volume > 1.3x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_confirmation = volume > (vol_ma_20 * 1.3)
+    volume_expansion = volume > (vol_ma_20 * 1.3)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
-    position_size = 0.25
+    base_size = 0.25
     
-    for i in range(30, n):  # Start after indicators are ready
+    for i in range(50, n):
         # Skip if any required data is not ready
-        if (np.isnan(rsi[i]) or np.isnan(cci[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_confirmation[i])):
+        if (np.isnan(daily_range_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(daily_high_aligned[i]) or np.isnan(daily_low_aligned[i]) or
+            np.isnan(volume_expansion[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions:
-        # 1. RSI < 30 (oversold)
-        # 2. CCI < -100 (deeply oversold)
-        # 3. Price above weekly EMA50 (bullish higher timeframe trend)
-        # 4. Volume confirmation
-        rsi_oversold = rsi[i] < 30
-        cci_oversold = cci[i] < -100
-        price_above_weekly_ema = close[i] > ema_50_1w_aligned[i]
-        long_condition = rsi_oversold and cci_oversold and price_above_weekly_ema and volume_confirmation[i]
+        # Regime filter: ADX < 25 = ranging, ADX >= 25 = trending
+        ranging = adx_aligned[i] < 25
+        trending = adx_aligned[i] >= 25
         
-        # Short conditions:
-        # 1. RSI > 70 (overbought)
-        # 2. CCI > 100 (deeply overbought)
-        # 3. Price below weekly EMA50 (bearish higher timeframe trend)
-        # 4. Volume confirmation
-        rsi_overbought = rsi[i] > 70
-        cci_overbought = cci[i] > 100
-        price_below_weekly_ema = close[i] < ema_50_1w_aligned[i]
-        short_condition = rsi_overbought and cci_overbought and price_below_weekly_ema and volume_confirmation[i]
+        # Volatility-adjusted position size: smaller in high volatility
+        vol_factor = np.clip(1.0 / (daily_range_aligned[i] / 100), 0.5, 1.5)  # normalize around 100% ATR range
+        position_size = base_size * vol_factor
+        
+        if ranging:
+            # Mean reversion: fade at daily extremes
+            # Long near daily low, short near daily high
+            long_condition = (close[i] <= daily_low_aligned[i] * 1.001) and volume_expansion[i]
+            short_condition = (close[i] >= daily_high_aligned[i] * 0.999) and volume_expansion[i]
+        else:
+            # Trending: breakout continuation
+            # Long on daily high break, short on daily low break
+            long_condition = (close[i] > daily_high_aligned[i]) and volume_expansion[i]
+            short_condition = (close[i] < daily_low_aligned[i]) and volume_expansion[i]
         
         if long_condition and position != 1:
             position = 1
@@ -118,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_RSI_CCI_Confluence_Strategy"
-timeframe = "1d"
+name = "6h_1d_Adaptive_Range_Breakout_with_Volume_and_ADX"
+timeframe = "6h"
 leverage = 1.0
