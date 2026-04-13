@@ -3,14 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Bollinger Squeeze breakout with 1d ADX trend filter and volume confirmation.
-# Bollinger Squeeze (low volatility) precedes explosive moves. When bands contract
-# (BB width < 20th percentile), a breakout is imminent. Direction determined by:
-# 1) Price breakout above/below Bollinger Bands
-# 2) 1d ADX > 25 confirming trend strength
-# 3) Volume > 2.0x average for confirmation
-# Works in both bull/bear markets by capturing volatility expansions.
-# Target: 20-50 trades per year (80-200 total over 4 years) for 4h timeframe.
+# Hypothesis: 1d Donchian(20) breakout with 1w ADX(14) trend filter and volume confirmation.
+# Donchian breakouts capture momentum; ADX ensures trend strength (>25) to avoid false breakouts in ranging markets.
+# Volume surge confirms breakout validity. Target: 15-25 trades/year (60-100 total) for 1d timeframe.
+# Works in bull (breakouts up) and bear (breakouts down) via symmetric long/short logic.
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,105 +18,82 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2.0)
-    bb_length = 20
-    bb_mult = 2.0
-    basis = np.zeros(n)
-    dev = np.zeros(n)
-    upper = np.zeros(n)
-    lower = np.zeros(n)
-    
-    # Calculate SMA and standard deviation
-    for i in range(bb_length - 1, n):
-        basis[i] = np.mean(close[i - bb_length + 1:i + 1])
-        dev[i] = np.std(close[i - bb_length + 1:i + 1])
-        upper[i] = basis[i] + bb_mult * dev[i]
-        lower[i] = basis[i] - bb_mult * dev[i]
-    
-    # Bollinger Band Width for squeeze detection
-    bb_width = (upper - lower) / basis
-    # Percentile lookback for squeeze threshold (50 periods)
-    bb_width_percentile = np.full(n, np.nan)
-    for i in range(50, n):
-        bb_width_percentile[i] = np.percentile(bb_width[i-50:i], 20)  # 20th percentile
-    
-    # Squeeze condition: BB width < 20th percentile of last 50 periods
-    squeeze = np.zeros(n, dtype=bool)
-    for i in range(50, n):
-        if not np.isnan(bb_width[i]) and not np.isnan(bb_width_percentile[i]):
-            squeeze[i] = bb_width[i] < bb_width_percentile[i]
-    
-    # 1-day data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # 1-week data for ADX trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate ADX (14)
-    adx_period = 14
-    tr = np.zeros(len(close_1d))
-    plus_dm = np.zeros(len(close_1d))
-    minus_dm = np.zeros(len(close_1d))
-    
-    for i in range(1, len(close_1d)):
-        high_diff = high_1d[i] - high_1d[i-1]
-        low_diff = low_1d[i-1] - low_1d[i]
+    # Calculate ADX(14) on 1w
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[np.nan], tr])
         
-        tr[i] = max(
-            high_1d[i] - low_1d[i],
-            abs(high_1d[i] - close_1d[i-1]),
-            abs(low_1d[i] - close_1d[i-1])
-        )
+        # Directional Movement
+        plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+        minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+        plus_dm = np.concatenate([[0], plus_dm])
+        minus_dm = np.concatenate([[0], minus_dm])
         
-        if high_diff > low_diff and high_diff > 0:
-            plus_dm[i] = high_diff
-        else:
-            plus_dm[i] = 0
+        # Smoothed TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
+        atr = np.full_like(tr, np.nan)
+        plus_dm_smooth = np.full_like(plus_dm, np.nan)
+        minus_dm_smooth = np.full_like(minus_dm, np.nan)
+        
+        # First values: simple average
+        if len(tr) >= period + 1:
+            atr[period] = np.nanmean(tr[1:period+1])
+            plus_dm_smooth[period] = np.nanmean(plus_dm[1:period+1])
+            minus_dm_smooth[period] = np.nanmean(minus_dm[1:period+1])
             
-        if low_diff > high_diff and low_diff > 0:
-            minus_dm[i] = low_diff
-        else:
-            minus_dm[i] = 0
-    
-    # Smoothed values
-    atr = np.zeros(len(close_1d))
-    plus_di = np.zeros(len(close_1d))
-    minus_di = np.zeros(len(close_1d))
-    dx = np.zeros(len(close_1d))
-    
-    # Initial values
-    if len(close_1d) >= adx_period:
-        atr[adx_period-1] = np.mean(tr[1:adx_period])
-        plus_di[adx_period-1] = (np.sum(plus_dm[1:adx_period]) / atr[adx_period-1]) * 100
-        minus_di[adx_period-1] = (np.sum(minus_dm[1:adx_period]) / atr[adx_period-1]) * 100
+            # Subsequent values: Wilder smoothing
+            for i in range(period+1, len(tr)):
+                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+                plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
+                minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
         
-        if plus_di[adx_period-1] + minus_di[adx_period-1] != 0:
-            dx[adx_period-1] = (abs(plus_di[adx_period-1] - minus_di[adx_period-1]) / 
-                               (plus_di[adx_period-1] + minus_di[adx_period-1])) * 100
-    
-    # Smooth subsequent values
-    for i in range(adx_period, len(close_1d)):
-        atr[i] = (atr[i-1] * (adx_period - 1) + tr[i]) / adx_period
-        plus_di[i] = (plus_di[i-1] * (adx_period - 1) + plus_dm[i]) / atr[i] * 100
-        minus_di[i] = (minus_di[i-1] * (adx_period - 1) + minus_dm[i]) / atr[i] * 100
+        # Directional Indicators
+        plus_di = np.full_like(tr, np.nan)
+        minus_di = np.full_like(tr, np.nan)
+        dx = np.full_like(tr, np.nan)
         
-        if plus_di[i] + minus_di[i] != 0:
-            dx[i] = (abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])) * 100
+        for i in range(period, len(tr)):
+            if atr[i] != 0 and not np.isnan(atr[i]):
+                plus_di[i] = 100 * plus_dm_smooth[i] / atr[i]
+                minus_di[i] = 100 * minus_dm_smooth[i] / atr[i]
+                if (plus_di[i] + minus_di[i]) != 0:
+                    dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+        
+        # ADX: smoothed DX
+        adx = np.full_like(tr, np.nan)
+        if len(tr) >= 2*period + 1:
+            adx[2*period] = np.nanmean(dx[period+1:2*period+1])
+            for i in range(2*period+1, len(tr)):
+                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        return adx
     
-    # ADX calculation
-    adx = np.zeros(len(close_1d))
-    if len(close_1d) >= 2 * adx_period - 1:
-        adx[2*adx_period-2] = np.mean(dx[adx_period-1:2*adx_period-1])
-        for i in range(2*adx_period-1, len(close_1d)):
-            adx[i] = (adx[i-1] * (adx_period - 1) + dx[i]) / adx_period
+    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
-    # Align 1d ADX to 4h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Donchian(20) channels on 1d
+    def calculate_donchian(high, low, window):
+        upper = np.full_like(high, np.nan)
+        lower = np.full_like(low, np.nan)
+        for i in range(window-1, len(high)):
+            upper[i] = np.max(high[i-window+1:i+1])
+            lower[i] = np.min(low[i-window+1:i+1])
+        return upper, lower
     
-    # Average volume (20-period = 10 hours) for volume confirmation
+    upper_channel, lower_channel = calculate_donchian(high, low, 20)
+    
+    # Average volume (20-period) for confirmation
     avg_volume = np.full(n, np.nan)
     for i in range(20, n):
         avg_volume[i] = np.mean(volume[i-20:i])
@@ -129,53 +102,44 @@ def generate_signals(prices):
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% position size
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required data is not ready
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(basis[i]) or
-            np.isnan(adx_1d_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
+            np.isnan(adx_1w_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
+        adx_val = adx_1w_aligned[i]
         avg_vol = avg_volume[i]
-        adx_val = adx_1d_aligned[i]
-        is_squeeze = squeeze[i]
         
         # Volume confirmation: current volume > 2.0x average volume
         volume_confirm = vol > 2.0 * avg_vol
         
-        # Only trade when coming out of a squeeze (volatility expansion)
-        if not is_squeeze:
-            continue
-            
         if position == 0:
-            # Long: Price breaks above upper Bollinger Band + ADX > 25 + volume confirmation
-            if (price > upper[i] and
-                adx_val > 25 and
-                volume_confirm):
+            # Long: breakout above upper channel + ADX > 25 + volume confirmation
+            if (price > upper_channel[i] and adx_val > 25 and volume_confirm):
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below lower Bollinger Band + ADX > 25 + volume confirmation
-            elif (price < lower[i] and
-                  adx_val > 25 and
-                  volume_confirm):
+            # Short: breakout below lower channel + ADX > 25 + volume confirmation
+            elif (price < lower_channel[i] and adx_val > 25 and volume_confirm):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Price returns to middle Bollinger Band or ADX weakens
-            if (price < basis[i] or
-                adx_val < 20):
+            # Exit long: price re-enters Donchian channel (below midpoint) or ADX weakens
+            midpoint = (upper_channel[i] + lower_channel[i]) / 2
+            if (price < midpoint or adx_val < 20):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Price returns to middle Bollinger Band or ADX weakens
-            if (price > basis[i] or
-                adx_val < 20):
+            # Exit short: price re-enters Donchian channel (above midpoint) or ADX weakens
+            midpoint = (upper_channel[i] + lower_channel[i]) / 2
+            if (price > midpoint or adx_val < 20):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -183,6 +147,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_BollingerSqueeze_ADX_Volume"
-timeframe = "4h"
+name = "1d_1w_Donchian_ADX_Volume_Breakout"
+timeframe = "1d"
 leverage = 1.0
