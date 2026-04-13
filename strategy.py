@@ -1,13 +1,10 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-1d_1w_MeanReversion_FundingRate
-Hypothesis: Uses weekly funding rate mean reversion (Z-score) to capture overextended funding extremes.
-In weekly periods when funding rate Z-score < -2.0 (extremely negative), go long; when > +2.0 (extremely positive), go short.
-Uses 1d price action for entry timing: wait for price to close above/below 20-period EMA on daily.
-Combines funding extreme (contrarian signal) with trend filter (EMA) to avoid picking bottoms/top of strong moves.
-Works in both bull and bear markets as funding extremes occur in all regimes.
-Target: 20-50 trades/year on 1d (80-200 total over 4 years).
+6h_1d_Range_Breakout_with_Volume_and_ADX
+Hypothesis: Uses daily range (high-low) to filter for low volatility conditions, then trades 6h breakouts with volume and ADX confirmation.
+Works in bull markets by capturing breakout momentum, and in bear markets by avoiding false breakouts during low volatility.
+ADX > 25 ensures we only trade when there's sufficient trend strength after breakout.
+Target: 15-35 trades/year on 6h (60-140 total over 4 years).
 """
 
 import numpy as np
@@ -24,85 +21,166 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for funding rate (proxy: using price change as funding proxy)
-    # NOTE: In actual implementation, funding rate data would be loaded separately
-    # For this simulation, we use weekly price change as a proxy for funding rate extremes
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly returns as proxy for funding rate
-    weekly_returns = np.diff(close_1w) / close_1w[:-1]
-    weekly_returns = np.concatenate([[0], weekly_returns])  # align length
-    
-    # Calculate Z-score of weekly returns (20-week window)
-    returns_series = pd.Series(weekly_returns)
-    mean_20w = returns_series.rolling(window=20, min_periods=20).mean()
-    std_20w = returns_series.rolling(window=20, min_periods=20).std()
-    z_score = (weekly_returns - mean_20w) / std_20w
-    z_score = np.where(std_20w == 0, 0, z_score)  # avoid division by zero
-    
-    # Funding extreme signals: Z-score < -2.0 (long) or > +2.0 (short)
-    funding_long_signal = z_score < -2.0
-    funding_short_signal = z_score > 2.0
-    
-    # Get daily data for EMA trend filter and entry timing
+    # Get daily data for range and ADX calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 20-period EMA on daily
-    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate daily range (high - low)
+    daily_range = high_1d - low_1d
     
-    # Align all signals to lower timeframe (using index alignment since we're using 1d as primary)
-    # For 1d primary timeframe, we can use the data directly with proper indexing
-    funding_long_aligned = align_htf_to_ltf(prices, df_1w, funding_long_signal)
-    funding_short_aligned = align_htf_to_ltf(prices, df_1w, funding_short_signal)
-    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
+    # Calculate 50-period percentile of daily range for volatility filter (30th percentile = low volatility)
+    daily_range_series = pd.Series(daily_range.values)
+    daily_range_percentile = daily_range_series.rolling(window=50, min_periods=30).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
+    
+    # Low volatility condition: daily range < 30th percentile
+    low_volatility = daily_range_percentile < 30.0
+    
+    # Calculate ADX on daily (14-period)
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
+    
+    # Smoothed values
+    tr_period = 14
+    atr = np.full_like(tr, np.nan, dtype=float)
+    dm_plus_smooth = np.full_like(dm_plus, np.nan, dtype=float)
+    dm_minus_smooth = np.full_like(dm_minus, np.nan, dtype=float)
+    
+    # Initial values
+    if len(tr) >= tr_period:
+        atr[tr_period] = np.nanmean(tr[1:tr_period+1])
+        dm_plus_smooth[tr_period] = np.nanmean(dm_plus[1:tr_period+1])
+        dm_minus_smooth[tr_period] = np.nanmean(dm_minus[1:tr_period+1])
+        
+        # Wilder smoothing
+        for i in range(tr_period + 1, len(tr)):
+            atr[i] = (atr[i-1] * (tr_period - 1) + tr[i]) / tr_period
+            dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (tr_period - 1) + dm_plus[i]) / tr_period
+            dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (tr_period - 1) + dm_minus[i]) / tr_period
+    
+    # DI+ and DI-
+    di_plus = np.full_like(atr, np.nan, dtype=float)
+    di_minus = np.full_like(atr, np.nan, dtype=float)
+    dx = np.full_like(atr, np.nan, dtype=float)
+    
+    valid = ~np.isnan(atr) & (atr != 0)
+    di_plus[valid] = (dm_plus_smooth[valid] / atr[valid]) * 100
+    di_minus[valid] = (dm_minus_smooth[valid] / atr[valid]) * 100
+    dx[valid] = (np.abs(di_plus[valid] - di_minus[valid]) / (di_plus[valid] + di_minus[valid])) * 100
+    
+    # ADX (smoothed DX)
+    adx = np.full_like(dx, np.nan, dtype=float)
+    adx_period = 14
+    if len(dx) >= 2 * adx_period:
+        adx[2*adx_period-1] = np.nanmean(dx[adx_period:2*adx_period])
+        for i in range(2*adx_period, len(dx)):
+            if not np.isnan(dx[i-1]):
+                adx[i] = (adx[i-1] * (adx_period - 1) + dx[i]) / adx_period
+    
+    # Get 6h data for breakout levels
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
+        return np.zeros(n)
+    
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
+    volume_6h = df_6h['volume'].values
+    
+    # 6h Donchian channels (20-period)
+    highest_20 = np.full_like(high_6h, np.nan, dtype=float)
+    lowest_20 = np.full_like(low_6h, np.nan, dtype=float)
+    
+    for i in range(len(high_6h)):
+        if i >= 19:
+            highest_20[i] = np.max(high_6h[i-19:i+1])
+            lowest_20[i] = np.min(low_6h[i-19:i+1])
+    
+    # Volume average for 6h
+    vol_ma_20_6h = np.full_like(volume_6h, np.nan, dtype=float)
+    for i in range(len(volume_6h)):
+        if i >= 19:
+            vol_ma_20_6h[i] = np.mean(volume_6h[i-19:i+1])
+    
+    # Align all signals to main timeframe
+    low_volatility_aligned = align_htf_to_ltf(prices, df_1d, low_volatility)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    highest_20_aligned = align_htf_to_ltf(prices, df_6h, highest_20)
+    lowest_20_aligned = align_htf_to_ltf(prices, df_6h, lowest_20)
+    vol_ma_20_6h_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_20_6h)
+    
+    # Session filter: 08:00-20:00 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_mask = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # -1: short, 0: flat, 1: long
     position_size = 0.25  # 25% of capital
     
-    for i in range(30, n):
-        # Skip if data not ready
-        if np.isnan(funding_long_aligned[i]) or np.isnan(funding_short_aligned[i]) or np.isnan(ema_20_aligned[i]):
+    for i in range(50, n):
+        # Skip if not in session or data not ready
+        if not session_mask[i] or \
+           np.isnan(low_volatility_aligned[i]) or \
+           np.isnan(adx_aligned[i]) or \
+           np.isnan(highest_20_aligned[i]) or \
+           np.isnan(lowest_20_aligned[i]) or \
+           np.isnan(vol_ma_20_6h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Entry conditions
-        long_entry = funding_long_aligned[i] and close[i] > ema_20_aligned[i]
-        short_entry = funding_short_aligned[i] and close[i] < ema_20_aligned[i]
-        
-        # Exit conditions: funding extreme passes or price crosses EMA in opposite direction
-        long_exit = (not funding_long_aligned[i]) or (close[i] < ema_20_aligned[i])
-        short_exit = (not funding_short_aligned[i]) or (close[i] > ema_20_aligned[i])
-        
-        if long_entry and position != 1:
-            position = 1
-            signals[i] = position_size
-        elif short_entry and position != -1:
-            position = -1
-            signals[i] = -position_size
-        elif position == 1 and long_exit:
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and short_exit:
-            position = 0
-            signals[i] = 0.0
-        elif position == 1:
-            signals[i] = position_size
-        elif position == -1:
-            signals[i] = -position_size
+        # Entry conditions: low volatility + ADX > 25 + breakout with volume expansion
+        if low_volatility_aligned[i] and adx_aligned[i] > 25:
+            # Volume expansion on 6h
+            volume_expansion = volume[i] > (vol_ma_20_6h_aligned[i] * 1.5) if i >= 20 else False
+            
+            # Long entry: price breaks above 6h Donchian high
+            if high[i] > highest_20_aligned[i] and volume_expansion:
+                if position != 1:
+                    position = 1
+                    signals[i] = position_size
+                else:
+                    signals[i] = position_size
+            # Short entry: price breaks below 6h Donchian low
+            elif low[i] < lowest_20_aligned[i] and volume_expansion:
+                if position != -1:
+                    position = -1
+                    signals[i] = -position_size
+                else:
+                    signals[i] = -position_size
+            # Hold position
+            elif position == 1:
+                signals[i] = position_size
+            elif position == -1:
+                signals[i] = -position_size
+            else:
+                signals[i] = 0.0
         else:
-            signals[i] = 0.0
+            # Exit conditions: volatility increases or ADX weakens
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
     
     return signals
 
-name = "1d_1w_MeanReversion_FundingRate"
-timeframe = "1d"
+name = "6h_1d_Range_Breakout_with_Volume_and_ADX"
+timeframe = "6h"
 leverage = 1.0
