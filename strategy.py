@@ -8,58 +8,50 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Hypothesis: 4h primary with 1d HTF - 4h Donchian breakout with 1d volume confirmation and ATR-based volatility filter
-    # Designed to capture strong daily trends with institutional volume, avoiding choppy/low-volume false breakouts
-    # Target: 75-200 trades over 4 years (19-50/year) for low fee drag and good generalization
+    # Hypothesis: 1d primary with 1w HTF - 1d Donchian breakout with 1w volume confirmation and ATR filter
+    # Designed to capture strong weekly trends with institutional volume, avoiding choppy/low-volume false breakouts
+    # Target: 30-100 trades over 4 years (7-25/year) for low fee drag and good generalization
+    # Works in both bull/bear via trend-following breakouts with volume confirmation
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values if 'volume' in prices.columns else np.ones(len(prices))
     
-    # Get 1d data for HTF Donchian channels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 1w data for HTF Donchian channels and volume
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values if 'volume' in df_1w.columns else np.ones(len(df_1w))
     
-    # Get 4h data for volume confirmation and ATR
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values if 'volume' in df_4h.columns else np.ones(len(df_4h))
-    
-    # Calculate 1d Donchian channels (20-period)
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate 1w Donchian channels (20-period)
+    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Calculate 4h ATR (14-period) for volatility filter
+    # Calculate 1w ATR (14-period) for volatility filter
     def calculate_atr(high, low, close, window=14):
         tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - np.roll(close, 1)[1:]))
         tr1 = np.maximum(tr1, np.abs(low[1:] - np.roll(close, 1)[1:]))
         tr = np.concatenate([[np.nan], tr1])
         return pd.Series(tr).rolling(window=window, min_periods=window).mean().values
     
-    atr_4h = calculate_atr(high_4h, low_4h, close_4h, window=14)
-    atr_ma_10 = pd.Series(atr_4h).rolling(window=10, min_periods=10).mean().values
+    atr_1w = calculate_atr(high_1w, low_1w, close_1w, window=14)
+    atr_ma_10 = pd.Series(atr_1w).rolling(window=10, min_periods=10).mean().values
     
-    # Calculate 4h volume average (20-period)
-    vol_avg_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1w volume average (20-period)
+    vol_avg_20 = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
     
-    # Align all HTF/LTF indicators to 4h primary timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid)
-    vol_avg_20_aligned = align_htf_to_ltf(prices, df_4h, vol_avg_20)
-    atr_ma_10_aligned = align_htf_to_ltf(prices, df_4h, atr_ma_10)
+    # Align all HTF indicators to 1d primary timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid)
+    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1w, vol_avg_20)
+    atr_ma_10_aligned = align_htf_to_ltf(prices, df_1w, atr_ma_10)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -76,22 +68,22 @@ def generate_signals(prices):
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmed = volume_4h[i] > 1.5 * vol_avg_20_aligned[i]
+        volume_confirmed = volume_1w[i] > 1.5 * vol_avg_20_aligned[i]
         
         # Volatility filter: avoid extremely low volatility (choppy markets)
-        vol_filter = atr_4h[i] > 0.3 * atr_ma_10_aligned[i]
+        vol_filter = atr_1w[i] > 0.3 * atr_ma_10_aligned[i]
         
         # Breakout conditions
-        breakout_up = close_4h[i] > donchian_high_aligned[i]
-        breakout_down = close_4h[i] < donchian_low_aligned[i]
+        breakout_up = close[i] > donchian_high_aligned[i]
+        breakout_down = close[i] < donchian_low_aligned[i]
         
         # Entry conditions
         enter_long = breakout_up and volume_confirmed and vol_filter
         enter_short = breakout_down and volume_confirmed and vol_filter
         
-        # Exit conditions: price returns to 1d Donchian middle
-        exit_long = position == 1 and close_4h[i] <= donchian_mid_aligned[i]
-        exit_short = position == -1 and close_4h[i] >= donchian_mid_aligned[i]
+        # Exit conditions: price returns to 1w Donchian middle
+        exit_long = position == 1 and close[i] <= donchian_mid_aligned[i]
+        exit_short = position == -1 and close[i] >= donchian_mid_aligned[i]
         
         # Execute signals
         if enter_long and position != 1:
@@ -117,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_breakout_volume_atr_v3"
-timeframe = "4h"
+name = "1d_1w_donchian_breakout_volume_atr_v4"
+timeframe = "1d"
 leverage = 1.0
