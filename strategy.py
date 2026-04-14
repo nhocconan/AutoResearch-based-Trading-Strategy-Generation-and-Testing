@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12-hour timeframe strategy using 1-day Donchian channel breakouts
-combined with 1-week volatility regime and volume confirmation.
-Long when price breaks above 1-day Donchian high (20) during low weekly volatility
-with volume surge. Short when price breaks below 1-day Donchian low (20) during
-low weekly volatility with volume surge. Exits when price crosses 1-day EMA(20)
-in opposite direction or volatility expands significantly.
+Hypothesis: 12-hour strategy using 1-day Donchian channel breakouts filtered by 1-week volatility regime.
+Long when price breaks above 1-day Donchian high (20) during low weekly volatility with volume confirmation.
+Short when price breaks below 1-day Donchian low (20) during low weekly volatility with volume confirmation.
+Exit when price crosses 1-day EMA(20) in opposite direction or volatility expands significantly.
 Designed for low turnover: ~15-30 trades/year per symbol to minimize fee drag.
 """
 import numpy as np
