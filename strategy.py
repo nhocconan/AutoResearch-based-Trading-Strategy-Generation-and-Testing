@@ -13,50 +13,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data once
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load 12h data once
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate Donchian channels (20-period) on daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate RSI (14-period) on 12h data
+    close_12h = df_12h['close'].values
+    delta = np.diff(close_12h, prepend=close_12h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate ADX (14-period) on daily data
-    if len(df_1d) < 30:
-        return np.zeros(n)
+    # Wilder's smoothing (alpha = 1/14)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - low_1d[:-1])  # high - prev close
-    tr3 = np.abs(low_1d[1:] - low_1d[:-1])  # low - prev close
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_12h = 100 - (100 / (1 + rs))
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
+    # Calculate ATR (14-period) on 12h data
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h_prev = np.roll(close_12h, 1)
+    close_12h_prev[0] = close_12h[0]
     
-    # Smoothed values
-    tr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_plus_14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus_14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    tr = np.maximum(high_12h - low_12h, 
+                    np.maximum(np.abs(high_12h - close_12h_prev), 
+                               np.abs(low_12h - close_12h_prev)))
     
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_14 / (tr_14 + 1e-10)
-    di_minus = 100 * dm_minus_14 / (tr_14 + 1e-10)
+    atr_12h = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Calculate 12h EMA (50-period) on close
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 4-period average volume (4h periods in a day)
-    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # Calculate 6-period average volume (4h periods in a day for 12h TF)
+    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     
     signals = np.zeros(n)
     position = 0
@@ -64,43 +55,40 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Get aligned indicators
-        upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)[i]
-        lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)[i]
-        adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)[i]
-        vol_ma_4_val = vol_ma_4[i]  # already LTF
+        rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)[i]
+        atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)[i]
+        ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)[i]
+        vol_ma_6_val = vol_ma_6[i]  # already LTF
         
         # Check for NaN values
-        if (np.isnan(upper_20_aligned) or np.isnan(lower_20_aligned) or 
-            np.isnan(adx_1d_aligned) or np.isnan(vol_ma_4_val)):
+        if (np.isnan(rsi_12h_aligned) or np.isnan(atr_12h_aligned) or 
+            np.isnan(ema_50_12h_aligned) or np.isnan(vol_ma_6_val)):
             continue
         
         # Volume confirmation (> 1.5x average)
-        volume_confirm = volume[i] > 1.5 * vol_ma_4_val
-        
-        # ADX trend filter (> 25)
-        trend_filter = adx_1d_aligned > 25
+        volume_confirm = volume[i] > 1.5 * vol_ma_6_val
         
         if position == 0:  # No position - look for entries
-            if volume_confirm and trend_filter:
-                # Long: price breaks above upper Donchian band
-                if close[i] > upper_20_aligned and close[i-1] <= upper_20_aligned:
+            if volume_confirm:
+                # Long: RSI < 30 (oversold) and price above EMA50 (bullish bias)
+                if rsi_12h_aligned < 30 and close[i] > ema_50_12h_aligned:
                     position = 1
                     signals[i] = position_size
-                # Short: price breaks below lower Donchian band
-                elif close[i] < lower_20_aligned and close[i-1] >= lower_20_aligned:
+                # Short: RSI > 70 (overbought) and price below EMA50 (bearish bias)
+                elif rsi_12h_aligned > 70 and close[i] < ema_50_12h_aligned:
                     position = -1
                     signals[i] = -position_size
-        elif position == 1:  # Long position - exit when price breaks below lower band
-            if close[i] < lower_20_aligned and close[i-1] >= lower_20_aligned:
+        elif position == 1:  # Long position - exit when RSI > 70 (overbought)
+            if rsi_12h_aligned > 70:
                 position = 0
                 signals[i] = 0.0
-        elif position == -1:  # Short position - exit when price breaks above upper band
-            if close[i] > upper_20_aligned and close[i-1] <= upper_20_aligned:
+        elif position == -1:  # Short position - exit when RSI < 30 (oversold)
+            if rsi_12h_aligned < 30:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_DailyDonchian20_1dADX25_Volume1.5x_v1"
-timeframe = "4h"
+name = "6h_RSI12h_OverboughtOversold_EMA50_Volume1.5x_v1"
+timeframe = "6h"
 leverage = 1.0
