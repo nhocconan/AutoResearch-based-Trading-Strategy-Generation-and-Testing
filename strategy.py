@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,30 +13,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data (HTF) once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
     # Load daily data (HTF) once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate weekly EMA(50) for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = np.full(len(df_1w), np.nan)
-    if len(df_1w) >= 50:
-        ema_50_1w[49] = np.mean(close_1w[:50])
-        for i in range(50, len(df_1w)):
-            ema_50_1w[i] = (close_1w[i] * 2 + ema_50_1w[i-1] * 49) / 51
-    
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Calculate daily ATR(14) for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    # Calculate daily ATR (14-period) for volatility filter
     tr = np.zeros(len(df_1d))
     tr[0] = high_1d[0] - low_1d[0]
     for i in range(1, len(df_1d)):
@@ -66,50 +52,54 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25  # 25% position size
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or
-            np.isnan(atr_12h[i]) or
+        if (np.isnan(atr_12h[i]) or
             np.isnan(donch_high[i]) or
             np.isnan(donch_low[i])):
             signals[i] = 0.0
             continue
         
-        # Skip low volatility periods (ATR < 0.3% of price)
-        if atr_12h[i] < 0.003 * close[i]:
+        # Skip low volatility periods (ATR < 0.5% of price)
+        if atr_12h[i] < 0.005 * close[i]:
             signals[i] = 0.0
             continue
         
-        # Skip high volatility periods (ATR > 3% of price) to avoid chop
-        if atr_12h[i] > 0.03 * close[i]:
-            signals[i] = 0.0
-            continue
+        # Calculate daily pivot levels based on previous day's range
+        prev_high = high_1d[i-1] if i > 0 else high_1d[0]
+        prev_low = low_1d[i-1] if i > 0 else low_1d[0]
+        prev_close = close_1d[i-1] if i > 0 else close_1d[0]
+        prev_range = prev_high - prev_low
         
-        # Trend filter: price above/below weekly EMA50
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
+        # Camarilla-style pivot levels (R3/S3)
+        r3 = prev_close + (prev_range * 1.1 / 4)
+        s3 = prev_close - (prev_range * 1.1 / 4)
+        
+        # Align to 12h timeframe
+        r3_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r3))[i]
+        s3_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i]
         
         if position == 0:
-            # Long: Price breaks above 12h Donchian high AND in weekly uptrend
-            if close[i] > donch_high[i] and uptrend:
+            # Long: Price breaks above 12h Donchian high AND above S3
+            if close[i] > donch_high[i] and close[i] > s3_12h:
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below 12h Donchian low AND in weekly downtrend
-            elif close[i] < donch_low[i] and downtrend:
+            # Short: Price breaks below 12h Donchian low AND below R3
+            elif close[i] < donch_low[i] and close[i] < r3_12h:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below 12h Donchian low OR trend turns down
-            if close[i] < donch_low[i] or not uptrend:
+            # Exit: Price falls back below 12h Donchian low OR below S3
+            if close[i] < donch_low[i] or close[i] < s3_12h:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above 12h Donchian high OR trend turns up
-            if close[i] > donch_high[i] or not downtrend:
+            # Exit: Price rises back above 12h Donchian high OR above R3
+            if close[i] > donch_high[i] or close[i] > r3_12h:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -117,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1w_EMA50_Trend_Filter_Donchian_Breakout"
+name = "12h_1d_Camarilla_R3S3_Breakout_Donchian"
 timeframe = "12h"
 leverage = 1.0
