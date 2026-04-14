@@ -108,7 +108,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 12h volume vs 20-period daily average volume
+        # Volume ratio: current 4h volume vs 20-period daily average volume
         if vol_ma_20_aligned[i] <= 0:
             volume_ratio = 0
         else:
@@ -148,6 +148,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Donchian20_ADX25_Volume"
-timeframe = "12h"
+name = "4h_1d_Donchian20_ADX25_Volume"
+timeframe = "4h"
 leverage = 1.0
