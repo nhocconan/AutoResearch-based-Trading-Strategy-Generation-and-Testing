@@ -8,32 +8,51 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for calculations
+    # Get daily data for weekly pivot points (using Monday's data)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 20-period high/low for daily range
-    high_1d_series = pd.Series(high_1d)
-    low_1d_series = pd.Series(low_1d)
-    daily_high_20 = high_1d_series.rolling(window=20, min_periods=20).max().shift(1).values
-    daily_low_20 = low_1d_series.rolling(window=20, min_periods=20).min().shift(1).values
+    # Calculate weekly pivot points using prior week's OHLC (Monday's data)
+    # For daily data, weekly pivot = (prev_week_high + prev_week_low + prev_week_close) / 3
+    # We'll use 5-day lookback for weekly data (approximation)
+    prev_week_high = np.roll(high_1d, 5)
+    prev_week_low = np.roll(low_1d, 5)
+    prev_week_close = np.roll(close_1d, 5)
+    prev_week_high[:5] = np.nan
+    prev_week_low[:5] = np.nan
+    prev_week_close[:5] = np.nan
     
-    # Align daily range to 4h timeframe
-    daily_high_20_aligned = align_htf_to_ltf(prices, df_1d, daily_high_20)
-    daily_low_20_aligned = align_htf_to_ltf(prices, df_1d, daily_low_20)
+    # Weekly pivot point
+    pp = (prev_week_high + prev_week_low + prev_week_close) / 3
+    # Weekly resistance and support levels
+    r1 = 2 * pp - prev_week_low
+    s1 = 2 * pp - prev_week_high
+    r2 = pp + (prev_week_high - prev_week_low)
+    s2 = pp - (prev_week_high - prev_week_low)
+    r3 = prev_week_high + 2 * (pp - prev_week_low)
+    s3 = prev_week_low - 2 * (prev_week_high - pp)
     
-    # Calculate 4-period range width (volatility measure)
-    daily_range = daily_high_20 - daily_low_20
-    daily_range_series = pd.Series(daily_range)
-    range_avg = daily_range_series.rolling(window=10, min_periods=10).mean().shift(1).values
-    range_avg_aligned = align_htf_to_ltf(prices, df_1d, range_avg)
+    # Align weekly pivot levels to daily timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly EMA(20) for trend filter
+    close_1w_series = pd.Series(close_1w)
+    ema_20_1w = close_1w_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
     # Volume confirmation: volume > 1.5x average volume (20-period)
     vol_series = pd.Series(volume)
@@ -44,12 +63,12 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 30  # for 20-period + 10-period calculations
+    start = 50  # for 50-period EMA + 5-day weekly lookback
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(daily_high_20_aligned[i]) or np.isnan(daily_low_20_aligned[i]) or
-            np.isnan(range_avg_aligned[i]) or np.isnan(avg_vol[i])):
+        if (np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
         
@@ -57,26 +76,26 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long: price breaks above 20-day high AND range is expanding (volatility increasing)
-            if price > daily_high_20_aligned[i] and range_avg_aligned[i] > daily_range[i-1] if i > 0 else False and vol > 1.5 * avg_vol[i]:
+            # Long: price breaks above weekly R2 AND above weekly EMA20 with volume confirmation
+            if price > r2_aligned[i] and price > ema_20_1w_aligned[i] and vol > 1.5 * avg_vol[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below 20-day low AND range is expanding
-            elif price < daily_low_20_aligned[i] and range_avg_aligned[i] > daily_range[i-1] if i > 0 else False and vol > 1.5 * avg_vol[i]:
+            # Short: price breaks below weekly S2 AND below weekly EMA20 with volume confirmation
+            elif price < s2_aligned[i] and price < ema_20_1w_aligned[i] and vol > 1.5 * avg_vol[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below 20-day low OR volatility contracts
-            if price < daily_low_20_aligned[i] or range_avg_aligned[i] < daily_range[i-1] * 0.8 if i > 0 else False:
+            # Exit long: price breaks below weekly S1
+            if price < s1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above 20-day high OR volatility contracts
-            if price > daily_high_20_aligned[i] or range_avg_aligned[i] < daily_range[i-1] * 0.8 if i > 0 else False:
+            # Exit short: price breaks above weekly R1
+            if price > r1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -84,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_20day_breakout_volatility_filter"
-timeframe = "4h"
+name = "1d_Weekly_Pivot_EMA_Volume"
+timeframe = "1d"
 leverage = 1.0
