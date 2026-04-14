@@ -3,13 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d volume confirmation and ADX regime filter
-# Long when price breaks above 20-bar Donchian high + 1d volume > 1.5x 20-day average + ADX > 25
-# Short when price breaks below 20-bar Donchian low + 1d volume > 1.5x 20-day average + ADX > 25
-# Exit when price returns to midpoint of Donchian channel or ADX < 20
-# Designed for trending markets with volume confirmation to avoid false breakouts
-# Works in both bull and bear markets: ADX filter ensures we only trade strong trends,
-# while volume confirmation validates breakout strength
+# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction and volume confirmation
+# Weekly pivot (from Monday weekly close) determines long/short bias
+# Donchian breakout in direction of weekly bias with volume > 1.5x 20-period average
+# Works in bull/bear markets: weekly pivot adapts to trend, volume filters false breakouts
+# Uses 60% position size to balance risk/reward
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,111 +19,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for volume confirmation
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE for pivot calculation
+    df_w = get_htf_data(prices, '1w')
     
-    # Calculate 1d average volume (20-day)
-    vol_1d = df_1d['volume'].values
-    avg_vol_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate weekly pivot points (using prior week's OHLC)
+    # Pivot = (H + L + C) / 3
+    # Bias: long if close > pivot, short if close < pivot
+    typical_price = (df_w['high'] + df_w['low'] + df_w['close']) / 3
+    pivot = typical_price.values
     
-    # Align 1d average volume to 4h timeframe
-    avg_vol_20_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_20)
+    # Align pivot to 6h timeframe (use prior week's pivot)
+    pivot_aligned = align_htf_to_ltf(prices, df_w, pivot)
     
-    # Calculate 4h ADX (14 periods) for trend strength
-    # Load 4h data ONCE for ADX calculation
-    df_4h = get_htf_data(prices, '4h')
+    # Load daily data ONCE for volume average
+    df_d = get_htf_data(prices, '1d')
     
-    # Calculate 4h ADX (14 periods)
-    adx_len = 14
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Calculate 20-day average volume
+    vol_ma_20 = pd.Series(df_d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_d, vol_ma_20)
     
-    # True Range
-    tr1 = high_4h[1:] - low_4h[1:]
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # Directional Movement
-    dm_plus = np.where((high_4h[1:] - high_4h[:-1]) > (low_4h[:-1] - low_4h[1:]), 
-                       np.maximum(high_4h[1:] - high_4h[:-1], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.where((low_4h[:-1] - low_4h[1:]) > (high_4h[1:] - high_4h[:-1]), 
-                        np.maximum(low_4h[:-1] - low_4h[1:], 0), 0)
-    dm_minus = np.concatenate([[np.nan], dm_minus])
-    
-    # Smoothed values
-    tr_sum = pd.Series(tr).rolling(window=adx_len, min_periods=adx_len).sum().values
-    dm_plus_sum = pd.Series(dm_plus).rolling(window=adx_len, min_periods=adx_len).sum().values
-    dm_minus_sum = pd.Series(dm_minus).rolling(window=adx_len, min_periods=adx_len).sum().values
-    
-    # Directional Indicators
-    plus_di = 100 * dm_plus_sum / tr_sum
-    minus_di = 100 * dm_minus_sum / tr_sum
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=adx_len, min_periods=adx_len).mean().values
-    
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
+    # Calculate 6h Donchian channels (20 periods)
+    donch_len = 20
+    upper = pd.Series(high).rolling(window=donch_len, min_periods=donch_len).max().values
+    lower = pd.Series(low).rolling(window=donch_len, min_periods=donch_len).min().values
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position size
+    position_size = 0.30  # 30% position size
     
     # Start after enough data for calculations
-    start = max(50, 20 + adx_len)
+    start = max(50, donch_len, 20)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(adx_aligned[i]) or 
-            np.isnan(avg_vol_20_aligned[i]) or
-            avg_vol_20_aligned[i] == 0):
+        if (np.isnan(pivot_aligned[i]) or 
+            np.isnan(vol_ma_20_aligned[i]) or
+            np.isnan(upper[i]) or 
+            np.isnan(lower[i])):
             signals[i] = 0.0
             continue
         
-        # Calculate Donchian channels (20-period) using available data up to i
-        lookback = min(20, i+1)
-        donchian_high = np.max(high[i-lookback+1:i+1])
-        donchian_low = np.min(low[i-lookback+1:i+1])
-        donchian_mid = (donchian_high + donchian_low) / 2
+        # Determine weekly bias
+        weekly_bias_long = close[i] > pivot_aligned[i]
+        weekly_bias_short = close[i] < pivot_aligned[i]
         
-        # Volume confirmation: current 1d volume > 1.5x 20-day average
-        # Need to get current 1d volume - find the most recent complete 1d bar
-        # For 4h timeframe, we can approximate using the volume data
-        vol_ratio = 1.0  # Default if we can't calculate
-        if i >= 20:  # Need enough data for volume ratio calculation
-            # Simplified: use current volume vs average (approximation for 4h)
-            vol_ratio = volume[i] / avg_vol_20_aligned[i] if avg_vol_20_aligned[i] > 0 else 1.0
-        
-        volume_confirmed = vol_ratio > 1.5
-        
-        # Trend filter: ADX > 25 indicates strong trend
-        strong_trend = adx_aligned[i] > 25
+        # Volume confirmation: current volume > 1.5x 20-day average
+        vol_confirm = volume[i] > 1.5 * vol_ma_20_aligned[i]
         
         if position == 0:
-            # Enter long: Donchian breakout up + volume confirmation + strong trend
-            if close[i] > donchian_high and volume_confirmed and strong_trend:
+            # Enter long: weekly bias long + Donchian breakout up + volume confirmation
+            if weekly_bias_long and close[i] > upper[i-1] and vol_confirm:
                 position = 1
                 signals[i] = position_size
-            # Enter short: Donchian breakout down + volume confirmation + strong trend
-            elif close[i] < donchian_low and volume_confirmed and strong_trend:
+            # Enter short: weekly bias short + Donchian breakdown down + volume confirmation
+            elif weekly_bias_short and close[i] < lower[i-1] and vol_confirm:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to Donchian midpoint OR trend weakens
-            if close[i] < donchian_mid or adx_aligned[i] < 20:
+            # Exit long: price retouches Donchian lower OR weekly bias flips
+            if close[i] < lower[i] or not weekly_bias_long:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to Donchian midpoint OR trend weakens
-            if close[i] > donchian_mid or adx_aligned[i] < 20:
+            # Exit short: price retouches Donchian upper OR weekly bias flips
+            if close[i] > upper[i] or not weekly_bias_short:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -133,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Volume_ADX_Trend_v1"
-timeframe = "4h"
+name = "6h_WeeklyPivot_DonchianBreakout_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
