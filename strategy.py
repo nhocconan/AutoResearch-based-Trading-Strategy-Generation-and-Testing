@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -44,7 +44,7 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25  # 25% position size
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Get aligned daily indicators
         upper_dc_20_i = align_htf_to_ltf(prices, df_1d, upper_dc_20)[i]
         lower_dc_20_i = align_htf_to_ltf(prices, df_1d, lower_dc_20)[i]
@@ -83,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_LowVol_Volume_Spike_EMA50_Filter"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_LowVol_Volume_Spike_EMA50_Filter"
+timeframe = "4h"
 leverage = 1.0
