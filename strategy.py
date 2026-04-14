@@ -3,80 +3,83 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Williams Alligator + Elder Ray combination with 12h trend filter
-# Uses Williams Alligator (Jaw/Teeth/Lips) to identify trend direction and avoid chop
-# Elder Ray (Bull Power/Bear Power) measures trend strength relative to EMA
-# Long when: Lips > Teeth > Jaw (bullish alignment) AND Bull Power > 0 AND price > 12h EMA50
-# Short when: Lips < Teeth < Jaw (bearish alignment) AND Bear Power < 0 AND price < 12h EMA50
-# Exit when Alligator alignment breaks or power reverses
-# Target: 50-150 total trades over 4 years (12-37/year) with strong trend filtering
+# Hypothesis: 4-hour RSI reversal with 1-day trend filter (EMA200) and volume confirmation
+# Long when RSI(14) crosses above 30 from below AND price > daily EMA200 AND volume > 1.5x 20-period average
+# Short when RSI(14) crosses below 70 from above AND price < daily EMA200 AND volume > 1.5x 20-period average
+# Exit when RSI crosses back to neutral (50) or opposite extreme
+# This captures mean reversion in strong trends while avoiding counter-trend trades
+# Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Load daily data ONCE before loop for EMA200 trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Williams Alligator (13,8,5 SMAs with future shifts)
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values  # 13-period, shifted 8
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values   # 8-period, shifted 5
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values    # 5-period, shifted 3
+    # Calculate RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Calculate daily EMA200 for trend filter
+    close_1d = df_1d['close'].values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Calculate volume average for confirmation (20-period)
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations (max shift + buffer)
-    start = 20
+    # Start after enough data for calculations (14 for RSI + buffer)
+    start = 30
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(ema50_12h_aligned[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema200_1d_aligned[i]) or 
+            np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        vol = volume[i]
+        vol_threshold = vol_avg[i] * 1.5
+        rsi_now = rsi[i]
+        rsi_prev = rsi[i-1]
         
         if position == 0:
-            # Long setup: bullish Alligator alignment + positive Bull Power + above 12h EMA50
-            if (lips[i] > teeth[i] > jaw[i] and bull_power[i] > 0 and price > ema50_12h_aligned[i]):
+            # Long setup: RSI crosses above 30 + price > daily EMA200 + volume confirmation
+            if (rsi_prev <= 30 and rsi_now > 30 and price > ema200_1d_aligned[i] and vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: bearish Alligator alignment + negative Bear Power + below 12h EMA50
-            elif (lips[i] < teeth[i] < jaw[i] and bear_power[i] < 0 and price < ema50_12h_aligned[i]):
+            # Short setup: RSI crosses below 70 + price < daily EMA200 + volume confirmation
+            elif (rsi_prev >= 70 and rsi_now < 70 and price < ema200_1d_aligned[i] and vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Alligator alignment breaks OR Bull Power turns negative
-            if not (lips[i] > teeth[i] > jaw[i]) or bull_power[i] <= 0:
+            # Exit long: RSI crosses below 50 (mean reversion complete)
+            if rsi_prev >= 50 and rsi_now < 50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Alligator alignment breaks OR Bear Power turns positive
-            if not (lips[i] < teeth[i] < jaw[i]) or bear_power[i] >= 0:
+            # Exit short: RSI crosses above 50 (mean reversion complete)
+            if rsi_prev <= 50 and rsi_now > 50:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -84,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Alligator_ElderRay_12hEMA50"
-timeframe = "6h"
+name = "4h_RSI_1dEMA200_Volume"
+timeframe = "4h"
 leverage = 1.0
