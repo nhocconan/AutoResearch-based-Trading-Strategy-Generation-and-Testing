@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout + 12h trend filter + volume confirmation
-# Works in bull/bear: Breakouts capture momentum, 12h EMA filter avoids counter-trend trades, volume reduces false breakouts
-# Targets: 12-37 trades/year (50-150 over 4 years) by requiring confluence of 3 filters
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) + 1d Trend Filter + Volume Confirmation
+# Works in bull/bear: Elder Ray measures bull/bear strength relative to EMA, avoiding traps; 1d EMA filters counter-trend trades
+# Targets: 12-37 trades/year (50-150 over 4 years) by requiring 3-way confluence
 # Position size: 0.25 to manage drawdown
 
 def generate_signals(prices):
@@ -18,18 +18,19 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data once
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 1d data once
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 1d EMA200 for trend filter
+    close_1d = df_1d['close'].values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Elder Ray components (13-period EMA)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
     # Volume moving average for confirmation
     vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -38,35 +39,35 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25
     
-    for i in range(20, n):
-        # Get aligned 12h EMA50
-        ema_50_i = align_htf_to_ltf(prices, df_12h, ema_50_12h)[i]
+    for i in range(13, n):
+        # Get aligned 1d EMA200
+        ema_200_i = align_htf_to_ltf(prices, df_1d, ema_200_1d)[i]
         
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema_50_i) or np.isnan(vol_ma[i]):
+        if np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(ema_200_i) or np.isnan(vol_ma[i]):
             continue
         
         # Volume confirmation (1.5x average)
         volume_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Long: Break above Donchian upper + 12h uptrend + volume
-        if position == 0 and high[i] > highest_high[i] and close[i] > ema_50_i and volume_confirm:
+        # Long: Bull Power > 0 (bulls in control) + price above 1d EMA200 + volume
+        if position == 0 and bull_power[i] > 0 and close[i] > ema_200_i and volume_confirm:
             position = 1
             signals[i] = position_size
-        # Short: Break below Donchian lower + 12h downtrend + volume
-        elif position == 0 and low[i] < lowest_low[i] and close[i] < ema_50_i and volume_confirm:
+        # Short: Bear Power < 0 (bears in control) + price below 1d EMA200 + volume
+        elif position == 0 and bear_power[i] < 0 and close[i] < ema_200_i and volume_confirm:
             position = -1
             signals[i] = -position_size
-        # Exit: Opposite Donchian break or trend reversal
+        # Exit: Opposite Elder Ray signal or trend reversal
         elif position != 0:
-            if position == 1 and low[i] < lowest_low[i]:
+            if position == 1 and bear_power[i] < 0:
                 position = 0
                 signals[i] = 0.0
-            elif position == -1 and high[i] > highest_high[i]:
+            elif position == -1 and bull_power[i] > 0:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "6h_Donchian_12hEMA_Volume_Breakout"
+name = "6h_ElderRay_1dEMA200_Volume"
 timeframe = "6h"
 leverage = 1.0
