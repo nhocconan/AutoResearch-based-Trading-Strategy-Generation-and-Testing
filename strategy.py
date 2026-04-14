@@ -94,7 +94,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position size
+    position_size = 0.30  # 30% position size
     
     for i in range(100, n):
         # Skip if any critical data is NaN
