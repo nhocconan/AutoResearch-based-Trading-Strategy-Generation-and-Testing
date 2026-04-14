@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,64 +13,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for 14-day RSI and 200-day SMA (trend filter)
+    # Load 1d data for weekly pivot and EMA50
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # 14-day RSI (Wilder's smoothing)
-    delta = np.diff(close_1d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate daily EMA50 for trend
+    ema_50_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 50:
+        ema_50_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_50_1d[i] = (close_1d[i] * 2 + ema_50_1d[i-1] * 48) / 50
     
-    avg_gain = np.full_like(close_1d, np.nan)
-    avg_loss = np.full_like(close_1d, np.nan)
-    if len(gain) >= 14:
-        avg_gain[13] = np.mean(gain[:14])
-        avg_loss[13] = np.mean(loss[:14])
-        for i in range(14, len(close_1d)):
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Calculate weekly pivot points (using prior week's data)
+    # We'll calculate weekly pivot from daily data: need to group by week
+    # For simplicity, use prior day's OHLC for daily pivot (common proxy)
+    pivot_point = np.full_like(close_1d, np.nan)
+    resistance1 = np.full_like(close_1d, np.nan)
+    support1 = np.full_like(close_1d, np.nan)
+    resistance2 = np.full_like(close_1d, np.nan)
+    support2 = np.full_like(close_1d, np.nan)
+    resistance3 = np.full_like(close_1d, np.nan)
+    support3 = np.full_like(close_1d, np.nan)
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_14 = 100 - (100 / (1 + rs))
+    if len(close_1d) >= 2:
+        for i in range(1, len(close_1d)):
+            # Prior day's OHLC
+            ph = high_1d[i-1]
+            pl = low_1d[i-1]
+            pc = close_1d[i-1]
+            
+            pp = (ph + pl + pc) / 3.0
+            r1 = 2 * pp - pl
+            s1 = 2 * pp - ph
+            r2 = pp + (ph - pl)
+            s2 = pp - (ph - pl)
+            r3 = ph + 2 * (pp - pl)
+            s3 = pl - 2 * (ph - pp)
+            
+            pivot_point[i] = pp
+            resistance1[i] = r1
+            support1[i] = s1
+            resistance2[i] = r2
+            support2[i] = s2
+            resistance3[i] = r3
+            support3[i] = s3
     
-    # 200-day SMA
-    sma_200 = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 200:
-        for i in range(199, len(close_1d)):
-            sma_200[i] = np.mean(close_1d[i-199:i+1])
+    # Align 1d indicators to 6h timeframe
+    ema_50_1d_6h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    pivot_point_6h = align_htf_to_ltf(prices, df_1d, pivot_point)
+    resistance1_6h = align_htf_to_ltf(prices, df_1d, resistance1)
+    support1_6h = align_htf_to_ltf(prices, df_1d, support1)
+    resistance2_6h = align_htf_to_ltf(prices, df_1d, resistance2)
+    support2_6h = align_htf_to_ltf(prices, df_1d, support2)
+    resistance3_6h = align_htf_to_ltf(prices, df_1d, resistance3)
+    support3_6h = align_htf_to_ltf(prices, df_1d, support3)
     
-    # Align RSI and SMA to 4h timeframe
-    rsi_14_4h = align_htf_to_ltf(prices, df_1d, rsi_14)
-    sma_200_4h = align_htf_to_ltf(prices, df_1d, sma_200)
-    
-    # Load 4h data for entry/exit logic
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 14:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    
-    # 14-period ATR for stoploss and position sizing
-    tr1 = high_4h[1:] - low_4h[1:]
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    atr_14 = np.full_like(close_4h, np.nan)
-    if len(tr) >= 14:
-        atr_14[13] = np.mean(tr[1:15])
-        for i in range(14, len(tr)):
-            atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
-    
-    # Align ATR to 4h (already aligned, but ensure no look-ahead)
-    atr_14_4h = align_htf_to_ltf(prices, df_4h, atr_14)
+    # Load 6m data for entry timing (volume confirmation)
+    # Since we're on 6h timeframe, we use the same data but check volume spike
+    vol_ma_20 = np.full_like(volume, np.nan)
+    if len(volume) >= 20:
+        for i in range(19, len(volume)):
+            vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0
@@ -78,33 +86,51 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical data is NaN
-        if (np.isnan(rsi_14_4h[i]) or 
-            np.isnan(sma_200_4h[i]) or 
-            np.isnan(atr_14_4h[i])):
+        if (np.isnan(ema_50_1d_6h[i]) or 
+            np.isnan(pivot_point_6h[i]) or 
+            np.isnan(resistance1_6h[i]) or 
+            np.isnan(support1_6h[i]) or
+            np.isnan(resistance2_6h[i]) or 
+            np.isnan(support2_6h[i]) or
+            np.isnan(resistance3_6h[i]) or 
+            np.isnan(support3_6h[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
+        # Volume ratio: current 6h volume vs 20-period average
+        if vol_ma_20[i] <= 0:
+            volume_ratio = 0
+        else:
+            volume_ratio = volume[i] / vol_ma_20[i]
+        
         if position == 0:
-            # Long: RSI < 30 (oversold) and price > 200-day SMA (bullish bias)
-            if rsi_14_4h[i] < 30 and close[i] > sma_200_4h[i]:
+            # Long: Price crosses above S3 with volume spike and above daily EMA50
+            if (close[i] > support3_6h[i] and
+                close[i] > ema_50_1d_6h[i] and
+                volume_ratio > 2.0):
                 position = 1
                 signals[i] = position_size
-            # Short: RSI > 70 (overbought) and price < 200-day SMA (bearish bias)
-            elif rsi_14_4h[i] > 70 and close[i] < sma_200_4h[i]:
+            # Short: Price crosses below R3 with volume spike and below daily EMA50
+            elif (close[i] < resistance3_6h[i] and
+                  close[i] < ema_50_1d_6h[i] and
+                  volume_ratio > 2.0):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: RSI > 50 (mean reversion) OR stoploss hit (2 * ATR)
-            if rsi_14_4h[i] > 50 or close[i] < (signals[i-1] * sma_200_4h[i] / position_size if i>0 and signals[i-1]!=0 else close[i]) - 2 * atr_14_4h[i]:
+            # Exit: Price crosses below S1 or below daily EMA50
+            if (close[i] < support1_6h[i] or 
+                close[i] < ema_50_1d_6h[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: RSI < 50 (mean reversion) OR stoploss hit (2 * ATR)
-            if rsi_14_4h[i] < 50 or close[i] > (signals[i-1] * sma_200_4h[i] / position_size if i>0 and signals[i-1]!=0 else close[i]) + 2 * atr_14_4h[i]:
+            # Exit: Price crosses above R1 or above daily EMA50
+            if (close[i] > resistance1_6h[i] or 
+                close[i] > ema_50_1d_6h[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -112,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_RSI14_SMA200_MeanReversion"
-timeframe = "4h"
+name = "6h_1d_Pivot_S3R3_EMA50_Volume"
+timeframe = "6h"
 leverage = 1.0
