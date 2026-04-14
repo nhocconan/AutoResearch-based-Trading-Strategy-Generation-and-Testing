@@ -13,12 +13,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
+    # Load 4h and 1d data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA(21) for trend filter
-    ema_21_1d = pd.Series(df_1d['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
+    # Calculate 4h EMA(34) for trend filter
+    ema_34_4h = pd.Series(df_4h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
     
     # Calculate 1d ATR(14) for volatility filter
     high_1d = df_1d['high'].values
@@ -45,14 +46,14 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position size
+    position_size = 0.20  # 20% position size
     
     # Start after enough data for calculations
     start = 100
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_21_1d_aligned[i]) or 
+        if (np.isnan(ema_34_4h_aligned[i]) or 
             np.isnan(atr_1d_aligned[i]) or
             np.isnan(rsi_1d_aligned[i])):
             signals[i] = 0.0
@@ -60,37 +61,37 @@ def generate_signals(prices):
         
         price = close[i]
         
-        # Trend filter: price > 1d EMA21 for long, price < 1d EMA21 for short
-        trend_filter_long = price > ema_21_1d_aligned[i]
-        trend_filter_short = price < ema_21_1d_aligned[i]
+        # Trend filter: price > 4h EMA34 for long, price < 4h EMA34 for short
+        trend_filter_long = price > ema_34_4h_aligned[i]
+        trend_filter_short = price < ema_34_4h_aligned[i]
         
-        # Volatility filter: 1d ATR > 1.5% of price to avoid low volatility periods
-        vol_filter = atr_1d_aligned[i] / price > 0.015 if price > 0 else False
+        # Volatility filter: 1d ATR > 1.0% of price to avoid low volatility periods
+        vol_filter = atr_1d_aligned[i] / price > 0.010 if price > 0 else False
         
-        # Momentum filter: RSI between 30 and 70 to avoid extremes
-        mom_filter = (rsi_1d_aligned[i] >= 30) & (rsi_1d_aligned[i] <= 70)
+        # Momentum filter: RSI between 40 and 60 to avoid extremes
+        mom_filter = (rsi_1d_aligned[i] >= 40) & (rsi_1d_aligned[i] <= 60)
         
         if position == 0:
-            # Long setup: price above 1d EMA21 + volatility filter + momentum filter
+            # Long setup: price above 4h EMA34 + volatility filter + momentum filter
             if trend_filter_long and vol_filter and mom_filter:
                 position = 1
                 signals[i] = position_size
-            # Short setup: price below 1d EMA21 + volatility filter + momentum filter
+            # Short setup: price below 4h EMA34 + volatility filter + momentum filter
             elif trend_filter_short and vol_filter and mom_filter:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below 1d EMA21
-            if price < ema_21_1d_aligned[i]:
+            # Exit long: price crosses below 4h EMA34
+            if price < ema_34_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above 1d EMA21
-            if price > ema_21_1d_aligned[i]:
+            # Exit short: price crosses above 4h EMA34
+            if price > ema_34_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -98,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dEMA21_VolFilter_RSI_Momentum_v1"
-timeframe = "4h"
+name = "1h_4hEMA34_1dATR_RSI_Momentum_v1"
+timeframe = "1h"
 leverage = 1.0
