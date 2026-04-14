@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
-from mta_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,119 +13,99 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data for trend direction
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Load 1w data for weekly pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Calculate 4h EMA200 for trend
-    ema_200_4h = np.full_like(close_4h, np.nan)
-    if len(close_4h) >= 200:
-        ema_200_4h[199] = np.mean(close_4h[:200])
-        for i in range(200, len(close_4h)):
-            ema_200_4h[i] = (close_4h[i] * 2 + ema_200_4h[i-1] * 198) / 200
+    # Calculate weekly pivot points (using prior week's OHLC)
+    pivot_point = np.full_like(close_1w, np.nan)
+    resistance1 = np.full_like(close_1w, np.nan)
+    support1 = np.full_like(close_1w, np.nan)
     
-    # Calculate 4h ATR(14) for volatility filter
-    tr_4h = np.zeros_like(close_4h)
-    tr_4h[0] = high_4h[0] - low_4h[0]
-    for i in range(1, len(close_4h)):
-        tr_4h[i] = max(high_4h[i] - low_4h[i], 
-                       abs(high_4h[i] - close_4h[i-1]),
-                       abs(low_4h[i] - close_4h[i-1]))
+    if len(close_1w) >= 2:
+        for i in range(1, len(close_1w)):
+            ph = high_1w[i-1]
+            pl = low_1w[i-1]
+            pc = close_1w[i-1]
+            
+            pp = (ph + pl + pc) / 3.0
+            r1 = 2 * pp - pl
+            s1 = 2 * pp - ph
+            
+            pivot_point[i] = pp
+            resistance1[i] = r1
+            support1[i] = s1
     
-    atr_14_4h = np.full_like(close_4h, np.nan)
-    if len(tr_4h) >= 14:
-        atr_14_4h[13] = np.mean(tr_4h[:14])
-        for i in range(14, len(tr_4h)):
-            atr_14_4h[i] = (tr_4h[i] * 2 + atr_14_4h[i-1] * 12) / 14
+    # Load 1d data for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Align 4h indicators to 1h
-    ema_200_4h_1h = align_htf_to_ltf(prices, df_4h, ema_200_4h)
-    atr_14_4h_1h = align_htf_to_ltf(prices, df_4h, atr_14_4h)
+    volume_1d = df_1d['volume'].values
     
-    # Load 1d data for session filter (we'll use time-based filter instead)
-    # Calculate 1h ATR(14) for volatility
-    tr_1h = np.zeros_like(close)
-    tr_1h[0] = high[0] - low[0]
-    for i in range(1, len(close)):
-        tr_1h[i] = max(high[i] - low[i], 
-                       abs(high[i] - close[i-1]),
-                       abs(low[i] - close[i-1]))
+    # Calculate daily volume SMA20
+    vol_sma_20_1d = np.full_like(volume_1d, np.nan)
+    if len(volume_1d) >= 20:
+        for i in range(19, len(volume_1d)):
+            vol_sma_20_1d[i] = np.mean(volume_1d[i-19:i+1])
     
-    atr_14_1h = np.full_like(close, np.nan)
-    if len(tr_1h) >= 14:
-        atr_14_1h[13] = np.mean(tr_1h[:14])
-        for i in range(14, len(tr_1h)):
-            atr_14_1h[i] = (tr_1h[i] * 2 + atr_14_1h[i-1] * 12) / 14
+    # Align weekly pivot points to 6h timeframe
+    pivot_point_6h = align_htf_to_ltf(prices, df_1w, pivot_point)
+    resistance1_6h = align_htf_to_ltf(prices, df_1w, resistance1)
+    support1_6h = align_htf_to_ltf(prices, df_1w, support1)
     
-    # Volume spike detection (1h)
-    vol_ma_20 = np.full_like(volume, np.nan)
-    if len(volume) >= 20:
-        for i in range(19, len(volume)):
-            vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    # Align daily volume SMA20 to 6h timeframe
+    vol_sma_20_1d_6h = align_htf_to_ltf(prices, df_1d, vol_sma_20_1d)
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_200_4h_1h[i]) or 
-            np.isnan(atr_14_4h_1h[i]) or
-            np.isnan(atr_14_1h[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(pivot_point_6h[i]) or 
+            np.isnan(resistance1_6h[i]) or 
+            np.isnan(support1_6h[i]) or
+            np.isnan(vol_sma_20_1d_6h[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: 08-20 UTC
-        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
-        
-        # Volume ratio: current 1h volume vs 20-period average
-        if vol_ma_20[i] <= 0:
+        # Volume ratio: current 6h volume vs daily volume SMA20
+        if vol_sma_20_1d_6h[i] <= 0:
             volume_ratio = 0
         else:
-            volume_ratio = volume[i] / vol_ma_20[i]
-        
-        # ATR ratio: 1h ATR / 4h ATR (normalized volatility)
-        if atr_14_4h_1h[i] <= 0:
-            atr_ratio = 0
-        else:
-            atr_ratio = atr_14_1h[i] / atr_14_4h_1h[i]
+            volume_ratio = volume[i] / vol_sma_20_1d_6h[i]
         
         if position == 0:
-            # Long: Price above 4h EMA200, volume spike, and normal volatility
-            if (close[i] > ema_200_4h_1h[i] and
-                volume_ratio > 1.5 and
-                atr_ratio < 2.0):
+            # Long: Price crosses above S1 with volume spike and above weekly pivot
+            if (close[i] > support1_6h[i] and
+                close[i] > pivot_point_6h[i] and
+                volume_ratio > 2.0):
                 position = 1
                 signals[i] = position_size
-            # Short: Price below 4h EMA200, volume spike, and normal volatility
-            elif (close[i] < ema_200_4h_1h[i] and
-                  volume_ratio > 1.5 and
-                  atr_ratio < 2.0):
+            # Short: Price crosses below R1 with volume spike and below weekly pivot
+            elif (close[i] < resistance1_6h[i] and
+                  close[i] < pivot_point_6h[i] and
+                  volume_ratio > 2.0):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price crosses below 4h EMA200 or volatility too high
-            if (close[i] < ema_200_4h_1h[i] or 
-                atr_ratio > 2.5):
+            # Exit: Price crosses below weekly pivot
+            if close[i] < pivot_point_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price crosses above 4h EMA200 or volatility too high
-            if (close[i] > ema_200_4h_1h[i] or 
-                atr_ratio > 2.5):
+            # Exit: Price crosses above weekly pivot
+            if close[i] > pivot_point_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -133,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4h_EMA200_Volume_ATR_Filter"
-timeframe = "1h"
+name = "6h_1w_Pivot_S1R1_Volume_Filter"
+timeframe = "6h"
 leverage = 1.0
