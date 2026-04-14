@@ -13,16 +13,16 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot levels
-    df_wk = get_htf_data(prices, '1w')
-    high_wk = df_wk['high'].values
-    low_wk = df_wk['low'].values
-    close_wk = df_wk['close'].values
+    # Get daily data for pivot levels and trend
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points using prior week's OHLC
-    prev_high = np.roll(high_wk, 1)
-    prev_low = np.roll(low_wk, 1)
-    prev_close = np.roll(close_wk, 1)
+    # Calculate daily pivot points using prior day's OHLC
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
     prev_high[0] = np.nan
     prev_low[0] = np.nan
     prev_close[0] = np.nan
@@ -32,16 +32,21 @@ def generate_signals(prices):
     # Resistance and support levels
     r1 = 2 * pp - prev_low
     s1 = 2 * pp - prev_high
-    r2 = pp + (high_wk - low_wk)
-    s2 = pp - (high_wk - low_wk)
+    r2 = pp + (high_1d - low_1d)
+    s2 = pp - (high_1d - low_1d)
     
-    # Align pivot levels to daily timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_wk, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_wk, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_wk, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_wk, s2)
+    # Align pivot levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
-    # Volume confirmation: volume > 1.5x average volume (20-period)
+    # Calculate daily EMA for trend filter (34-period)
+    close_series_1d = pd.Series(close_1d)
+    ema_34_1d = close_series_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume confirmation: volume > 1.5x average volume (20-period) on 12h chart
     vol_series = pd.Series(volume)
     avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
@@ -50,13 +55,13 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 20  # for volume calculation
+    start = 34  # for EMA calculation
     
     for i in range(start, n):
         # Skip if any critical data is NaN
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
             np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(avg_vol[i])):
+            np.isnan(ema_34_aligned[i]) or np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
         
@@ -64,12 +69,12 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long: price breaks above R2 with volume confirmation
-            if price > r2_aligned[i] and vol > 1.5 * avg_vol[i]:
+            # Long: price breaks above R2 with volume confirmation and above daily EMA
+            if price > r2_aligned[i] and vol > 1.5 * avg_vol[i] and price > ema_34_aligned[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below S2 with volume confirmation
-            elif price < s2_aligned[i] and vol > 1.5 * avg_vol[i]:
+            # Short: price breaks below S2 with volume confirmation and below daily EMA
+            elif price < s2_aligned[i] and vol > 1.5 * avg_vol[i] and price < ema_34_aligned[i]:
                 position = -1
                 signals[i] = -position_size
             else:
@@ -91,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_Pivot_Breakout_Weekly"
-timeframe = "1d"
+name = "12h_1d_Pivot_Breakout_EMA_Trend"
+timeframe = "12h"
 leverage = 1.0
