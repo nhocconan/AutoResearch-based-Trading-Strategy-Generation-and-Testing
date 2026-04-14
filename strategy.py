@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,92 +13,104 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data for trend filter
+    # Load weekly data for pivot calculation (HTF)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 10-period weekly EMA for trend
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    ema_1w = np.full(len(df_1w), np.nan)
-    if len(close_1w) >= 10:
-        alpha = 2.0 / (10 + 1)
-        ema_1w[0] = close_1w[0]
-        for i in range(1, len(close_1w)):
-            ema_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_1w[i-1]
     
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate weekly pivot points (standard formula)
+    pivot = (high_1w + low_1w + close_1w) / 3.0
+    r1 = 2 * pivot - low_1w
+    s1 = 2 * pivot - high_1w
+    r2 = pivot + (high_1w - low_1w)
+    s2 = pivot - (high_1w - low_1w)
     
-    # Load daily data for price channels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Align pivot levels to 12h timeframe
+    pivot_12h = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_12h = align_htf_to_ltf(prices, df_1w, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1w, s1)
+    r2_12h = align_htf_to_ltf(prices, df_1w, r2)
+    s2_12h = align_htf_to_ltf(prices, df_1w, s2)
     
-    # Calculate 20-day Donchian channels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate weekly ATR for volatility filter
+    tr = np.zeros(len(df_1w))
+    tr[0] = high_1w[0] - low_1w[0]
+    for i in range(1, len(df_1w)):
+        tr[i] = max(
+            high_1w[i] - low_1w[i],
+            abs(high_1w[i] - close_1w[i-1]),
+            abs(low_1w[i] - close_1w[i-1])
+        )
     
-    donchian_high = np.full(len(df_1d), np.nan)
-    donchian_low = np.full(len(df_1d), np.nan)
+    atr_1w = np.full(len(df_1w), np.nan)
+    if len(df_1w) >= 14:
+        atr_1w[13] = np.mean(tr[:14])
+        for i in range(14, len(df_1w)):
+            atr_1w[i] = (atr_1w[i-1] * 13 + tr[i]) / 14
     
-    if len(high_1d) >= 20:
-        for i in range(19, len(df_1d)):
-            donchian_high[i] = np.max(high_1d[i-19:i+1])
-            donchian_low[i] = np.min(low_1d[i-19:i+1])
+    atr_12h = align_htf_to_ltf(prices, df_1w, atr_1w)
     
-    dh_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    dl_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    
-    # Volume spike detection (20-day average)
-    vol_ma_20 = np.full_like(volume, np.nan)
-    if len(volume) >= 20:
-        for i in range(19, len(volume)):
-            vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    # Volume spike detection (10-period average on 12h)
+    vol_ma_10 = np.full_like(volume, np.nan)
+    if len(volume) >= 10:
+        for i in range(9, len(volume)):
+            vol_ma_10[i] = np.mean(volume[i-9:i+1])
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # Conservative position size
+    position_size = 0.25  # 25% position size for lower drawdown
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any critical data is NaN
-        if (np.isnan(dh_aligned[i]) or 
-            np.isnan(dl_aligned[i]) or
-            np.isnan(ema_1w_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(pivot_12h[i]) or 
+            np.isnan(r1_12h[i]) or
+            np.isnan(s1_12h[i]) or
+            np.isnan(r2_12h[i]) or
+            np.isnan(s2_12h[i]) or
+            np.isnan(atr_12h[i]) or
+            np.isnan(vol_ma_10[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: require significant spike
-        if vol_ma_20[i] <= 0:
+        # Skip low volatility periods (ATR < 0.5% of price)
+        if atr_12h[i] < 0.005 * close[i]:
+            signals[i] = 0.0
+            continue
+        
+        # Volume ratio: current 12h volume vs 10-period average
+        if vol_ma_10[i] <= 0:
             volume_ratio = 0
         else:
-            volume_ratio = volume[i] / vol_ma_20[i]
+            volume_ratio = volume[i] / vol_ma_10[i]
         
-        if volume_ratio < 1.5:  # Require at least 1.5x average volume
-            signals[i] = 0.0
-            continue
+        # Volume threshold: require significant spike
+        vol_threshold = 2.5
         
         if position == 0:
-            # Long: Price breaks above 20-day high with weekly uptrend
-            if close[i] > dh_aligned[i] and close[i] > ema_1w_aligned[i]:
+            # Long: Price breaks above R2 with volume confirmation
+            if (close[i] > r2_12h[i] and volume_ratio > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below 20-day low with weekly downtrend
-            elif close[i] < dl_aligned[i] and close[i] < ema_1w_aligned[i]:
+            # Short: Price breaks below S2 with volume confirmation
+            elif (close[i] < s2_12h[i] and volume_ratio > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below 20-day low or weekly trend turns down
-            if close[i] < dl_aligned[i] or close[i] < ema_1w_aligned[i]:
+            # Exit: Price falls back below S1
+            if close[i] < s1_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above 20-day high or weekly trend turns up
-            if close[i] > dh_aligned[i] or close[i] > ema_1w_aligned[i]:
+            # Exit: Price rises back above R1
+            if close[i] > r1_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -106,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_WeeklyEMA10_Volume"
-timeframe = "1d"
+name = "12h_1w_Pivot_R2S2_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
