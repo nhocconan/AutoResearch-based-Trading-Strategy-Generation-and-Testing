@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d EMA(50) pullback strategy with weekly pivot context and volume confirmation
-# In trending markets, price respects EMA(50) as dynamic support/resistance
-# Weekly pivot levels provide institutional context for trend strength
-# Volume > 1.5x average confirms institutional participation during pullbacks
-# Works in bull/bear as EMA adapts to trend and pivot bias confirms direction
-# Target: 15-25 trades/year per symbol (60-100 total over 4 years)
+# Hypothesis: 6h EMA crossover with 1d RSI filter and volume confirmation
+# EMA(9/21) crossover captures momentum shifts
+# 1d RSI(14) filters trades: only long when RSI<70, short when RSI>30 (avoid overextended moves)
+# Volume > 1.5x average confirms institutional participation
+# Works in bull/bear as EMA adapts to trend and RSI prevents chasing extremes
+# Target: 12-25 trades/year per symbol (48-100 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,33 +20,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for EMA and weekly pivot context
+    # Load 1d data ONCE for RSI filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate EMA(50) on 1d close
-    close_1d = pd.Series(df_1d['close'])
-    ema_50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Calculate weekly pivot points from prior week (using 1d data)
-    lookback = 5  # 5 trading days = 1 week
-    if len(df_1d) < lookback:
+    # Calculate 1d RSI(14)
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Get prior week's OHLC (excluding current incomplete day)
-    prev_week_high = pd.Series(df_1d['high']).rolling(window=lookback, min_periods=lookback).max().shift(1).values
-    prev_week_low = pd.Series(df_1d['low']).rolling(window=lookback, min_periods=lookback).min().shift(1).values
-    prev_week_close = pd.Series(df_1d['close']).rolling(window=lookback, min_periods=lookback).last().shift(1).values
+    close_1d = pd.Series(df_1d['close'])
+    delta = close_1d.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=14).mean()
+    rs = gain / loss
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_values = rsi_1d.values
     
-    # Weekly pivot calculation (standard floor trader pivot)
-    weekly_pivot = (prev_week_high + prev_week_low + prev_week_close) / 3
-    weekly_r1 = 2 * weekly_pivot - prev_week_low
-    weekly_s1 = 2 * weekly_pivot - prev_week_high
+    # Align 1d RSI to 6h timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d_values)
     
-    # Align EMA and weekly pivot levels to 1d timeframe (already aligned, but use for consistency)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
+    # EMA(9) and EMA(21) on 6h
+    ema_fast = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema_slow = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
     # Volume confirmation: 1.5x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,54 +50,49 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(100, 50)
+    start = max(30, 21, 20)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_50_aligned[i]) or 
-            np.isnan(weekly_pivot_aligned[i]) or
-            np.isnan(weekly_r1_aligned[i]) or
-            np.isnan(weekly_s1_aligned[i]) or
+        if (np.isnan(ema_fast[i]) or 
+            np.isnan(ema_slow[i]) or
+            np.isnan(rsi_1d_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend bias: price relative to EMA(50)
-        above_ema = close[i] > ema_50_aligned[i]
-        below_ema = close[i] < ema_50_aligned[i]
+        # EMA crossover signals
+        ema_cross_up = ema_fast[i] > ema_slow[i] and ema_fast[i-1] <= ema_slow[i-1]
+        ema_cross_down = ema_fast[i] < ema_slow[i] and ema_fast[i-1] >= ema_slow[i-1]
         
-        # Pivot bias: price relative to weekly pivot
-        above_pivot = close[i] > weekly_pivot_aligned[i]
-        below_pivot = close[i] < weekly_pivot_aligned[i]
+        # RSI filters: avoid overbought/oversold extremes
+        rsi_not_overbought = rsi_1d_aligned[i] < 70
+        rsi_not_oversold = rsi_1d_aligned[i] > 30
         
-        # Volume confirmation: current volume > 1.5x average
+        # Volume confirmation
         volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Enter long: pullback to EMA(50) in uptrend (price > EMA and > pivot) + volume
-            if (above_ema and 
-                above_pivot and 
-                volume_confirmed):
+            # Enter long: EMA bullish crossover + RSI not overbought + volume
+            if ema_cross_up and rsi_not_overbought and volume_confirmed:
                 position = 1
                 signals[i] = position_size
-            # Enter short: pullback to EMA(50) in downtrend (price < EMA and < pivot) + volume
-            elif (below_ema and 
-                  below_pivot and 
-                  volume_confirmed):
+            # Enter short: EMA bearish crossover + RSI not oversold + volume
+            elif ema_cross_down and rsi_not_oversold and volume_confirmed:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below EMA(50) or returns to weekly pivot
-            if close[i] < ema_50_aligned[i] or close[i] < weekly_pivot_aligned[i]:
+            # Exit long: EMA bearish crossover or RSI overbought
+            if ema_cross_down or rsi_1d_aligned[i] >= 70:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above EMA(50) or returns to weekly pivot
-            if close[i] > ema_50_aligned[i] or close[i] > weekly_pivot_aligned[i]:
+            # Exit short: EMA bullish crossover or RSI oversold
+            if ema_cross_up or rsi_1d_aligned[i] <= 30:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -111,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA50_Pullback_WeeklyPivot_Volume_v1"
-timeframe = "1d"
+name = "6h_1d_EMA_RSI_Volume_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
