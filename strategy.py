@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI Pullback with 4h Trend Filter and Volume Confirmation
-# Takes long when: price pulls back to RSI(30) in a 4h uptrend with volume spike
-# Takes short when: price bounces off RSI(70) in a 4h downtrend with volume spike
-# Uses 4h EMA(50) for trend direction and 1h volume spike (>1.5x 20-period average)
-# Designed to capture mean-reversion moves within established trends, avoiding counter-trend trades
-# Target: 60-150 total trades over 4 years (15-37/year) with strict entry conditions
+# Hypothesis: 12h Bollinger Band Squeeze Breakout with 1d Volume Confirmation and ADX Trend Filter
+# Takes long when price breaks above upper Bollinger Band during low volatility (squeeze) with 1d volume spike and ADX > 25
+# Takes short when price breaks below lower Bollinger Band during low volatility (squeeze) with 1d volume spike and ADX > 25
+# Bollinger Band squeeze defined as bandwidth < 20th percentile of last 50 periods
+# Exits when price crosses back inside Bollinger Bands or volatility expands (bandwidth > 50th percentile)
+# Designed to capture explosive moves after consolidation periods, avoiding choppy markets
+# Target: 15-40 trades per symbol over 4 years (4-10/year)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,70 +21,117 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Load 12h and 1d data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 4h EMA(50) for trend direction
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate 12h Bollinger Bands (20-period, 2 std)
+    close_12h = df_12h['close'].values
+    bb_middle = pd.Series(close_12h).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(close_12h).rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
+    bb_width = (bb_upper - bb_lower) / bb_middle  # Normalized bandwidth
     
-    # Calculate 1h RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    gain_ma = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    loss_ma = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = gain_ma / (loss_ma + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate Bollinger Band width percentiles for squeeze detection
+    bb_width_series = pd.Series(bb_width)
+    bb_width_lower_thresh = bb_width_series.rolling(window=50, min_periods=20).quantile(0.20).values
+    bb_width_upper_thresh = bb_width_series.rolling(window=50, min_periods=20).quantile(0.50).values
     
-    # Calculate 1h volume average (20-period)
-    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate 1d ADX for trend strength
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr).ewm(span=14, adjust=False).mean().values
+    dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False).mean().values
+    dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False).mean().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(span=14, adjust=False).mean().values
+    
+    # Calculate 1d volume average (20-period)
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align indicators to 12h timeframe
+    bb_upper_aligned = align_htf_to_ltf(prices, df_12h, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_12h, bb_lower)
+    bb_middle_aligned = align_htf_to_ltf(prices, df_12h, bb_middle)
+    bb_width_lower_thresh_aligned = align_htf_to_ltf(prices, df_12h, bb_width_lower_thresh)
+    bb_width_upper_thresh_aligned = align_htf_to_ltf(prices, df_12h, bb_width_upper_thresh)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 50  # for RSI and EMA calculations
+    start = 60  # for Bollinger Bands and ADX calculations
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(rsi[i]) or np.isnan(ema_4h_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or 
+            np.isnan(bb_width_lower_thresh_aligned[i]) or np.isnan(bb_width_upper_thresh_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_current = volume[i]
-        rsi_val = rsi[i]
-        trend = ema_4h_aligned[i]
+        bb_width_current = bb_width[i] if i < len(bb_width) else bb_width[-1]
+        vol_1d_current = vol_1d[i] if i < len(vol_1d) else vol_1d[-1]
         
         if position == 0:
-            # Long setup: RSI < 30 (oversold) in uptrend with volume spike
-            if (rsi_val < 30 and 
-                price > trend and  # Uptrend filter
-                vol_current > 1.5 * vol_ma[i]):  # Volume spike
-                position = 1
-                signals[i] = position_size
-            # Short setup: RSI > 70 (overbought) in downtrend with volume spike
-            elif (rsi_val > 70 and 
-                  price < trend and  # Downtrend filter
-                  vol_current > 1.5 * vol_ma[i]):  # Volume spike
-                position = -1
-                signals[i] = -position_size
+            # Look for Bollinger Band squeeze breakout with volume and trend confirmation
+            is_squeeze = bb_width_current < bb_width_lower_thresh_aligned[i]
+            if is_squeeze:
+                # Long setup: break above upper BB with volume spike and strong trend
+                if (price > bb_upper_aligned[i] and 
+                    vol_1d_current > 1.5 * vol_ma_1d_aligned[i] and  # Volume spike
+                    adx_aligned[i] > 25):                           # Strong trend
+                    position = 1
+                    signals[i] = position_size
+                # Short setup: break below lower BB with volume spike and strong trend
+                elif (price < bb_lower_aligned[i] and 
+                      vol_1d_current > 1.5 * vol_ma_1d_aligned[i] and  # Volume spike
+                      adx_aligned[i] > 25):                           # Strong trend
+                    position = -1
+                    signals[i] = -position_size
+                else:
+                    signals[i] = 0.0
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI returns to neutral (50) or trend breaks
-            if rsi_val >= 50 or price < trend:
+            # Exit long: price breaks below middle BB or volatility expands (end of squeeze)
+            if price < bb_middle_aligned[i] or bb_width_current > bb_width_upper_thresh_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: RSI returns to neutral (50) or trend breaks
-            if rsi_val <= 50 or price > trend:
+            # Exit short: price breaks above middle BB or volatility expands (end of squeeze)
+            if price > bb_middle_aligned[i] or bb_width_current > bb_width_upper_thresh_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -91,6 +139,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_RSI_Pullback_4hTrend_Volume"
-timeframe = "1h"
+name = "12h_Bollinger_Squeeze_Breakout_1dVolume_ADX"
+timeframe = "12h"
 leverage = 1.0
