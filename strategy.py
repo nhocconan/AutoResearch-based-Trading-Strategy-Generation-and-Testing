@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for pivot points and EMA50
+    # Load daily data for pivots and EMA50
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -48,13 +48,13 @@ def generate_signals(prices):
             resistance1[i] = r1
             support1[i] = s1
     
-    # Align 1d indicators to 1d timeframe (no alignment needed for same timeframe)
-    ema_50_1d_aligned = ema_50_1d
-    pivot_point_aligned = pivot_point
-    resistance1_aligned = resistance1
-    support1_aligned = support1
+    # Align 1d indicators to 6h timeframe
+    ema_50_1d_6h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    pivot_point_6h = align_htf_to_ltf(prices, df_1d, pivot_point)
+    resistance1_6h = align_htf_to_ltf(prices, df_1d, resistance1)
+    support1_6h = align_htf_to_ltf(prices, df_1d, support1)
     
-    # Volume spike detection (1d)
+    # Volume spike detection on 6h bars
     vol_ma_20 = np.full_like(volume, np.nan)
     if len(volume) >= 20:
         for i in range(19, len(volume)):
@@ -66,47 +66,47 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(pivot_point_aligned[i]) or 
-            np.isnan(resistance1_aligned[i]) or 
-            np.isnan(support1_aligned[i]) or
+        if (np.isnan(ema_50_1d_6h[i]) or 
+            np.isnan(pivot_point_6h[i]) or 
+            np.isnan(resistance1_6h[i]) or 
+            np.isnan(support1_6h[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 1d volume vs 20-period average
+        # Volume ratio: current 6h volume vs 20-period average
         if vol_ma_20[i] <= 0:
             volume_ratio = 0
         else:
             volume_ratio = volume[i] / vol_ma_20[i]
         
         if position == 0:
-            # Long: Price closes above S1 with volume spike and above daily EMA50
-            if (close[i] > support1_aligned[i] and
-                close[i] > ema_50_1d_aligned[i] and
+            # Long: Price crosses above S1 with volume spike and above daily EMA50
+            if (close[i] > support1_6h[i] and
+                close[i] > ema_50_1d_6h[i] and
                 volume_ratio > 2.0):
                 position = 1
                 signals[i] = position_size
-            # Short: Price closes below R1 with volume spike and below daily EMA50
-            elif (close[i] < resistance1_aligned[i] and
-                  close[i] < ema_50_1d_aligned[i] and
+            # Short: Price crosses below R1 with volume spike and below daily EMA50
+            elif (close[i] < resistance1_6h[i] and
+                  close[i] < ema_50_1d_6h[i] and
                   volume_ratio > 2.0):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price closes below pivot or below daily EMA50
-            if (close[i] < pivot_point_aligned[i] or 
-                close[i] < ema_50_1d_aligned[i]):
+            # Exit: Price crosses below pivot or below daily EMA50
+            if (close[i] < pivot_point_6h[i] or 
+                close[i] < ema_50_1d_6h[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price closes above pivot or above daily EMA50
-            if (close[i] > pivot_point_aligned[i] or 
-                close[i] > ema_50_1d_aligned[i]):
+            # Exit: Price crosses above pivot or above daily EMA50
+            if (close[i] > pivot_point_6h[i] or 
+                close[i] > ema_50_1d_6h[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -114,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1d_Pivot_S1R1_EMA50_Volume"
-timeframe = "1d"
+name = "6h_1d_Pivot_S1R1_EMA50_Volume"
+timeframe = "6h"
 leverage = 1.0
