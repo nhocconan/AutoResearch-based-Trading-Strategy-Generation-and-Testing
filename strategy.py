@@ -1,25 +1,19 @@
 #!/usr/bin/env python3
 """
-12h Volume-Weighted Average Price (VWAP) Reversion + Volume Spike + Daily Trend
-Long when price crosses above VWAP with volume > 1.5x average and daily close > daily open.
-Short when price crosses below VWAP with volume > 1.5x average and daily close < daily open.
-Exit when price crosses back below/above VWAP.
-Designed for low turnover: ~10-20 trades/year per symbol.
+12h Donchian Breakout + Daily Trend + Volume Spike
+Long when price breaks above 20-period Donchian high, daily close > daily open, and volume > 1.5x average.
+Short when price breaks below 20-period Donchian low, daily close < daily open, and volume > 1.5x average.
+Exit when price reverses back through the Donchian median.
+Designed for low turnover: ~15-30 trades/year per symbol.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_vwap(high, low, close, volume):
-    """Calculate VWAP for the current period"""
-    typical_price = (high + low + close) / 3
-    vwap = np.nancumsum(typical_price * volume) / np.nancumsum(volume)
-    return vwap
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -29,14 +23,21 @@ def generate_signals(prices):
     
     # Load daily data once for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     daily_close = df_1d['close'].values
     daily_open = df_1d['open'].values
     
-    # Calculate VWAP
-    vwap = calculate_vwap(high, low, close, volume)
+    # Calculate 20-period Donchian channels
+    donch_high = np.full(n, np.nan)
+    donch_low = np.full(n, np.nan)
+    
+    for i in range(20, n):
+        donch_high[i] = np.max(high[i-19:i+1])
+        donch_low[i] = np.min(low[i-19:i+1])
+    
+    donch_mid = (donch_high + donch_low) / 2
     
     # Volume filter: 20-period average
     vol_ma = np.full(n, np.nan)
@@ -63,8 +64,8 @@ def generate_signals(prices):
     position_size = 0.25
     
     for i in range(20, n):
-        # Skip if VWAP or volume MA not ready
-        if np.isnan(vwap[i]) or np.isnan(vol_ma[i]):
+        # Skip if any indicator not ready
+        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(vol_ma[i]):
             continue
         
         # Get aligned daily trend values
@@ -75,27 +76,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price crosses above VWAP, volume spike, daily bullish
-            if close[i] > vwap[i] and close[i-1] <= vwap[i-1] and volume[i] > vol_ma[i] * 1.5 and daily_bull > 0.5:
+            # Long: Break above Donchian high, volume spike, daily bullish
+            if close[i] > donch_high[i] and volume[i] > vol_ma[i] * 1.5 and daily_bull > 0.5:
                 position = 1
                 signals[i] = position_size
-            # Short: Price crosses below VWAP, volume spike, daily bearish
-            elif close[i] < vwap[i] and close[i-1] >= vwap[i-1] and volume[i] > vol_ma[i] * 1.5 and daily_bear > 0.5:
+            # Short: Break below Donchian low, volume spike, daily bearish
+            elif close[i] < donch_low[i] and volume[i] > vol_ma[i] * 1.5 and daily_bear > 0.5:
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
-            # Exit: Price crosses below VWAP
-            if close[i] < vwap[i] and close[i-1] >= vwap[i-1]:
+            # Exit: Price crosses below Donchian midpoint
+            if close[i] < donch_mid[i] and close[i-1] >= donch_mid[i-1]:
                 position = 0
                 signals[i] = 0.0
         elif position == -1:
-            # Exit: Price crosses above VWAP
-            if close[i] > vwap[i] and close[i-1] <= vwap[i-1]:
+            # Exit: Price crosses above Donchian midpoint
+            if close[i] > donch_mid[i] and close[i-1] <= donch_mid[i-1]:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_VWAP_Reversion_Volume_DailyTrend"
+name = "12h_Donchian_Breakout_DailyTrend_Volume"
 timeframe = "12h"
 leverage = 1.0
