@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,88 +13,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d and 1w data ONCE before loop
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1-week ATR (20-period)
-    tr1 = df_1w['high'] - df_1w['low']
-    tr2 = np.abs(df_1w['high'] - df_1w['close'].shift(1))
-    tr3 = np.abs(df_1w['low'] - df_1w['close'].shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1w = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    # Calculate 6h Donchian Channel (20-period)
+    close_series = pd.Series(close)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max()
+    donchian_low = low_series.rolling(window=20, min_periods=20).min()
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Calculate 1-week Donchian channel (20-period)
-    donch_high = df_1w['high'].rolling(window=20, min_periods=20).max().values
-    donch_low = df_1w['low'].rolling(window=20, min_periods=20).min().values
-    donch_high_aligned = align_htf_to_ltf(prices, df_1w, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1w, donch_low)
+    # Calculate 1d daily pivot points (standard: PP, R1/R2/R3, S1/S2/S3)
+    # Pivot Point = (High + Low + Close) / 3
+    pp_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    # Resistance levels
+    r1_1d = 2 * pp_1d - df_1d['low']
+    r2_1d = pp_1d + (df_1d['high'] - df_1d['low'])
+    r3_1d = df_1d['high'] + 2 * (pp_1d - df_1d['low'])
+    # Support levels
+    s1_1d = 2 * pp_1d - df_1d['high']
+    s2_1d = pp_1d - (df_1d['high'] - df_1d['low'])
+    s3_1d = df_1d['low'] - 2 * (df_1d['high'] - pp_1d)
     
-    # Calculate 1-day RSI (14-period)
-    delta = pd.Series(df_1d['close']).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d.values)
+    # Calculate volume average for confirmation (20-period)
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
-    # Calculate 1-day volume average (20-period)
-    vol_avg_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
-    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    # Align daily pivot levels to 6h timeframe (with 1-bar delay for completed daily bar)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d.values)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d.values)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d.values)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 100
+    start = 50
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or 
-            np.isnan(atr_1w_aligned[i]) or 
-            np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(vol_avg_1d_aligned[i])):
+        if (np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or 
+            np.isnan(vol_avg[i]) or
+            np.isnan(pp_aligned[i]) or
+            np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        volume_today = volume[i]
-        atr = atr_1w_aligned[i]
-        rsi_val = rsi_1d_aligned[i]
-        vol_avg = vol_avg_1d_aligned[i]
-        upper = donch_high_aligned[i]
-        lower = donch_low_aligned[i]
-        
-        # Volume confirmation: today's volume > 1.5x 1-day average
-        vol_confirm = volume_today > (vol_avg * 1.5)
+        vol = volume[i]
+        vol_threshold = vol_avg[i] * 1.5  # Volume must be 1.5x average
         
         if position == 0:
-            # Long: price breaks above weekly Donchian high + RSI > 50 + volume confirmation
-            if price > upper and rsi_val > 50 and vol_confirm:
+            # Long setup: Break above Donchian high AND above daily R3 (strong bullish breakout) AND volume confirmation
+            if (price > donchian_high[i] and price > r3_aligned[i] and vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below weekly Donchian low + RSI < 50 + volume confirmation
-            elif price < lower and rsi_val < 50 and vol_confirm:
+            # Short setup: Break below Donchian low AND below daily S3 (strong bearish breakout) AND volume confirmation
+            elif (price < donchian_low[i] and price < s3_aligned[i] and vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below weekly Donchian low OR ATR-based stop (2x ATR below entry)
-            # Since we don't track entry price, use time-based exit: reverse signal when opposite condition met
-            if price < lower:
+            # Exit long: Price retracement to Donchian middle
+            if price < donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above weekly Donchian high
-            if price > upper:
+            # Exit short: Price retracement to Donchian middle
+            if price > donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -102,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyDonchian_RSI_Volume"
-timeframe = "1d"
+name = "6h_Donchian_DailyPivot_Breakout_Volume"
+timeframe = "6h"
 leverage = 1.0
