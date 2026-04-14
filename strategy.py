@@ -1,18 +1,17 @@
-#!/usr/bin/env python3
-"""
-Hypothesis: 1h timeframe with 4h trend filter and volume confirmation.
-Use 4h EMA20 as trend filter, 1h RSI(14) for mean reversion entries, and volume spike for confirmation.
-Target 15-30 trades/year by requiring: trend alignment, RSI extreme, and volume > 1.5x average.
-Works in bull/bear: trend filter prevents counter-trend trades, mean reversion captures reversals.
-"""
+# 6h_1w_1d_Pivot_R2S2_Breakout_Volume
+# Combines weekly trend filter with daily pivot breakouts on 6h timeframe
+# Weekly trend (price above/below weekly EMA50) filters direction
+# Daily pivot R2/S2 breakouts with volume confirmation for entry
+# Targets 15-35 trades/year to avoid fee drag while capturing strong moves
 
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,39 +19,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Load weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 4h EMA20 for trend
-    close_4h = df_4h['close'].values
-    ema_20_4h = np.full_like(close_4h, np.nan)
-    if len(close_4h) >= 20:
-        ema_20_4h[19] = np.mean(close_4h[:20])
-        for i in range(20, len(close_4h)):
-            ema_20_4h[i] = (close_4h[i] * 2 + ema_20_4h[i-1] * 19) / 21
+    # Load daily data for pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    # Weekly EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = np.full_like(close_1w, np.nan)
+    if len(close_1w) >= 50:
+        ema_50_1w[49] = np.mean(close_1w[:50])
+        for i in range(50, len(close_1w)):
+            ema_50_1w[i] = (close_1w[i] * 2 + ema_50_1w[i-1] * 49) / 51
     
-    # 1h RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Daily pivot points
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    avg_gain = np.full_like(close, np.nan)
-    avg_loss = np.full_like(close, np.nan)
-    if len(close) >= 14:
-        avg_gain[13] = np.mean(gain[1:14])
-        avg_loss[13] = np.mean(loss[1:14])
-        for i in range(14, len(close)):
-            avg_gain[i] = (gain[i] + avg_gain[i-1] * 13) / 14
-            avg_loss[i] = (loss[i] + avg_loss[i-1] * 13) / 14
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
+    r2 = pivot + (high_1d - low_1d)
+    s2 = pivot - (high_1d - low_1d)
     
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(close, np.nan), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # Align weekly EMA50 to 6h
+    ema_50_6h = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # 1h volume average (20-period)
+    # Align daily pivots to 6h
+    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
+    r2_6h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_6h = align_htf_to_ltf(prices, df_1d, s2)
+    
+    # Calculate 14-period daily ATR for volatility filter
+    tr = np.zeros(len(df_1d))
+    tr[0] = high_1d[0] - low_1d[0]
+    for i in range(1, len(df_1d)):
+        tr[i] = max(
+            high_1d[i] - low_1d[i],
+            abs(high_1d[i] - close_1d[i-1]),
+            abs(low_1d[i] - close_1d[i-1])
+        )
+    
+    atr_1d = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 14:
+        atr_1d[13] = np.mean(tr[:14])
+        for i in range(14, len(df_1d)):
+            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
+    
+    atr_6h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # Volume spike detection (20-period average on 6h)
     vol_ma_20 = np.full_like(volume, np.nan)
     if len(volume) >= 20:
         for i in range(19, len(volume)):
@@ -60,42 +84,56 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.20  # 20% position
+    position_size = 0.25  # 25% position size
     
-    for i in range(20, n):
-        # Skip if data not ready
-        if (np.isnan(ema_20_4h_aligned[i]) or 
-            np.isnan(rsi[i]) or
+    for i in range(100, n):
+        # Skip if any critical data is NaN
+        if (np.isnan(ema_50_6h[i]) or 
+            np.isnan(pivot_6h[i]) or
+            np.isnan(r1_6h[i]) or
+            np.isnan(s1_6h[i]) or
+            np.isnan(r2_6h[i]) or
+            np.isnan(s2_6h[i]) or
+            np.isnan(atr_6h[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: require at least 1.5x average volume
-        if vol_ma_20[i] <= 0 or volume[i] < vol_ma_20[i] * 1.5:
+        # Skip low volatility periods (ATR < 0.6% of price)
+        if atr_6h[i] < 0.006 * close[i]:
             signals[i] = 0.0
             continue
         
+        # Volume ratio: current 6h volume vs 20-period average
+        if vol_ma_20[i] <= 0:
+            volume_ratio = 0
+        else:
+            volume_ratio = volume[i] / vol_ma_20[i]
+        
+        # Volume threshold: require significant spike
+        vol_threshold = 2.0
+        
         if position == 0:
-            # Long: Uptrend (price > EMA20) + RSI oversold (<30)
-            if close[i] > ema_20_4h_aligned[i] and rsi[i] < 30:
+            # Long: Price above weekly EMA50 (uptrend) + breaks above R2 with volume
+            if (close[i] > ema_50_6h[i] and close[i] > r2_6h[i] and volume_ratio > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short: Downtrend (price < EMA20) + RSI overbought (>70)
-            elif close[i] < ema_20_4h_aligned[i] and rsi[i] > 70:
+            # Short: Price below weekly EMA50 (downtrend) + breaks below S2 with volume
+            elif (close[i] < ema_50_6h[i] and close[i] < s2_6h[i] and volume_ratio > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI overbought (>70) or trend breaks
-            if rsi[i] > 70 or close[i] < ema_20_4h_aligned[i]:
+            # Exit: Price falls back below S1 or closes below weekly EMA50
+            if close[i] < s1_6h[i] or close[i] < ema_50_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: RSI oversold (<30) or trend breaks
-            if rsi[i] < 30 or close[i] > ema_20_4h_aligned[i]:
+            # Exit: Price rises back above R1 or closes above weekly EMA50
+            if close[i] > r1_6h[i] or close[i] > ema_50_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -103,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4h_EMA20_RSI_Volume_Filter"
-timeframe = "1h"
+name = "6h_1w_1d_Pivot_R2S2_Breakout_Volume"
+timeframe = "6h"
 leverage = 1.0
