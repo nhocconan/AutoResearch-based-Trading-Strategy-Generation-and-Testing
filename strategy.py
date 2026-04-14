@@ -3,17 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h 123-Reversal pattern with 1d ADX trend filter and volume confirmation
-# The 123-Reversal is a price action pattern where:
-# 1. Price makes a new high/low (point 1)
-# 2. Pulls back to form a swing point (point 2)
-# 3. Breaks through point 1 with momentum (point 3)
-# Works in both bull/bear markets by only taking reversals in direction of higher timeframe trend
+# Hypothesis: 4h Camarilla pivot breakout with 1d ADX trend filter and volume confirmation
+# Uses institutional pivot levels with trend strength filter to avoid false breakouts
+# Works in bull/bear by only taking breakouts in direction of 1d trend (ADX > 25)
 # Target: 75-200 total trades over 4 years (19-50/year)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,64 +18,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX trend filter
+    # Get 1d data for trend filter (ADX) and Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 14-period ADX on 1d data
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate 1d ADX(14) for trend strength filter
+    # TR = max(high-low, abs(high-prev_close), abs(low-prev_close))
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_close_1d[0] = close_1d[0]
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - prev_close_1d)
+    tr3 = np.abs(low_1d - prev_close_1d)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # +DM and -DM
+    high_diff = np.diff(high_1d, prepend=high_1d[0])
+    low_diff = np.diff(low_1d, prepend=low_1d[0])
+    plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0)
+    minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0)
     
-    # Smooth with Wilder's smoothing (using EMA as approximation)
-    tr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
-    dm_plus_14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False).mean().values
-    dm_minus_14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False).mean().values
+    # Smooth with Wilder's smoothing (alpha = 1/period)
+    def wilder_smoothing(data, period):
+        result = np.zeros_like(data)
+        result[period-1] = np.mean(data[:period])
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + (data[i] / period)
+        return result
+    
+    tr14 = wilder_smoothing(tr, 14)
+    plus_dm14 = wilder_smoothing(plus_dm, 14)
+    minus_dm14 = wilder_smoothing(minus_dm, 14)
     
     # DI+ and DI-
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
+    plus_di14 = 100 * plus_dm14 / tr14
+    minus_di14 = 100 * minus_dm14 / tr14
     
     # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    adx_14 = adx
+    dx = 100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14)
+    adx = wilder_smoothing(dx, 14)
     
-    # Align ADX to 4h timeframe
-    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Identify swing points for 123 pattern
-    # Find local highs and lows (3-bar lookback)
-    swing_high = np.zeros(n, dtype=bool)
-    swing_low = np.zeros(n, dtype=bool)
+    # Calculate Camarilla levels from previous 1d candle
+    # Camarilla formulas based on previous day's range
+    prev_close_1d_shift = np.roll(close_1d, 1)
+    prev_close_1d_shift[0] = close_1d[0]
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_high_1d[0] = high_1d[0]
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_low_1d[0] = low_1d[0]
     
-    for i in range(2, n-2):
-        # Swing high: higher than 2 bars on each side
-        if (high[i] > high[i-1] and high[i] > high[i-2] and 
-            high[i] > high[i+1] and high[i] > high[i+2]):
-            swing_high[i] = True
-        # Swing low: lower than 2 bars on each side
-        if (low[i] < low[i-1] and low[i] < low[i-2] and 
-            low[i] < low[i+1] and low[i] < low[i+2]):
-            swing_low[i] = True
+    range_1d = prev_high_1d - prev_low_1d
     
-    # Track the most recent swing points
-    last_swing_high_idx = -1
-    last_swing_low_idx = -1
-    last_swing_high_val = 0
-    last_swing_low_val = 0
+    # Camarilla levels
+    camarilla_h4 = prev_close_1d_shift + 1.1 * range_1d / 2
+    camarilla_l4 = prev_close_1d_shift - 1.1 * range_1d / 2
+    camarilla_h3 = prev_close_1d_shift + 1.1 * range_1d / 4
+    camarilla_l3 = prev_close_1d_shift - 1.1 * range_1d / 4
+    camarilla_h2 = prev_close_1d_shift + 1.1 * range_1d / 6
+    camarilla_l2 = prev_close_1d_shift - 1.1 * range_1d / 6
+    camarilla_h1 = prev_close_1d_shift + 1.1 * range_1d / 12
+    camarilla_l1 = prev_close_1d_shift - 1.1 * range_1d / 12
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
     # Volume confirmation: volume > 1.3x average volume (20-period)
     vol_series = pd.Series(volume)
@@ -89,73 +97,44 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 30  # for swing detection and ADX
+    start = 50  # for ADX calculation
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(adx_14_aligned[i]) or np.isnan(avg_vol[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
         
-        # Update swing points
-        if swing_high[i]:
-            last_swing_high_idx = i
-            last_swing_high_val = high[i]
-        if swing_low[i]:
-            last_swing_low_idx = i
-            last_swing_low_val = low[i]
-        
         price = close[i]
         vol = volume[i]
+        adx_val = adx_aligned[i]
         
         if position == 0:
-            # Need valid swing points
-            if last_swing_high_idx == -1 or last_swing_low_idx == -1:
-                signals[i] = 0.0
-                continue
-                
-            # Determine trend direction from ADX and DI crossover
-            # We need DI values - recalculate or approximate from recent data
-            if i >= 2:  # Need at least 2 periods for DI
-                # Simplified trend: if recent closes are rising, trend is up
-                trend_up = close[i] > close[i-5]  # 5-period momentum
-            else:
-                trend_up = True
-            
-            # Long 123 reversal: 
-            # 1. Made a swing low (point 1)
-            # 2. Pulled back to form a lower high (point 2) 
-            # 3. Broke above point 1 with volume (point 3)
-            if (trend_up and 
-                price > last_swing_low_val and  # Broke above point 1
-                low[i] < last_swing_low_val and  # Pulled back below point 1 (formed point 2)
-                i - last_swing_low_idx >= 3 and  # At least 3 bars since swing low
-                vol > 1.3 * avg_vol[i]):  # Volume confirmation
+            # Long: price breaks above Camarilla H3 with volume filter AND strong trend (ADX > 25)
+            if (price > camarilla_h3_aligned[i] and 
+                vol > 1.3 * avg_vol[i] and 
+                adx_val > 25):
                 position = 1
                 signals[i] = position_size
-            # Short 123 reversal:
-            # 1. Made a swing high (point 1)
-            # 2. Pulled back to form a higher low (point 2)
-            # 3. Broke below point 1 with volume (point 3)
-            elif (not trend_up and 
-                  price < last_swing_high_val and  # Broke below point 1
-                  high[i] > last_swing_high_val and  # Pulled back above point 1 (formed point 2)
-                  i - last_swing_high_idx >= 3 and  # At least 3 bars since swing high
-                  vol > 1.3 * avg_vol[i]):  # Volume confirmation
+            # Short: price breaks below Camarilla L3 with volume filter AND strong trend (ADX > 25)
+            elif (price < camarilla_l3_aligned[i] and 
+                  vol > 1.3 * avg_vol[i] and 
+                  adx_val > 25):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below the swing low that started the move
-            if price < last_swing_low_val:
+            # Exit long: price breaks below Camarilla L3 OR trend weakens (ADX < 20)
+            if price < camarilla_l3_aligned[i] or adx_val < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above the swing high that started the move
-            if price > last_swing_high_val:
+            # Exit short: price breaks above Camarilla H3 OR trend weakens (ADX < 20)
+            if price > camarilla_h3_aligned[i] or adx_val < 20:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -163,6 +142,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_123Reversal_ADX_Volume"
+name = "4h_Camarilla_ADX_Volume"
 timeframe = "4h"
 leverage = 1.0
