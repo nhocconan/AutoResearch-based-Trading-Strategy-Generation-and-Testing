@@ -1,16 +1,15 @@
-#3.0
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Bollinger Bands for volatility and mean reversion, 
-# combined with 1d RSI for momentum confirmation. Uses Bollinger Band width 
-# to identify low volatility regimes (squeeze) and enters on mean reversion 
-# from Bollinger Bands when RSI is oversold/overbought. 
-# Designed to work in both bull and bear markets by focusing on mean reversion 
-# during low volatility periods, which occur in all market conditions.
-# Target: 20-40 trades/year per symbol (80-160 total over 4 years) to minimize fee drag.
+# Hypothesis: 4h strategy using 1d EMA200 trend filter and 4h Donchian breakout with volume confirmation.
+# EMA200 from daily timeframe filters trades to align with long-term trend (avoid counter-trend trades).
+# Donchian breakout from 4h provides entry signals with high probability of continuation.
+# Volume confirmation (>1.5x 20-period average) reduces false breakouts.
+# ATR-based stop loss manages risk via signal=0 when price moves against position.
+# Designed to work in both bull and bear markets by using daily EMA200 filter to avoid counter-trend trades.
+# Target: 20-30 trades/year per symbol (80-120 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,101 +21,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for Bollinger Bands and RSI
+    # Load 1d data ONCE for EMA200 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # Calculate Bollinger Bands (20, 2.0)
-    bb_period = 20
-    bb_std = 2.0
+    # Calculate EMA200 on 1d close
     close_1d = df_1d['close'].values
+    ema_200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    basis = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).mean().values
-    dev = bb_std * pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_band = basis + dev
-    lower_band = basis - dev
+    # Align 1d EMA200 to 4h timeframe
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
     
-    # Calculate RSI (14)
-    rsi_period = 14
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate 4h Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Bollinger Band Width for squeeze detection
-    bb_width = (upper_band - lower_band) / basis
-    bb_width_ma = pd.Series(bb_width).rolling(window=50, min_periods=50).mean().values
-    
-    # Align 1d indicators to 12h timeframe
-    basis_aligned = align_htf_to_ltf(prices, df_1d, basis)
-    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    bb_width_aligned = align_htf_to_ltf(prices, df_1d, bb_width)
-    bb_width_ma_aligned = align_htf_to_ltf(prices, df_1d, bb_width_ma)
-    
-    # Volume confirmation on 12h timeframe
+    # Volume confirmation: 1.5x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # ATR for stop loss (10-period)
+    tr1 = np.abs(high[1:] - low[1:])
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
+    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(bb_period, rsi_period, 50)  # Need BB, RSI, and BB width MA
+    start = max(200, 20)  # Need EMA200 and Donchian
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(basis_aligned[i]) or 
-            np.isnan(upper_band_aligned[i]) or
-            np.isnan(lower_band_aligned[i]) or
-            np.isnan(rsi_aligned[i]) or
-            np.isnan(bb_width_aligned[i]) or
-            np.isnan(bb_width_ma_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_200_aligned[i]) or 
+            np.isnan(donchian_high[i]) or
+            np.isnan(donchian_low[i]) or
+            np.isnan(vol_ma[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
-        volume_confirmed = volume[i] > 1.2 * vol_ma[i]
-        
-        # Bollinger Band squeeze condition: low volatility regime
-        volatility_squeeze = bb_width_aligned[i] < 0.8 * bb_width_ma_aligned[i]
+        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Look for mean reversion entries during low volatility
-            # Long: price touches lower BB AND RSI oversold (<30) AND volatility squeeze
-            if (close[i] <= lower_band_aligned[i] and 
-                rsi_aligned[i] < 30 and 
-                volatility_squeeze and
+            # Look for breakouts above 4h Donchian high or below 4h Donchian low
+            # Only trade in direction of daily EMA200 (trend filter)
+            
+            # Long: price breaks above 4h Donchian high AND price above EMA200
+            if (close[i] > donchian_high[i] and 
+                close[i] > ema_200_aligned[i] and 
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: price touches upper BB AND RSI overbought (>70) AND volatility squeeze
-            elif (close[i] >= upper_band_aligned[i] and 
-                  rsi_aligned[i] > 70 and 
-                  volatility_squeeze and
+            # Short: price breaks below 4h Donchian low AND price below EMA200
+            elif (close[i] < donchian_low[i] and 
+                  close[i] < ema_200_aligned[i] and 
                   volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to BB middle or RSI reaches neutral
-            if (close[i] >= basis_aligned[i] or 
-                rsi_aligned[i] >= 50):
+            # Exit long: price returns to 4h Donchian low or closes below EMA200
+            if (close[i] <= donchian_low[i] or 
+                close[i] < ema_200_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to BB middle or RSI reaches neutral
-            if (close[i] <= basis_aligned[i] or 
-                rsi_aligned[i] <= 50):
+            # Exit short: price returns to 4h Donchian high or closes above EMA200
+            if (close[i] >= donchian_high[i] or 
+                close[i] > ema_200_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -124,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1dBollingerBands_RSI_Squeeze_VolumeFilter_v1"
-timeframe = "12h"
+name = "4h_1dEMA200_4hDonchian_VolumeFilter_v1"
+timeframe = "4h"
 leverage = 1.0
