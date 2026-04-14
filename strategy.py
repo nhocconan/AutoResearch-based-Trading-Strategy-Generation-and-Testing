@@ -3,12 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Weekly Pivot Breakout with Volume Confirmation
-# Long when price breaks above weekly R4 AND volume > 1.5x 20-period average
-# Short when price breaks below weekly S4 AND volume > 1.5x 20-period average
-# Exit when price crosses back inside the weekly S3-R3 range (core zone)
-# Weekly pivots provide strong institutional levels; breakouts capture momentum with volume filter.
-# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost.
+# Hypothesis: 12-hour Williams %R mean reversion with 1-week trend filter and volume confirmation
+# Long when Williams %R < -80 (oversold) AND price > weekly EMA50 AND volume > 1.5x 20-period average
+# Short when Williams %R > -20 (overbought) AND price < weekly EMA50 AND volume > 1.5x 20-period average
+# Exit when Williams %R crosses back above -50 (for long) or below -50 (for short)
+# Williams %R identifies overbought/oversold conditions, effective in ranging markets
+# Weekly EMA50 filters for trend direction to avoid counter-trend trades
+# Volume confirmation ensures institutional participation
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,36 +22,20 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for pivot calculation
+    # Load weekly data ONCE before loop for EMA50 trend filter
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly high, low, close for pivot points
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate Williams %R (14-period) on 12h
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    
+    # Calculate weekly EMA50 for trend filter
     close_1w = df_1w['close'].values
-    
-    # Calculate weekly pivot points: P = (H+L+C)/3
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    # Calculate support and resistance levels
-    r1_1w = 2 * pivot_1w - low_1w
-    s1_1w = 2 * pivot_1w - high_1w
-    r2_1w = pivot_1w + (high_1w - low_1w)
-    s2_1w = pivot_1w - (high_1w - low_1w)
-    r3_1w = high_1w + 2 * (pivot_1w - low_1w)
-    s3_1w = low_1w - 2 * (high_1w - pivot_1w)
-    r4_1w = r3_1w + (high_1w - low_1w)
-    s4_1w = s3_1w - (high_1w - low_1w)
-    
-    # Align weekly pivot levels to 6h timeframe (wait for weekly close)
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
-    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
-    r4_1w_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
-    s4_1w_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     # Calculate volume average for confirmation (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -58,12 +44,13 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations
+    # Start after enough data for calculations (14 for Williams %R + buffer)
     start = 20
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isclose(pivot_1w_aligned[i], 0) or np.isnan(vol_avg[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema50_1w_aligned[i]) or 
+            np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
@@ -72,26 +59,26 @@ def generate_signals(prices):
         vol_threshold = vol_avg[i] * 1.5
         
         if position == 0:
-            # Long setup: breakout above weekly R4 + volume confirmation
-            if (price > r4_1w_aligned[i] and vol > vol_threshold):
+            # Long setup: Williams %R oversold (< -80) AND price > weekly EMA50 AND volume confirmation
+            if (williams_r[i] < -80 and price > ema50_1w_aligned[i] and vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: breakdown below weekly S4 + volume confirmation
-            elif (price < s4_1w_aligned[i] and vol > vol_threshold):
+            # Short setup: Williams %R overbought (> -20) AND price < weekly EMA50 AND volume confirmation
+            elif (williams_r[i] > -20 and price < ema50_1w_aligned[i] and vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price falls back below weekly S3 (exit core zone)
-            if price < s3_1w_aligned[i]:
+            # Exit long: Williams %R crosses back above -50 (exiting oversold territory)
+            if williams_r[i] > -50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price rises back above weekly R3 (exit core zone)
-            if price > r3_1w_aligned[i]:
+            # Exit short: Williams %R crosses back below -50 (exiting overbought territory)
+            if williams_r[i] < -50:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -99,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_Breakout_Volume"
-timeframe = "6h"
+name = "12h_WilliamsR_1wEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
