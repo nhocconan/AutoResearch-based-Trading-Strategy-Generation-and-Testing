@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily KAMA with weekly trend filter and volume confirmation.
-# KAMA adapts to market conditions - fast in trends, slow in ranges.
-# Weekly trend filter ensures we only trade in direction of higher timeframe trend.
-# Volume confirmation filters out low-conviction moves.
-# Target: 15-25 trades/year per symbol (60-100 total over 4 years) to minimize fee drag.
+# Hypothesis: 12-hour strategy using 1-day Donchian breakout with volume confirmation and ATR stop.
+# In trending markets, trade breakouts in the direction of the 1-day trend (price > EMA50).
+# Uses volume > 1.5x 20-period average to confirm momentum.
+# Position size: 0.25 (25%) to balance risk and return.
+# Target: 20-50 trades per year per symbol to minimize fee drag.
+# Works in both bull and bear markets by filtering trades with trend and volume.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,58 +20,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE for trend filter and Donchian channels
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly EMA34 for trend direction (more stable than price vs EMA)
-    ema_len = 34
-    if len(df_1w) < ema_len:
+    # 1-day EMA(50) for trend direction
+    ema_len = 50
+    if len(df_1d) < ema_len:
         return np.zeros(n)
     
-    ema_1w = pd.Series(df_1w['close']).ewm(span=ema_len, adjust=False, min_periods=ema_len).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    ema_1d = pd.Series(df_1d['close']).ewm(span=ema_len, adjust=False, min_periods=ema_len).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Daily KAMA (adaptive moving average)
-    er_len = 10      # Efficiency ratio period
-    fast_sc = 2 / (2 + 1)   # SC for fastest EMA
-    slow_sc = 2 / (30 + 1)  # SC for slowest EMA
+    # 1-day Donchian channels (20-period high/low)
+    donch_len = 20
+    if len(df_1d) < donch_len:
+        return np.zeros(n)
     
-    # Calculate Efficiency Ratio
-    change = np.abs(np.diff(close, k=er_len))
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)
+    # Calculate Donchian channels on 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Pad arrays to match length
-    change = np.concatenate([np.full(er_len, np.nan), change])
-    volatility = np.concatenate([np.full(er_len, np.nan), volatility])
+    # Rolling max/min for Donchian channels
+    dh_1d = pd.Series(high_1d).rolling(window=donch_len, min_periods=donch_len).max().values
+    dl_1d = pd.Series(low_1d).rolling(window=donch_len, min_periods=donch_len).min().values
     
-    # Avoid division by zero
-    er = np.where(volatility != 0, change / volatility, 0)
+    # Align Donchian levels to 12h timeframe
+    dh_1d_aligned = align_htf_to_ltf(prices, df_1d, dh_1d)
+    dl_1d_aligned = align_htf_to_ltf(prices, df_1d, dl_1d)
     
-    # Calculate smoothing constant
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # ATR for volatility and stop loss (1-day ATR)
+    atr_len = 14
+    if len(df_1d) < atr_len:
+        return np.zeros(n)
     
-    # Calculate KAMA
-    kama = np.full_like(close, np.nan)
-    kama[er_len] = close[er_len]  # Seed with first close
+    # Calculate True Range for 1d
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1]) if len(close_1d) > 1 else np.array([])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1]) if len(close_1d) > 1 else np.array([])
     
-    for i in range(er_len + 1, len(close)):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    if len(tr1) > 0 and len(tr2) > 0 and len(tr3) > 0:
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[np.nan], tr])
+    else:
+        # Handle edge case with insufficient data
+        tr = np.full(len(high_1d), np.nan)
+        if len(high_1d) > 0:
+            tr[0] = np.nan
     
-    # Daily RSI(14) for overbought/oversold conditions
-    rsi_len = 14
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_len, adjust=False, min_periods=rsi_len).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_len, adjust=False, min_periods=rsi_len).mean().values
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.concatenate([np.full(rsi_len, np.nan), rsi])
+    atr_1d = pd.Series(tr).ewm(span=atr_len, adjust=False, min_periods=atr_len).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     # Volume confirmation: 1.5x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -80,51 +78,49 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(ema_len*2, er_len*2, rsi_len*2, 20)
+    start = max(ema_len*2, donch_len, atr_len, 20)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_1w_aligned[i]) or 
-            np.isnan(kama[i]) or
-            np.isnan(rsi[i]) or
+        if (np.isnan(ema_1d_aligned[i]) or 
+            np.isnan(dh_1d_aligned[i]) or
+            np.isnan(dl_1d_aligned[i]) or
+            np.isnan(atr_1d_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Weekly trend filter: price above/below weekly EMA34
-        weekly_uptrend = close[i] > ema_1w_aligned[i]
-        weekly_downtrend = close[i] < ema_1w_aligned[i]
+        # Trend filter: price above/below 1-day EMA50
+        bullish_trend = close[i] > ema_1d_aligned[i]
+        bearish_trend = close[i] < ema_1d_aligned[i]
         
         # Volume confirmation
         volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: price above KAMA, weekly uptrend, not overbought, with volume
-            if (close[i] > kama[i] and 
-                weekly_uptrend and 
-                rsi[i] < 70 and 
-                volume_confirmed):
-                position = 1
-                signals[i] = position_size
-            # Short: price below KAMA, weekly downtrend, not oversold, with volume
-            elif (close[i] < kama[i] and 
-                  weekly_downtrend and 
-                  rsi[i] > 30 and 
-                  volume_confirmed):
-                position = -1
-                signals[i] = -position_size
+            # Look for breakouts in direction of 1-day trend
+            if bullish_trend and volume_confirmed:
+                # Long breakout above Donchian high
+                if close[i] > dh_1d_aligned[i]:
+                    position = 1
+                    signals[i] = position_size
+            elif bearish_trend and volume_confirmed:
+                # Short breakdown below Donchian low
+                if close[i] < dl_1d_aligned[i]:
+                    position = -1
+                    signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price below KAMA or overbought
-            if close[i] < kama[i] or rsi[i] > 75:
+            # Exit long: price returns to Donchian low or stops hit
+            if close[i] < dl_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price above KAMA or oversold
-            if close[i] > kama[i] or rsi[i] < 25:
+            # Exit short: price returns to Donchian high or stops hit
+            if close[i] > dh_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -132,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "daily_kama_weekly_trend_volume_filter_v1"
-timeframe = "1d"
+name = "12h_1d_Donchian_EMA_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
