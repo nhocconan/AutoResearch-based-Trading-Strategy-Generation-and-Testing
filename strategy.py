@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 12h Supertrend for trend direction and 12h ATR breakout for entry.
-# Long when price breaks above 12h ATR-based upper band with Supertrend uptrend and volume confirmation.
-# Short when price breaks below 12h ATR-based lower band with Supertrend downtrend and volume confirmation.
-# Exit when price crosses the Supertrend line or ATR band reverses.
-# Supertrend adapts to volatility, working in both bull and bear markets.
-# Target: 20-25 trades/year per symbol (80-100 total over 4 years) to minimize fee drag.
+# Hypothesis: 1h strategy using 4h for trend (EMA21) and 1d for volatility (ATR14) to set dynamic breakout levels.
+# Enter long when price breaks above 4h EMA21 + 0.5*ATR14 with volume confirmation in uptrend (4h close > EMA21).
+# Enter short when price breaks below 4h EMA21 - 0.5*ATR14 with volume confirmation in downtrend (4h close < EMA21).
+# Exit when price crosses back over 4h EMA21.
+# Uses session filter (08-20 UTC) to avoid low-volatility periods.
+# Position size fixed at 0.20 to control risk and reduce trade frequency.
+# Target: 15-30 trades/year per symbol (60-120 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,92 +21,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE for Supertrend and ATR bands
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Load 4h data ONCE for EMA21 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 21:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Calculate ATR for Supertrend
-    tr1 = np.abs(high_12h[1:] - low_12h[1:])
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    # Load 1d data ONCE for ATR14 volatility
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate True Range and ATR on 1d
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     
-    atr_period = 10
-    atr_12h = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    atr_period = 14
+    atr_1d = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Supertrend parameters
-    atr_multiplier = 3.0
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate basic upper and lower bands
-    hl2 = (high_12h + low_12h) / 2
-    upper_band = hl2 + (atr_multiplier * atr_12h)
-    lower_band = hl2 - (atr_multiplier * atr_12h)
-    
-    # Initialize Supertrend
-    supertrend = np.full_like(close_12h, np.nan)
-    trend = np.ones_like(close_12h, dtype=int)  # 1 for uptrend, -1 for downtrend
-    
-    # Calculate Supertrend
-    for i in range(1, len(close_12h)):
-        if np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(atr_12h[i]):
-            supertrend[i] = supertrend[i-1] if i > 0 else np.nan
-            trend[i] = trend[i-1] if i > 0 else 1
-            continue
-            
-        if close_12h[i] > upper_band[i-1]:
-            trend[i] = 1
-        elif close_12h[i] < lower_band[i-1]:
-            trend[i] = -1
-        else:
-            trend[i] = trend[i-1]
-            if trend[i] == 1 and lower_band[i] < lower_band[i-1]:
-                lower_band[i] = lower_band[i-1]
-            if trend[i] == -1 and upper_band[i] > upper_band[i-1]:
-                upper_band[i] = upper_band[i-1]
-        
-        if trend[i] == 1:
-            supertrend[i] = lower_band[i]
-        else:
-            supertrend[i] = upper_band[i]
-    
-    # Calculate ATR breakout bands (separate from Supertrend for entry)
-    atr_breakout_period = 14
-    atr_breakout = pd.Series(tr).ewm(span=atr_breakout_period, adjust=False, min_periods=atr_breakout_period).mean().values
-    
-    # ATR breakout bands
-    atr_multiplier_breakout = 1.5
-    upper_breakout = hl2 + (atr_multiplier_breakout * atr_breakout)
-    lower_breakout = hl2 - (atr_multiplier_breakout * atr_breakout)
-    
-    # Align indicators to lower timeframe
-    supertrend_aligned = align_htf_to_ltf(prices, df_12h, supertrend)
-    trend_aligned = align_htf_to_ltf(prices, df_12h, trend)
-    upper_breakout_aligned = align_htf_to_ltf(prices, df_12h, upper_breakout)
-    lower_breakout_aligned = align_htf_to_ltf(prices, df_12h, lower_breakout)
-    
-    # Volume confirmation: 1.5x average volume
+    # Volume confirmation: 1.5x average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position size
+    position_size = 0.20  # Fixed 20% position size
     
     # Start after enough data for calculations
-    start = max(20, 14)
+    start = max(21, 14, 20)  # EMA21, ATR14, vol MA20
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(supertrend_aligned[i]) or 
-            np.isnan(trend_aligned[i]) or
-            np.isnan(upper_breakout_aligned[i]) or
-            np.isnan(lower_breakout_aligned[i]) or
+        if (np.isnan(ema_4h_aligned[i]) or 
+            np.isnan(atr_1d_aligned[i]) or
             np.isnan(vol_ma[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Apply session filter
+        if not in_session[i]:
             signals[i] = 0.0
             continue
         
@@ -113,33 +81,32 @@ def generate_signals(prices):
         volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Look for ATR breakout entries
-            # Long: price breaks above upper breakout band with uptrend
-            if (close[i] > upper_breakout_aligned[i] and 
-                trend_aligned[i] == 1 and 
+            # Dynamic breakout levels based on 4h EMA21 and 1d ATR
+            upper_band = ema_4h_aligned[i] + 0.5 * atr_1d_aligned[i]
+            lower_band = ema_4h_aligned[i] - 0.5 * atr_1d_aligned[i]
+            
+            # Long: price breaks above upper band with volume confirmation
+            if (close[i] > upper_band and 
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below lower breakout band with downtrend
-            elif (close[i] < lower_breakout_aligned[i] and 
-                  trend_aligned[i] == -1 and 
+            # Short: price breaks below lower band with volume confirmation
+            elif (close[i] < lower_band and 
                   volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below Supertrend or breaks below lower breakout band
-            if (close[i] < supertrend_aligned[i] or 
-                close[i] < lower_breakout_aligned[i]):
+            # Exit long: price crosses back below 4h EMA21
+            if close[i] < ema_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above Supertrend or breaks above upper breakout band
-            if (close[i] > supertrend_aligned[i] or 
-                close[i] > upper_breakout_aligned[i]):
+            # Exit short: price crosses back above 4h EMA21
+            if close[i] > ema_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -147,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Supertrend_ATRBreakout_Volume_v1"
-timeframe = "4h"
+name = "1h_EMA21_ATR_Breakout_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
