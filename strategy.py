@@ -38,16 +38,13 @@ def generate_signals(prices):
         for i in range(14, len(df_1d)):
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr_6h = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Volume spike detection (20-period average on 12h)
+    # Volume spike detection (20-period average on 6h)
     vol_ma_20 = np.full_like(volume, np.nan)
     if len(volume) >= 20:
         for i in range(19, len(volume)):
             vol_ma_20[i] = np.mean(volume[i-19:i+1])
-    
-    # Calculate 12h EMA for trend filter
-    close_ema = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0
@@ -55,16 +52,17 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any critical data is NaN
-        if np.isnan(atr_12h[i]) or np.isnan(vol_ma_20[i]) or np.isnan(close_ema[i]):
+        if (np.isnan(atr_6h[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Skip low volatility periods (ATR < 0.5% of price)
-        if atr_12h[i] < 0.005 * close[i]:
+        if atr_6h[i] < 0.005 * close[i]:
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 12h volume vs 20-period average
+        # Volume ratio: current 6h volume vs 20-period average
         if vol_ma_20[i] <= 0:
             volume_ratio = 0
         else:
@@ -73,28 +71,45 @@ def generate_signals(prices):
         # Volume threshold: require significant spike
         vol_threshold = 2.5
         
-        # Entry conditions
+        # Calculate dynamic pivot levels based on previous day's range
+        prev_high = high_1d[i-1] if i > 0 else high_1d[0]
+        prev_low = low_1d[i-1] if i > 0 else low_1d[0]
+        prev_close = close_1d[i-1] if i > 0 else close_1d[0]
+        prev_range = prev_high - prev_low
+        
+        # Camarilla-style pivot levels
+        r4 = prev_close + (prev_range * 1.1 / 2)
+        s4 = prev_close - (prev_range * 1.1 / 2)
+        r3 = prev_close + (prev_range * 1.1 / 4)
+        s3 = prev_close - (prev_range * 1.1 / 4)
+        
+        # Align to 6h timeframe
+        r4_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r4))[i] if i < len(prices) else r4
+        s4_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s4))[i] if i < len(prices) else s4
+        r3_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r3))[i] if i < len(prices) else r3
+        s3_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i] if i < len(prices) else s3
+        
         if position == 0:
-            # Long: Price above EMA50 with volume confirmation
-            if (close[i] > close_ema[i] and volume_ratio > vol_threshold):
+            # Long: Price breaks above R4 with volume confirmation
+            if close[i] > r4_6h and volume_ratio > vol_threshold:
                 position = 1
                 signals[i] = position_size
-            # Short: Price below EMA50 with volume confirmation
-            elif (close[i] < close_ema[i] and volume_ratio > vol_threshold):
+            # Short: Price breaks below S4 with volume confirmation
+            elif close[i] < s4_6h and volume_ratio > vol_threshold:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price crosses below EMA50
-            if close[i] < close_ema[i]:
+            # Exit: Price falls back below S3 (more sensitive exit)
+            if close[i] < s3_6h:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price crosses above EMA50
-            if close[i] > close_ema[i]:
+            # Exit: Price rises back above R3 (more sensitive exit)
+            if close[i] > r3_6h:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -102,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_EMA50_Volume_Filter"
-timeframe = "12h"
+name = "6h_1d_Camarilla_R4S4_Breakout_Volume"
+timeframe = "6h"
 leverage = 1.0
