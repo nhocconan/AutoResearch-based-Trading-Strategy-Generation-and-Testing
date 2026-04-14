@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,7 +18,7 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA21 for trend filter
+    # Calculate 1d close EMA21 for trend filter
     close_1d = df_1d['close'].values
     ema_21_1d = np.full(len(df_1d), np.nan)
     if len(df_1d) >= 21:
@@ -59,7 +59,7 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25
     
-    for i in range(60, n):
+    for i in range(100, n):
         # Skip if any critical data is NaN
         if (np.isnan(ema_21_1d_aligned[i]) or
             np.isnan(atr_4h_aligned[i]) or
