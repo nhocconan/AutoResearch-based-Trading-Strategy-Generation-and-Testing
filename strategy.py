@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for pivot calculation
+    # Load 1-day data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 15:
         return np.zeros(n)
@@ -28,8 +28,6 @@ def generate_signals(prices):
     s1 = 2 * pivot - high_1d
     r2 = pivot + (high_1d - low_1d)
     s2 = pivot - (high_1d - low_1d)
-    r3 = high_1d + 2 * (pivot - low_1d)
-    s3 = low_1d - 2 * (high_1d - pivot)
     
     # Align pivot levels to 4h timeframe
     pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
@@ -62,7 +60,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.30  # 30% position size
+    position_size = 0.25  # 25% position size for lower drawdown
     
     for i in range(30, n):
         # Skip if any critical data is NaN
@@ -118,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Pivot_R2S2_Breakout_v1"
+name = "4h_1d_Pivot_R2S2_Breakout_v2"
 timeframe = "4h"
 leverage = 1.0
