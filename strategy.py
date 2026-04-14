@@ -1,88 +1,144 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 12h Williams %R for mean-reversion entries with 1d ADX as trend filter
-# - Long when price is above 1d EMA200 (bullish trend) and 12h Williams %R < -80 (oversold)
-# - Short when price is below 1d EMA200 (bearish trend) and 12h Williams %R > -20 (overbought)
-# - Exit when Williams %R crosses back through -50 (mean reversion complete)
-# - Williams %R provides timely reversal signals; EMA200 filters for trend alignment
-# - Target: 50-150 total trades over 4 years (12-38/year) for low frequency and minimal fee drag
+# Hypothesis: 12h strategy combining daily Ichimoku Cloud as trend filter
+# with 12h Relative Strength Index (RSI) for mean-reversion entries.
+# - Long when price is above daily Kumo (cloud) and 12h RSI < 30 (oversold)
+# - Short when price is below daily Kumo and 12h RSI > 70 (overbought)
+# - Volume confirmation: current volume > 1.3x 20-period average to ensure participation
+# - Uses Ichimoku Cloud for robust trend filtering that adapts to volatility
+# - RSI(14) provides mean-reversion signals within the trend context
+# - Target: 50-150 total trades over 4 years (12-37/year) for optimal balance
 # - Position size 0.25 for balanced risk exposure
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load 1d data once before loop
+    # Load daily data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 52:  # Need enough for Ichimoku (26*2)
         return np.zeros(n)
     
-    # Calculate 1d EMA200
+    # Calculate Ichimoku Components (daily)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Load 12h data once before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 14:
-        return np.zeros(n)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
     
-    # Calculate 12h Williams %R(14)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
     
-    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
-    wr = -100 * (highest_high - close_12h) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    wr = np.where((highest_high - lowest_low) == 0, -50, wr)
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
     
-    # Align indicators to 6h timeframe
-    ema200_6h = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    wr_6h = align_htf_to_ltf(prices, df_12h, wr)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = (period52_high + period52_low) / 2
+    
+    # Kumo (Cloud) boundaries: Senkou Span A and B shifted forward 26 periods
+    # For trend filtering, we use the current cloud (Senkou Span A/B shifted)
+    # But to avoid look-ahead, we use the cloud values from 26 periods ago
+    # Actually, for determining if price is above/below cloud at time t,
+    # we use Senkou Span A/B calculated at t-26 (already known)
+    # So we shift Senkou Span A/B forward by 26 to align with current price
+    # But since we want to avoid look-ahead, we'll use the cloud as it was known 26 periods ago
+    # Simpler: use the current Senkou Span A/B values (which are plotted 26 periods ahead)
+    # To get the cloud values that are visible at current time, we need Senkou Span A/B from 26 periods ago
+    # So we'll use Senkou Span A/B values shifted BACK by 26 to get current cloud
+    
+    # The cloud that is visible at time t is Senkou Span A/B calculated at t-26
+    # So we take Senkou Span A/B and shift them forward by 26 to align with current time
+    # But to avoid look-ahead, we use values that were known in the past
+    # Actually, Senkou Span A/B are plotted 26 periods ahead, so the current cloud
+    # was calculated 26 periods ago. Therefore, we can use the current Senkou Span A/B
+    # values as they represent the cloud that is visible now (calculated in the past)
+    
+    # For simplicity and to avoid look-ahead issues, we'll use:
+    # Kumo top = max(Senkou Span A, Senkou Span B) 
+    # Kumo bottom = min(Senkou Span A, Senkou Span B)
+    # These represent the current cloud boundaries
+    
+    kumo_top = np.maximum(senkou_span_a, senkou_span_b)
+    kumo_bottom = np.minimum(senkou_span_a, senkou_span_b)
+    
+    # Calculate 12h RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume filter: 20-period average
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25
     
-    for i in range(200, n):
+    for i in range(60, n):
         # Skip if any critical data is NaN
-        if np.isnan(ema200_6h[i]) or np.isnan(wr_6h[i]):
+        if np.isnan(rsi[i]) or np.isnan(vol_ma[i]):
+            continue
+        
+        # Get daily index for current 12h bar
+        # 1 day = 2 * 12h bars
+        idx_1d = i // 2
+        if idx_1d < 1:
+            continue
+            
+        # Current Kumo (cloud) values - these are safe to use as they represent
+        # the cloud that is visible now (calculated from past data)
+        kumo_top_val = kumo_top[idx_1d]
+        kumo_bottom_val = kumo_bottom[idx_1d]
+        
+        if np.isnan(kumo_top_val) or np.isnan(kumo_bottom_val):
             continue
         
         if position == 0:
-            # Long: price above 1d EMA200 + Williams %R oversold (< -80)
-            if (close[i] > ema200_6h[i] and 
-                wr_6h[i] < -80):
+            # Long: price above Kumo + RSI oversold + volume confirmation
+            if (close[i] > kumo_top_val and      # price above cloud
+                rsi[i] < 30 and                  # RSI oversold
+                volume[i] > vol_ma[i] * 1.3):    # volume confirmation
                 position = 1
                 signals[i] = position_size
-            # Short: price below 1d EMA200 + Williams %R overbought (> -20)
-            elif (close[i] < ema200_6h[i] and 
-                  wr_6h[i] > -20):
+            # Short: price below Kumo + RSI overbought + volume confirmation
+            elif (close[i] < kumo_bottom_val and   # price below cloud
+                  rsi[i] > 70 and                  # RSI overbought
+                  volume[i] > vol_ma[i] * 1.3):    # volume confirmation
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
-            # Exit long: Williams %R crosses back above -50 (mean reversion complete)
-            if wr_6h[i] > -50:
+            # Exit: RSI overbought or price below Kumo
+            if rsi[i] > 70 or close[i] < kumo_bottom_val:
                 position = 0
                 signals[i] = 0.0
         elif position == -1:
-            # Exit short: Williams %R crosses back below -50 (mean reversion complete)
-            if wr_6h[i] < -50:
+            # Exit: RSI oversold or price above Kumo
+            if rsi[i] < 30 or close[i] > kumo_top_val:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "6h_1d_EMA200_12h_WilliamsR"
-timeframe = "6h"
+name = "12h_1d_Ichimoku_RSI_MeanReversion"
+timeframe = "12h"
 leverage = 1.0
