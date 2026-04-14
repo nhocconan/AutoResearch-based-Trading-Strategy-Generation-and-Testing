@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,47 +13,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data (HTF) once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load weekly data (HTF) once before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla pivot levels
-    range_1d = high_1d - low_1d
-    r3 = close_1d + (range_1d * 1.1 / 4)
-    s3 = close_1d - (range_1d * 1.1 / 4)
-    r4 = close_1d + (range_1d * 1.1 / 2)
-    s4 = close_1d - (range_1d * 1.1 / 2)
-    
-    # Align Camarilla levels to 6h timeframe
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
-    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
-    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Calculate daily ATR for volatility filter (14-period)
-    tr = np.zeros(len(df_1d))
-    tr[0] = high_1d[0] - low_1d[0]
-    for i in range(1, len(df_1d)):
-        tr[i] = max(
-            high_1d[i] - low_1d[i],
-            abs(high_1d[i] - close_1d[i-1]),
-            abs(low_1d[i] - close_1d[i-1])
+    # Calculate weekly ATR for volatility filter (14-period)
+    tr_1w = np.zeros(len(df_1w))
+    tr_1w[0] = high_1w[0] - low_1w[0]
+    for i in range(1, len(df_1w)):
+        tr_1w[i] = max(
+            high_1w[i] - low_1w[i],
+            abs(high_1w[i] - close_1w[i-1]),
+            abs(low_1w[i] - close_1w[i-1])
         )
     
-    atr_1d = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 14:
-        atr_1d[13] = np.mean(tr[:14])
-        for i in range(14, len(df_1d)):
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
+    atr_1w = np.full(len(df_1w), np.nan)
+    if len(df_1w) >= 14:
+        atr_1w[13] = np.mean(tr_1w[:14])
+        for i in range(14, len(df_1w)):
+            atr_1w[i] = (atr_1w[i-1] * 13 + tr_1w[i]) / 14
     
-    atr_6h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr_12h = align_htf_to_ltf(prices, df_1w, atr_1w)
     
-    # Volume spike detection (20-period average on 6h)
+    # Load daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    
+    # Calculate 50-period EMA on daily
+    ema_50_1d = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 50:
+        alpha = 2.0 / (50 + 1)
+        ema_50_1d[0] = close_1d[0]
+        for i in range(1, len(df_1d)):
+            ema_50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_50_1d[i-1]
+    
+    ema_50_12h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Calculate weekly Donchian channels (20-period)
+    high_20_1w = np.full(len(df_1w), np.nan)
+    low_20_1w = np.full(len(df_1w), np.nan)
+    if len(df_1w) >= 20:
+        for i in range(19, len(df_1w)):
+            high_20_1w[i] = np.max(high_1w[i-19:i+1])
+            low_20_1w[i] = np.min(low_1w[i-19:i+1])
+    
+    high_20_12h = align_htf_to_ltf(prices, df_1w, high_20_1w)
+    low_20_12h = align_htf_to_ltf(prices, df_1w, low_20_1w)
+    
+    # Calculate 12h volume moving average (20-period)
     vol_ma_20 = np.full_like(volume, np.nan)
     if len(volume) >= 20:
         for i in range(19, len(volume)):
@@ -63,52 +78,55 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25  # 25% position size
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r3_6h[i]) or 
-            np.isnan(s3_6h[i]) or
-            np.isnan(r4_6h[i]) or
-            np.isnan(s4_6h[i]) or
-            np.isnan(atr_6h[i]) or
+        if (np.isnan(high_20_12h[i]) or 
+            np.isnan(low_20_12h[i]) or
+            np.isnan(ema_50_12h[i]) or
+            np.isnan(atr_12h[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Skip low volatility periods (ATR < 0.5% of price)
-        if atr_6h[i] < 0.005 * close[i]:
+        # Skip low volatility periods (ATR < 0.3% of price)
+        if atr_12h[i] < 0.003 * close[i]:
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 6h volume vs 20-period average
+        # Volume ratio: current 12h volume vs 20-period average
         if vol_ma_20[i] <= 0:
             volume_ratio = 0
         else:
             volume_ratio = volume[i] / vol_ma_20[i]
         
         # Volume threshold: require significant spike
-        vol_threshold = 2.5
+        vol_threshold = 3.0
         
         if position == 0:
-            # Long: Price breaks above R4 with volume confirmation
-            if (close[i] > r4_6h[i] and volume_ratio > vol_threshold):
+            # Long: Price breaks above weekly high with volume confirmation and above weekly EMA50
+            if (close[i] > high_20_12h[i] and 
+                volume_ratio > vol_threshold and
+                close[i] > ema_50_12h[i]):
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below S4 with volume confirmation
-            elif (close[i] < s4_6h[i] and volume_ratio > vol_threshold):
+            # Short: Price breaks below weekly low with volume confirmation and below weekly EMA50
+            elif (close[i] < low_20_12h[i] and 
+                  volume_ratio > vol_threshold and
+                  close[i] < ema_50_12h[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below S3 (more sensitive exit)
-            if close[i] < s3_6h[i]:
+            # Exit: Price falls back below weekly low
+            if close[i] < low_20_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above R3 (more sensitive exit)
-            if close[i] > r3_6h[i]:
+            # Exit: Price rises back above weekly high
+            if close[i] > high_20_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -116,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Camarilla_R4S4_Breakout_Volume"
-timeframe = "6h"
+name = "12h_1w_Donchian_EMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
