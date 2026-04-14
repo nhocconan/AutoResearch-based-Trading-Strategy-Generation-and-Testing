@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian breakout with 12-hour ATR filter and volume confirmation
-# Long when price breaks above Donchian upper channel (20-period) AND price > 12h ATR(14) filter AND volume > 1.5x 20-period average
-# Short when price breaks below Donchian lower channel (20-period) AND price < 12h ATR(14) filter AND volume > 1.5x 20-period average
-# Exit when price crosses back inside the Donchian channel (opposite side)
-# Uses Donchian channels for volatility breakouts, ATR for volatility filter, volume for confirmation
-# Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost
+# Hypothesis: 1-hour timeframe with 4-hour trend filter and 1-day momentum filter.
+# Uses 4h Supertrend for trend direction, 1d RSI for momentum confirmation, and 1h price action for entry timing.
+# Long when: 4h Supertrend = uptrend AND 1d RSI > 50 AND 1h close > 1h open (bullish candle)
+# Short when: 4h Supertrend = downtrend AND 1d RSI < 50 AND 1h close < 1h open (bearish candle)
+# Exit when trend changes or momentum fails.
+# Designed for 60-150 total trades over 4 years (15-37/year) with session filter (08-20 UTC) to reduce noise.
+# Uses discrete position sizes (0.20) to minimize churn and focuses on high-probability setups.
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,76 +19,102 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
+    open_price = prices['open'].values
     
-    # Load 12h data ONCE before loop for ATR filter
-    df_12h = get_htf_data(prices, '12h')
+    # Calculate hour filter once (08-20 UTC)
+    hours = prices.index.hour
     
-    # Calculate Donchian Channels on 4h (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    upper_channel = high_series.rolling(window=20, min_periods=20).max().values
-    lower_channel = low_series.rolling(window=20, min_periods=20).min().values
+    # Load 4h data ONCE before loop for Supertrend
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate 12h ATR(14) for volatility filter
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate 4h Supertrend (ATR=10, multiplier=3.0)
+    hl2 = (df_4h['high'] + df_4h['low']) / 2
+    atr = pd.Series(df_4h['high'] - df_4h['low']).rolling(window=10, min_periods=10).mean()
+    upper_band = hl2 + 3.0 * atr
+    lower_band = hl2 - 3.0 * atr
     
-    # True Range calculation
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr1[0] = 0  # First period has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    supertrend = np.full(len(df_4h), True)  # True = uptrend, False = downtrend
+    for i in range(1, len(df_4h)):
+        if df_4h['close'].iloc[i] > upper_band.iloc[i-1]:
+            supertrend[i] = True
+        elif df_4h['close'].iloc[i] < lower_band.iloc[i-1]:
+            supertrend[i] = False
+        else:
+            supertrend[i] = supertrend[i-1]
+            if supertrend[i] and lower_band.iloc[i] < lower_band.iloc[i-1]:
+                lower_band.iloc[i] = lower_band.iloc[i-1]
+            if not supertrend[i] and upper_band.iloc[i] > upper_band.iloc[i-1]:
+                upper_band.iloc[i] = upper_band.iloc[i-1]
     
-    atr14_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr14_12h_aligned = align_htf_to_ltf(prices, df_12h, atr14_12h)
+    supertrend_4h = supertrend
+    supertrend_4h_aligned = align_htf_to_ltf(prices, df_4h, supertrend_4h.astype(float))
     
-    # Calculate volume average for confirmation (20-period)
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Load 1d data ONCE before loop for RSI
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate 1d RSI(14)
+    close_1d = df_1d['close']
+    delta = close_1d.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_values = rsi_1d.fillna(50).values  # Fill NaN with 50 (neutral)
+    
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d_values)
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position size
+    position_size = 0.20  # 20% position size
     
-    # Start after enough data for calculations (20 for Donchian + buffer)
-    start = 30
+    # Start after enough data for calculations
+    start = 20
     
     for i in range(start, n):
-        # Skip if any critical data is NaN
-        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
-            np.isnan(atr14_12h_aligned[i]) or np.isnan(vol_avg[i])):
+        # Apply session filter: 08-20 UTC
+        if not (8 <= hours[i] <= 20):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        vol = volume[i]
-        vol_threshold = vol_avg[i] * 1.5
+        # Skip if any critical data is NaN
+        if (np.isnan(supertrend_4h_aligned[i]) or 
+            np.isnan(rsi_1d_aligned[i])):
+            signals[i] = 0.0
+            continue
+        
+        # 1h price action
+        is_bullish_candle = close[i] > open_price[i]
+        is_bearish_candle = close[i] < open_price[i]
         
         if position == 0:
-            # Long setup: price breaks above upper Donchian channel AND above 12h ATR filter AND volume confirmation
-            if (price > upper_channel[i] and price > atr14_12h_aligned[i] and vol > vol_threshold):
+            # Long setup: 4h uptrend + 1d bullish momentum + 1h bullish candle
+            if (supertrend_4h_aligned[i] > 0.5 and  # Uptrend
+                rsi_1d_aligned[i] > 50 and          # Bullish momentum
+                is_bullish_candle):                 # Bullish price action
                 position = 1
                 signals[i] = position_size
-            # Short setup: price breaks below lower Donchian channel AND below 12h ATR filter AND volume confirmation
-            elif (price < lower_channel[i] and price < atr14_12h_aligned[i] and vol > vol_threshold):
+            # Short setup: 4h downtrend + 1d bearish momentum + 1h bearish candle
+            elif (supertrend_4h_aligned[i] < 0.5 and  # Downtrend
+                  rsi_1d_aligned[i] < 50 and          # Bearish momentum
+                  is_bearish_candle):                 # Bearish price action
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses back inside Donchian channel (below lower channel)
-            if price < lower_channel[i]:
+            # Exit long: trend turns down OR momentum turns bearish
+            if (supertrend_4h_aligned[i] < 0.5 or  # Trend change
+                rsi_1d_aligned[i] < 50):           # Momentum failure
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses back inside Donchian channel (above upper channel)
-            if price > upper_channel[i]:
+            # Exit short: trend turns up OR momentum turns bullish
+            if (supertrend_4h_aligned[i] > 0.5 or  # Trend change
+                rsi_1d_aligned[i] > 50):           # Momentum failure
                 position = 0
                 signals[i] = 0.0
             else:
@@ -95,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_12hATR_Volume"
-timeframe = "4h"
+name = "1h_4hSupertrend_1dRSI_PriceAction"
+timeframe = "1h"
 leverage = 1.0
