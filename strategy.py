@@ -11,85 +11,108 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load weekly data once for regime detection
-    df_1w = get_htf_data(prices, '1w')
+    # Load daily data once for pivot levels and 12h for trend
+    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1w) < 20:
+    if len(df_1d) < 2 or len(df_12h) < 2:
         return np.zeros(n)
     
-    # Calculate weekly ATR for regime detection (trending vs ranging)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate daily pivot points and key levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    tr1 = np.abs(high_1w[1:] - low_1w[1:])
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_1w = np.concatenate([[np.nan], tr_1w])
-    atr_1w = np.full(len(tr_1w), np.nan)
+    # Calculate pivot points
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
+    r2 = pivot + (high_1d - low_1d)
+    s2 = pivot - (high_1d - low_1d)
     
-    for i in range(14, len(tr_1w)):
-        atr_1w[i] = np.nanmean(tr_1w[i-13:i+1])
-    
-    # Calculate weekly trend direction using price vs 20-period EMA
-    ema_20_1w = np.full(len(close_1w), np.nan)
+    # Calculate 12h EMA for trend direction
+    close_12h = df_12h['close'].values
+    ema_20_12h = np.full(len(close_12h), np.nan)
     ema_multiplier = 2 / (20 + 1)
-    ema_20_1w[19] = np.mean(close_1w[:20])
-    for i in range(20, len(close_1w)):
-        ema_20_1w[i] = (close_1w[i] - ema_20_1w[i-1]) * ema_multiplier + ema_20_1w[i-1]
+    ema_20_12h[19] = np.mean(close_12h[:20])
+    for i in range(20, len(close_12h)):
+        ema_20_12h[i] = (close_12h[i] - ema_20_12h[i-1]) * ema_multiplier + ema_20_12h[i-1]
     
-    # Weekly trend: 1 for uptrend, -1 for downtrend, 0 for unclear
-    weekly_trend = np.full(len(close_1w), 0)
-    for i in range(20, len(close_1w)):
-        if close_1w[i] > ema_20_1w[i]:
-            weekly_trend[i] = 1
-        elif close_1w[i] < ema_20_1w[i]:
-            weekly_trend[i] = -1
+    # 12h trend: 1 for uptrend, -1 for downtrend
+    trend_12h = np.full(len(close_12h), 0)
+    for i in range(20, len(close_12h)):
+        if close_12h[i] > ema_20_12h[i]:
+            trend_12h[i] = 1
+        elif close_12h[i] < ema_20_12h[i]:
+            trend_12h[i] = -1
+    
+    # Calculate 12h ATR for volatility filter
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    tr1 = np.abs(high_12h[1:] - low_12h[1:])
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr_12h = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_12h = np.concatenate([[np.nan], tr_12h])
+    atr_12h = np.full(len(tr_12h), np.nan)
+    
+    for i in range(14, len(tr_12h)):
+        atr_12h[i] = np.nanmean(tr_12h[i-13:i+1])
     
     # Create arrays for alignment
-    atr_1w_arr = atr_1w
-    weekly_trend_arr = weekly_trend
+    pivot_arr = pivot
+    r1_arr = r1
+    s1_arr = s1
+    r2_arr = r2
+    s2_arr = s2
+    trend_12h_arr = trend_12h
+    atr_12h_arr = atr_12h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25
     
     for i in range(30, n):
-        # Get aligned weekly data
-        atr_w = align_htf_to_ltf(prices, df_1w, atr_1w_arr)[i]
-        trend_w = align_htf_to_ltf(prices, df_1w, weekly_trend_arr)[i]
+        # Get aligned daily and 12h data
+        pivot_d = align_htf_to_ltf(prices, df_1d, pivot_arr)[i]
+        r1_d = align_htf_to_ltf(prices, df_1d, r1_arr)[i]
+        s1_d = align_htf_to_ltf(prices, df_1d, s1_arr)[i]
+        r2_d = align_htf_to_ltf(prices, df_1d, r2_arr)[i]
+        s2_d = align_htf_to_ltf(prices, df_1d, s2_arr)[i]
+        trend_12h_i = align_htf_to_ltf(prices, df_12h, trend_12h_arr)[i]
+        atr_12h_i = align_htf_to_ltf(prices, df_12h, atr_12h_arr)[i]
         
-        if np.isnan(atr_w) or np.isnan(trend_w):
+        if np.isnan(pivot_d) or np.isnan(r1_d) or np.isnan(s1_d) or np.isnan(r2_d) or np.isnan(s2_d) or np.isnan(trend_12h_i) or np.isnan(atr_12h_i):
             continue
         
         # Volatility filter: only trade when volatility is above average
-        if atr_w < np.nanmedian(atr_1w):
+        if atr_12h_i < np.nanmedian(atr_12h):
             continue
         
         if position == 0:
-            # Long: Weekly uptrend + price above prior close
-            if trend_w == 1 and close[i] > close[i-1]:
+            # Long: 12h uptrend + price above S1 (support) with rejection
+            if trend_12h_i == 1 and close[i] > s1_d and low[i] <= s1_d * 1.001:
                 position = 1
                 signals[i] = position_size
-            # Short: Weekly downtrend + price below prior close
-            elif trend_w == -1 and close[i] < close[i-1]:
+            # Short: 12h downtrend + price below R1 (resistance) with rejection
+            elif trend_12h_i == -1 and close[i] < r1_d and high[i] >= r1_d * 0.999:
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
-            # Exit: Weekly trend turns down OR price closes below prior close
-            if trend_w == -1 or close[i] < close[i-1]:
+            # Exit: 12h trend turns down OR price reaches R2 (resistance target)
+            if trend_12h_i == -1 or close[i] >= r2_d:
                 position = 0
                 signals[i] = 0.0
         elif position == -1:
-            # Exit: Weekly trend turns up OR price closes above prior close
-            if trend_w == 1 or close[i] > close[i-1]:
+            # Exit: 12h trend turns up OR price reaches S2 (support target)
+            if trend_12h_i == 1 or close[i] <= s2_d:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "1d_WeeklyTrend_Close_Momentum_v1"
-timeframe = "1d"
+name = "4h_12hTrend_DailyPivot_Rejection_v1"
+timeframe = "4h"
 leverage = 1.0
