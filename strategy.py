@@ -41,11 +41,17 @@ def generate_signals(prices):
     high_20_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     low_20_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
+    # Calculate daily 20-period high and low for Donchian channel (exit)
+    high_10_1d = pd.Series(high_1d).rolling(window=10, min_periods=10).max().values
+    low_10_1d = pd.Series(low_1d).rolling(window=10, min_periods=10).min().values
+    
     # Create arrays for alignment
     atr_1d_arr = atr_1d
     ema_50_1d_arr = ema_50_1d
     high_20_1d_arr = high_20_1d
     low_20_1d_arr = low_20_1d
+    high_10_1d_arr = high_10_1d
+    low_10_1d_arr = low_10_1d
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,9 +63,12 @@ def generate_signals(prices):
         ema_50_1d_i = align_htf_to_ltf(prices, df_1d, ema_50_1d_arr)[i]
         high_20_1d_i = align_htf_to_ltf(prices, df_1d, high_20_1d_arr)[i]
         low_20_1d_i = align_htf_to_ltf(prices, df_1d, low_20_1d_arr)[i]
+        high_10_1d_i = align_htf_to_ltf(prices, df_1d, high_10_1d_arr)[i]
+        low_10_1d_i = align_htf_to_ltf(prices, df_1d, low_10_1d_arr)[i]
         
         if np.isnan(atr_1d_i) or np.isnan(ema_50_1d_i) or \
-           np.isnan(high_20_1d_i) or np.isnan(low_20_1d_i):
+           np.isnan(high_20_1d_i) or np.isnan(low_20_1d_i) or \
+           np.isnan(high_10_1d_i) or np.isnan(low_10_1d_i):
             continue
         
         # Volatility regime: only trade when ATR is above median (avoid chop)
@@ -76,7 +85,7 @@ def generate_signals(prices):
                     signals[i] = position_size
             elif position == 1:
                 # Exit: price crosses below 10-period low
-                if close[i] < low_20_1d_i:
+                if close[i] < low_10_1d_i:
                     position = 0
                     signals[i] = 0.0
         elif close[i] < ema_50_1d_i:
@@ -88,7 +97,7 @@ def generate_signals(prices):
                     signals[i] = -position_size
             elif position == -1:
                 # Exit: price crosses above 10-period high
-                if close[i] > high_20_1d_i:
+                if close[i] > high_10_1d_i:
                     position = 0
                     signals[i] = 0.0
     
