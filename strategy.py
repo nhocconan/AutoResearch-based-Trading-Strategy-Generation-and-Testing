@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -8,102 +8,94 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend direction
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    
-    # Calculate 4h EMA50 for trend
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    
-    # Get 1d data for ATR-based volatility regime filter
+    # Get 1d data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR uses only high-low
+    # Calculate Camarilla pivot levels from previous day
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # Resistance levels: R1 = C + (H-L)*1.1/12, R2 = C + (H-L)*1.1/6, R3 = C + (H-L)*1.1/4, R4 = C + (H-L)*1.1/2
+    # Support levels: S1 = C - (H-L)*1.1/12, S2 = C - (H-L)*1.1/6, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Calculate 14-day ATR
-    atr_14 = np.full_like(tr, np.nan)
-    for i in range(len(tr)):
-        if i < 14:
-            atr_14[i] = np.nan
-        elif i == 14:
-            atr_14[i] = np.mean(tr[1:15])
-        else:
-            atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
+    # Calculate resistance levels
+    R1 = close_1d + range_1d * 1.1 / 12
+    R2 = close_1d + range_1d * 1.1 / 6
+    R3 = close_1d + range_1d * 1.1 / 4
+    R4 = close_1d + range_1d * 1.1 / 2
     
-    # Calculate ATR percentile rank over 60 days
-    atr_percentile = np.full_like(atr_14, np.nan)
-    for i in range(60, len(atr_14)):
-        window = atr_14[i-60:i]
-        valid_window = window[~np.isnan(window)]
-        if len(valid_window) > 0:
-            atr_percentile[i] = (np.sum(valid_window <= atr_14[i]) / len(valid_window)) * 100
+    # Calculate support levels
+    S1 = close_1d - range_1d * 1.1 / 12
+    S2 = close_1d - range_1d * 1.1 / 6
+    S3 = close_1d - range_1d * 1.1 / 4
+    S4 = close_1d - range_1d * 1.1 / 2
     
-    # Align ATR percentile to 1h timeframe
-    atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
+    # Align pivot levels to 4h timeframe (previous day's levels available after daily close)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
     
-    # Volume confirmation: volume > 1.5x average volume (24-period)
+    # Volume confirmation: volume > 1.5x average volume (20-period)
     vol_series = pd.Series(volume)
-    avg_vol = vol_series.rolling(window=24, min_periods=24).mean().shift(1).values
+    avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
-    # Session filter: 8-20 UTC (pre-compute hours)
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Trend filter: 50-period EMA on 4h
+    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(60, 24, 50)  # 60 for ATR percentile, 24 for volume avg, 50 for EMA50
+    start = max(50, 20)  # 50 for EMA50, 20 for volume average
     
     for i in range(start, n):
-        # Skip if any critical data is NaN or outside session
-        if (np.isnan(atr_percentile_aligned[i]) or np.isnan(ema50_4h_aligned[i]) or 
-            np.isnan(avg_vol[i]) or not in_session[i]):
+        # Skip if any critical data is NaN
+        if (np.isnan(pivot_aligned[i]) or np.isnan(R1_aligned[i]) or 
+            np.isnan(S1_aligned[i]) or np.isnan(ema50[i]) or 
+            np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        atr_percentile_val = atr_percentile_aligned[i]
-        ema50_val = ema50_4h_aligned[i]
         
         if position == 0:
-            # Low volatility regime: ATR percentile < 30 (bottom 30% of volatility)
-            # Long: price above EMA50 with volume confirmation in low vol
-            if price > ema50_val and vol > 1.5 * avg_vol[i] and atr_percentile_val < 30:
+            # Long setup: price touches or breaks above S1 with volume confirmation and above EMA50
+            if price >= S1_aligned[i] and price <= S1_aligned[i] * 1.005 and vol > 1.5 * avg_vol[i] and price > ema50[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: price below EMA50 with volume confirmation in low vol
-            elif price < ema50_val and vol > 1.5 * avg_vol[i] and atr_percentile_val < 30:
+            # Short setup: price touches or breaks below R1 with volume confirmation and below EMA50
+            elif price <= R1_aligned[i] and price >= R1_aligned[i] * 0.995 and vol > 1.5 * avg_vol[i] and price < ema50[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below EMA50 or volatility expands (ATR percentile > 70)
-            if price < ema50_val or atr_percentile_val > 70:
+            # Exit long: price reaches R2 (profit target) or breaks below S1 (stop loss)
+            if price >= R2_aligned[i] or price < S1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above EMA50 or volatility expands (ATR percentile > 70)
-            if price > ema50_val or atr_percentile_val > 70:
+            # Exit short: price reaches S2 (profit target) or breaks above R1 (stop loss)
+            if price <= S2_aligned[i] or price > R1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -111,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4h_1d_VolatilityRegime_EMA50"
-timeframe = "1h"
+name = "4h_1d_Camarilla_Pivot_Touch_Volume"
+timeframe = "4h"
 leverage = 1.0
