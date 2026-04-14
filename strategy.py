@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-day Williams %R (14) with 1-week EMA(50) trend filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions: <-80 oversold (long), >-20 overbought (short).
-# The 1-week EMA(50) filters trades to follow the dominant weekly trend, reducing whipsaws in ranging markets.
-# Volume > 1.5x the 20-day average confirms institutional participation and reduces false signals.
-# This strategy targets 15-25 trades per year per symbol (60-100 total over 4 years), staying within optimal range to minimize fee drag.
-# Works in both bull and bear markets: the trend filter ensures alignment with higher-timeframe momentum,
-# while Williams %R captures mean-reversion entries during pullbacks or bounces.
+# Hypothesis: 4-hour daily Camarilla pivot with volume confirmation and Choppiness regime filter.
+# Camarilla levels derived from prior daily range provide statistically significant reversal zones.
+# The Choppiness Index (14-period) filters for trending regimes (CHOP < 38.2) to trade with momentum.
+# Volume > 1.5x 20-period average confirms institutional participation.
+# This approach aims for 20-40 trades per year per symbol (80-160 total over 4 years) to minimize fee drag.
+# Works in both bull and bear markets by combining mean-reversion at pivots with trend filter.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,28 +20,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-week data ONCE for trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Load daily data ONCE for Camarilla pivot and Choppiness
+    df_1d = get_htf_data(prices, '1d')
     
-    # 1-week EMA(50) for trend filter
-    ema_len = 50
-    if len(df_1w) < ema_len:
+    # Camarilla pivot levels from previous day
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    ema_1w = pd.Series(df_1w['close']).ewm(span=ema_len, adjust=False, min_periods=ema_len).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Williams %R (14) on daily
-    wr_len = 14
-    if len(high) < wr_len:
+    # Calculate Camarilla levels
+    range_ = prev_high - prev_low
+    camarilla_h5 = prev_close + 1.1 * range_ * 1.1 / 12
+    camarilla_h4 = prev_close + 1.1 * range_ * 1.1 / 6
+    camarilla_h3 = prev_close + 1.1 * range_ * 1.1 / 4
+    camarilla_l3 = prev_close - 1.1 * range_ * 1.1 / 4
+    camarilla_l4 = prev_close - 1.1 * range_ * 1.1 / 6
+    camarilla_l5 = prev_close - 1.1 * range_ * 1.1 / 12
+    
+    # Align Camarilla levels to 4h timeframe
+    h5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h5)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    l5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l5)
+    
+    # Choppiness Index (14-period) on daily
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    highest_high = pd.Series(high).rolling(window=wr_len, min_periods=wr_len).max().values
-    lowest_low = pd.Series(low).rolling(window=wr_len, min_periods=wr_len).min().values
-    # Avoid division by zero
-    range_hl = highest_high - lowest_low
-    range_hl = np.where(range_hl == 0, 1e-10, range_hl)
-    williams_r = -100 * (highest_high - close) / range_hl
+    # True Range
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr14 = tr.rolling(window=14, min_periods=14).sum()
+    
+    # Choppiness: 100 * log10(sum(TR14)/(ATR14*14)) / log10(14)
+    chop = 100 * np.log10(atr14 / (atr14))  # placeholder, will calculate properly
+    # Recalculate correctly:
+    sum_tr14 = tr.rolling(window=14, min_periods=14).sum()
+    chop = 100 * np.log10(sum_tr14 / (atr14 * 14)) / np.log10(14)
+    chop_values = chop.values
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_values)
     
     # Volume confirmation: 1.5x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,48 +75,48 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(60, wr_len, 20)
+    start = max(30, 20)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_1w_aligned[i]) or 
-            np.isnan(williams_r[i]) or
+        if (np.isnan(h3_aligned[i]) or 
+            np.isnan(l3_aligned[i]) or
+            np.isnan(chop_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to 1-week EMA50
-        above_ema = close[i] > ema_1w_aligned[i]
-        below_ema = close[i] < ema_1w_aligned[i]
+        # Regime filter: trending market (Choppiness < 38.2)
+        trending = chop_aligned[i] < 38.2
         
-        # Volume confirmation: current volume > 1.5x average
+        # Volume confirmation
         volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Enter long: Williams %R oversold (< -80) + above weekly EMA + volume
-            if (williams_r[i] < -80 and 
-                above_ema and 
+            # Enter long at L3 with trend filter and volume
+            if (close[i] <= l3_aligned[i] and 
+                trending and 
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Enter short: Williams %R overbought (> -20) + below weekly EMA + volume
-            elif (williams_r[i] > -20 and 
-                  below_ema and 
+            # Enter short at H3 with trend filter and volume
+            elif (close[i] >= h3_aligned[i] and 
+                  trending and 
                   volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Williams %R returns to -50 or breaks below weekly EMA
-            if williams_r[i] > -50 or close[i] < ema_1w_aligned[i]:
+            # Exit long: price reaches L4 or reverses at H3
+            if close[i] >= l4_aligned[i] or close[i] >= h3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Williams %R returns to -50 or breaks above weekly EMA
-            if williams_r[i] < -50 or close[i] > ema_1w_aligned[i]:
+            # Exit short: price reaches H4 or reverses at L3
+            if close[i] <= h4_aligned[i] or close[i] <= l3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -101,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_WilliamsR_EMA50_Volume_v1"
-timeframe = "1d"
+name = "4h_1d_Camarilla_Chop_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
