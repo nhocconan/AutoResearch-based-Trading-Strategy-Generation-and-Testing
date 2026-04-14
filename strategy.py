@@ -37,15 +37,15 @@ def generate_signals(prices):
     atr_percentile = atr_series_1d.rolling(window=30, min_periods=30).quantile(0.6).values
     volatility_filter = atr_1d > atr_percentile
     
-    # Calculate 12h Donchian channels (20-period) - breakout levels
+    # Calculate 12h volume filter: current volume > 1.3x 20-period average
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate 4h Donchian channels (20-period) - breakout levels
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_high = high_series.rolling(window=20, min_periods=20).max().shift(1).values
     donchian_low = low_series.rolling(window=20, min_periods=20).min().shift(1).values
-    
-    # Calculate 12h volume filter: current volume > 1.3x 20-period average
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
@@ -104,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_S1R1_Breakout_Vol_VolatilityFilter_v2"
-timeframe = "12h"
+name = "4h_1d_S1R1_Breakout_Vol_VolatilityFilter_v2"
+timeframe = "4h"
 leverage = 1.0
