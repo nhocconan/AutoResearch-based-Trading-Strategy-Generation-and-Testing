@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour strategy using 1-day Williams %R for mean reversion and 1-day ATR for volatility filtering.
-# In oversold conditions (Williams %R < -80) with low volatility (ATR below median), go long.
-# In overbought conditions (Williams %R > -20) with low volatility, go short.
-# Uses 1-day timeframe for stable signals less prone to whipsaw in both bull and bear markets.
-# Volume confirmation: current volume > 1.5x 20-period average to ensure participation.
+# Hypothesis: 6-hour strategy using weekly pivot points for directional bias and daily ADX for trend strength.
+# Long when price breaks above weekly R2 with daily ADX > 20; short when price breaks below weekly S2 with daily ADX > 20.
+# In low ADX (ADX <= 20), fade at weekly R3/S3 with reversal confirmation.
+# Volume > 1.5x 20-period average confirms breakouts/breakdowns.
+# Weekly pivots provide structural support/resistance that works in both bull and bear markets.
 # Target: 20-40 trades/year per symbol (80-160 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
@@ -20,31 +20,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for mean reversion and volatility filters
+    # Load daily data for pivots and ADX
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Williams %R (14-period) on 1d
-    williams_len = 14
-    if len(df_1d) < williams_len:
+    # Load weekly data for pivot calculation (using daily data to compute weekly pivots)
+    # We'll use the same daily data but resample conceptually via rolling window for weekly high/low/close
+    if len(df_1d) < 5:
+        return np.zeros(n)
+    
+    # Calculate weekly high, low, close from daily data (simplified: use last 5 days)
+    # For proper weekly pivot, we need actual weekly OHLC, but we'll approximate with 5-day period
+    weekly_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().values
+    weekly_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().values
+    weekly_close = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).last().values
+    
+    # Weekly pivot points
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
+    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
+    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
+    weekly_r3 = weekly_high + 2 * (weekly_pivot - weekly_low)
+    weekly_s3 = weekly_low - 2 * (weekly_high - weekly_pivot)
+    
+    # Align weekly pivots to 6h
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    weekly_r2_aligned = align_htf_to_ltf(prices, df_1d, weekly_r2)
+    weekly_s2_aligned = align_htf_to_ltf(prices, df_1d, weekly_s2)
+    weekly_r3_aligned = align_htf_to_ltf(prices, df_1d, weekly_r3)
+    weekly_s3_aligned = align_htf_to_ltf(prices, df_1d, weekly_s3)
+    
+    # Daily ADX for trend strength
+    if len(df_1d) < 14:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Highest high and lowest low over williams_len period
-    highest_high = pd.Series(high_1d).rolling(window=williams_len, min_periods=williams_len).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=williams_len, min_periods=williams_len).min().values
-    
-    # Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
-    
-    # Calculate ATR (14-period) on 1d for volatility filter
-    atr_len = 14
-    if len(df_1d) < atr_len:
-        return np.zeros(n)
     
     # True Range
     tr1 = high_1d[1:] - low_1d[1:]
@@ -53,14 +65,27 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     
-    atr_1d = pd.Series(tr).ewm(span=atr_len, adjust=False, min_periods=atr_len).mean().values
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Calculate ATR median for volatility threshold
-    atr_median = np.nanmedian(atr_1d[~np.isnan(atr_1d)])
+    # Smoothed values
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Williams %R and ATR alignment to 4h
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Volume confirmation: 1.5x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -70,46 +95,62 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(williams_len*2, atr_len*2, 20)
+    start = max(20, 14*2, 5)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(williams_r_aligned[i]) or 
-            np.isnan(atr_1d_aligned[i]) or
+        if (np.isnan(adx_aligned[i]) or 
+            np.isnan(weekly_r2_aligned[i]) or
+            np.isnan(weekly_s2_aligned[i]) or
+            np.isnan(weekly_r3_aligned[i]) or
+            np.isnan(weekly_s3_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when ATR is below median (low volatility regime)
-        low_volatility = atr_1d_aligned[i] < atr_median
+        # Trend regime: ADX > 20 = trending, ADX <= 20 = ranging
+        trending = adx_aligned[i] > 20
         
         # Volume confirmation
         volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            if low_volatility and volume_confirmed:
-                # Oversold condition: Williams %R < -80 -> long
-                if williams_r_aligned[i] < -80:
+            if trending:
+                # In trending market: breakout trades in direction of weekly pivot levels
+                if (close[i] > weekly_r2_aligned[i] and 
+                    volume_confirmed):
                     position = 1
                     signals[i] = position_size
-                # Overbought condition: Williams %R > -20 -> short
-                elif williams_r_aligned[i] > -20:
+                elif (close[i] < weekly_s2_aligned[i] and 
+                      volume_confirmed):
                     position = -1
                     signals[i] = -position_size
                 else:
                     signals[i] = 0.0
             else:
-                signals[i] = 0.0
+                # In ranging market: fade at extreme weekly levels (R3/S3)
+                if (close[i] > weekly_r3_aligned[i] and 
+                    volume_confirmed):
+                    position = -1
+                    signals[i] = -position_size
+                elif (close[i] < weekly_s3_aligned[i] and 
+                      volume_confirmed):
+                    position = 1
+                    signals[i] = position_size
+                else:
+                    signals[i] = 0.0
         elif position == 1:
-            # Exit long: Williams %R returns to oversold threshold or becomes overbought
-            if williams_r_aligned[i] > -20:  # Reached overbought territory
+            # Exit long: price returns to weekly pivot or breaks below S1
+            if (close[i] < weekly_pivot_aligned[i] or 
+                close[i] < weekly_s1_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Williams %R returns to overbought threshold or becomes oversold
-            if williams_r_aligned[i] < -80:  # Reached oversold territory
+            # Exit short: price returns to weekly pivot or breaks above R1
+            if (close[i] > weekly_pivot_aligned[i] or 
+                close[i] > weekly_r1_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -117,6 +158,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_WilliamsR_VolatilityFilter_Volume"
-timeframe = "4h"
+name = "6h_WeeklyPivot_DailyADX_v1"
+timeframe = "6h"
 leverage = 1.0
