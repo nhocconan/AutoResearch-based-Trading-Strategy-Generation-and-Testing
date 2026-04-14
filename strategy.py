@@ -15,22 +15,31 @@ def generate_signals(prices):
     
     # Load 1d data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA20 for trend filter
+    # Calculate 1d RSI(14) for momentum filter
     close_1d = df_1d['close'].values
-    ema_20_1d = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 20:
-        multiplier = 2 / (20 + 1)
-        ema_20_1d[19] = np.mean(close_1d[:20])
-        for i in range(20, len(df_1d)):
-            ema_20_1d[i] = (close_1d[i] - ema_20_1d[i-1]) * multiplier + ema_20_1d[i-1]
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Align 1d EMA20 to daily timeframe (no additional alignment needed as we're on 1d)
-    ema_20_1d_aligned = ema_20_1d  # Already on 1d timeframe
+    avg_gain = np.full(len(close_1d), np.nan)
+    avg_loss = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 14:
+        avg_gain[13] = np.mean(gain[:14])
+        avg_loss[13] = np.mean(loss[:14])
+        for i in range(14, len(close_1d)):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
     
-    # Calculate 1d ATR (14-period) for volatility filter
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi_14 = 100 - (100 / (1 + rs))
+    
+    # Align 1d RSI to 6h timeframe
+    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
+    
+    # Calculate 1d ATR(14) for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -46,82 +55,81 @@ def generate_signals(prices):
         for i in range(14, len(df_1d)):
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # Align daily ATR to daily timeframe
-    atr_1d_aligned = atr_1d  # Already on 1d timeframe
+    # Align daily ATR to 6h timeframe
+    atr_6h_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate daily volume moving average (20-period)
-    volume_ma = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 20:
-        for i in range(19, len(df_1d)):
-            volume_ma[i] = np.mean(df_1d['volume'].values[i-19:i+1])
+    # Calculate 6h volume moving average (20-period)
+    volume_ma = np.full(n, np.nan)
+    if n >= 20:
+        for i in range(19, n):
+            volume_ma[i] = np.mean(volume[i-19:i+1])
+    
+    # Calculate 6h price position relative to 1d range
+    # Use previous day's range for today's context
+    high_1d_prev = np.concatenate([[high_1d[0]], high_1d[:-1]])  # yesterday's high
+    low_1d_prev = np.concatenate([[low_1d[0]], low_1d[:-1]])    # yesterday's low
+    range_1d_prev = high_1d_prev - low_1d_prev
+    
+    # Normalize current price to yesterday's range (0 = low, 1 = high)
+    price_pos_1d = (close - low_1d_prev) / range_1d_prev
+    price_pos_1d = np.clip(price_pos_1d, 0, 1)  # clamp to [0,1]
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25
     
-    for i in range(20, len(df_1d)):
+    for i in range(100, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_20_1d_aligned[i]) or
-            np.isnan(atr_1d_aligned[i]) or
-            np.isnan(volume_ma[i])):
+        if (np.isnan(rsi_14_aligned[i]) or
+            np.isnan(atr_6h_aligned[i]) or
+            np.isnan(volume_ma[i]) or
+            np.isnan(price_pos_1d[i])):
             signals[i] = 0.0
             continue
         
         # Skip low volatility periods (ATR < 0.5% of price)
-        if atr_1d_aligned[i] / close_1d[i] < 0.005:
+        if atr_6h_aligned[i] / close[i] < 0.005:
             signals[i] = 0.0
             continue
         
         # Skip low volume periods (volume < 60% of 20-period MA)
-        if df_1d['volume'].values[i] < 0.6 * volume_ma[i]:
+        if volume[i] < 0.6 * volume_ma[i]:
             signals[i] = 0.0
             continue
         
-        # Calculate pivot levels based on previous day's range
-        if i >= 1:
-            prev_high = high_1d[i-1]
-            prev_low = low_1d[i-1]
-            prev_close = close_1d[i-1]
-            prev_range = prev_high - prev_low
-            
-            # S3 and R3 levels (extreme rejection zones)
-            s3 = prev_close - (prev_range * 1.1)
-            r3 = prev_close + (prev_range * 1.1)
-            
-            if position == 0:
-                # Long: Price rejects S3 with volume and trend alignment
-                if low_1d[i] <= s3 and close_1d[i] > s3 and df_1d['volume'].values[i] > volume_ma[i] and close_1d[i] > ema_20_1d_aligned[i]:
-                    position = 1
-                    signals[i] = position_size
-                # Short: Price rejects R3 with volume and trend alignment
-                elif high_1d[i] >= r3 and close_1d[i] < r3 and df_1d['volume'].values[i] > volume_ma[i] and close_1d[i] < ema_20_1d_aligned[i]:
-                    position = -1
-                    signals[i] = -position_size
-                else:
-                    signals[i] = 0.0
-            elif position == 1:
-                # Exit: Price breaks S3 again or reaches mean reversion target
-                # Calculate S1 for profit target (mean reversion level)
-                s1 = prev_close - (prev_range * 0.5)
-                if low_1d[i] <= s3 or close_1d[i] <= s1:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = position_size
-            elif position == -1:
-                # Exit: Price breaks R3 again or reaches mean reversion target
-                # Calculate R1 for profit target (mean reversion level)
-                r1 = prev_close + (prev_range * 0.5)
-                if high_1d[i] >= r3 or close_1d[i] >= r1:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -position_size
-        else:
+        # Avoid extreme overbought/oversold conditions
+        if rsi_14_aligned[i] > 80 or rsi_14_aligned[i] < 20:
             signals[i] = 0.0
+            continue
+        
+        if position == 0:
+            # Long: Price in lower third of yesterday's range with bullish momentum
+            if price_pos_1d[i] < 0.33 and rsi_14_aligned[i] > 50:
+                position = 1
+                signals[i] = position_size
+            # Short: Price in upper third of yesterday's range with bearish momentum
+            elif price_pos_1d[i] > 0.66 and rsi_14_aligned[i] < 50:
+                position = -1
+                signals[i] = -position_size
+            else:
+                signals[i] = 0.0
+        elif position == 1:
+            # Exit: Price reaches upper third or momentum fades
+            if price_pos_1d[i] >= 0.66 or rsi_14_aligned[i] < 40:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = position_size
+        elif position == -1:
+            # Exit: Price reaches lower third or momentum fades
+            if price_pos_1d[i] <= 0.33 or rsi_14_aligned[i] > 60:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -position_size
     
     return signals
 
-name = "1d_Pivot_S3R3_Rejection_Volume_Filter_v3"
-timeframe = "1d"
+name = "6h_1d_RangePosition_RSI_Filter"
+timeframe = "6h"
 leverage = 1.0
