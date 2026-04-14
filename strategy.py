@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1w Ichimoku Cloud (Tenkan/Kijun/Senkou Span) as trend filter and 6h price position relative to cloud for entry.
-# Ichimoku Cloud from weekly timeframe provides strong trend identification - price above cloud = bullish trend, below = bearish.
-# Entry: Go long when price crosses above cloud base (Senkou Span B) in bullish trend, short when crosses below in bearish trend.
-# Exit: Reverse when price crosses the opposite cloud boundary (Tenkan-Kijun midpoint).
-# This captures major trends while avoiding whipsaws in ranging markets. Weekly filter ensures we only trade with the dominant trend.
-# Target: 20-40 trades/year per symbol (80-160 total over 4 years) to minimize fee drag.
+# Hypothesis: 12h strategy combining 1w Supertrend for trend direction and 12h Donchian breakout for entry.
+# 1w Supertrend (ATR=10, multiplier=3) filters for strong trends to avoid whipsaws in ranging markets.
+# 12h Donchian channel (period=20) provides breakout signals in the direction of the weekly trend.
+# Volume confirmation (>1.3x 20-period average) reduces false breakouts.
+# ATR-based trailing stop manages risk by exiting when price moves against position by 2.5x ATR.
+# Designed to work in both bull and bear markets by using 1w trend filter to avoid counter-trend trades.
+# Target: 15-25 trades/year per symbol (60-100 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,102 +19,176 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load weekly data ONCE for Ichimoku Cloud calculation
+    # Load 1w data ONCE for Supertrend calculation
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 52:  # Need ~1 year of weekly data
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate Ichimoku Cloud components on weekly data
+    # Calculate Supertrend on 1w data
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    period_tenkan = 9
-    max_high_tenkan = pd.Series(high_1w).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
-    min_low_tenkan = pd.Series(low_1w).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
-    tenkan_sen = (max_high_tenkan + min_low_tenkan) / 2
+    # True Range
+    tr1 = np.abs(high_1w[1:] - low_1w[1:])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    period_kijun = 26
-    max_high_kijun = pd.Series(high_1w).rolling(window=period_kijun, min_periods=period_kijun).max().values
-    min_low_kijun = pd.Series(low_1w).rolling(window=period_kijun, min_periods=period_kijun).min().values
-    kijun_sen = (max_high_kijun + min_low_kijun) / 2
+    # ATR
+    atr_period = 10
+    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted forward 26 periods
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
+    # Basic Upper and Lower Bands
+    basic_ub = (high_1w + low_1w) / 2 + 3 * atr
+    basic_lb = (high_1w + low_1w) / 2 - 3 * atr
     
-    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted forward 52 periods
-    period_senkou_b = 52
-    max_high_senkou_b = pd.Series(high_1w).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
-    min_low_senkou_b = pd.Series(low_1w).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
-    senkou_span_b = ((max_high_senkou_b + min_low_senkou_b) / 2)
+    # Final Upper and Lower Bands
+    final_ub = np.zeros(len(close_1w))
+    final_lb = np.zeros(len(close_1w))
     
-    # Align Ichimoku components to 6h timeframe
-    tenkan_aligned = align_htf_to_ltf(prices, df_1w, tenkan_sen)
-    kijun_aligned = align_htf_to_ltf(prices, df_1w, kijun_sen)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_a)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_b)
+    for i in range(len(close_1w)):
+        if i == 0:
+            final_ub[i] = basic_ub[i]
+            final_lb[i] = basic_lb[i]
+        else:
+            if basic_ub[i] < final_ub[i-1] or close_1w[i-1] > final_ub[i-1]:
+                final_ub[i] = basic_ub[i]
+            else:
+                final_ub[i] = final_ub[i-1]
+                
+            if basic_lb[i] > final_lb[i-1] or close_1w[i-1] < final_lb[i-1]:
+                final_lb[i] = basic_lb[i]
+            else:
+                final_lb[i] = final_lb[i-1]
     
-    # Calculate cloud boundaries (shifted forward by 26 periods for Senkou Span A/B)
-    # Since we aligned the already-shifted spans, we use them directly
-    # Cloud top = max(Senkou A, Senkou B), Cloud bottom = min(Senkou A, Senkou B)
-    cloud_top = np.maximum(senkou_span_a_aligned, senkou_span_b_aligned)
-    cloud_bottom = np.minimum(senkou_span_a_aligned, senkou_span_b_aligned)
+    # Supertrend
+    supertrend = np.zeros(len(close_1w))
+    for i in range(len(close_1w)):
+        if i == 0:
+            supertrend[i] = final_ub[i]
+        else:
+            if supertrend[i-1] == final_ub[i-1]:
+                if close_1w[i] <= final_ub[i]:
+                    supertrend[i] = final_ub[i]
+                else:
+                    supertrend[i] = final_lb[i]
+            else:
+                if close_1w[i] >= final_lb[i]:
+                    supertrend[i] = final_lb[i]
+                else:
+                    supertrend[i] = final_ub[i]
     
-    # Middle line for exit (Tenkan-Kijun midpoint)
-    cloud_middle = (tenkan_aligned + kijun_aligned) / 2
+    # Trend direction: 1 for uptrend, -1 for downtrend
+    trend = np.where(close_1w > supertrend, 1, -1)
+    
+    # Load 12h data ONCE for Donchian channels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    
+    # Calculate Donchian channels on 12h data
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    
+    donchian_period = 20
+    upper_channel = pd.Series(high_12h).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    lower_channel = pd.Series(low_12h).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    
+    # Align indicators to 12h timeframe
+    trend_aligned = align_htf_to_ltf(prices, df_1w, trend)
+    upper_channel_aligned = align_htf_to_ltf(prices, df_12h, upper_channel)
+    lower_channel_aligned = align_htf_to_ltf(prices, df_12h, lower_channel)
+    
+    # Volume confirmation: 1.3x average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # ATR for trailing stop (using 12h data)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # True Range for 12h
+    tr1_12h = np.abs(high_12h[1:] - low_12h[1:])
+    tr2_12h = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3_12h = np.abs(low_12h[1:] - close_12h[:-1])
+    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
+    tr_12h = np.concatenate([[np.nan], tr_12h])
+    
+    atr_period_12h = 10
+    atr_12h = pd.Series(tr_12h).ewm(span=atr_period_12h, adjust=False, min_periods=atr_period_12h).mean().values
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 52  # Need Senkou Span B calculation
+    start = max(donchian_period, 20)  # Need Donchian and volume MA
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(cloud_top[i]) or 
-            np.isnan(cloud_bottom[i]) or
-            np.isnan(cloud_middle[i])):
+        if (np.isnan(trend_aligned[i]) or 
+            np.isnan(upper_channel_aligned[i]) or
+            np.isnan(lower_channel_aligned[i]) or
+            np.isnan(vol_ma[i]) or
+            np.isnan(atr_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # Volume confirmation
+        volume_confirmed = volume[i] > 1.3 * vol_ma[i]
+        
         if position == 0:
-            # Look for cloud breakouts in direction of trend
-            # Bullish trend: price above cloud
-            # Bearish trend: price below cloud
-            
-            # Long: price breaks above cloud top AND bullish trend (price above cloud)
-            if (close[i] > cloud_top[i] and 
-                close[i] > cloud_bottom[i]):  # Price above cloud (bullish)
+            # Look for Donchian breakouts in direction of weekly trend
+            # Long: price breaks above upper Donchian channel AND weekly uptrend
+            if (close[i] > upper_channel_aligned[i] and 
+                trend_aligned[i] == 1 and 
+                volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below cloud bottom AND bearish trend (price below cloud)
-            elif (close[i] < cloud_bottom[i] and 
-                  close[i] < cloud_top[i]):  # Price below cloud (bearish)
+            # Short: price breaks below lower Donchian channel AND weekly downtrend
+            elif (close[i] < lower_channel_aligned[i] and 
+                  trend_aligned[i] == -1 and 
+                  volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to cloud middle (Tenkan-Kijun midpoint)
-            if close[i] <= cloud_middle[i]:
+            # Exit long: price drops below lower Donchian channel or trailing stop hit
+            # Trailing stop: exit if price drops by 2.5x ATR from highest high since entry
+            if (close[i] < lower_channel_aligned[i] or 
+                close[i] <= highest_high - 2.5 * atr_12h_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
+                # Update highest high for trailing stop
+                if 'highest_high' not in locals():
+                    highest_high = close[i]
+                else:
+                    highest_high = max(highest_high, close[i])
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to cloud middle
-            if close[i] >= cloud_middle[i]:
+            # Exit short: price rises above upper Donchian channel or trailing stop hit
+            # Trailing stop: exit if price rises by 2.5x ATR from lowest low since entry
+            if (close[i] > upper_channel_aligned[i] or 
+                close[i] >= lowest_low + 2.5 * atr_12h_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
+                # Update lowest low for trailing stop
+                if 'lowest_low' not in locals():
+                    lowest_low = close[i]
+                else:
+                    lowest_low = min(lowest_low, close[i])
                 signals[i] = -position_size
     
     return signals
 
-name = "6h_1wIchimoku_Cloud_Breakout_MiddleExit_v1"
-timeframe = "6h"
+name = "12h_1wSupertrend_12hDonchian_Breakout_VolumeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
