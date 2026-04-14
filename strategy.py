@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Camarilla pivot breakout with 1-day volatility filter
-# Uses Camarilla pivot levels (H4, L4) from daily data for entry signals
+# Hypothesis: 4-hour Donchian breakout with 1-day volatility filter and volume confirmation
+# Uses Donchian(20) from daily data for entry signals
 # Daily ATR-based volatility filter to avoid choppy markets (ATR > 20-period median)
 # Volume confirmation > 1.3x 20-period EMA to reduce false breakouts
 # Designed for 20-40 trades/year with clear breakout logic
@@ -21,20 +21,19 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data once for Camarilla pivots and volatility filter
+    # Load daily data once for Donchian channels and volatility filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from daily OHLC
+    # Calculate Donchian channels from daily high/low (20-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla calculations
-    range_1d = high_1d - low_1d
-    camarilla_h4 = close_1d + range_1d * 1.1 / 2
-    camarilla_l4 = close_1d - range_1d * 1.1 / 2
+    # Donchian upper/lower bands (20-period)
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
     # Daily ATR for volatility filter (14-period)
     high_1d_shift = np.roll(high_1d, 1)
@@ -61,14 +60,14 @@ def generate_signals(prices):
     position_size = 0.25
     
     for i in range(20, n):
-        # Get aligned daily Camarilla levels
-        camarilla_h4_i = align_htf_to_ltf(prices, df_1d, camarilla_h4)[i]
-        camarilla_l4_i = align_htf_to_ltf(prices, df_1d, camarilla_l4)[i]
+        # Get aligned daily Donchian levels
+        donchian_high_i = align_htf_to_ltf(prices, df_1d, donchian_high)[i]
+        donchian_low_i = align_htf_to_ltf(prices, df_1d, donchian_low)[i]
         
         # Get aligned daily volatility filter
         atr_med_i = align_htf_to_ltf(prices, df_1d, atr_median)[i]
         
-        if np.isnan(camarilla_h4_i) or np.isnan(camarilla_l4_i) or np.isnan(atr_med_i) or np.isnan(vol_ma[i]):
+        if np.isnan(donchian_high_i) or np.isnan(donchian_low_i) or np.isnan(atr_med_i) or np.isnan(vol_ma[i]):
             continue
         
         # Volatility filter: only trade when ATR > median (avoid choppy markets)
@@ -77,25 +76,25 @@ def generate_signals(prices):
         # Volume confirmation (1.3x average)
         volume_confirm = volume[i] > 1.3 * vol_ma[i]
         
-        # Long: Price breaks above Camarilla H4 + volatility filter + volume
-        if position == 0 and close[i] > camarilla_h4_i and vol_filter and volume_confirm:
+        # Long: Price breaks above Donchian high + volatility filter + volume
+        if position == 0 and close[i] > donchian_high_i and vol_filter and volume_confirm:
             position = 1
             signals[i] = position_size
-        # Short: Price breaks below Camarilla L4 + volatility filter + volume
-        elif position == 0 and close[i] < camarilla_l4_i and vol_filter and volume_confirm:
+        # Short: Price breaks below Donchian low + volatility filter + volume
+        elif position == 0 and close[i] < donchian_low_i and vol_filter and volume_confirm:
             position = -1
             signals[i] = -position_size
-        # Exit: Price returns to opposite Camarilla level or volatility drops
+        # Exit: Price returns to opposite Donchian level or volatility drops
         elif position != 0:
-            if position == 1 and (close[i] < camarilla_l4_i or not vol_filter):
+            if position == 1 and (close[i] < donchian_low_i or not vol_filter):
                 position = 0
                 signals[i] = 0.0
-            elif position == -1 and (close[i] > camarilla_h4_i or not vol_filter):
+            elif position == -1 and (close[i] > donchian_high_i or not vol_filter):
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_Camarilla_DailyVolatility_Volume"
+name = "4h_Donchian_DailyVolatility_Volume"
 timeframe = "4h"
 leverage = 1.0
