@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R + 1d CCI trend filter with volume confirmation.
-# Williams %R(14) identifies oversold/overbought conditions for mean reversion entries.
-# 1d CCI(20) > 100 = bullish trend, < -100 = bearish trend - provides directional bias.
-# Volume > 1.3x average confirms institutional participation.
-# Works in bull/bear markets as 1d CCI adapts to long-term trend.
-# Target: 15-25 trades/year per symbol (60-100 total over 4 years) to avoid fee drag.
+# Hypothesis: 4h Williams Alligator (13,8,5 SMAs) with 1d trend filter (EMA50) and volume confirmation.
+# Alligator jaws (13 SMA), teeth (8 SMA), lips (5 SMA) define trend: 
+#   Bullish: lips > teeth > jaws, Bearish: jaws > teeth > lips.
+# 1d EMA50 provides higher timeframe trend bias to avoid counter-trend trades.
+# 4x average volume confirms institutional participation in breakouts.
+# Works in bull/bear as 1d EMA adapts to trend and Alligator catches reversals.
+# Target: 20-30 trades/year per symbol (80-120 total over 4 years).
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,26 +24,22 @@ def generate_signals(prices):
     # Load 1d data ONCE for trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d CCI(20) for trend filter
-    cci_len = 20
-    if len(df_1d) < cci_len:
+    # 1d EMA(50) for trend filter
+    ema_len = 50
+    if len(df_1d) < ema_len:
         return np.zeros(n)
     
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    sma_tp = typical_price.rolling(window=cci_len, min_periods=cci_len).mean()
-    mad = typical_price.rolling(window=cci_len, min_periods=cci_len).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
-    cci_1d = (typical_price - sma_tp) / (0.015 * mad)
-    cci_1d_values = cci_1d.values
-    cci_1d_aligned = align_htf_to_ltf(prices, df_1d, cci_1d_values)
+    ema_1d = pd.Series(df_1d['close']).ewm(span=ema_len, adjust=False, min_periods=ema_len).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Williams %R(14) on 4h
-    wr_len = 14
-    highest_high = pd.Series(high).rolling(window=wr_len, min_periods=wr_len).max()
-    lowest_low = pd.Series(low).rolling(window=wr_len, min_periods=wr_len).min()
-    wr = -100 * (highest_high - close) / (highest_high - lowest_low)
-    wr_values = wr.values
+    # Williams Alligator on 4h: SMAs of median price
+    # Jaw: 13-period SMA, Teeth: 8-period SMA, Lips: 5-period SMA
+    median_price = (high + low) / 2
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
     
-    # Volume confirmation: 1.3x average volume
+    # Volume confirmation: 4x average volume (institutional participation)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -50,48 +47,50 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(40, wr_len, cci_len, 20)
+    start = max(60, 13, 8, 5, 20)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(wr_values[i]) or 
-            np.isnan(cci_1d_aligned[i]) or
+        if (np.isnan(jaw[i]) or 
+            np.isnan(teeth[i]) or
+            np.isnan(lips[i]) or
+            np.isnan(ema_1d_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: 1d CCI indicates trend direction
-        bullish_trend = cci_1d_aligned[i] > 100
-        bearish_trend = cci_1d_aligned[i] < -100
+        # Alligator alignment: bullish (lips > teeth > jaws) or bearish (jaws > teeth > lips)
+        bullish_alignment = (lips[i] > teeth[i]) and (teeth[i] > jaw[i])
+        bearish_alignment = (jaw[i] > teeth[i]) and (teeth[i] > lips[i])
         
-        # Volume confirmation: current volume > 1.3x average
-        volume_confirmed = volume[i] > 1.3 * vol_ma[i]
+        # Trend filter: price relative to 1d EMA50
+        above_ema = close[i] > ema_1d_aligned[i]
+        below_ema = close[i] < ema_1d_aligned[i]
+        
+        # Volume confirmation: current volume > 4x average
+        volume_confirmed = volume[i] > 4.0 * vol_ma[i]
         
         if position == 0:
-            # Enter long: Williams %R oversold (< -80) + bullish trend + volume
-            if (wr_values[i] < -80 and 
-                bullish_trend and 
-                volume_confirmed):
+            # Enter long: Alligator bullish + above 1d EMA + volume
+            if bullish_alignment and above_ema and volume_confirmed:
                 position = 1
                 signals[i] = position_size
-            # Enter short: Williams %R overbought (> -20) + bearish trend + volume
-            elif (wr_values[i] > -20 and 
-                  bearish_trend and 
-                  volume_confirmed):
+            # Enter short: Alligator bearish + below 1d EMA + volume
+            elif bearish_alignment and below_ema and volume_confirmed:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Williams %R returns to overbought (> -20) or trend turns bearish
-            if wr_values[i] > -20 or cci_1d_aligned[i] < -100:
+            # Exit long: Alligator turns bearish OR price crosses below 1d EMA
+            if not bullish_alignment or below_ema:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Williams %R returns to oversold (< -80) or trend turns bullish
-            if wr_values[i] < -80 or cci_1d_aligned[i] > 100:
+            # Exit short: Alligator turns bullish OR price crosses above 1d EMA
+            if not bearish_alignment or above_ema:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -99,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_WilliamsR_CCI_Volume_v1"
+name = "4h_1d_Alligator_EMA50_Volume_v1"
 timeframe = "4h"
 leverage = 1.0
