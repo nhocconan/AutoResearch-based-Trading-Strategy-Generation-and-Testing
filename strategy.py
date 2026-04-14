@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) + 1d regime filter
-# Elder Ray = Bull Power (High - EMA13), Bear Power (Low - EMA13)
-# Bullish when Bull Power > 0 and rising, Bearish when Bear Power < 0 and falling
-# 1d regime: use ADX(1d) > 25 to filter for trending markets only
-# Works in both bull/bear because we only trade strong trends (ADX filter)
-# Exit when power crosses zero (mean reversion within trend)
-# Target: 20-40 trades/year per symbol to avoid fee drag
+# Hypothesis: 4h Price Channel Breakout with Volume Confirmation and Daily Trend Filter
+# Uses daily SMA(50) to determine long-term trend direction (bullish/bearish)
+# Trades breakouts above/below 4h Donchian channels (20-period) in the direction of daily trend
+# Volume > 1.3x average confirms breakout strength
+# Exits when price returns to the midpoint of the Donchian channel (mean reversion within trend)
+# Designed to work in both bull and bear markets by following the higher timeframe trend
+# Target: 20-40 trades/year per symbol to minimize fee drag while maintaining edge
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,95 +21,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for ADX regime filter
+    # Load daily data ONCE for trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d ADX (14 periods)
-    adx_len = 14
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate daily SMA(50) for trend direction
+    sma_len = 50
     close_1d = df_1d['close'].values
+    sma_1d = pd.Series(close_1d).rolling(window=sma_len, min_periods=sma_len).mean().values
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Align daily SMA to 4h timeframe
+    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d)
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_minus = np.concatenate([[np.nan], dm_minus])
+    # 4h Donchian Channel (20-period)
+    dc_len = 20
+    upper = pd.Series(high).rolling(window=dc_len, min_periods=dc_len).max().values
+    lower = pd.Series(low).rolling(window=dc_len, min_periods=dc_len).min().values
     
-    # Smoothed values
-    tr_sum = pd.Series(tr).rolling(window=adx_len, min_periods=adx_len).sum().values
-    dm_plus_sum = pd.Series(dm_plus).rolling(window=adx_len, min_periods=adx_len).sum().values
-    dm_minus_sum = pd.Series(dm_minus).rolling(window=adx_len, min_periods=adx_len).sum().values
+    # Midpoint for exit signal
+    midpoint = (upper + lower) / 2
     
-    # Directional Indicators
-    plus_di = 100 * dm_plus_sum / tr_sum
-    minus_di = 100 * dm_minus_sum / tr_sum
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx_1d = pd.Series(dx).rolling(window=adx_len, min_periods=adx_len).mean().values
-    
-    # Align ADX to 6h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Elder Ray on 6h: EMA13 of close
-    ema_len = 13
-    ema = pd.Series(close).ewm(span=ema_len, adjust=False, min_periods=ema_len).mean().values
-    bull_power = high - ema  # High - EMA13
-    bear_power = low - ema   # Low - EMA13
+    # Volume average (20 periods)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(50, ema_len, adx_len*2)
+    start = max(50, dc_len, 20)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(adx_1d_aligned[i]) or 
-            np.isnan(ema[i]) or
-            np.isnan(bull_power[i]) or
-            np.isnan(bear_power[i])):
+        if (np.isnan(sma_1d_aligned[i]) or 
+            np.isnan(upper[i]) or 
+            np.isnan(lower[i]) or
+            np.isnan(midpoint[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: ADX > 25 indicates trending market
-        trending = adx_1d_aligned[i] > 25
+        # Trend filter: price above/below daily SMA
+        bullish_trend = close[i] > sma_1d_aligned[i]
+        bearish_trend = close[i] < sma_1d_aligned[i]
+        
+        # Volume confirmation: current volume > 1.3x average
+        volume_confirmed = volume[i] > 1.3 * vol_ma[i]
         
         if position == 0:
-            # Enter long: Bull Power > 0 and rising (bullish momentum) + trending
-            if (bull_power[i] > 0 and 
-                bull_power[i] > bull_power[i-1] and 
-                trending):
+            # Enter long: price breaks above upper Donchian + bullish trend + volume
+            if (close[i] > upper[i-1] and 
+                bullish_trend and 
+                volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Enter short: Bear Power < 0 and falling (bearish momentum) + trending
-            elif (bear_power[i] < 0 and 
-                  bear_power[i] < bear_power[i-1] and 
-                  trending):
+            # Enter short: price breaks below lower Donchian + bearish trend + volume
+            elif (close[i] < lower[i-1] and 
+                  bearish_trend and 
+                  volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Bull Power crosses below zero (loss of bullish momentum)
-            if bull_power[i] <= 0:
+            # Exit long: price returns to midpoint (mean reversion)
+            if close[i] < midpoint[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Bear Power crosses above zero (loss of bearish momentum)
-            if bear_power[i] >= 0:
+            # Exit short: price returns to midpoint (mean reversion)
+            if close[i] > midpoint[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -117,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_Power_1dADXFilter_v1"
-timeframe = "6h"
+name = "4h_PriceChannel_Breakout_Volume_DailyTrend_v1"
+timeframe = "4h"
 leverage = 1.0
