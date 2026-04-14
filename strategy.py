@@ -1,17 +1,18 @@
-# 12h_1d_Camarilla_Pivot_Volume_Strategy_v1
-# Strategy: Use 1d Camarilla pivot levels as support/resistance with volume confirmation
-# Long when price touches S3 with volume spike, short when price touches R3 with volume spike
-# Works in both bull and bear markets by fading extreme moves at key pivot levels
-# Low turnover expected: ~15-30 trades/year per symbol
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 4h Camarilla Pivot Reversal with Volume Spike and 12h Trend Filter
+# Camarilla pivot levels provide high-probability reversal zones in ranging markets
+# Volume spike (2x average) confirms institutional interest at pivot levels
+# 12h ADX < 20 ensures we only trade in ranging/low-volatility environments
+# Works in bull markets (buy dips to support) and bear markets (sell rallies to resistance)
+# Low turnover expected: ~15-30 trades/year per symbol
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,37 +20,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
+    # Load 12h data ONCE for trend filter (ADX)
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d Camarilla pivot levels (using previous day's data)
-    # Camarilla levels based on previous day's range
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 12h ADX (14 periods) for trend strength
+    adx_len = 14
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Previous day's values for pivot calculation (shift by 1)
-    prev_high = np.concatenate([[np.nan], high_1d[:-1]])
-    prev_low = np.concatenate([[np.nan], low_1d[:-1]])
-    prev_close = np.concatenate([[np.nan], close_1d[:-1]])
+    # True Range
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Pivot point and range
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
+    # Directional Movement
+    dm_plus = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
+                       np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
+                        np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
+    dm_minus = np.concatenate([[np.nan], dm_minus])
+    
+    # Smoothed values
+    tr_sum = pd.Series(tr).rolling(window=adx_len, min_periods=adx_len).sum().values
+    dm_plus_sum = pd.Series(dm_plus).rolling(window=adx_len, min_periods=adx_len).sum().values
+    dm_minus_sum = pd.Series(dm_minus).rolling(window=adx_len, min_periods=adx_len).sum().values
+    
+    # Directional Indicators
+    plus_di = 100 * dm_plus_sum / tr_sum
+    minus_di = 100 * dm_minus_sum / tr_sum
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx_12h = pd.Series(dx).rolling(window=adx_len, min_periods=adx_len).mean().values
+    
+    # Align 12h ADX to 4h timeframe
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    
+    # Calculate 1-day Camarilla pivot levels
+    # Using previous day's OHLC
+    prev_day_open = np.roll(prices['open'].values, 1)
+    prev_day_high = np.roll(prices['high'].values, 1)
+    prev_day_low = np.roll(prices['low'].values, 1)
+    prev_day_close = np.roll(prices['close'].values, 1)
+    
+    # First day has no previous data
+    prev_day_open[0] = np.nan
+    prev_day_high[0] = np.nan
+    prev_day_low[0] = np.nan
+    prev_day_close[0] = np.nan
+    
+    # Pivot point and support/resistance levels
+    pivot = (prev_day_high + prev_day_low + prev_day_close) / 3
+    range_hl = prev_day_high - prev_day_low
     
     # Camarilla levels
-    r3 = pivot + (range_hl * 1.1 / 2)
-    s3 = pivot - (range_hl * 1.1 / 2)
-    r4 = pivot + (range_hl * 1.1)
-    s4 = pivot - (range_hl * 1.1)
+    r4 = pivot + range_hl * 1.1 / 2
+    r3 = pivot + range_hl * 1.1 / 4
+    r2 = pivot + range_hl * 1.1 / 6
+    r1 = pivot + range_hl * 1.1 / 12
+    s1 = pivot - range_hl * 1.1 / 12
+    s2 = pivot - range_hl * 1.1 / 6
+    s3 = pivot - range_hl * 1.1 / 4
+    s4 = pivot - range_hl * 1.1 / 2
     
-    # Align 1d levels to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Calculate volume average (20 periods)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -57,42 +94,47 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(30, 20)
+    start = max(50, 20)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or
+        if (np.isnan(adx_12h_aligned[i]) or 
+            np.isnan(pivot[i]) or 
+            np.isnan(r1[i]) or 
+            np.isnan(s1[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        volume_confirmed = volume[i] > 2.0 * vol_ma[i]
+        # Trend filter: ADX < 20 indicates ranging market (good for mean reversion)
+        ranging = adx_12h_aligned[i] < 20
+        
+        # Volume confirmation: current volume > 2x average
+        volume_spike = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Enter long: price touches or goes below S3 with volume spike
-            if (low[i] <= s3_aligned[i] and volume_confirmed):
+            # Enter long: price at S1 support + volume spike + ranging market
+            if (low[i] <= s1[i] and close[i] > s1[i] and 
+                volume_spike and ranging):
                 position = 1
                 signals[i] = position_size
-            # Enter short: price touches or goes above R3 with volume spike
-            elif (high[i] >= r3_aligned[i] and volume_confirmed):
+            # Enter short: price at R1 resistance + volume spike + ranging market
+            elif (high[i] >= r1[i] and close[i] < r1[i] and 
+                  volume_spike and ranging):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price reaches midpoint or S4 level
-            midpoint = (r3_aligned[i] + s3_aligned[i]) / 2
-            if close[i] >= midpoint or low[i] <= s4_aligned[i]:
+            # Exit long: price reaches pivot point or R1
+            if close[i] >= pivot[i] or close[i] >= r1[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price reaches midpoint or R4 level
-            midpoint = (r3_aligned[i] + s3_aligned[i]) / 2
-            if close[i] <= midpoint or high[i] >= r4_aligned[i]:
+            # Exit short: price reaches pivot point or S1
+            if close[i] <= pivot[i] or close[i] <= s1[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -100,6 +142,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_Pivot_Volume_Strategy_v1"
-timeframe = "12h"
+name = "4h_Camarilla_Pivot_Volume_Spike_Ranging_v1"
+timeframe = "4h"
 leverage = 1.0
