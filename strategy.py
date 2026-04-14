@@ -1,17 +1,16 @@
-# 12h_1wPivot_1dIchimoku_CloudFilter_v1
-# Hypothesis: Use weekly Ichimoku cloud as primary trend filter on 12h timeframe.
-# Enter long when price is above cloud and breaks above 1-day Ichimoku conversion line with volume confirmation.
-# Enter short when price is below cloud and breaks below 1-day Ichimoku base line with volume confirmation.
-# Exit when price returns to the opposite Ichimoku line or trend changes.
-# Weekly Ichimoku provides strong trend filter to avoid counter-trend trades in both bull and bear markets.
-# Daily Ichimoku provides timely entry/exit signals.
-# Volume confirmation reduces false breakouts.
-# Target: 20-40 trades/year per symbol (80-160 total over 4 years) to minimize fee drag.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 4h strategy using 1d Williams %R for overbought/oversold conditions and 12h ADX for trend strength.
+# Williams %R identifies reversal points in both bull and bear markets.
+# ADX > 25 confirms strong trend to avoid whipsaws in ranging markets.
+# Volume confirmation (>1.5x 20-period average) reduces false signals.
+# Designed for low trade frequency (<30/year) to minimize fee drag.
+# Williams %R: %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+# Buy signal: %R < -80 (oversold) + ADX > 25 + volume confirmation
+# Sell signal: %R > -20 (overbought) + ADX > 25 + volume confirmation
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,67 +22,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for Ichimoku cloud (trend filter)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 52:
+    # Load 12h data ONCE for ADX calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 14:
         return np.zeros(n)
     
-    # Calculate Ichimoku on weekly data
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate ADX on 12h data
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = pd.Series(high_1w).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1w).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2
+    # True Range
+    tr1 = np.abs(high_12h[1:] - low_12h[1:])
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = pd.Series(high_1w).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1w).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2
+    # Directional Movement
+    dm_plus = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
+                       np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
+    dm_minus = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
+                        np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Senkou Span A (Leading Span A): (Conversion Line + Base Line)/2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    # Smoothed values
+    tr_period = 14
+    atr = pd.Series(tr).ewm(alpha=1/tr_period, adjust=False).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/tr_period, adjust=False).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/tr_period, adjust=False).mean().values
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
-    period52_high = pd.Series(high_1w).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1w).rolling(window=52, min_periods=52).min().values
-    senkou_span_b = (period52_high + period52_low) / 2
+    # Directional Indicators
+    plus_di = 100 * dm_plus_smooth / atr
+    minus_di = 100 * dm_minus_smooth / atr
     
-    # Chikou Span (Lagging Span): Close plotted 26 periods behind
-    chikou_span = np.concatenate([np.full(26, np.nan), close_1w[:-26]])
+    # DX and ADX
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = pd.Series(dx).ewm(alpha=1/tr_period, adjust=False).mean().values
     
-    # Align weekly Ichimoku components to 12h timeframe
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1w, tenkan_sen)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_1w, kijun_sen)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_a)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_b)
-    chikou_span_aligned = align_htf_to_ltf(prices, df_1w, chikou_span)
-    
-    # Load daily data ONCE for Ichimoku entry/exit signals
+    # Load 1d data ONCE for Williams %R calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 26:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate Ichimoku on daily data
+    # Calculate Williams %R on 1d data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high_1d = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low_1d = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_sen_1d = (period9_high_1d + period9_low_1d) / 2
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high_1d = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low_1d = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_sen_1d = (period26_high_1d + period26_low_1d) / 2
-    
-    # Align daily Ichimoku components to 12h timeframe
-    tenkan_sen_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen_1d)
-    kijun_sen_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen_1d)
+    # Align indicators to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
     # Volume confirmation: 1.5x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -93,58 +87,46 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(52, 26, 20)  # Need weekly Ichimoku and daily Ichimoku and volume MA
+    start = max(20, 14, 14)  # Need Williams %R, ADX, and volume MA
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(tenkan_sen_aligned[i]) or 
-            np.isnan(kijun_sen_aligned[i]) or
-            np.isnan(senkou_span_a_aligned[i]) or
-            np.isnan(senkou_span_b_aligned[i]) or
-            np.isnan(chikou_span_aligned[i]) or
-            np.isnan(tenkan_sen_1d_aligned[i]) or
-            np.isnan(kijun_sen_1d_aligned[i]) or
+        if (np.isnan(adx_aligned[i]) or 
+            np.isnan(williams_r_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
-        
-        # Determine if price is above or below weekly cloud
-        cloud_top = np.maximum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        cloud_bottom = np.minimum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        price_above_cloud = close[i] > cloud_top
-        price_below_cloud = close[i] < cloud_bottom
         
         # Volume confirmation
         volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Look for entries
-            # Long: price above weekly cloud AND breaks above daily Tenkan-sen with volume
-            if (price_above_cloud and 
-                close[i] > tenkan_sen_1d_aligned[i] and 
+            # Look for reversals from overbought/oversold conditions
+            # Only trade when ADX > 25 (strong trend)
+            if (williams_r_aligned[i] < -80 and  # Oversold
+                adx_aligned[i] > 25 and 
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: price below weekly cloud AND breaks below daily Kijun-sen with volume
-            elif (price_below_cloud and 
-                  close[i] < kijun_sen_1d_aligned[i] and 
+            elif (williams_r_aligned[i] > -20 and  # Overbought
+                  adx_aligned[i] > 25 and 
                   volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below daily Kijun-sen or returns to weekly cloud
-            if (close[i] < kijun_sen_1d_aligned[i] or 
-                close[i] < cloud_top):
+            # Exit long: Williams %R returns from oversold or ADX weakens
+            if (williams_r_aligned[i] > -50 or  # Return from oversold
+                adx_aligned[i] < 20):  # Weak trend
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above daily Tenkan-sen or returns to weekly cloud
-            if (close[i] > tenkan_sen_1d_aligned[i] or 
-                close[i] > cloud_bottom):
+            # Exit short: Williams %R returns from overbought or ADX weakens
+            if (williams_r_aligned[i] < -50 or  # Return from overbought
+                adx_aligned[i] < 20):  # Weak trend
                 position = 0
                 signals[i] = 0.0
             else:
@@ -152,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1wPivot_1dIchimoku_CloudFilter_v1"
-timeframe = "12h"
+name = "4h_12hADX_1dWilliamsR_VolumeFilter_v1"
+timeframe = "4h"
 leverage = 1.0
