@@ -1,18 +1,24 @@
+# The solution is a strategy based on the 4-hour timeframe, using a 1-day timeframe for the trend filter.
+# It uses the Donchian channel (20-period) for breakout signals, with entry only in the direction of the
+# 1-day ADX trend. A volume filter confirms the breakout, and exits are triggered by a touch of the
+# opposite Donchian band. This approach aims to capture momentum in trending markets while avoiding
+# whipsaws in ranging conditions, suitable for both bull and bear markets.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R mean reversion with 1d trend filter and volume confirmation
-# Williams %R(14) identifies overbought/oversold conditions for mean reversion
-# 1d ADX(14) > 25 filters for trending markets where mean reversion is less effective
-# Volume > 1.5x 20-period EMA confirms institutional participation during reversals
-# Target: 15-35 trades/year with mean reversion logic suited for 2025 range-bound conditions
-# Exits via opposite Williams %R threshold to avoid whipsaws
+# Hypothesis: 4h Donchian breakout with 1d ADX trend filter and volume confirmation
+# Breakouts above Donchian(20) high or below Donchian(20) low capture momentum
+# 1d ADX(14) > 25 filters for trending markets where breakouts are more reliable
+# Volume > 1.5x 20-period EMA confirms institutional participation
+# Target: 20-50 trades/year with trend-following logic suited for 2025 bear/range conditions
+# Stops via opposite Donchian band touch to avoid whipsaws
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,12 +26,11 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Calculate Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1d ADX (14-period) for trend filter
+    # Calculate 1d ADX (14-period) for trend filter (high ADX = trending)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -64,42 +69,41 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25
     
-    for i in range(14, n):
+    for i in range(20, n):
         # Get aligned 1d ADX
         adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)[i]
         
-        if np.isnan(williams_r[i]) or np.isnan(adx_1d_aligned) or \
-           np.isnan(vol_ma[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
+           np.isnan(adx_1d_aligned) or np.isnan(vol_ma[i]):
             continue
         
         # Volume confirmation (1.5x average)
         volume_confirm = volume[i] > 1.5 * vol_ma[i]
-        # Trend filter: ADX > 25 indicates trending market (less effective for mean reversion)
-        # We want ranging markets: ADX < 25
-        ranging = adx_1d_aligned < 25
+        # Trend filter: ADX > 25 indicates trending market (better for breakouts)
+        trending = adx_1d_aligned > 25
         
-        if position == 0:  # No position - look for mean reversion entries
-            # Long: Williams %R oversold (< -80) in ranging market with volume
-            if williams_r[i] < -80 and volume_confirm and ranging:
+        if position == 0:  # No position - look for breakout entries
+            # Long breakout: price breaks above Donchian high with volume in trending market
+            if close[i] > donchian_high[i] and volume_confirm and trending:
                 position = 1
                 signals[i] = position_size
-            # Short: Williams %R overbought (> -20) in ranging market with volume
-            elif williams_r[i] > -20 and volume_confirm and ranging:
+            # Short breakout: price breaks below Donchian low with volume in trending market
+            elif close[i] < donchian_low[i] and volume_confirm and trending:
                 position = -1
                 signals[i] = -position_size
-        elif position == 1:  # Long position - exit when Williams %R returns from oversold
-            # Exit if Williams %R rises above -50 (returning from oversold)
-            if williams_r[i] > -50:
+        elif position == 1:  # Long position - exit at opposite Donchian band
+            # Exit if price breaks below Donchian low (failed breakout)
+            if close[i] < donchian_low[i]:
                 position = 0
                 signals[i] = 0.0
-        elif position == -1:  # Short position - exit when Williams %R returns from overbought
-            # Exit if Williams %R falls below -50 (returning from overbought)
-            if williams_r[i] < -50:
+        elif position == -1:  # Short position - exit at opposite Donchian band
+            # Exit if price breaks above Donchian high (failed breakout)
+            if close[i] > donchian_high[i]:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_WilliamsR_1dADX_MeanRev"
-timeframe = "12h"
+name = "4h_Donchian_1dADX_TrendBreak"
+timeframe = "4h"
 leverage = 1.0
