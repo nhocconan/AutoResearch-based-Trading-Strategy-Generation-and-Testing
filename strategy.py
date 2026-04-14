@@ -1,41 +1,29 @@
-# 12h_1dEMA20_BBWidth_RSI_Filter
-# Hypothesis: Price trend following with Bollinger Band width filter and RSI momentum filter on 12h timeframe
-# Uses 1d EMA20 as trend filter, BB width < 5% to avoid chop, RSI between 30-70 to avoid extremes
-# Designed for low trade frequency (~15-25/year) to minimize fee drag while capturing trends in bull/bear markets
-
 #!/usr/bin/env python3
+"""
+12h_1dVolatilityRegime_RangeBreakout
+Hypothesis: In low volatility regimes (BB width < 3%), price tends to break out of prior 24h range.
+Use 1d Bollinger Band width for regime detection, breakout of prior day's high/low for entry.
+Works in both bull/bear markets by capturing volatility expansion after contraction.
+Target: 15-25 trades/year to minimize fee drag.
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA(20) for trend filter
-    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
-    
-    # Calculate 1d ATR(14) for volatility filter
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    close_series = pd.Series(close)
-    tr1 = high_series - low_series
-    tr2 = abs(high_series - close_series.shift(1))
-    tr3 = abs(low_series - close_series.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate 1d Bollinger Bands (20, 2)
+    # Calculate 1d Bollinger Bands (20, 2) for volatility regime
     sma_20_1d = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).mean().values
     std_20_1d = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).std().values
     upper_bb_1d = sma_20_1d + (2 * std_20_1d)
@@ -43,72 +31,55 @@ def generate_signals(prices):
     upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_1d)
     lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_1d)
     
-    # Calculate 1d RSI(14) for momentum filter
-    delta = pd.Series(df_1d['close']).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_1d = (100 - (100 / (1 + rs))).values
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Calculate prior day's high/low for breakout levels
+    prior_high_1d = df_1d['high'].shift(1).values  # Prior day's high
+    prior_low_1d = df_1d['low'].shift(1).values    # Prior day's low
+    prior_high_aligned = align_htf_to_ltf(prices, df_1d, prior_high_1d)
+    prior_low_aligned = align_htf_to_ltf(prices, df_1d, prior_low_1d)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 100
+    start = 30
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_20_1d_aligned[i]) or 
-            np.isnan(atr[i]) or 
-            np.isnan(upper_bb_aligned[i]) or 
+        if (np.isnan(upper_bb_aligned[i]) or 
             np.isnan(lower_bb_aligned[i]) or
-            np.isnan(rsi_1d_aligned[i])):
+            np.isnan(prior_high_aligned[i]) or
+            np.isnan(prior_low_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol = volume[i]
         
-        # ATR-based volatility filter: avoid extremely low volatility periods
-        atr_ratio = atr[i] / price if price > 0 else 0
-        vol_filter = atr_ratio > 0.003  # Minimum 0.3% ATR relative to price
-        
-        # Bollinger Band squeeze detection: bandwidth < 5% of price
+        # Volatility regime filter: BB width < 3% of price indicates low volatility/squeeze
         bb_width = (upper_bb_aligned[i] - lower_bb_aligned[i]) / price if price > 0 else 0
-        bb_squeeze = bb_width < 0.05
-        
-        # Trend filter: price > 1d EMA20 for long, price < 1d EMA20 for short
-        trend_filter_long = price > ema_20_1d_aligned[i]
-        trend_filter_short = price < ema_20_1d_aligned[i]
-        
-        # Momentum filter: RSI between 30 and 70 to avoid extremes
-        rsi_filter = (rsi_1d_aligned[i] > 30) & (rsi_1d_aligned[i] < 70)
+        low_vol_regime = bb_width < 0.03
         
         if position == 0:
-            # Long setup: price above 1d EMA20 + volatility filter + not in squeeze + momentum filter
-            if (trend_filter_long and vol_filter and not bb_squeeze and rsi_filter):
+            # Long breakout: price breaks above prior day's high in low vol regime
+            if low_vol_regime and price > prior_high_aligned[i]:
                 position = 1
                 signals[i] = position_size
-            # Short setup: price below 1d EMA20 + volatility filter + not in squeeze + momentum filter
-            elif (trend_filter_short and vol_filter and not bb_squeeze and rsi_filter):
+            # Short breakout: price breaks below prior day's low in low vol regime
+            elif low_vol_regime and price < prior_low_aligned[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below 1d EMA20
-            if price < ema_20_1d_aligned[i]:
+            # Exit long: price returns to prior day's low (mean reversion) or volatility expands
+            if price < prior_low_aligned[i] or bb_width > 0.08:  # Exit if volatility expands
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above 1d EMA20
-            if price > ema_20_1d_aligned[i]:
+            # Exit short: price returns to prior day's high or volatility expands
+            if price > prior_high_aligned[i] or bb_width > 0.08:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -116,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1dEMA20_BBWidth_RSI_Filter"
+name = "12h_1dVolatilityRegime_RangeBreakout"
 timeframe = "12h"
 leverage = 1.0
