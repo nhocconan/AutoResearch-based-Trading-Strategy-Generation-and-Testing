@@ -1,18 +1,19 @@
-# This strategy uses 1-hour timeframe with 4-hour and 1-day higher timeframe filters
-# Hypothesis: Combining 4-hour trend direction with 1-day volatility regime and 1-hour momentum
-# creates high-probability entries with low turnover. In bull markets, we take long positions
-# when 4hr trend is up and 1hr momentum is strong. In bear markets, we take short positions
-# when 4hr trend is down and 1hr momentum is weak. The 1-day volatility filter avoids
-# choppy markets where whipsaws occur. Designed for ~20-40 trades/year to minimize fee drag.
-# Works in both bull and bear via symmetric long/short logic with trend/momentum/volatility filters.
-
+#!/usr/bin/env python3
+"""
+Hypothesis: 6-hour strategy using weekly pivot levels with daily EMA trend filter.
+Long when price breaks above weekly R3 with daily EMA(50) uptrend and volume surge.
+Short when price breaks below weekly S3 with daily EMA(50) downtrend and volume surge.
+Exit when price returns to weekly pivot point (P) or EMA trend reverses.
+Designed for low turnover: ~15-25 trades/year per symbol to minimize fee drag.
+Uses weekly structure for direction and daily EMA for trend filter to avoid whipsaws.
+"""
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,97 +21,107 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4-hour data for trend (once before loop)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Load weekly data once for pivot calculation
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 5:
         return np.zeros(n)
     
-    # Load 1-day data for volatility regime (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    close_weekly = df_weekly['close'].values
+    
+    # Calculate weekly pivot points (based on previous week)
+    # P = (H + L + C) / 3
+    # R3 = H + 2*(P - L)
+    # S3 = L - 2*(H - P)
+    weekly_P = (high_weekly + low_weekly + close_weekly) / 3
+    weekly_R3 = high_weekly + 2 * (weekly_P - low_weekly)
+    weekly_S3 = low_weekly - 2 * (high_weekly - weekly_P)
+    
+    # Load daily data for EMA trend filter
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 50:
         return np.zeros(n)
     
-    # 4-hour EMA20 for trend direction
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    close_daily = df_daily['close'].values
+    # EMA(50) for trend filter
+    ema_50 = pd.Series(close_daily).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # 1-day ATR for volatility regime
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
-    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d, additional_delay_bars=0)
-    
-    # 1-hour RSI for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Session filter: 08:00-20:00 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Volume filter: 24-period average (4 days for 6h timeframe)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.20
+    position_size = 0.25
     
     for i in range(50, n):
-        if not in_session[i]:
+        # Weekly index (approximately 28 bars per week for 6h timeframe)
+        idx_weekly = i // 28
+        if idx_weekly < 1:  # need previous week for pivot
             continue
-            
-        # Get aligned values for current bar
-        trend = ema_4h_aligned[i]
-        vol_regime = atr_1d_aligned[i]
-        momentum = rsi[i]
         
-        # Skip if any value is NaN
-        if np.isnan(trend) or np.isnan(vol_regime) or np.isnan(momentum):
+        # Daily index (4 bars per day for 6h timeframe)
+        idx_daily = i // 4
+        if idx_daily < 50:  # need enough for EMA
+            continue
+        
+        # Use previous weekly values to avoid look-ahead
+        prev_weekly_idx = idx_weekly - 1
+        if prev_weekly_idx < 0:
             continue
             
-        # Calculate 1-hour EMA20 for entry timing
-        if i >= 20:
-            ema_1h = pd.Series(close[:i+1]).ewm(span=20, adjust=False, min_periods=20).mean().iloc[-1]
-        else:
+        # Use current daily values for EMA (updated daily)
+        # EMA uses all history up to current point, so current value is valid
+        
+        P_weekly = weekly_P[prev_weekly_idx] if prev_weekly_idx < len(weekly_P) else weekly_P[-1]
+        R3_weekly = weekly_R3[prev_weekly_idx] if prev_weekly_idx < len(weekly_R3) else weekly_R3[-1]
+        S3_weekly = weekly_S3[prev_weekly_idx] if prev_weekly_idx < len(weekly_S3) else weekly_S3[-1]
+        
+        if np.isnan(P_weekly) or np.isnan(R3_weekly) or np.isnan(S3_weekly):
             continue
-            
+        
+        # Create arrays for alignment (using previous weekly values)
+        P_arr = np.full(len(df_weekly), P_weekly)
+        R3_arr = np.full(len(df_weekly), R3_weekly)
+        S3_arr = np.full(len(df_weekly), S3_weekly)
+        
+        P_6h = align_htf_to_ltf(prices, df_weekly, P_arr)[i]
+        R3_6h = align_htf_to_ltf(prices, df_weekly, R3_arr)[i]
+        S3_6h = align_htf_to_ltf(prices, df_weekly, S3_arr)[i]
+        
+        # Daily EMA value (no alignment needed as it's updated daily)
+        ema_50_6h = ema_50[idx_daily] if idx_daily < len(ema_50) else ema_50[-1]
+        
+        if np.isnan(P_6h) or np.isnan(R3_6h) or np.isnan(S3_6h) or np.isnan(ema_50_6h):
+            continue
+        
         if position == 0:
-            # Long: 4hr uptrend, low volatility, bullish momentum
-            if (close[i] > ema_1h and 
-                close[i] > trend and 
-                vol_regime < np.nanpercentile(atr_1d_aligned[:i+1], 50) and  # below median volatility
-                momentum > 50):
+            # Long: price breaks above weekly R3 + daily EMA uptrend + volume surge
+            if (close[i] > R3_6h and 
+                close[i] > ema_50_6h and  # price above EMA = uptrend
+                volume[i] > vol_ma[i] * 2.0):
                 position = 1
                 signals[i] = position_size
-            # Short: 4hr downtrend, low volatility, bearish momentum
-            elif (close[i] < ema_1h and 
-                  close[i] < trend and 
-                  vol_regime < np.nanpercentile(atr_1d_aligned[:i+1], 50) and  # below median volatility
-                  momentum < 50):
+            # Short: price breaks below weekly S3 + daily EMA downtrend + volume surge
+            elif (close[i] < S3_6h and 
+                  close[i] < ema_50_6h and  # price below EMA = downtrend
+                  volume[i] > vol_ma[i] * 2.0):
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
-            # Exit long: trend breaks down or momentum fades
-            if close[i] < trend or momentum < 40:
+            # Exit: price returns to weekly pivot or price breaks below EMA
+            if close[i] < P_6h or close[i] < ema_50_6h:
                 position = 0
                 signals[i] = 0.0
         elif position == -1:
-            # Exit short: trend breaks up or momentum fades
-            if close[i] > trend or momentum > 60:
+            # Exit: price returns to weekly pivot or price breaks above EMA
+            if close[i] > P_6h or close[i] > ema_50_6h:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "1h_4h_1d_Trend_Momentum_Volatility"
-timeframe = "1h"
+name = "6h_1w_Pivot_1d_EMA50_Volume"
+timeframe = "6h"
 leverage = 1.0
+EOF
