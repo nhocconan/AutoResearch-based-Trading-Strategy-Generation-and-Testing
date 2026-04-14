@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy combining daily volatility breakout with weekly RSI trend filter.
+# Hypothesis: 12h strategy using daily volatility breakout with weekly RSI trend filter.
 # Uses volatility-adjusted breakout levels based on prior day's range and ATR, providing adaptive support/resistance.
 # Long when price breaks above volatility-adjusted resistance with 1w RSI > 50 (uptrend) and volume confirmation.
 # Short when price breaks below volatility-adjusted support with 1w RSI < 50 (downtrend) and volume confirmation.
 # Exit when price returns to prior day's close or RSI crosses 50 in opposite direction.
 # Designed to work in both bull and bear markets by adapting to volatility and using RSI for trend confirmation.
-# Target: 20-25 trades/year per symbol (80-100 total over 4 years) to minimize fee drag.
+# Target: 12-37 trades/year per symbol (50-150 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -136,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_VolatilityAdjustedBreakout_1wRSI_v1"
-timeframe = "4h"
+name = "12h_VolatilityAdjustedBreakout_1wRSI_v1"
+timeframe = "12h"
 leverage = 1.0
