@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla Pivot Breakout + Volume Spike + ADX Trend Filter
-# Uses 12h timeframe with Camarilla pivot levels from daily timeframe for structure
-# Volume confirmation ensures breakouts have conviction, ADX > 25 filters for trending markets
-# Works in bull/bear by trading breakouts in direction of higher timeframe trend
-# Target: 50-150 total trades over 4 years (12-37/year)
+# Hypothesis: 1d Donchian Breakout + Volume Spike + Weekly Trend Filter
+# Uses daily Donchian channel breakouts with volume confirmation and weekly trend strength filter
+# Weekly ADX > 25 ensures we only trade in trending markets on higher timeframe, avoiding false breakouts
+# Works in bull/bear by capturing breakouts in the direction of the weekly trend
+# Target: 30-100 total trades over 4 years (7-25/year)
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,68 +19,51 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots (calculated from previous day)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) == 0:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # Camarilla: based on previous day's range
-    ph = df_1d['high'].values  # previous day high
-    pl = df_1d['low'].values   # previous day low
-    pc = df_1d['close'].values # previous day close
+    # Calculate weekly ADX (14-period) on weekly data
+    whigh = df_1w['high'].values
+    wlow = df_1w['low'].values
+    wclose = df_1w['close'].values
     
-    # Calculate Camarilla levels for each previous day
-    # Resistance levels
-    r4 = pc + ((ph - pl) * 1.1 / 2)
-    r3 = pc + ((ph - pl) * 1.1 / 4)
-    r2 = pc + ((ph - pl) * 1.1 / 6)
-    r1 = pc + ((ph - pl) * 1.1 / 12)
-    # Support levels
-    s1 = pc - ((ph - pl) * 1.1 / 12)
-    s2 = pc - ((ph - pl) * 1.1 / 6)
-    s3 = pc - ((ph - pl) * 1.1 / 4)
-    s4 = pc - ((ph - pl) * 1.1 / 2)
+    # True Range for weekly
+    wtr1 = whigh - wlow
+    wtr2 = np.abs(whigh - np.roll(wclose, 1))
+    wtr3 = np.abs(wlow - np.roll(wclose, 1))
+    wtr2[0] = 0
+    wtr3[0] = 0
+    wtr = np.maximum(wtr1, np.maximum(wtr2, wtr3))
     
-    # Align Camarilla levels to 12h timeframe (using previous day's levels)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Directional Movement for weekly
+    wdm_plus = np.where((whigh - np.roll(whigh, 1)) > (np.roll(wlow, 1) - wlow), 
+                        np.maximum(whigh - np.roll(whigh, 1), 0), 0)
+    wdm_minus = np.where((np.roll(wlow, 1) - wlow) > (whigh - np.roll(whigh, 1)), 
+                         np.maximum(np.roll(wlow, 1) - wlow, 0), 0)
+    wdm_plus[0] = 0
+    wdm_minus[0] = 0
     
-    # ADX calculation (14-period) on 12h data
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Smoothed values for weekly
+    wtr14 = pd.Series(wtr).rolling(window=14, min_periods=14).sum().values
+    wdm_plus14 = pd.Series(wdm_plus).rolling(window=14, min_periods=14).sum().values
+    wdm_minus14 = pd.Series(wdm_minus).rolling(window=14, min_periods=14).sum().values
     
-    # Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Directional Indicators for weekly
+    wdi_plus = np.where(wtr14 != 0, 100 * wdm_plus14 / wtr14, 0)
+    wdi_minus = np.where(wtr14 != 0, 100 * wdm_minus14 / wtr14, 0)
     
-    # Smoothed values
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
-    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    # DX and ADX for weekly
+    wdx = np.where((wdi_plus + wdi_minus) != 0, 100 * np.abs(wdi_plus - wdi_minus) / (wdi_plus + wdi_minus), 0)
+    wadx = pd.Series(wdx).rolling(window=14, min_periods=14).mean().values
     
-    # Directional Indicators
-    di_plus = np.where(tr14 != 0, 100 * dm_plus14 / tr14, 0)
-    di_minus = np.where(tr14 != 0, 100 * dm_minus14 / tr14, 0)
+    # Align weekly ADX to daily timeframe (with proper delay for weekly bar close)
+    wadx_aligned = align_htf_to_ltf(prices, df_1w, wadx)
     
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # Daily Donchian channel (20-period)
+    d_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    d_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
     # Volume confirmation: volume > 1.5x average volume (20-period)
     vol_series = pd.Series(volume)
@@ -91,23 +74,21 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 35  # for ADX calculation and Camarilla alignment
+    start = 35  # for ADX calculation
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(r2_aligned[i]) or
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(adx[i]) or 
-            np.isnan(avg_vol[i])):
+        if (np.isnan(d_high[i]) or np.isnan(d_low[i]) or
+            np.isnan(wadx_aligned[i]) or np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         
-        # Trend filter: only trade when ADX > 25 (trending market)
-        if adx[i] < 25:
-            # In weak trend/ranging market, stay flat
+        # Weekly trend filter: only trade when weekly ADX > 25 (trending market)
+        if wadx_aligned[i] < 25:
+            # In weak trend/ranging market on weekly, stay flat
             if position != 0:
                 position = 0
                 signals[i] = 0.0
@@ -116,26 +97,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R3 with volume filter
-            if price > r3_aligned[i] and vol > 1.5 * avg_vol[i]:
+            # Long: price breaks above Donchian high with volume filter
+            if price > d_high[i] and vol > 1.5 * avg_vol[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below S3 with volume filter
-            elif price < s3_aligned[i] and vol > 1.5 * avg_vol[i]:
+            # Short: price breaks below Donchian low with volume filter
+            elif price < d_low[i] and vol > 1.5 * avg_vol[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below S3 (reversal signal)
-            if price < s3_aligned[i]:
+            # Exit long: price breaks below Donchian low
+            if price < d_low[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above R3 (reversal signal)
-            if price > r3_aligned[i]:
+            # Exit short: price breaks above Donchian high
+            if price > d_high[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -143,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_Pivot_Volume_ADX_Filter"
-timeframe = "12h"
+name = "1d_Donchian_Volume_WeeklyADX_Filter"
+timeframe = "1d"
 leverage = 1.0
