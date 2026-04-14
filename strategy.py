@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe with 1d ATR-based volatility filter and 1w Donchian breakout
-# The strategy combines long-term trend direction (1w Donchian) with volatility regime filtering (1d ATR).
-# Low volatility periods (ATR below 20-day percentile) precede breakouts, which are then filtered by 1w Donchian breakout direction.
-# This approach aims to capture volatility expansion after contraction, working in both bull and bear markets.
-# Uses discrete position sizing (0.25) to minimize trade frequency and fee impact.
+# Hypothesis: 4h timeframe with 1d RSI(14) and 1w Williams %R(14) for mean reversion in extreme zones
+# RSI < 30 and Williams %R < -80 indicates oversold conditions -> long
+# RSI > 70 and Williams %R > -20 indicates overbought conditions -> short
+# Works in both bull and bear markets as it captures exhaustion points during extended moves
+# Uses 1d RSI for momentum exhaustion and 1w Williams %R for longer-term extremes
+# Low trade frequency expected due to strict dual-timeframe extreme conditions
 
 def generate_signals(prices):
     n = len(prices)
@@ -15,132 +16,74 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     
-    # Load 1d data ONCE for ATR calculation
+    # Load 1d data ONCE for RSI
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d ATR (14-period)
-    atr_length = 14
-    high_low = df_1d['high'] - df_1d['low']
-    high_close = np.abs(df_1d['high'] - df_1d['close'].shift())
-    low_close = np.abs(df_1d['low'] - df_1d['close'].shift())
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    atr = pd.Series(tr).rolling(window=atr_length, min_periods=atr_length).mean().values
+    # Calculate 1d RSI(14)
+    rsi_length = 14
+    delta = pd.Series(df_1d['close']).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/rsi_length, min_periods=rsi_length, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/rsi_length, min_periods=rsi_length, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    # Align ATR to 12h timeframe
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    # Align RSI to 4h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_values)
     
-    # Load 1w data ONCE for Donchian channels
+    # Load 1w data ONCE for Williams %R
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1w Donchian channels (20 periods)
-    donch_length = 20
-    donch_high = pd.Series(df_1w['high']).rolling(window=donch_length, min_periods=donch_length).max().values
-    donch_low = pd.Series(df_1w['low']).rolling(window=donch_length, min_periods=donch_length).min().values
+    # Calculate 1w Williams %R(14)
+    highest_high = pd.Series(df_1w['high']).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(df_1w['low']).rolling(window=14, min_periods=14).min()
+    williams_r = -100 * (highest_high - df_1w['close']) / (highest_high - lowest_low)
+    williams_r = williams_r.replace([np.inf, -np.inf], np.nan).values
     
-    # Align Donchian channels to 12h timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_1w, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1w, donch_low)
+    # Align Williams %R to 4h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1w, williams_r)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(50, 20)  # Need enough for ATR and Donchian
+    start = max(30, 14)  # Need enough for Williams %R
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(atr_aligned[i]) or 
-            np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i])):
+        if (np.isnan(rsi_aligned[i]) or 
+            np.isnan(williams_r_aligned[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        
-        # Volatility regime filter: Low volatility (ATR below 20th percentile of last 30 periods)
-        # Calculate percentile rank manually to avoid look-ahead
-        if i >= 30:
-            atr_slice = atr_aligned[max(0, i-30):i]
-            if len(atr_slice) > 0:
-                # Remove NaN values
-                clean_atr = atr_slice[~np.isnan(atr_slice)]
-                if len(clean_atr) > 0:
-                    sorted_atr = np.sort(clean_atr)
-                    current_atr = atr_aligned[i]
-                    # Count how many values are less than current ATR
-                    rank = np.searchsorted(sorted_atr, current_atr, side='left')
-                    percentile = (rank / len(sorted_atr)) * 100
-                    low_vol = percentile <= 20  # Low volatility regime
-                else:
-                    low_vol = False
-            else:
-                low_vol = False
-        else:
-            low_vol = False
-        
-        # Breakout signals from 1w Donchian
-        breakout_up = price > donch_high_aligned[i]
-        breakout_down = price < donch_low_aligned[i]
+        rsi_val = rsi_aligned[i]
+        williams_val = williams_r_aligned[i]
         
         if position == 0:
-            # Enter long: low volatility + upward breakout
-            if low_vol and breakout_up:
+            # Enter long: RSI oversold AND Williams %R deeply oversold
+            if rsi_val < 30 and williams_val < -80:
                 position = 1
                 signals[i] = position_size
-            # Enter short: low volatility + downward breakout
-            elif low_vol and breakout_down:
+            # Enter short: RSI overbought AND Williams %R deeply overbought
+            elif rsi_val > 70 and williams_val > -20:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below Donchian low OR high volatility (ATR > 80th percentile)
-            if i >= 30:
-                atr_slice = atr_aligned[max(0, i-30):i]
-                if len(atr_slice) > 0:
-                    clean_atr = atr_slice[~np.isnan(atr_slice)]
-                    if len(clean_atr) > 0:
-                        sorted_atr = np.sort(clean_atr)
-                        current_atr = atr_aligned[i]
-                        rank = np.searchsorted(sorted_atr, current_atr, side='left')
-                        percentile = (rank / len(sorted_atr)) * 100
-                        high_vol = percentile >= 80
-                    else:
-                        high_vol = False
-                else:
-                    high_vol = False
-            else:
-                high_vol = False
-            
-            if price < donch_low_aligned[i] or high_vol:
+            # Exit long: RSI returns to neutral OR Williams %R returns from extreme
+            if rsi_val >= 50 or williams_val >= -50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above Donchian high OR high volatility
-            if i >= 30:
-                atr_slice = atr_aligned[max(0, i-30):i]
-                if len(atr_slice) > 0:
-                    clean_atr = atr_slice[~np.isnan(atr_slice)]
-                    if len(clean_atr) > 0:
-                        sorted_atr = np.sort(clean_atr)
-                        current_atr = atr_aligned[i]
-                        rank = np.searchsorted(sorted_atr, current_atr, side='left')
-                        percentile = (rank / len(sorted_atr)) * 100
-                        high_vol = percentile >= 80
-                    else:
-                        high_vol = False
-                else:
-                    high_vol = False
-            else:
-                high_vol = False
-            
-            if price > donch_high_aligned[i] or high_vol:
+            # Exit short: RSI returns to neutral OR Williams %R returns from extreme
+            if rsi_val <= 50 or williams_val <= -50:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -148,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1dATR_1wDonchian_VolatilityBreakout_v1"
-timeframe = "12h"
+name = "4h_1dRSI_1wWilliamsR_MeanReversion_v1"
+timeframe = "4h"
 leverage = 1.0
