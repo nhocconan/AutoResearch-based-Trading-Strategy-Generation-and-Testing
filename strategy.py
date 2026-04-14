@@ -13,13 +13,13 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for weekly pivot levels
+    # Get 1d data for weekly pivot levels
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points using previous day's OHLC
+    # Calculate pivot points using prior day's OHLC
     prev_high = np.roll(high_1d, 1)
     prev_low = np.roll(low_1d, 1)
     prev_close = np.roll(close_1d, 1)
@@ -32,10 +32,14 @@ def generate_signals(prices):
     # Resistance and support levels
     r1 = 2 * pp - prev_low
     s1 = 2 * pp - prev_high
+    r2 = pp + (high_1d - low_1d)
+    s2 = pp - (high_1d - low_1d)
     
-    # Align pivot levels to 1d timeframe
+    # Align pivot levels to 6h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
     # Volume confirmation: volume > 1.5x average volume (20-period)
     vol_series = pd.Series(volume)
@@ -46,11 +50,12 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 20
+    start = 20  # for volume calculation
     
     for i in range(start, n):
         # Skip if any critical data is NaN
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
             np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
@@ -59,25 +64,25 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long: price breaks above R1 pivot with volume
-            if price > r1_aligned[i] and vol > 1.5 * avg_vol[i]:
+            # Long: price breaks above R2 with volume confirmation
+            if price > r2_aligned[i] and vol > 1.5 * avg_vol[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below S1 pivot with volume
-            elif price < s1_aligned[i] and vol > 1.5 * avg_vol[i]:
+            # Short: price breaks below S2 with volume confirmation
+            elif price < s2_aligned[i] and vol > 1.5 * avg_vol[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below S1 pivot
+            # Exit long: price breaks below S1
             if price < s1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above R1 pivot
+            # Exit short: price breaks above R1
             if price > r1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
@@ -86,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_Pivot_Breakout_Volume"
-timeframe = "1d"
+name = "6h_1d_Pivot_Breakout_Weekly"
+timeframe = "6h"
 leverage = 1.0
