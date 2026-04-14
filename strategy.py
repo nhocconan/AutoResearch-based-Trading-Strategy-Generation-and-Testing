@@ -8,12 +8,12 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly and daily data once for regime and pivot levels
+    # Load weekly data once for regime and pivot levels
     df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
     
