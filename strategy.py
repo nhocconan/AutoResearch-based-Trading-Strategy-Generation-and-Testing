@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe with 1d Williams %R reversal and 1w EMA trend filter
-# Williams %R identifies overbought/oversold conditions on daily timeframe
-# EMA on weekly timeframe determines primary trend direction
-# Combines mean reversion in ranging markets with trend following in trending markets
-# Works in both bull and bear markets by adapting to regime
+# Hypothesis: 4h with 12h Williams %R for overbought/oversold and 1d volume surge filter
+# Williams %R identifies extreme price levels (oversold < -80, overbought > -20)
+# Volume surge (>1.5x 20-period average) confirms conviction behind moves
+# Works in bull markets (buy oversold bounces) and bear markets (sell overbought bounces)
+# Low trade frequency due to dual confirmation requirement
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,72 +17,76 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load 1d data ONCE for Williams %R
+    # Load 12h data ONCE for Williams %R
+    df_12h = get_htf_data(prices, '12h')
+    
+    # Calculate 12h Williams %R (14 periods)
+    williams_length = 14
+    highest_high = pd.Series(df_12h['high']).rolling(window=williams_length, min_periods=williams_length).max().values
+    lowest_low = pd.Series(df_12h['low']).rolling(window=williams_length, min_periods=williams_length).min().values
+    williams_r = -100 * (highest_high - df_12h['close'].values) / (highest_high - lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # Avoid division by zero
+    
+    # Align Williams %R to 4h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r)
+    
+    # Load 1d data ONCE for volume average
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Williams %R (14 periods)
-    wr_length = 14
-    highest_high = pd.Series(df_1d['high']).rolling(window=wr_length, min_periods=wr_length).max().values
-    lowest_low = pd.Series(df_1d['low']).rolling(window=wr_length, min_periods=wr_length).min().values
-    # Avoid division by zero
-    diff = highest_high - lowest_low
-    wr = np.where(diff != 0, -100 * (highest_high - df_1d['close'].values) / diff, -50)
+    # Calculate 1d volume average (20 periods)
+    vol_ma_length = 20
+    vol_ma = pd.Series(df_1d['volume']).rolling(window=vol_ma_length, min_periods=vol_ma_length).mean().values
     
-    # Align Williams %R to 12h timeframe
-    wr_aligned = align_htf_to_ltf(prices, df_1d, wr)
-    
-    # Load 1w data ONCE for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate EMA (21 periods) on weekly close
-    ema_length = 21
-    ema = pd.Series(df_1w['close']).ewm(span=ema_length, adjust=False, min_periods=ema_length).mean().values
-    
-    # Align EMA to 12h timeframe
-    ema_aligned = align_htf_to_ltf(prices, df_1w, ema)
+    # Align volume average to 4h timeframe
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(30, wr_length, ema_length)
+    start = max(30, 20)  # Need enough for Williams %R and volume MA
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(wr_aligned[i]) or 
-            np.isnan(ema_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        vol_current = volume[i]
         
-        # Williams %R levels
-        wr_oversold = -80  # Oversold threshold
-        wr_overbought = -20  # Overbought threshold
+        # Volume surge condition: current volume > 1.5x 20-period average
+        volume_surge = vol_current > 1.5 * vol_ma_aligned[i]
+        
+        # Williams %R conditions
+        oversold = williams_r_aligned[i] < -80
+        overbought = williams_r_aligned[i] > -20
         
         if position == 0:
-            # Enter long: Williams %R oversold AND price above weekly EMA (uptrend)
-            if wr_aligned[i] <= wr_oversold and price > ema_aligned[i]:
+            # Enter long: oversold + volume surge
+            if oversold and volume_surge:
                 position = 1
                 signals[i] = position_size
-            # Enter short: Williams %R overbought AND price below weekly EMA (downtrend)
-            elif wr_aligned[i] >= wr_overbought and price < ema_aligned[i]:
+            # Enter short: overbought + volume surge
+            elif overbought and volume_surge:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Williams %R becomes overbought OR price crosses below weekly EMA
-            if wr_aligned[i] >= wr_overbought or price < ema_aligned[i]:
+            # Exit long: Williams %R returns to neutral (> -50) or overbought (> -20)
+            if williams_r_aligned[i] > -50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Williams %R becomes oversold OR price crosses above weekly EMA
-            if wr_aligned[i] <= wr_oversold or price > ema_aligned[i]:
+            # Exit short: Williams %R returns to neutral (< -50) or oversold (< -80)
+            if williams_r_aligned[i] < -50:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -90,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1dWR_1wEMA_TrendFilter_v1"
-timeframe = "12h"
+name = "4h_12hWilliamsR_1dVolumeSurge_v1"
+timeframe = "4h"
 leverage = 1.0
