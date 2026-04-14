@@ -32,6 +32,11 @@ def generate_signals(prices):
     tr_series_1d = pd.Series(tr_1d)
     atr_1d = tr_series_1d.rolling(window=14, min_periods=14).mean().values
     
+    # Calculate 1d ATR percentile (60th) over 30 days for volatility filter
+    atr_series_1d = pd.Series(atr_1d)
+    atr_percentile = atr_series_1d.rolling(window=30, min_periods=30).quantile(0.6).values
+    volatility_filter = atr_1d > atr_percentile
+    
     # Calculate 4h Donchian channels (20-period) - breakout levels
     high_series = pd.Series(high)
     low_series = pd.Series(low)
@@ -41,11 +46,6 @@ def generate_signals(prices):
     # Calculate 4h volume filter: current volume > 1.3x 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate 1d volatility regime: ATR > 60th percentile of past 30 days
-    atr_series_1d = pd.Series(atr_1d)
-    atr_percentile = atr_series_1d.rolling(window=30, min_periods=30).quantile(0.6).values
-    volatility_filter = atr_1d > atr_percentile
     
     signals = np.zeros(n)
     position = 0
