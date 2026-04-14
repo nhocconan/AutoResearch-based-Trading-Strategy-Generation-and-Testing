@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,11 +18,13 @@ def generate_signals(prices):
     if len(df_1d) < 100:
         return np.zeros(n)
     
-    # Daily Donchian channel (20)
+    # Daily high/low/close for calculations
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
+    # Daily Donchian channel (20)
     upper_dc_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     lower_dc_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
@@ -33,12 +35,15 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Daily volatility regime filter: ATR ratio (ATR / 50-period MA of ATR)
+    # Daily ATR ratio (ATR / 50-period MA of ATR) for volatility regime
     atr_ma_50_1d = pd.Series(atr_14_1d).rolling(window=50, min_periods=50).mean().values
     atr_ratio_1d = atr_14_1d / np.where(atr_ma_50_1d > 0, atr_ma_50_1d, np.nan)
     
     # Daily EMA 50 for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    
+    # Daily volume moving average (20) for volume spike filter
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
@@ -50,16 +55,16 @@ def generate_signals(prices):
         lower_dc_20_i = align_htf_to_ltf(prices, df_1d, lower_dc_20)[i]
         atr_ratio_1d_i = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)[i]
         ema_50_1d_i = align_htf_to_ltf(prices, df_1d, ema_50_1d)[i]
+        vol_ma_20_1d_i = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)[i]
         
-        if np.isnan(upper_dc_20_i) or np.isnan(lower_dc_20_i) or np.isnan(atr_ratio_1d_i) or np.isnan(ema_50_1d_i):
+        if np.isnan(upper_dc_20_i) or np.isnan(lower_dc_20_i) or np.isnan(atr_ratio_1d_i) or np.isnan(ema_50_1d_i) or np.isnan(vol_ma_20_1d_i):
             continue
         
-        # Volatility filter: only trade when ATR ratio < 0.7 (low volatility regime)
-        low_vol = atr_ratio_1d_i < 0.7
+        # Volatility filter: only trade when ATR ratio < 0.6 (low volatility regime)
+        low_vol = atr_ratio_1d_i < 0.6
         
-        # Volume spike filter (2x median volume)
-        vol_median = np.nanmedian(volume[:i+1])
-        volume_spike = volume[i] > 2.0 * vol_median
+        # Volume spike filter (1.5x daily average volume)
+        volume_spike = volume[i] > 1.5 * vol_ma_20_1d_i
         
         # Long: break above upper Donchian with volume spike in low vol and price above daily EMA50
         if position == 0 and low_vol and volume_spike:
@@ -83,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_LowVol_Volume_Spike_EMA50_Filter"
+name = "12h_Donchian_Breakout_LowVol_Volume_Spike_EMA50_Filter_v2"
 timeframe = "12h"
 leverage = 1.0
