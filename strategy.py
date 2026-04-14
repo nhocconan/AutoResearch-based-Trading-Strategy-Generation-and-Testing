@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1-week Donchian channel breakout with volume confirmation and ADX trend filter
-# - Long when price breaks above previous weekly high with volume > 1.5x 20-day average and ADX > 25 (trending)
-# - Short when price breaks below previous weekly low with volume > 1.5x 20-day average and ADX > 25 (trending)
-# - Uses ADX > 25 to filter for trending markets and avoid whipsaws in ranging periods
-# - Exits on opposite breakout (mean reversion tendency in ranging markets)
-# - Position size 0.25 to balance risk and returns
-# - Target: 40-100 trades over 4 years (10-25/year) to minimize fee drag
-# - Works in both bull and bear markets by capturing breakouts with trend confirmation
+# Hypothesis: 12h strategy using 1-day KAMA direction with RSI filter and volume confirmation
+# - Long when KAMA turns upward, RSI > 50, and volume > 1.5x 24-period average
+# - Short when KAMA turns downward, RSI < 50, and volume > 1.5x 24-period average
+# - KAMA adapts to market noise, reducing whipsaws in ranging markets
+# - Volume confirmation ensures breakouts have conviction
+# - RSI filter avoids extremes and focuses on momentum continuation
+# - Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+# - Works in both bull and bear markets by adapting to volatility regimes
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,48 +22,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Load 1d data once before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate ADX for trend filter (14-period)
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate KAMA (Kaufman Adaptive Moving Average) on 1d
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close_1d, 10))  # 10-period net change
+    volatility = np.sum(np.abs(np.diff(close_1d, 1)), axis=1)  # 10-period sum of absolute changes
+    volatility = np.concatenate([np.full(9, np.nan), volatility])  # align with change
     
-    # Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    up_move[0] = 0
-    down_move[0] = 0
+    # Avoid division by zero
+    er = np.where(volatility != 0, change / volatility, 0)
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Smoothing constants
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # fast=2, slow=30
     
-    # Smoothed values
-    tr_ma = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_dm_ma = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
-    minus_dm_ma = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    # Calculate KAMA
+    kama = np.full_like(close_1d, np.nan)
+    kama[9] = close_1d[9]  # start after 10 periods
+    for i in range(10, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # Directional Indicators
-    plus_di = 100 * plus_dm_ma / tr_ma
-    minus_di = 100 * minus_dm_ma / tr_ma
+    # Calculate RSI (14-period) on 1d
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # DX and ADX
-    dx = np.where((plus_di + minus_di) > 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    avg_gain = np.full_like(close_1d, np.nan)
+    avg_loss = np.full_like(close_1d, np.nan)
     
-    # Volume filter: 20-period average (approximately 20 days)
+    # Initial averages
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
+    
+    # Wilder's smoothing
+    for i in range(14, len(close_1d)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume filter: 24-period average (1 day of 12h bars)
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_ma = vol_series.rolling(window=24, min_periods=24).mean().values
+    
+    # Align KAMA and RSI to 12h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -71,47 +81,38 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical data is NaN
-        if np.isnan(adx[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or np.isnan(vol_ma[i]):
             continue
         
-        # Get previous weekly high/low for breakout levels
-        prev_high = high_1w[i-1]
-        prev_low = low_1w[i-1]
-        
-        # Create arrays for alignment (constant values for the 1w period)
-        high_array = np.full(len(df_1w), prev_high)
-        low_array = np.full(len(df_1w), prev_low)
-        
-        # Align to 1d timeframe
-        high_1d = align_htf_to_ltf(prices, df_1w, high_array)[i]
-        low_1d = align_htf_to_ltf(prices, df_1w, low_array)[i]
+        # Determine KAMA direction (upward/downward)
+        kama_dir = 1 if kama_aligned[i] > kama_aligned[i-1] else -1
         
         if position == 0:
-            # Long: Break above previous weekly high with volume and trend filter
-            if (close[i] > high_1d and 
-                volume[i] > vol_ma[i] * 1.5 and
-                adx[i] > 25):
+            # Long: KAMA turning up, RSI > 50, volume confirmation
+            if (kama_dir == 1 and 
+                rsi_aligned[i] > 50 and
+                volume[i] > vol_ma[i] * 1.5):
                 position = 1
                 signals[i] = position_size
-            # Short: Break below previous weekly low with volume and trend filter
-            elif (close[i] < low_1d and 
-                  volume[i] > vol_ma[i] * 1.5 and
-                  adx[i] > 25):
+            # Short: KAMA turning down, RSI < 50, volume confirmation
+            elif (kama_dir == -1 and 
+                  rsi_aligned[i] < 50 and
+                  volume[i] > vol_ma[i] * 1.5):
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
-            # Exit: Break below previous weekly low (mean reversion in ranging markets)
-            if close[i] < low_1d:
+            # Exit: KAMA turns down or RSI < 40 (momentum fade)
+            if kama_dir == -1 or rsi_aligned[i] < 40:
                 position = 0
                 signals[i] = 0.0
         elif position == -1:
-            # Exit: Break above previous weekly high (mean reversion in ranging markets)
-            if close[i] > high_1d:
+            # Exit: KAMA turns up or RSI > 60 (momentum fade)
+            if kama_dir == 1 or rsi_aligned[i] > 60:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "1d_1w_DonchianBreakout_Volume_ADXFilter"
-timeframe = "1d"
+name = "12h_1d_KAMA_RSI_Volume_Filter"
+timeframe = "12h"
 leverage = 1.0
