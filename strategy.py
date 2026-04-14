@@ -23,16 +23,19 @@ def generate_signals(prices):
     if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate weekly VWAP
-    typical_price_1w = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3.0
-    vwap_1w = (typical_price_1w * df_1w['volume']).cumsum() / df_1w['volume'].cumsum()
-    vwap_1w = vwap_1w.values
+    # Calculate weekly ATR for volatility filter
+    high_low_1w = df_1w['high'] - df_1w['low']
+    high_close_1w = np.abs(df_1w['high'] - df_1w['close'].shift(1))
+    low_close_1w = np.abs(df_1w['low'] - df_1w['close'].shift(1))
+    tr_1w = np.maximum(high_low_1w, np.maximum(high_close_1w, low_close_1w))
+    atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1d Williams %R (14-period)
-    highest_high_14 = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
-    close_1d = df_1d['close'].values
-    williams_r = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
+    # Calculate 1d RSI (14-period) for mean reversion
+    delta = pd.Series(df_1d['close']).diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=14).mean()
+    rs = gain / loss
+    rsi_1d = (100 - (100 / (1 + rs))).values
     
     # Volume filter: 20-period average
     vol_series = pd.Series(volume)
@@ -44,60 +47,60 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any critical data is NaN
-        if np.isnan(vol_ma[i]):
+        if np.isnan(vol_ma[i]) or np.isnan(atr_1w[-1]) if len(atr_1w) > 0 else True:
             continue
         
-        # Get 1d index for current 6h bar (6h = 0.25 * 1d)
-        idx_1d = i // 4
-        if idx_1d < 14:  # Need sufficient 1d data for Williams %R
+        # Get 1d index for current 12h bar (12h = 0.5 * 1d)
+        idx_1d = i // 2
+        if idx_1d < 14:  # Need sufficient 1d data for RSI
             continue
             
-        # Get 1w index for current 6h bar (6h = 1/28 * 1w approximately)
-        idx_1w = i // 28
-        if idx_1w < 14:  # Need sufficient 1w data for VWAP
+        # Get 1w index for current 12h bar (12h = 1/14 * 1w approximately)
+        idx_1w = i // 14
+        if idx_1w < 14:  # Need sufficient 1w data for ATR
             continue
         
         # Previous values to avoid look-ahead
-        williams_prev = williams_r[idx_1d-1]
-        vwap_prev = vwap_1w[idx_1w-1] if idx_1w-1 < len(vwap_1w) else vwap_1w[-1]
+        rsi_prev = rsi_1d[idx_1d-1]
+        atr_prev = atr_1w[idx_1w-1] if idx_1w-1 < len(atr_1w) else atr_1w[-1]
         
-        if np.isnan(williams_prev):
+        if np.isnan(rsi_prev):
             continue
         
         # Create arrays for alignment (constant values for the period)
-        williams_arr = np.full(len(df_1d), williams_prev)
-        vwap_arr = np.full(len(df_1w), vwap_prev)
+        rsi_arr = np.full(len(df_1d), rsi_prev)
+        atr_arr = np.full(len(df_1w), atr_prev)
         
-        # Align to 6h timeframe
-        williams_6h = align_htf_to_ltf(prices, df_1d, williams_arr)[i]
-        vwap_6h = align_htf_to_ltf(prices, df_1w, vwap_arr)[i]
+        # Align to 12h timeframe
+        rsi_12h = align_htf_to_ltf(prices, df_1d, rsi_arr)[i]
+        atr_12h = align_htf_to_ltf(prices, df_1w, atr_arr)[i]
         
         if position == 0:
-            # Long: Williams %R oversold (< -80) + price above weekly VWAP + volume confirmation
-            if (williams_6h < -80 and 
-                close[i] > vwap_6h and 
+            # Long: RSI oversold (< 30) + volatility expansion (current ATR > 1.5 * average ATR) + volume confirmation
+            if (rsi_12h < 30 and 
+                atr_12h > 1.5 * atr_prev and 
                 volume[i] > vol_ma[i] * 1.5):
                 position = 1
                 signals[i] = position_size
-            # Short: Williams %R overbought (> -20) + price below weekly VWAP + volume confirmation
-            elif (williams_6h > -20 and 
-                  close[i] < vwap_6h and 
+            # Short: RSI overbought (> 70) + volatility expansion + volume confirmation
+            elif (rsi_12h > 70 and 
+                  atr_12h > 1.5 * atr_prev and 
                   volume[i] > vol_ma[i] * 1.5):
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
-            # Exit: Williams %R returns to neutral (> -50) or price crosses below VWAP
-            if williams_6h > -50 or close[i] < vwap_6h:
+            # Exit: RSI returns to neutral (> 50) or volatility contraction
+            if rsi_12h > 50 or atr_12h < 0.5 * atr_prev:
                 position = 0
                 signals[i] = 0.0
         elif position == -1:
-            # Exit: Williams %R returns to neutral (< -50) or price crosses above VWAP
-            if williams_6h < -50 or close[i] > vwap_6h:
+            # Exit: RSI returns to neutral (< 50) or volatility contraction
+            if rsi_12h < 50 or atr_12h < 0.5 * atr_prev:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "6h_1d_WilliamsR_1w_VWAP"
-timeframe = "6h"
+name = "12h_1d_RSI_1w_ATR_Volatility"
+timeframe = "12h"
 leverage = 1.0
