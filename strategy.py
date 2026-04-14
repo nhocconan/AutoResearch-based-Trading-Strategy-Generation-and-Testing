@@ -1,3 +1,9 @@
+# 4h_1d_Camarilla_R4S4_Donchian_ADX_Volume_Filter
+# Hypothesis: Price breaking above/below daily Camarilla S4/R4 levels with 4h Donchian confirmation, volume filter, and ADX trend filter
+# Works in bull/bear: Uses volatility-based pivot levels (S4/R4) that adapt to market conditions, combined with trend following
+# Target: 20-50 trades/year per symbol, avoiding overtrading via tight entry conditions
+# Edge: Combines short-term breakout (Donchian) with institutional pivot levels (Camarilla) and trend strength (ADX)
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
