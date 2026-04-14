@@ -15,12 +15,13 @@ def generate_signals(prices):
     
     # Load weekly data (HTF) once before loop
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 12:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
     # Calculate weekly ATR (14-period)
     tr = np.zeros(len(df_1w))
@@ -38,74 +39,55 @@ def generate_signals(prices):
         for i in range(14, len(df_1w)):
             atr_1w[i] = (atr_1w[i-1] * 13 + tr[i]) / 14
     
-    # Calculate weekly ATR percentage (ATR / close)
-    atr_pct_1w = np.full(len(df_1w), np.nan)
-    for i in range(len(df_1w)):
-        if not np.isnan(atr_1w[i]) and close_1w[i] > 0:
-            atr_pct_1w[i] = atr_1w[i] / close_1w[i]
-        else:
-            atr_pct_1w[i] = np.nan
+    # Calculate weekly EMA (50-period) for trend
+    ema_50_1w = np.full(len(df_1w), np.nan)
+    if len(df_1w) >= 50:
+        ema_50_1w[49] = np.mean(close_1w[:50])
+        for i in range(50, len(df_1w)):
+            ema_50_1w[i] = (close_1w[i] * 2 + ema_50_1w[i-1] * 49) / 50
     
-    # Calculate weekly volatility filter (top 30% volatility weeks)
-    vol_threshold_1w = np.full(len(df_1w), np.nan)
-    for i in range(len(df_1w)):
-        if i >= 12:  # Need 12 weeks of history for percentile
-            hist = atr_pct_1w[max(0, i-11):i+1]  # Last 12 weeks including current
-            valid_hist = hist[~np.isnan(hist)]
-            if len(valid_hist) >= 5:
-                vol_threshold_1w[i] = np.percentile(valid_hist, 70)  # Top 30%
-            else:
-                vol_threshold_1w[i] = np.nan
-        else:
-            vol_threshold_1w[i] = np.nan
-    
-    # High volatility week filter
-    high_vol_week = np.full(len(df_1w), False)
-    for i in range(len(df_1w)):
-        if not np.isnan(atr_pct_1w[i]) and not np.isnan(vol_threshold_1w[i]):
-            high_vol_week[i] = atr_pct_1w[i] > vol_threshold_1w[i]
-        else:
-            high_vol_week[i] = False
-    
-    # Align weekly indicators to 6h timeframe
-    high_vol_week_6h = align_htf_to_ltf(prices, df_1w, high_vol_week.astype(float))
-    
-    # Calculate 6-hour RSI (6-period) for mean reversion signals
-    delta = np.diff(close, prepend=close[0])
+    # Calculate weekly RSI (14-period) for momentum
+    delta = np.diff(close_1w, prepend=close_1w[0])
     gain = np.where(delta > 0, delta, 0.0)
     loss = np.where(delta < 0, -delta, 0.0)
     
-    avg_gain = np.full(n, np.nan)
-    avg_loss = np.full(n, np.nan)
-    if n >= 6:
-        avg_gain[5] = np.mean(gain[:6])
-        avg_loss[5] = np.mean(loss[:6])
-        for i in range(6, n):
-            avg_gain[i] = (avg_gain[i-1] * 5 + gain[i]) / 6
-            avg_loss[i] = (avg_loss[i-1] * 5 + loss[i]) / 6
+    avg_gain = np.full(len(df_1w), np.nan)
+    avg_loss = np.full(len(df_1w), np.nan)
+    if len(df_1w) >= 14:
+        avg_gain[13] = np.mean(gain[:14])
+        avg_loss[13] = np.mean(loss[:14])
+        for i in range(14, len(df_1w)):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    rsi_6h = np.full(n, np.nan)
-    for i in range(n):
+    rsi_1w = np.full(len(df_1w), np.nan)
+    for i in range(len(df_1w)):
         if not np.isnan(avg_loss[i]) and avg_loss[i] != 0:
             rs = avg_gain[i] / avg_loss[i]
-            rsi_6h[i] = 100 - (100 / (1 + rs))
+            rsi_1w[i] = 100 - (100 / (1 + rs))
         elif not np.isnan(avg_gain[i]) and avg_loss[i] == 0:
-            rsi_6h[i] = 100.0
+            rsi_1w[i] = 100.0
     
-    # Calculate 6-hour Bollinger Bands (20-period, 2 std)
-    sma_20 = np.full(n, np.nan)
-    std_20 = np.full(n, np.nan)
+    # Calculate weekly volume average (20-period) for volume filter
+    vol_ma_20_1w = np.full(len(df_1w), np.nan)
+    if len(df_1w) >= 20:
+        vol_ma_20_1w[19] = np.mean(volume_1w[:20])
+        for i in range(20, len(df_1w)):
+            vol_ma_20_1w[i] = (volume_1w[i] + vol_ma_20_1w[i-1] * 19) / 20
+    
+    # Align indicators to 12h timeframe
+    atr_12h = align_htf_to_ltf(prices, df_1w, atr_1w)
+    ema_50_12h = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    rsi_12h = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    vol_ma_20_12h = align_htf_to_ltf(prices, df_1w, vol_ma_20_1w)
+    
+    # Calculate 12-hour Donchian channels (20-period)
+    donch_high = np.full(n, np.nan)
+    donch_low = np.full(n, np.nan)
     if n >= 20:
         for i in range(19, n):
-            sma_20[i] = np.mean(clone if 'clone' in locals() else close[i-19:i+1])
-            std_20[i] = np.std(close[i-19:i+1])
-    
-    upper_band = np.full(n, np.nan)
-    lower_band = np.full(n, np.nan)
-    for i in range(n):
-        if not np.isnan(sma_20[i]) and not np.isnan(std_20[i]):
-            upper_band[i] = sma_20[i] + 2 * std_20[i]
-            lower_band[i] = sma_20[i] - 2 * std_20[i]
+            donch_high[i] = np.max(high[i-19:i+1])
+            donch_low[i] = np.min(low[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0
@@ -113,39 +95,46 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical data is NaN
-        if (np.isnan(rsi_6h[i]) or
-            np.isnan(upper_band[i]) or
-            np.isnan(lower_band[i]) or
-            np.isnan(high_vol_week_6h[i])):
+        if (np.isnan(atr_12h[i]) or
+            np.isnan(ema_50_12h[i]) or
+            np.isnan(rsi_12h[i]) or
+            np.isnan(vol_ma_20_12h[i]) or
+            np.isnan(donch_high[i]) or
+            np.isnan(donch_low[i])):
             signals[i] = 0.0
             continue
         
-        # Only trade during high volatility weeks (top 30% volatility)
-        if high_vol_week_6h[i] < 0.5:
+        # Skip low volatility periods (ATR < 1% of price)
+        if atr_12h[i] / close[i] < 0.01:
+            signals[i] = 0.0
+            continue
+        
+        # Skip low volume periods (volume < 20-period MA)
+        if volume[i] < vol_ma_20_12h[i]:
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: RSI < 30 (oversold) AND price touches or goes below lower Bollinger Band
-            if rsi_6h[i] < 30 and close[i] <= lower_band[i]:
+            # Long: Price breaks above 12h Donchian high AND price > weekly EMA50 AND RSI < 70
+            if close[i] > donch_high[i] and close[i] > ema_50_12h[i] and rsi_12h[i] < 70:
                 position = 1
                 signals[i] = position_size
-            # Short: RSI > 70 (overbought) AND price touches or goes above upper Bollinger Band
-            elif rsi_6h[i] > 70 and close[i] >= upper_band[i]:
+            # Short: Price breaks below 12h Donchian low AND price < weekly EMA50 AND RSI > 30
+            elif close[i] < donch_low[i] and close[i] < ema_50_12h[i] and rsi_12h[i] > 30:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: RSI > 50 (mean reversion complete) OR price reaches middle (SMA)
-            if rsi_6h[i] > 50 or close[i] >= sma_20[i]:
+            # Exit: Price falls back below 12h Donchian low OR below weekly EMA50 OR RSI > 70
+            if close[i] < donch_low[i] or close[i] < ema_50_12h[i] or rsi_12h[i] > 70:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: RSI < 50 (mean reversion complete) OR price reaches middle (SMA)
-            if rsi_6h[i] < 50 or close[i] <= sma_20[i]:
+            # Exit: Price rises back above 12h Donchian high OR above weekly EMA50 OR RSI < 30
+            if close[i] > donch_high[i] or close[i] > ema_50_12h[i] or rsi_12h[i] < 30:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -153,6 +142,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_HighVolWeek_BollingerRSI_MeanReversion"
-timeframe = "6h"
+name = "12h_1w_EMA50_RSI_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
