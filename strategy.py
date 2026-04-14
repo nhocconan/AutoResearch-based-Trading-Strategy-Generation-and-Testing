@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d trend filter and volume confirmation
-# Targets: 25-40 trades/year by requiring price break above/below Donchian(20) with trend alignment
-# Logic: Long when price breaks above Donchian high(20), price > 1d EMA50, volume > 1.5x average
-#        Short when price breaks below Donchian low(20), price < 1d EMA50, volume > 1.5x average
-#        Exit on opposite Donchian break or trend reversal
+# Hypothesis: 12h Williams Alligator with 1w trend filter and volume confirmation
+# Targets: 15-25 trades/year by requiring alignment of Alligator jaws/teeth/lips with 1w EMA50
+# Logic: Long when lips > teeth > jaws (bullish alignment) and price > 1w EMA50 and volume > 1.3x average
+#        Short when lips < teeth < jaws (bearish alignment) and price < 1w EMA50 and volume > 1.3x average
+#        Exit when alignment breaks or price crosses 1w EMA50
 # Position size: 0.25 to manage drawdown
 
 def generate_signals(prices):
@@ -20,18 +20,22 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data once
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load weekly data once
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Daily EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Weekly EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Donchian channels (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Williams Alligator (13,8,5 SMAs with future shift)
+    # Jaws: 13-period SMA shifted 8 bars forward
+    # Teeth: 8-period SMA shifted 5 bars forward  
+    # Lips: 5-period SMA shifted 3 bars forward
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8)
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5)
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3)
     
     # Volume moving average for confirmation
     vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -40,35 +44,46 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25
     
-    for i in range(20, n):
-        # Get aligned daily EMA50
-        ema_50_i = align_htf_to_ltf(prices, df_1d, ema_50_1d)[i]
+    for i in range(13, n):  # Start after Alligator warmup
+        # Get aligned weekly EMA50
+        ema_50_i = align_htf_to_ltf(prices, df_1w, ema_50_1w)[i]
         
-        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(ema_50_i) or np.isnan(vol_ma[i]):
+        # Get current Alligator values (skip if any NaN)
+        jaw_i = jaw[i]
+        teeth_i = teeth[i]
+        lips_i = lips[i]
+        
+        if (np.isnan(ema_50_i) or np.isnan(jaw_i) or np.isnan(teeth_i) or 
+            np.isnan(lips_i) or np.isnan(vol_ma[i])):
             continue
         
-        # Volume confirmation (1.5x average)
-        volume_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation (1.3x average)
+        volume_confirm = volume[i] > 1.3 * vol_ma[i]
         
-        # Long: Price breaks above Donchian high, uptrend, volume confirmation
-        if position == 0 and close[i] > donch_high[i] and close[i] > ema_50_i and volume_confirm:
+        # Bullish alignment: Lips > Teeth > Jaws
+        bullish_align = lips_i > teeth_i > jaw_i
+        # Bearish alignment: Lips < Teeth < Jaws
+        bearish_align = lips_i < teeth_i < jaw_i
+        
+        # Long: Bullish alignment, uptrend, volume confirmation
+        if position == 0 and bullish_align and close[i] > ema_50_i and volume_confirm:
             position = 1
             signals[i] = position_size
-        # Short: Price breaks below Donchian low, downtrend, volume confirmation
-        elif position == 0 and close[i] < donch_low[i] and close[i] < ema_50_i and volume_confirm:
+        # Short: Bearish alignment, downtrend, volume confirmation
+        elif position == 0 and bearish_align and close[i] < ema_50_i and volume_confirm:
             position = -1
             signals[i] = -position_size
-        # Exit: Opposite Donchian break or trend reversal
+        # Exit: Alignment breaks or price crosses weekly EMA50
         elif position != 0:
-            if position == 1 and (close[i] < donch_low[i] or close[i] < ema_50_i):
+            if position == 1 and (not bullish_align or close[i] < ema_50_i):
                 position = 0
                 signals[i] = 0.0
-            elif position == -1 and (close[i] > donch_high[i] or close[i] > ema_50_i):
+            elif position == -1 and (not bearish_align or close[i] > ema_50_i):
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian_TrendFilter_Volume"
-timeframe = "4h"
+name = "12h_WilliamsAlligator_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
