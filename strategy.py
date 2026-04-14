@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data once
+    # Load daily data once for 1d timeframe
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -115,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_1w_PivotBreakout_EMA21_Trend_Volume"
-timeframe = "4h"
+name = "1d_1w_PivotBreakout_EMA21_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
