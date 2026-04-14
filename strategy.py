@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with daily trend filter and volume confirmation
-# Donchian breakouts capture strong momentum moves, while daily EMA trend filter ensures
-# we trade in the direction of the higher timeframe trend. Volume confirmation avoids
-# false breakouts. Works in both bull and bear markets by using daily EMA to determine
-# trend direction (long only when above daily EMA, short only when below).
-# Target: 75-200 total trades over 4 years (19-50/year)
+# Hypothesis: 6h Bollinger Band squeeze breakout with daily volume confirmation and trend filter
+# Bollinger Band squeeze indicates low volatility and impending breakout.
+# Breakout direction determined by daily EMA trend filter to avoid false breakouts.
+# Volume confirmation ensures institutional participation.
+# Works in bull/bear by using daily EMA trend (long above EMA, short below EMA).
+# Target: 50-150 total trades over 4 years (12-37/year)
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,36 +20,46 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
+    # Get daily data for trend filter and volume average
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
     # Calculate daily EMA(50) for trend filter
     close_1d_series = pd.Series(close_1d)
     ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Donchian channels (20-period) on 4h data
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Bollinger Bands (20, 2) on 6h
+    close_series = pd.Series(close)
+    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_series.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
     
-    # Volume confirmation: volume > 1.5x average volume (20-period)
-    vol_series = pd.Series(volume)
-    avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
+    # Bollinger Band width for squeeze detection
+    bb_width = (bb_upper - bb_lower) / bb_middle
+    # Squeeze: BB width below 20-period average width
+    bb_width_series = pd.Series(bb_width)
+    bb_width_avg = bb_width_series.rolling(window=20, min_periods=20).mean().values
+    squeeze = bb_width < bb_width_avg
+    
+    # Daily volume confirmation: volume > 1.5x average daily volume (20-period)
+    vol_1d_series = pd.Series(volume_1d)
+    avg_vol_1d = vol_1d_series.rolling(window=20, min_periods=20).mean().shift(1).values
+    avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 20  # for Donchian channels
+    start = 40  # for BB and averages
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(avg_vol[i])):
+        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(avg_vol_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -57,28 +67,34 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long: price breaks above Donchian high with volume filter AND above daily EMA50
-            if (price > donchian_high[i] and price > ema_50_1d_aligned[i] and 
-                vol > 1.5 * avg_vol[i]):
-                position = 1
-                signals[i] = position_size
-            # Short: price breaks below Donchian low with volume filter AND below daily EMA50
-            elif (price < donchian_low[i] and price < ema_50_1d_aligned[i] and 
-                  vol > 1.5 * avg_vol[i]):
-                position = -1
-                signals[i] = -position_size
+            # Look for breakout after squeeze
+            if squeeze[i]:
+                # Long: break above upper band with volume filter AND above daily EMA50
+                if (price > bb_upper[i] and 
+                    vol > 1.5 * avg_vol_1d_aligned[i] and 
+                    price > ema_50_1d_aligned[i]):
+                    position = 1
+                    signals[i] = position_size
+                # Short: break below lower band with volume filter AND below daily EMA50
+                elif (price < bb_lower[i] and 
+                      vol > 1.5 * avg_vol_1d_aligned[i] and 
+                      price < ema_50_1d_aligned[i]):
+                    position = -1
+                    signals[i] = -position_size
+                else:
+                    signals[i] = 0.0
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below Donchian low OR below daily EMA50
-            if price < donchian_low[i] or price < ema_50_1d_aligned[i]:
+            # Exit long: price breaks below middle band OR below daily EMA50
+            if price < bb_middle[i] or price < ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above Donchian high OR above daily EMA50
-            if price > donchian_high[i] or price > ema_50_1d_aligned[i]:
+            # Exit short: price breaks above middle band OR above daily EMA50
+            if price > bb_middle[i] or price > ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -86,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_DailyEMA_Volume"
-timeframe = "4h"
+name = "6h_Bollinger_Squeeze_Breakout_EMA_Volume"
+timeframe = "6h"
 leverage = 1.0
