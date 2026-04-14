@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_1d_TRIX_Trend_Follower_v1
-Hypothesis: TRIX (15) on 1d timeframe filters trend direction on 4h. Long when TRIX > 0 and rising, short when TRIX < 0 and falling.
-Volume confirmation: current 4h volume > 1.5x 20-period average. Entry only in strong trend (ADX > 25 on 1d).
-Exit when TRIX crosses zero or volume drops below average.
-Designed to capture medium-term trends in both bull and bear markets while avoiding whipsaws in ranging conditions.
+4h_1d_RangeBreakout_Volume_Trend_v2
+Hypothesis: On 4h timeframe, use 1d range breakout with volume confirmation and ADX trend filter.
+Breakout above 1d high or below 1d low with volume > 1.5x 20-period average and ADX > 20 indicates strong trend.
+Go long on breakout above 1d high, short on breakout below 1d low.
+Exit when price crosses 1d midpoint or ADX falls below 15 indicating trend exhaustion.
+Designed to capture strong trends in both bull and bear markets while avoiding false breakouts in low-volume, low-volatility environments.
 """
 
 import numpy as np
@@ -21,39 +22,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for TRIX and ADX
+    # Load 1d data for price range and midpoint
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate TRIX on 1d close (15-period EMA of EMA of EMA, then percent change)
-    def ema(array, period):
-        result = np.full_like(array, np.nan, dtype=float)
-        if len(array) < period:
-            return result
-        alpha = 2 / (period + 1)
-        result[period-1] = np.nanmean(array[:period])
-        for i in range(period, len(array)):
-            if np.isnan(array[i]):
-                result[i] = result[i-1]
-            else:
-                result[i] = alpha * array[i] + (1 - alpha) * result[i-1]
-        return result
+    # Calculate 1d midpoint
+    midpoint_1d = (high_1d + low_1d) / 2
     
-    ema1 = ema(close_1d, 15)
-    ema2 = ema(ema1, 15)
-    ema3 = ema(ema2, 15)
-    
-    trix = np.full_like(close_1d, np.nan)
-    for i in range(1, len(ema3)):
-        if np.isnan(ema3[i]) or np.isnan(ema3[i-1]) or ema3[i-1] == 0:
-            trix[i] = np.nan
-        else:
-            trix[i] = (ema3[i] - ema3[i-1]) / ema3[i-1] * 100
+    # Align 1d high, low, and midpoint to 4h timeframe
+    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
+    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
+    midpoint_1d_aligned = align_htf_to_ltf(prices, df_1d, midpoint_1d)
     
     # Calculate ADX on 1d data
     if len(high_1d) < 14:
@@ -74,7 +58,7 @@ def generate_signals(prices):
                    abs(high_1d[i] - high_1d[i-1]), 
                    abs(low_1d[i] - low_1d[i-1]))
     
-    # Wilder's smoothing
+    # Smooth TR, +DM, -DM with Wilder's smoothing (alpha = 1/14)
     atr = np.zeros_like(high_1d)
     plus_di = np.zeros_like(high_1d)
     minus_di = np.zeros_like(high_1d)
@@ -82,6 +66,7 @@ def generate_signals(prices):
     adx = np.full_like(high_1d, np.nan)
     
     if len(high_1d) >= 14:
+        # Initial values
         atr[13] = np.nansum(tr[1:14])
         plus_dm_sum = np.nansum(plus_dm[1:14])
         minus_dm_sum = np.nansum(minus_dm[1:14])
@@ -102,6 +87,7 @@ def generate_signals(prices):
                 if plus_di[i] + minus_di[i] > 0:
                     dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
         
+        # Calculate ADX as smoothed DX
         if len(high_1d) >= 27:
             adx[26] = np.nanmean(dx[14:27])
             for i in range(27, len(high_1d)):
@@ -110,11 +96,10 @@ def generate_signals(prices):
                 else:
                     adx[i] = (adx[i-1] * 13 + dx[i]) / 14
     
-    # Align TRIX and ADX to 4h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
+    # Align ADX to 4h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Volume moving average (20-period)
+    # Calculate 20-period volume moving average on 4h data
     vol_ma_20 = np.full_like(volume, np.nan)
     for i in range(19, len(volume)):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
@@ -123,42 +108,47 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25  # 25% position size
     
-    for i in range(20, n):
+    for i in range(20, n):  # Start after enough data for alignment
         # Skip if any critical data is NaN
-        if (np.isnan(trix_aligned[i]) or np.isnan(adx_aligned[i]) or
+        if (np.isnan(high_1d_aligned[i]) or np.isnan(low_1d_aligned[i]) or
+            np.isnan(midpoint_1d_aligned[i]) or np.isnan(adx_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
+        # Volume ratio: current 4h volume vs 20-period average
+        if vol_ma_20[i] <= 0:
+            volume_ratio = 0
+        else:
+            volume_ratio = volume[i] / vol_ma_20[i]
+        
         if position == 0:
-            # Long: TRIX > 0 and rising (current > previous), volume confirmation, strong trend
-            if (trix_aligned[i] > 0 and 
-                trix_aligned[i] > trix_aligned[i-1] and
-                volume[i] > 1.5 * vol_ma_20[i] and
-                adx_aligned[i] > 25):
+            # Look for long entries: breakout above 1d high with volume increase in trend
+            if (close[i] > high_1d_aligned[i] and 
+                volume_ratio > 1.5 and
+                adx_aligned[i] > 20):
                 position = 1
                 signals[i] = position_size
-            # Short: TRIX < 0 and falling (current < previous), volume confirmation, strong trend
-            elif (trix_aligned[i] < 0 and 
-                  trix_aligned[i] < trix_aligned[i-1] and
-                  volume[i] > 1.5 * vol_ma_20[i] and
-                  adx_aligned[i] > 25):
+            # Look for short entries: breakdown below 1d low with volume increase in trend
+            elif (close[i] < low_1d_aligned[i] and 
+                  volume_ratio > 1.5 and
+                  adx_aligned[i] > 20):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: TRIX crosses below zero or volume drops below average
-            if (trix_aligned[i] <= 0 or
-                volume[i] <= vol_ma_20[i]):
+            # Exit long: price crosses below 1d midpoint or ADX falls indicating trend exhaustion
+            if (close[i] < midpoint_1d_aligned[i] or
+                adx_aligned[i] < 15):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: TRIX crosses above zero or volume drops below average
-            if (trix_aligned[i] >= 0 or
-                volume[i] <= vol_ma_20[i]):
+            # Exit short: price crosses above 1d midpoint or ADX falls indicating trend exhaustion
+            if (close[i] > midpoint_1d_aligned[i] or
+                adx_aligned[i] < 15):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -166,6 +156,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_TRIX_Trend_Follower_v1"
+name = "4h_1d_RangeBreakout_Volume_Trend_v2"
 timeframe = "4h"
 leverage = 1.0
