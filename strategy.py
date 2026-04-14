@@ -13,19 +13,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily donchian channel (20-period)
+    # Load daily data once
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
+    # Calculate Donchian channels (20-period) on daily data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    
-    # Donchian upper and lower bands (20)
     upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Calculate daily ADX (14-period)
+    # Calculate ADX (14-period) on daily data
     if len(df_1d) < 30:
         return np.zeros(n)
     
