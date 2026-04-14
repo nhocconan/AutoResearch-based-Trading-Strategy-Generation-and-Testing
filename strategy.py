@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1-day Donchian channel breakout with volume confirmation and ADX trend filter.
-# Long when price breaks above 1-day Donchian upper band AND volume > 1.5x 20-period average AND ADX > 25.
-# Short when price breaks below 1-day Donchian lower band AND volume > 1.5x 20-period average AND ADX > 25.
-# Exit when price returns to Donchian midpoint or ADX drops below 20.
-# Donchian channels provide clear support/resistance levels; volume confirms breakout strength.
-# ADX filter ensures trading only in trending conditions, avoiding false breakouts in ranges.
-# Target: 20-30 trades/year per symbol (80-120 total over 4 years) to minimize fee drag.
+# Hypothesis: 12h strategy using 1-day Donchian channel breakout with volume confirmation
+# and ADX trend filter. Long when price breaks above Donchian(20) high AND volume > 1.5x
+# 20-period average volume AND ADX > 25. Short when price breaks below Donchian(20) low
+# with same conditions. Exit when price returns to Donchian middle or ADX drops below 20.
+# This captures strong trends with volume confirmation, reducing false breakouts.
+# Target: 20-40 trades/year per symbol (80-160 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,7 +22,7 @@ def generate_signals(prices):
     
     # Load 1d data ONCE for Donchian channels, volume average, and ADX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:  # Need enough for Donchian(20), volume average(20), and ADX(14)
+    if len(df_1d) < 34:  # Need enough for Donchian(20) and ADX(14)
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -34,7 +33,7 @@ def generate_signals(prices):
     # Calculate Donchian channels (20-period)
     donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2.0
+    donchian_middle = (donchian_high + donchian_low) / 2.0
     
     # Calculate average volume (20-period)
     avg_volume = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
@@ -70,7 +69,7 @@ def generate_signals(prices):
     # Align indicators to 12h timeframe
     donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid)
+    donchian_middle_aligned = align_htf_to_ltf(prices, df_1d, donchian_middle)
     avg_volume_aligned = align_htf_to_ltf(prices, df_1d, avg_volume)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
@@ -79,7 +78,7 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(40, 20)  # Need Donchian(20), volume average(20), and ADX(14)
+    start = max(34, 20)  # Need Donchian(20) and ADX(14) periods
     
     for i in range(start, n):
         # Skip if any critical data is NaN
@@ -90,8 +89,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume spike condition: current volume > 1.5x average volume
-        volume_spike = volume[i] > 1.5 * avg_volume_aligned[i]
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirm = volume[i] > 1.5 * avg_volume_aligned[i]
         
         # Trend filter: ADX > 25 indicates strong trend
         strong_trend = adx_aligned[i] > 25
@@ -101,31 +100,31 @@ def generate_signals(prices):
         
         if position == 0:
             # Look for breakout entries in strong trend with volume confirmation
-            # Long: price breaks above Donchian upper band AND volume spike AND strong trend
+            # Long: price breaks above Donchian high AND volume confirmation AND strong trend
             if (close[i] > donchian_high_aligned[i] and 
-                volume_spike and
+                volume_confirm and
                 strong_trend):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below Donchian lower band AND volume spike AND strong trend
+            # Short: price breaks below Donchian low AND volume confirmation AND strong trend
             elif (close[i] < donchian_low_aligned[i] and 
-                  volume_spike and
+                  volume_confirm and
                   strong_trend):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to Donchian midpoint or trend weakens
-            if (close[i] <= donchian_mid_aligned[i] or 
+            # Exit long: price returns to Donchian middle or trend weakens
+            if (close[i] <= donchian_middle_aligned[i] or 
                 weak_trend):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to Donchian midpoint or trend weakens
-            if (close[i] >= donchian_mid_aligned[i] or 
+            # Exit short: price returns to Donchian middle or trend weakens
+            if (close[i] >= donchian_middle_aligned[i] or 
                 weak_trend):
                 position = 0
                 signals[i] = 0.0
