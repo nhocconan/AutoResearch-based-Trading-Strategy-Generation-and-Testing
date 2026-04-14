@@ -15,12 +15,13 @@ def generate_signals(prices):
     
     # Load daily data (HTF) once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
     # Calculate daily ATR (14-period)
     tr = np.zeros(len(df_1d))
@@ -39,14 +40,6 @@ def generate_signals(prices):
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
     atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # Calculate 12-hour Donchian channels (20-period)
-    donch_high = np.full(n, np.nan)
-    donch_low = np.full(n, np.nan)
-    if n >= 20:
-        for i in range(19, n):
-            donch_high[i] = np.max(high[i-19:i+1])
-            donch_low[i] = np.min(low[i-19:i+1])
     
     # Calculate daily ADX (14-period)
     plus_dm = np.zeros(len(df_1d))
@@ -90,14 +83,42 @@ def generate_signals(prices):
     
     adx_12h = align_htf_to_ltf(prices, df_1d, adx_14)
     
-    # Calculate daily volatility filter (ATR > 1.5% of price)
-    vol_filter_1d = np.zeros(len(df_1d))
+    # Calculate daily volume ratio (current volume / 20-day average)
+    vol_ma_20 = np.full(len(df_1d), np.nan)
     for i in range(len(df_1d)):
-        if not np.isnan(atr_1d[i]) and close_1d[i] > 0:
-            vol_filter_1d[i] = atr_1d[i] / close_1d[i] > 0.015
-        else:
-            vol_filter_1d[i] = False
-    vol_filter_12h = align_htf_to_ltf(prices, df_1d, vol_filter_1d.astype(float))
+        if i >= 19:
+            vol_ma_20[i] = np.mean(volume_1d[i-19:i+1])
+    
+    vol_ratio = np.full(len(df_1d), np.nan)
+    for i in range(len(df_1d)):
+        if not np.isnan(vol_ma_20[i]) and vol_ma_20[i] > 0:
+            vol_ratio[i] = volume_1d[i] / vol_ma_20[i]
+    
+    vol_ratio_12h = align_htf_to_ltf(prices, df_1d, vol_ratio)
+    
+    # Calculate 4-hour Donchian channels (20-period) for entry timing
+    donch_high_4h = np.full(n, np.nan)
+    donch_low_4h = np.full(n, np.nan)
+    if n >= 20:
+        for i in range(19, n):
+            donch_high_4h[i] = np.max(high[i-19:i+1])
+            donch_low_4h[i] = np.min(low[i-19:i+1])
+    
+    # Calculate 4-hour ATR (14-period) for stop loss
+    tr_4h = np.zeros(n)
+    tr_4h[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr_4h[i] = max(
+            high[i] - low[i],
+            abs(high[i] - close[i-1]),
+            abs(low[i] - close[i-1])
+        )
+    
+    atr_4h = np.full(n, np.nan)
+    if n >= 14:
+        atr_4h[13] = np.mean(tr_4h[:14])
+        for i in range(14, n):
+            atr_4h[i] = (atr_4h[i-1] * 13 + tr_4h[i]) / 14
     
     signals = np.zeros(n)
     position = 0
@@ -106,19 +127,26 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if any critical data is NaN
         if (np.isnan(atr_12h[i]) or
-            np.isnan(donch_high[i]) or
-            np.isnan(donch_low[i]) or
-            np.isnan(adx_12h[i])):
+            np.isnan(adx_12h[i]) or
+            np.isnan(vol_ratio_12h[i]) or
+            np.isnan(donch_high_4h[i]) or
+            np.isnan(donch_low_4h[i]) or
+            np.isnan(atr_4h[i])):
             signals[i] = 0.0
             continue
         
         # Skip low volatility periods (ATR < 1.5% of price)
-        if vol_filter_12h[i] < 0.5:
+        if atr_12h[i] / close[i] < 0.015:
             signals[i] = 0.0
             continue
         
         # Skip weak trend (ADX < 25)
         if adx_12h[i] < 25:
+            signals[i] = 0.0
+            continue
+        
+        # Skip low volume (volume ratio < 1.5)
+        if vol_ratio_12h[i] < 1.5:
             signals[i] = 0.0
             continue
         
@@ -137,26 +165,26 @@ def generate_signals(prices):
         s3_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i]
         
         if position == 0:
-            # Long: Price breaks above 12h Donchian high AND above S3 AND +DI > -DI (bullish bias)
-            if close[i] > donch_high[i] and close[i] > s3_12h and plus_di_14[i-1] > minus_di_14[i-1]:
+            # Long: Price breaks above 4h Donchian high AND above S3 AND volume confirmation
+            if close[i] > donch_high_4h[i] and close[i] > s3_12h and vol_ratio_12h[i] > 1.5:
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below 12h Donchian low AND below R3 AND -DI > +DI (bearish bias)
-            elif close[i] < donch_low[i] and close[i] < r3_12h and minus_di_14[i-1] > plus_di_14[i-1]:
+            # Short: Price breaks below 4h Donchian low AND below R3 AND volume confirmation
+            elif close[i] < donch_low_4h[i] and close[i] < r3_12h and vol_ratio_12h[i] > 1.5:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below 12h Donchian low OR below S3 OR ADX drops below 20
-            if close[i] < donch_low[i] or close[i] < s3_12h or adx_12h[i] < 20:
+            # Exit: Price falls back below 4h Donchian low OR below S3 OR ATR-based stop loss
+            if close[i] < donch_low_4h[i] or close[i] < s3_12h or close[i] < (signals[i-1] * close[i-1] - 2.0 * atr_4h[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above 12h Donchian high OR above R3 OR ADX drops below 20
-            if close[i] > donch_high[i] or close[i] > r3_12h or adx_12h[i] < 20:
+            # Exit: Price rises back above 4h Donchian high OR above R3 OR ATR-based stop loss
+            if close[i] > donch_high_4h[i] or close[i] > r3_12h or close[i] > (signals[i-1] * close[i-1] + 2.0 * atr_4h[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -164,6 +192,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_R3S3_Breakout_Donchian_ADX_VolFilter"
+name = "12h_1d_Camarilla_R3S3_Breakout_4hDonchian_VolumeFilter"
 timeframe = "12h"
 leverage = 1.0
