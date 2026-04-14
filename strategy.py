@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d ADX trend filter and 1w Donchian breakout with volume confirmation.
-# Long when price breaks above weekly Donchian upper channel AND daily volume > 1.3x 20-day average AND daily ADX > 20.
-# Short when price breaks below weekly Donchian lower channel AND daily volume > 1.3x 20-day average AND daily ADX > 20.
-# Exit when price crosses the weekly Donchian midpoint OR daily ADX drops below 15.
-# Weekly Donchian provides strong trend structure, daily volume confirms participation, daily ADX ensures trending conditions.
-# Target: 20-50 trades/year per symbol (80-200 total over 4 years) to minimize fee drag while capturing major trends.
+# Hypothesis: 4h strategy using 1d Williams %R mean reversion with Bollinger Band squeeze filter.
+# Long when Williams %R < -80 (oversold) AND price < Bollinger lower band AND Bollinger width < 20th percentile (squeeze).
+# Short when Williams %R > -20 (overbought) AND price > Bollinger upper band AND Bollinger width < 20th percentile (squeeze).
+# Exit when Williams %R crosses -50 (mean reversion complete) OR Bollinger width expands above 50th percentile.
+# Williams %R identifies extremes, Bollinger squeeze filters for low volatility breakouts, mean reversion captures snapbacks.
+# Target: 30-60 trades/year per symbol (120-240 total over 4 years) to balance opportunity with fee control.
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,29 +18,8 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Load weekly data ONCE for Donchian channels
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 30:
-        return np.zeros(n)
-    
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly = df_weekly['close'].values
-    
-    # Calculate weekly Donchian channels (20-period)
-    lookback = 20
-    donchian_upper = np.full(len(high_weekly), np.nan)
-    donchian_lower = np.full(len(low_weekly), np.nan)
-    donchian_mid = np.full(len(close_weekly), np.nan)
-    
-    for i in range(lookback - 1, len(high_weekly)):
-        donchian_upper[i] = np.max(high_weekly[i - lookback + 1:i + 1])
-        donchian_lower[i] = np.min(low_weekly[i - lookback + 1:i + 1])
-        donchian_mid[i] = (donchian_upper[i] + donchian_lower[i]) / 2.0
-    
-    # Load daily data ONCE for ADX and volume
+    # Load daily data ONCE for Williams %R and Bollinger Bands
     df_daily = get_htf_data(prices, '1d')
     if len(df_daily) < 30:
         return np.zeros(n)
@@ -48,114 +27,101 @@ def generate_signals(prices):
     high_daily = df_daily['high'].values
     low_daily = df_daily['low'].values
     close_daily = df_daily['close'].values
-    volume_daily = df_daily['volume'].values
     
-    # Calculate daily ADX (14-period)
-    # True Range
-    tr1 = high_daily[1:] - low_daily[1:]
-    tr2 = np.abs(high_daily[1:] - close_daily[:-1])
-    tr3 = np.abs(low_daily[1:] - close_daily[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate Williams %R (14-period)
+    lookback_wr = 14
+    highest_high = np.full_like(high_daily, np.nan)
+    lowest_low = np.full_like(low_daily, np.nan)
     
-    # Directional Movement
-    dm_plus = np.where((high_daily[1:] - high_daily[:-1]) > (low_daily[:-1] - low_daily[1:]), 
-                       np.maximum(high_daily[1:] - high_daily[:-1], 0), 0)
-    dm_minus = np.where((low_daily[:-1] - low_daily[1:]) > (high_daily[1:] - high_daily[:-1]), 
-                        np.maximum(low_daily[:-1] - low_daily[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    for i in range(lookback_wr - 1, len(high_daily)):
+        highest_high[i] = np.max(high_daily[i - lookback_wr + 1:i + 1])
+        lowest_low[i] = np.min(low_daily[i - lookback_wr + 1:i + 1])
     
-    # Wilder's smoothing
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value: simple average (skip first element for DM)
-        result[period-1] = np.nanmean(data[1:period])  # Skip first element which is 0 for DM
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    williams_r = np.full_like(close_daily, np.nan)
+    for i in range(lookback_wr - 1, len(close_daily)):
+        if highest_high[i] - lowest_low[i] != 0:
+            williams_r[i] = (highest_high[i] - close_daily[i]) / (highest_high[i] - lowest_low[i]) * -100
+        else:
+            williams_r[i] = -50  # neutral when no range
     
-    tr_14 = wilders_smoothing(tr, 14)
-    dm_plus_14 = wilders_smoothing(dm_plus, 14)
-    dm_minus_14 = wilders_smoothing(dm_minus, 14)
+    # Calculate Bollinger Bands (20-period, 2 std)
+    lookback_bb = 20
+    std_dev = 2
+    sma = np.full_like(close_daily, np.nan)
+    bb_upper = np.full_like(close_daily, np.nan)
+    bb_lower = np.full_like(close_daily, np.nan)
+    bb_width = np.full_like(close_daily, np.nan)
     
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
+    for i in range(lookback_bb - 1, len(close_daily)):
+        sma[i] = np.mean(close_daily[i - lookback_bb + 1:i + 1])
+        std = np.std(close_daily[i - lookback_bb + 1:i + 1])
+        bb_upper[i] = sma[i] + std * std_dev
+        bb_lower[i] = sma[i] - std * std_dev
+        if sma[i] != 0:
+            bb_width[i] = (bb_upper[i] - bb_lower[i]) / sma[i] * 100  # percentage width
+        else:
+            bb_width[i] = 0
     
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = np.full_like(dx, np.nan)
-    # First ADX: simple average of first 14 DX values
-    valid_dx = dx[~np.isnan(dx)]
-    if len(valid_dx) >= 14:
-        adx[13] = np.mean(valid_dx[:14])
-        for i in range(14, len(dx)):
-            if not np.isnan(dx[i]):
-                adx[i] = (adx[i-1] * 13 + dx[i]) / 14
-    
-    # Calculate 20-day average volume
-    vol_ma_20 = np.full_like(volume_daily, np.nan)
-    for i in range(19, len(volume_daily)):
-        vol_ma_20[i] = np.mean(volume_daily[i-19:i+1])
+    # Calculate Bollinger width percentiles for squeeze filter
+    # We'll calculate 20th and 50th percentiles dynamically
+    bb_width_valid = bb_width[~np.isnan(bb_width)]
+    if len(bb_width_valid) >= 20:
+        bb_width_20th = np.percentile(bb_width_valid, 20)
+        bb_width_50th = np.percentile(bb_width_valid, 50)
+    else:
+        bb_width_20th = 5.0  # default squeeze threshold
+        bb_width_50th = 10.0  # default expansion threshold
     
     # Align indicators to 4h timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_weekly, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_weekly, donchian_lower)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_weekly, donchian_mid)
-    adx_aligned = align_htf_to_ltf(prices, df_daily, adx)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_daily, vol_ma_20)
+    williams_r_aligned = align_htf_to_ltf(prices, df_daily, williams_r)
+    bb_upper_aligned = align_htf_to_ltf(prices, df_daily, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_daily, bb_lower)
+    bb_width_aligned = align_htf_to_ltf(prices, df_daily, bb_width)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(30, 20)  # Need daily and weekly data
+    start = max(lookback_wr, lookback_bb)  # Need both indicators
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_upper_aligned[i]) or 
-            np.isnan(donchian_lower_aligned[i]) or
-            np.isnan(donchian_mid_aligned[i]) or
-            np.isnan(adx_aligned[i]) or
-            np.isnan(vol_ma_20_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(bb_upper_aligned[i]) or
+            np.isnan(bb_lower_aligned[i]) or
+            np.isnan(bb_width_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current daily volume vs 20-day average
-        daily_volume_aligned = align_htf_to_ltf(prices, df_daily, volume_daily)
-        volume_ratio = daily_volume_aligned[i] / vol_ma_20_aligned[i] if vol_ma_20_aligned[i] > 0 else 0
-        
         if position == 0:
-            # Look for breakout entries with volume confirmation and trend
-            # Long: price breaks above upper channel AND volume > 1.3x average AND ADX > 20
-            if (close[i] > donchian_upper_aligned[i] and 
-                volume_ratio > 1.3 and 
-                adx_aligned[i] > 20):
+            # Look for mean reversion entries during Bollinger squeeze
+            # Long: oversold (Williams %R < -80) AND price below lower band AND squeeze (width < 20th percentile)
+            if (williams_r_aligned[i] < -80 and 
+                close[i] < bb_lower_aligned[i] and
+                bb_width_aligned[i] < bb_width_20th):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below lower channel AND volume > 1.3x average AND ADX > 20
-            elif (close[i] < donchian_lower_aligned[i] and 
-                  volume_ratio > 1.3 and 
-                  adx_aligned[i] > 20):
+            # Short: overbought (Williams %R > -20) AND price above upper band AND squeeze (width < 20th percentile)
+            elif (williams_r_aligned[i] > -20 and 
+                  close[i] > bb_upper_aligned[i] and
+                  bb_width_aligned[i] < bb_width_20th):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses midline or trend weakens
-            if (close[i] < donchian_mid_aligned[i] or 
-                adx_aligned[i] < 15):
+            # Exit long: mean reversion complete OR volatility expansion
+            if (williams_r_aligned[i] > -50 or  # Williams %R crossed midpoint
+                bb_width_aligned[i] > bb_width_50th):  # volatility expanded
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses midline or trend weakens
-            if (close[i] > donchian_mid_aligned[i] or 
-                adx_aligned[i] < 15):
+            # Exit short: mean reversion complete OR volatility expansion
+            if (williams_r_aligned[i] < -50 or  # Williams %R crossed midpoint
+                bb_width_aligned[i] > bb_width_50th):  # volatility expanded
                 position = 0
                 signals[i] = 0.0
             else:
@@ -163,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1w_Donchian_Breakout_Volume_ADX_v1"
+name = "4h_1d_WilliamsR_BollingerSqueeze_MeanReversion_v1"
 timeframe = "4h"
 leverage = 1.0
