@@ -1,18 +1,21 @@
+# SPDX-FileCopyrightText: 2025 Alpaca Trading Solutions
+# SPDX-License-Identifier: MIT
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Camarilla pivot breakout with daily volume spike and chop regime filter
-# Long when price closes above H3 (Camarilla resistance) AND volume > 1.8x 20-period average AND chop > 61.8 (range market)
-# Short when price closes below L3 (Camarilla support) AND volume > 1.8x 20-period average AND chop > 61.8
-# Exit when price crosses back to the pivot level (median of H3/L3)
-# Uses Camarilla levels for intraday support/resistance, volume for breakout confirmation, chop to avoid trending markets
-# Target: 50-120 total trades over 4 years (12-30/year) to minimize fee drag while capturing mean reversion in ranging markets
+# Hypothesis: 12-hour Camarilla pivot levels from weekly high-low range + volume spike confirmation
+# Long when price touches L3 or L4 level with volume > 2x 20-period average
+# Short when price touches H3 or H4 level with volume > 2x 20-period average
+# Exit when price crosses back to H4/L3 levels (neutral zone)
+# Uses weekly Camarilla for institutional levels, volume for confirmation, tight entries to minimize fees
+# Target: 50-150 total trades over 4 years (12-37/year) for low fee drag and robust performance
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,87 +23,78 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate pivot points from previous day (using daily OHLC)
-    # We need daily data to calculate Camarilla levels for current 4h bar
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop for Camarilla pivot calculation
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate Camarilla levels for each day
-    # H4 = close + 1.5 * (high - low)
-    # H3 = close + 1.25 * (high - low)
-    # H2 = close + 1.0 * (high - low)
-    # H1 = close + 0.75 * (high - low)
-    # L1 = close - 0.75 * (high - low)
-    # L2 = close - 1.0 * (high - low)
-    # L3 = close - 1.25 * (high - low)
-    # L4 = close - 1.5 * (high - low)
+    # Calculate weekly high-low range for Camarilla levels
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_range = weekly_high - weekly_low
     
-    # Calculate daily ranges
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # Calculate Camarilla levels based on weekly range
+    # H4 = weekly_close + 1.1 * weekly_range/2
+    # H3 = weekly_close + 1.1 * weekly_range/4
+    # L3 = weekly_close - 1.1 * weekly_range/4
+    # L4 = weekly_close - 1.1 * weekly_range/2
+    weekly_close = df_weekly['close'].values
+    camarilla_h4 = weekly_close + 1.1 * weekly_range / 2
+    camarilla_h3 = weekly_close + 1.1 * weekly_range / 4
+    camarilla_l3 = weekly_close - 1.1 * weekly_range / 4
+    camarilla_l4 = weekly_close - 1.1 * weekly_range / 2
     
-    # Calculate Camarilla levels (we'll use H3 and L3 for entries)
-    camarilla_h3 = daily_close + 1.25 * (daily_high - daily_low)
-    camarilla_l3 = daily_close - 1.25 * (daily_high - daily_low)
-    camarilla_pivot = (daily_high + daily_low + daily_close) / 3  # Classic pivot
+    # Align Camarilla levels to 12h timeframe (wait for weekly close)
+    h4_aligned = align_htf_to_ltf(prices, df_weekly, camarilla_h4)
+    h3_aligned = align_htf_to_ltf(prices, df_weekly, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_weekly, camarilla_l3)
+    l4_aligned = align_htf_to_ltf(prices, df_weekly, camarilla_l4)
     
-    # Align Camarilla levels to 4h timeframe (use previous day's levels)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    
-    # Calculate Choppiness Index (using daily data for regime detection)
-    # CHOP = 100 * log10(sum(ATR) / (max(high) - min(low))) / log10(n)
-    # We'll use a simplified version: high-low range over period
-    period = 14
-    high_low_range = pd.Series(daily_high - daily_low).rolling(window=period, min_periods=period).sum().values
-    max_high = pd.Series(daily_high).rolling(window=period, min_periods=period).max().values
-    min_low = pd.Series(daily_low).rolling(window=period, min_periods=period).min().values
-    chop = 100 * np.log10(high_low_range / (max_high - min_low + 1e-10)) / np.log10(period)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Calculate volume average for confirmation (20-period on 4h)
+    # Calculate volume average for confirmation (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations
-    start = max(20, 30)  # Need 20 for vol avg, 30 for chop calculation
+    # Start after enough data for calculations (need weekly data + buffer)
+    start = 60
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(chop_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(h4_aligned[i]) or np.isnan(h3_aligned[i]) or 
+            np.isnan(l3_aligned[i]) or np.isnan(l4_aligned[i]) or 
+            np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_threshold = vol_avg[i] * 1.8
+        vol_threshold = vol_avg[i] * 2.0  # Require 2x average volume
         
         if position == 0:
-            # Long setup: price closes above H3 + volume confirmation + chop > 61.8 (range market)
-            if (price > camarilla_h3_aligned[i] and vol > vol_threshold and chop_aligned[i] > 61.8):
+            # Long setup: price touches L3 or L4 with volume confirmation
+            if ((abs(price - l3_aligned[i]) < 0.001 * l3_aligned[i] or 
+                 abs(price - l4_aligned[i]) < 0.001 * l4_aligned[i]) and 
+                vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: price closes below L3 + volume confirmation + chop > 61.8
-            elif (price < camarilla_l3_aligned[i] and vol > vol_threshold and chop_aligned[i] > 61.8):
+            # Short setup: price touches H3 or H4 with volume confirmation
+            elif ((abs(price - h3_aligned[i]) < 0.001 * h3_aligned[i] or 
+                   abs(price - h4_aligned[i]) < 0.001 * h4_aligned[i]) and 
+                  vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses back to pivot level (or below)
-            if price < camarilla_pivot_aligned[i]:
+            # Exit long: price crosses back to H4 level (neutral zone)
+            if price >= h4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses back to pivot level (or above)
-            if price > camarilla_pivot_aligned[i]:
+            # Exit short: price crosses back to L4 level (neutral zone)
+            if price <= l4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -108,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_Volume_Chop"
-timeframe = "4h"
+name = "12h_Camarilla_Weekly_Volume"
+timeframe = "12h"
 leverage = 1.0
