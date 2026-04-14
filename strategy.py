@@ -1,7 +1,10 @@
-# hypothesis: 12h Donchian breakout with 1d volume confirmation and 1d ADX trend filter, plus exit on opposite breakout
-# uses 12h primary timeframe for lower trade frequency, 1d for trend/volume filters to reduce noise
-# aims for 12-37 trades/year (50-150 total) with discrete sizing to minimize fee drag
-# works in bull via breakouts, in bear via short breakdowns, avoids whipsaws with trend filter
+#!/usr/bin/env python3
+"""
+Hypothesis: 4h Donchian breakout with 1d volume confirmation and 1d ADX trend filter, plus exit on opposite breakout.
+Uses 4h primary timeframe for balanced trade frequency, 1d for trend/volume filters to reduce noise.
+Aims for 20-50 trades/year (80-200 total over 4 years) with discrete sizing to minimize fee drag.
+Works in bull via breakouts, in bear via short breakdowns, avoids whipsaws with trend filter.
+"""
 
 import numpy as np
 import pandas as pd
@@ -17,7 +20,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h Donchian channels (20-period)
+    # 4h Donchian channels (20-period)
     def donchian_channels(high, low, window):
         upper = np.full_like(high, np.nan)
         lower = np.full_like(high, np.nan)
@@ -27,7 +30,6 @@ def generate_signals(prices):
         return upper, lower
     
     donchian_upper, donchian_lower = donchian_channels(high, low, 20)
-    donchian_mid = (donchian_upper + donchian_lower) / 2
     
     # 1d data for volume and ADX
     df_1d = get_htf_data(prices, '1d')
@@ -111,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_1dVol_ADX"
-timeframe = "12h"
+name = "4h_Donchian_1dVol_ADX"
+timeframe = "4h"
 leverage = 1.0
