@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy combining 12-hour Volume Weighted Average Price (VWAP) with
-# daily Bollinger Band mean reversion. VWAP acts as dynamic support/resistance,
-# while Bollinger Bands identify overbought/oversold conditions. Long when price
-# pulls back to VWAP from below during oversold conditions (BB < 20), short when
-# price rallies to VWAP from above during overbought conditions (BB > 80).
-# This mean-reversion-to-VWAP approach works in both trending and ranging markets
-# by fading extremes relative to the dynamic VWAP mean. Volume-weighted pricing
-# reduces false signals from low-volume spikes.
+# Hypothesis: 4h strategy using 1-day RSI with weekly Bollinger Bands for volatility regime.
+# RSI(14) on daily timeframe identifies overbought/oversold conditions.
+# Weekly Bollinger Bands (20,2) identify high/low volatility regimes.
+# In low volatility (BB width < 50th percentile), mean revert at RSI extremes.
+# In high volatility (BB width > 50th percentile), follow RSI momentum.
+# Volume confirmation (>1.3x 20-period average) reduces false signals.
+# Designed to work in both bull and bear markets by adapting to volatility regimes.
+# Target: 20-40 trades/year per symbol (80-160 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,82 +22,116 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE for VWAP calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Load weekly data ONCE for Bollinger Bands
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate VWAP on 12h data: cumulative(volume * price) / cumulative(volume)
-    typical_price_12h = (df_12h['high'].values + df_12h['low'].values + df_12h['close'].values) / 3.0
-    vp_12h = typical_price_12h * df_12h['volume'].values
-    cum_vp_12h = np.cumsum(vp_12h)
-    cum_vol_12h = np.cumsum(df_12h['volume'].values)
-    vwap_12h = cum_vp_12h / cum_vol_12h
+    # Calculate weekly Bollinger Bands (20,2)
+    close_1w = df_1w['close'].values
+    bb_length = 20
+    bb_std = 2
     
-    # Align 12h VWAP to 6h timeframe (wait for 12h bar close)
-    vwap_12h_aligned = align_htf_to_ltf(prices, df_12h, vwap_12h)
+    ma = pd.Series(close_1w).rolling(window=bb_length, min_periods=bb_length).mean().values
+    std = pd.Series(close_1w).rolling(window=bb_length, min_periods=bb_length).std().values
     
-    # Load daily data ONCE for Bollinger Bands
+    upper = ma + bb_std * std
+    lower = ma - bb_std * std
+    bb_width = upper - lower
+    
+    # Calculate 50th percentile of BB width for regime detection
+    bb_width_50th = np.nanpercentile(bb_width, 50)
+    
+    # Align weekly Bollinger Bands to 4h timeframe
+    ma_aligned = align_htf_to_ltf(prices, df_1w, ma)
+    upper_aligned = align_htf_to_ltf(prices, df_1w, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_1w, lower)
+    bb_width_aligned = align_htf_to_ltf(prices, df_1w, bb_width)
+    bb_width_50th_aligned = align_htf_to_ltf(prices, df_1w, np.full_like(bb_width, bb_width_50th))
+    
+    # Load daily data ONCE for RSI
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate Bollinger Bands on daily close
+    # Calculate daily RSI(14)
     close_1d = df_1d['close'].values
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    bb_upper = sma_20 + 2.0 * std_20
-    bb_lower = sma_20 - 2.0 * std_20
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate %B: (close - lower) / (upper - lower)
-    bb_range = bb_upper - bb_lower
-    # Avoid division by zero
-    bb_range_safe = np.where(bb_range == 0, 1e-10, bb_range)
-    percent_b = (close_1d - bb_lower) / bb_range_safe
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
     
-    # Align Bollinger %B to 6h timeframe
-    percent_b_aligned = align_htf_to_ltf(prices, df_1d, percent_b)
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Align daily RSI to 4h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    
+    # Volume confirmation: 1.3x average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 20  # Need Bollinger Bands
+    start = max(20, 14, 20)  # Need BB, RSI, and volume MA
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(vwap_12h_aligned[i]) or 
-            np.isnan(percent_b_aligned[i])):
+        if (np.isnan(ma_aligned[i]) or 
+            np.isnan(upper_aligned[i]) or
+            np.isnan(lower_aligned[i]) or
+            np.isnan(rsi_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Volume confirmation
+        volume_confirmed = volume[i] > 1.3 * vol_ma[i]
+        
+        # Regime detection: low volatility if BB width < 50th percentile
+        low_volatility = bb_width_aligned[i] < bb_width_50th_aligned[i]
+        high_volatility = bb_width_aligned[i] >= bb_width_50th_aligned[i]
+        
         if position == 0:
-            # Look for mean reversion to VWAP from Bollinger extremes
-            # Long: price below VWAP AND oversold (%B < 0.2)
-            if (close[i] < vwap_12h_aligned[i] and 
-                percent_b_aligned[i] < 0.2):
-                position = 1
-                signals[i] = position_size
-            # Short: price above VWAP AND overbought (%B > 0.8)
-            elif (close[i] > vwap_12h_aligned[i] and 
-                  percent_b_aligned[i] > 0.8):
-                position = -1
-                signals[i] = -position_size
-            else:
-                signals[i] = 0.0
+            # Look for entries based on volatility regime
+            if low_volatility:
+                # Low volatility: mean revert at RSI extremes
+                if (rsi_aligned[i] < 30 and 
+                    volume_confirmed):
+                    position = 1
+                    signals[i] = position_size
+                elif (rsi_aligned[i] > 70 and 
+                      volume_confirmed):
+                    position = -1
+                    signals[i] = -position_size
+            else:  # high_volatility
+                # High volatility: follow RSI momentum
+                if (rsi_aligned[i] > 50 and 
+                    rsi_aligned[i] > rsi_aligned[i-1] and  # RSI rising
+                    volume_confirmed):
+                    position = 1
+                    signals[i] = position_size
+                elif (rsi_aligned[i] < 50 and 
+                      rsi_aligned[i] < rsi_aligned[i-1] and  # RSI falling
+                      volume_confirmed):
+                    position = -1
+                    signals[i] = -position_size
         elif position == 1:
-            # Exit long: price reaches VWAP or becomes overbought
-            if (close[i] >= vwap_12h_aligned[i] or 
-                percent_b_aligned[i] > 0.8):
+            # Exit long: RSI returns to neutral (50) or opposite extreme
+            if (rsi_aligned[i] >= 50 or 
+                rsi_aligned[i] > 70):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price reaches VWAP or becomes oversold
-            if (close[i] <= vwap_12h_aligned[i] or 
-                percent_b_aligned[i] < 0.2):
+            # Exit short: RSI returns to neutral (50) or opposite extreme
+            if (rsi_aligned[i] <= 50 or 
+                rsi_aligned[i] < 30):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -105,6 +139,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12hVWAP_1dBB_MeanReversion_v1"
-timeframe = "6h"
+name = "4h_1wBB_1dRSI_VolatilityRegime_v1"
+timeframe = "4h"
 leverage = 1.0
