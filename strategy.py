@@ -38,9 +38,9 @@ def generate_signals(prices):
         for i in range(14, len(df_1d)):
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    atr_6h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Volume spike detection (20-period average on 6h)
+    # Volume spike detection (20-period average on 4h)
     vol_ma_20 = np.full_like(volume, np.nan)
     if len(volume) >= 20:
         for i in range(19, len(volume)):
@@ -52,17 +52,17 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any critical data is NaN
-        if (np.isnan(atr_6h[i]) or
+        if (np.isnan(atr_4h[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Skip low volatility periods (ATR < 0.5% of price)
-        if atr_6h[i] < 0.005 * close[i]:
+        if atr_4h[i] < 0.005 * close[i]:
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 6h volume vs 20-period average
+        # Volume ratio: current 4h volume vs 20-period average
         if vol_ma_20[i] <= 0:
             volume_ratio = 0
         else:
@@ -83,33 +83,33 @@ def generate_signals(prices):
         r3 = prev_close + (prev_range * 1.1 / 4)
         s3 = prev_close - (prev_range * 1.1 / 4)
         
-        # Align to 6h timeframe
-        r4_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r4))[i] if i < len(prices) else r4
-        s4_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s4))[i] if i < len(prices) else s4
-        r3_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r3))[i] if i < len(prices) else r3
-        s3_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i] if i < len(prices) else s3
+        # Align to 4h timeframe
+        r4_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r4))[i] if i < len(prices) else r4
+        s4_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s4))[i] if i < len(prices) else s4
+        r3_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r3))[i] if i < len(prices) else r3
+        s3_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i] if i < len(prices) else s3
         
         if position == 0:
             # Long: Price breaks above R4 with volume confirmation
-            if close[i] > r4_6h and volume_ratio > vol_threshold:
+            if close[i] > r4_4h and volume_ratio > vol_threshold:
                 position = 1
                 signals[i] = position_size
             # Short: Price breaks below S4 with volume confirmation
-            elif close[i] < s4_6h and volume_ratio > vol_threshold:
+            elif close[i] < s4_4h and volume_ratio > vol_threshold:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Exit: Price falls back below S3 (more sensitive exit)
-            if close[i] < s3_6h:
+            if close[i] < s3_4h:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
             # Exit: Price rises back above R3 (more sensitive exit)
-            if close[i] > r3_6h:
+            if close[i] > r3_4h:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -117,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Camarilla_R4S4_Breakout_Volume"
-timeframe = "6h"
+name = "4h_1d_Camarilla_R4S4_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
