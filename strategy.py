@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy combining 1w Supertrend for trend direction and 12h Donchian breakout for entry.
-# 1w Supertrend (ATR=10, multiplier=3) filters for strong trends to avoid whipsaws in ranging markets.
-# 12h Donchian channel (period=20) provides breakout signals in the direction of the weekly trend.
-# Volume confirmation (>1.3x 20-period average) reduces false breakouts.
-# ATR-based trailing stop manages risk by exiting when price moves against position by 2.5x ATR.
-# Designed to work in both bull and bear markets by using 1w trend filter to avoid counter-trend trades.
-# Target: 15-25 trades/year per symbol (60-100 total over 4 years) to minimize fee drag.
+# Hypothesis: 4h strategy using 1d ATR for volatility filtering and 4h Donchian channel breakout.
+# 1d ATR(14) > median ATR(14) filters for high volatility periods to capture breakouts.
+# Donchian channel breakout (20) provides entry with clear structure.
+# Volume confirmation (>1.2x 20-period average) reduces false breakouts.
+# ATR-based exit manages risk with 2x ATR trailing stop.
+# Designed to work in both bull and bear markets by using volatility filter to capture expansion phases.
+# Target: 20-30 trades/year per symbol (80-120 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,174 +21,126 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE for Supertrend calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 1d data ONCE for ATR calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Supertrend on 1w data
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate ATR on 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # True Range
-    tr1 = np.abs(high_1w[1:] - low_1w[1:])
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     
     # ATR
-    atr_period = 10
-    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    atr_period = 14
+    atr_1d = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
     
-    # Basic Upper and Lower Bands
-    basic_ub = (high_1w + low_1w) / 2 + 3 * atr
-    basic_lb = (high_1w + low_1w) / 2 - 3 * atr
+    # Median ATR for volatility filter
+    atr_median = np.nanmedian(atr_1d)
     
-    # Final Upper and Lower Bands
-    final_ub = np.zeros(len(close_1w))
-    final_lb = np.zeros(len(close_1w))
-    
-    for i in range(len(close_1w)):
-        if i == 0:
-            final_ub[i] = basic_ub[i]
-            final_lb[i] = basic_lb[i]
-        else:
-            if basic_ub[i] < final_ub[i-1] or close_1w[i-1] > final_ub[i-1]:
-                final_ub[i] = basic_ub[i]
-            else:
-                final_ub[i] = final_ub[i-1]
-                
-            if basic_lb[i] > final_lb[i-1] or close_1w[i-1] < final_lb[i-1]:
-                final_lb[i] = basic_lb[i]
-            else:
-                final_lb[i] = final_lb[i-1]
-    
-    # Supertrend
-    supertrend = np.zeros(len(close_1w))
-    for i in range(len(close_1w)):
-        if i == 0:
-            supertrend[i] = final_ub[i]
-        else:
-            if supertrend[i-1] == final_ub[i-1]:
-                if close_1w[i] <= final_ub[i]:
-                    supertrend[i] = final_ub[i]
-                else:
-                    supertrend[i] = final_lb[i]
-            else:
-                if close_1w[i] >= final_lb[i]:
-                    supertrend[i] = final_lb[i]
-                else:
-                    supertrend[i] = final_ub[i]
-    
-    # Trend direction: 1 for uptrend, -1 for downtrend
-    trend = np.where(close_1w > supertrend, 1, -1)
-    
-    # Load 12h data ONCE for Donchian channels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Load 4h data ONCE for Donchian channels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate Donchian channels on 12h data
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Calculate Donchian channels on 4h data
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    donchian_period = 20
-    upper_channel = pd.Series(high_12h).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    lower_channel = pd.Series(low_12h).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    donch_period = 20
+    upper_channel = pd.Series(high_4h).rolling(window=donch_period, min_periods=donch_period).max().values
+    lower_channel = pd.Series(low_4h).rolling(window=donch_period, min_periods=donch_period).min().values
     
-    # Align indicators to 12h timeframe
-    trend_aligned = align_htf_to_ltf(prices, df_1w, trend)
-    upper_channel_aligned = align_htf_to_ltf(prices, df_12h, upper_channel)
-    lower_channel_aligned = align_htf_to_ltf(prices, df_12h, lower_channel)
+    # Align indicators to 4h timeframe
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    upper_channel_aligned = align_htf_to_ltf(prices, df_4h, upper_channel)
+    lower_channel_aligned = align_htf_to_ltf(prices, df_4h, lower_channel)
     
-    # Volume confirmation: 1.3x average volume
+    # Volume confirmation: 1.2x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR for trailing stop (using 12h data)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # True Range for 12h
-    tr1_12h = np.abs(high_12h[1:] - low_12h[1:])
-    tr2_12h = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3_12h = np.abs(low_12h[1:] - close_12h[:-1])
-    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
-    tr_12h = np.concatenate([[np.nan], tr_12h])
-    
-    atr_period_12h = 10
-    atr_12h = pd.Series(tr_12h).ewm(span=atr_period_12h, adjust=False, min_periods=atr_period_12h).mean().values
-    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(donchian_period, 20)  # Need Donchian and volume MA
+    start = max(donch_period, 20)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(trend_aligned[i]) or 
+        if (np.isnan(atr_1d_aligned[i]) or 
             np.isnan(upper_channel_aligned[i]) or
             np.isnan(lower_channel_aligned[i]) or
-            np.isnan(vol_ma[i]) or
-            np.isnan(atr_12h_aligned[i])):
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Volatility filter: current 1d ATR > median ATR
+        high_volatility = atr_1d_aligned[i] > atr_median
+        
         # Volume confirmation
-        volume_confirmed = volume[i] > 1.3 * vol_ma[i]
+        volume_confirmed = volume[i] > 1.2 * vol_ma[i]
         
         if position == 0:
-            # Look for Donchian breakouts in direction of weekly trend
-            # Long: price breaks above upper Donchian channel AND weekly uptrend
+            # Look for Donchian channel breakouts
+            # Only trade in high volatility periods
+            
+            # Long: price breaks above upper Donchian channel
             if (close[i] > upper_channel_aligned[i] and 
-                trend_aligned[i] == 1 and 
+                high_volatility and 
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below lower Donchian channel AND weekly downtrend
+            # Short: price breaks below lower Donchian channel
             elif (close[i] < lower_channel_aligned[i] and 
-                  trend_aligned[i] == -1 and 
+                  high_volatility and 
                   volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price drops below lower Donchian channel or trailing stop hit
-            # Trailing stop: exit if price drops by 2.5x ATR from highest high since entry
-            if (close[i] < lower_channel_aligned[i] or 
-                close[i] <= highest_high - 2.5 * atr_12h_aligned[i]):
-                position = 0
-                signals[i] = 0.0
-            else:
-                # Update highest high for trailing stop
-                if 'highest_high' not in locals():
-                    highest_high = close[i]
+            # Exit long: 2x ATR trailing stop or reversal signal
+            atr_4h = pd.Series(np.maximum(high - low, np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1)))).ewm(span=14, adjust=False, min_periods=14).mean().values
+            atr_4h[0] = atr_4h[1] if len(atr_4h) > 1 else 0.0
+            
+            # Track highest high since entry for trailing stop
+            # Simplified: exit if price drops 2x ATR from current high
+            if i > 0:
+                recent_high = np.maximum.accumulate(high[:i+1])[-1]
+                if close[i] < recent_high - 2.0 * atr_4h[i]:
+                    position = 0
+                    signals[i] = 0.0
                 else:
-                    highest_high = max(highest_high, close[i])
+                    signals[i] = position_size
+            else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price rises above upper Donchian channel or trailing stop hit
-            # Trailing stop: exit if price rises by 2.5x ATR from lowest low since entry
-            if (close[i] > upper_channel_aligned[i] or 
-                close[i] >= lowest_low + 2.5 * atr_12h_aligned[i]):
-                position = 0
-                signals[i] = 0.0
-            else:
-                # Update lowest low for trailing stop
-                if 'lowest_low' not in locals():
-                    lowest_low = close[i]
+            # Exit short: 2x ATR trailing stop or reversal signal
+            atr_4h = pd.Series(np.maximum(high - low, np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1)))).ewm(span=14, adjust=False, min_periods=14).mean().values
+            atr_4h[0] = atr_4h[1] if len(atr_4h) > 1 else 0.0
+            
+            # Track lowest low since entry for trailing stop
+            # Simplified: exit if price rises 2x ATR from current low
+            if i > 0:
+                recent_low = np.minimum.accumulate(low[:i+1])[-1]
+                if close[i] > recent_low + 2.0 * atr_4h[i]:
+                    position = 0
+                    signals[i] = 0.0
                 else:
-                    lowest_low = min(lowest_low, close[i])
+                    signals[i] = -position_size
+            else:
                 signals[i] = -position_size
     
     return signals
 
-name = "12h_1wSupertrend_12hDonchian_Breakout_VolumeFilter_v1"
-timeframe = "12h"
+name = "4h_1dATR_VolatilityFilter_DonchianBreakout_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
