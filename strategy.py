@@ -43,13 +43,22 @@ def generate_signals(prices):
         volume_series = pd.Series(volume)
         volume_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 50:
+        ema_series = pd.Series(close_1d)
+        ema50_1d = ema_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align daily EMA50 to 4h timeframe
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25
     
     for i in range(100, n):
         # Skip if any critical data is NaN
-        if np.isnan(atr_4h_aligned[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(atr_4h_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(ema50_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -63,9 +72,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Calculate pivot levels based on previous day's close
+        # Get previous day's data (1d index)
         if i >= 1:
-            # Get previous day's data (1d index)
             prev_close = close_1d[i-1]
             prev_high = high_1d[i-1]
             prev_low = low_1d[i-1]
@@ -86,26 +94,26 @@ def generate_signals(prices):
             r3_4h = align_htf_to_ltf(prices, df_1d, r3_array)[i]
             
             if position == 0:
-                # Long: Price rejects S3 with volume
-                if low[i] <= s3_4h and close[i] > s3_4h and volume[i] > volume_ma[i]:
+                # Long: Price rejects S3 with volume and above EMA50
+                if low[i] <= s3_4h and close[i] > s3_4h and volume[i] > volume_ma[i] and close[i] > ema50_4h_aligned[i]:
                     position = 1
                     signals[i] = position_size
-                # Short: Price rejects R3 with volume
-                elif high[i] >= r3_4h and close[i] < r3_4h and volume[i] > volume_ma[i]:
+                # Short: Price rejects R3 with volume and below EMA50
+                elif high[i] >= r3_4h and close[i] < r3_4h and volume[i] > volume_ma[i] and close[i] < ema50_4h_aligned[i]:
                     position = -1
                     signals[i] = -position_size
                 else:
                     signals[i] = 0.0
             elif position == 1:
-                # Exit: Price breaks S3 again
-                if low[i] <= s3_4h:
+                # Exit: Price breaks S3 again or trend changes
+                if low[i] <= s3_4h or close[i] < ema50_4h_aligned[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                # Exit: Price breaks R3 again
-                if high[i] >= r3_4h:
+                # Exit: Price breaks R3 again or trend changes
+                if high[i] >= r3_4h or close[i] > ema50_4h_aligned[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
@@ -115,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Pivot_S3R3_Rejection_Volume_Filter_v6"
+name = "4h_1d_Pivot_S3R3_Rejection_Volume_EMA_Filter_v1"
 timeframe = "4h"
 leverage = 1.0
