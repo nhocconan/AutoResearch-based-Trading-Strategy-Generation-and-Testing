@@ -1,15 +1,14 @@
-# 12h_1d_Camarilla_Pivot_Breakout_Volume
-# Hypothesis: 12-hour Camarilla pivot breakout with 1-day EMA trend filter and volume confirmation
-# Long when price closes above H3 AND price > 1d EMA50 AND volume > 1.5x 20-period average
-# Short when price closes below L3 AND price < 1d EMA50 AND volume > 1.5x 20-period average
-# Exit when price crosses back inside the Camarilla H3/L3 levels
-# Camarilla pivots are effective reversal points in ranging markets, EMA filters for trend alignment, volume confirms breakouts
-# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 4-hour Choppiness Index regime filter with 12-hour EMA trend and volume confirmation
+# Long when: Choppiness Index > 61.8 (ranging market), price crosses above EMA20, volume > 1.5x average
+# Short when: Choppiness Index > 61.8 (ranging market), price crosses below EMA20, volume > 1.5x average
+# Exit when: Choppiness Index < 38.2 (trending market) OR price crosses EMA20 in opposite direction
+# Uses Choppiness Index to identify ranging markets where mean reversion works, EMA for dynamic support/resistance
+# Target: 80-150 total trades over 4 years (20-38/year) to balance opportunity and cost
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,43 +20,53 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla pivots and EMA50
-    df_1d = get_htf_data(prices, '1d')
+    # Load 12h data ONCE before loop for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate Camarilla pivot levels for each 1d period
-    # H4 = close + 1.5 * (high - low)
-    # H3 = close + 1.1 * (high - low)
-    # L3 = close - 1.1 * (high - low)
-    # L4 = close - 1.5 * (high - low)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate EMA20 for dynamic support/resistance
+    close_series = pd.Series(close)
+    ema20 = close_series.ewm(span=20, adjust=False, min_periods=20).values
     
-    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d)
-    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d)
-    
-    # Align Camarilla levels to 12h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    
-    # Calculate 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     # Calculate volume average for confirmation (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate Choppiness Index (14-period)
+    atr_list = []
+    for i in range(n):
+        if i == 0:
+            tr = high[i] - low[i]
+        else:
+            tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        atr_list.append(tr)
+    
+    atr = pd.Series(atr_list).rolling(window=14, min_periods=14).mean().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    
+    # Avoid division by zero
+    chop_raw = 100 * np.log10((highest_high - lowest_low) / (np.sum(atr_list[:14]) if i < 14 else np.sum(atr_list[i-13:i+1])) / 14) / np.log10(14)
+    # Simplified calculation using rolling sum
+    atr_sum = pd.Series(atr_list).rolling(window=14, min_periods=14).sum().values
+    chop = 100 * np.log10((highest_high - lowest_low) / atr_sum) / np.log10(14)
+    # Handle cases where highest_high == lowest_low
+    chop = np.where((highest_high - lowest_low) == 0, 50, chop)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations (need 50 for EMA)
-    start = 50
+    # Start after enough data for calculations
+    start = 30
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(ema20[i]) or np.isnan(ema50_12h_aligned[i]) or 
+            np.isnan(vol_avg[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
@@ -66,26 +75,28 @@ def generate_signals(prices):
         vol_threshold = vol_avg[i] * 1.5
         
         if position == 0:
-            # Long setup: close above H3 + above 1d EMA50 + volume confirmation
-            if (price > camarilla_h3_aligned[i] and price > ema50_1d_aligned[i] and vol > vol_threshold):
+            # Long setup: ranging market (CHOP > 61.8), price crosses above EMA20, volume confirmation
+            if (chop[i] > 61.8 and price > ema20[i] and 
+                i > start and close[i-1] <= ema20[i-1] and vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: close below L3 + below 1d EMA50 + volume confirmation
-            elif (price < camarilla_l3_aligned[i] and price < ema50_1d_aligned[i] and vol > vol_threshold):
+            # Short setup: ranging market (CHOP > 61.8), price crosses below EMA20, volume confirmation
+            elif (chop[i] > 61.8 and price < ema20[i] and 
+                  i > start and close[i-1] >= ema20[i-1] and vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes back inside H3/L3 (below H3)
-            if price < camarilla_h3_aligned[i]:
+            # Exit long: trending market (CHOP < 38.2) OR price crosses below EMA20
+            if chop[i] < 38.2 or (price < ema20[i] and close[i-1] >= ema20[i-1]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes back inside H3/L3 (above L3)
-            if price > camarilla_l3_aligned[i]:
+            # Exit short: trending market (CHOP < 38.2) OR price crosses above EMA20
+            if chop[i] < 38.2 or (price > ema20[i] and close[i-1] <= ema20[i-1]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -93,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_Pivot_Breakout_Volume"
-timeframe = "12h"
+name = "4h_Choppiness_EMA20_Volume"
+timeframe = "4h"
 leverage = 1.0
