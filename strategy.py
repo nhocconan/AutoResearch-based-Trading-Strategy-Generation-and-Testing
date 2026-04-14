@@ -41,10 +41,16 @@ def generate_signals(prices):
     close_1d_series2 = pd.Series(close_1d)
     ema_200_1d = close_1d_series2.ewm(span=200, adjust=False, min_periods=200).mean().values
     
+    # Calculate daily 20-period high and low for Donchian channel
+    high_20_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
     # Create arrays for alignment
     atr_1d_arr = atr_1d
     ema_50_1d_arr = ema_50_1d
     ema_200_1d_arr = ema_200_1d
+    high_20_1d_arr = high_20_1d
+    low_20_1d_arr = low_20_1d
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,8 +61,11 @@ def generate_signals(prices):
         atr_1d_i = align_htf_to_ltf(prices, df_1d, atr_1d_arr)[i]
         ema_50_1d_i = align_htf_to_ltf(prices, df_1d, ema_50_1d_arr)[i]
         ema_200_1d_i = align_htf_to_ltf(prices, df_1d, ema_200_1d_arr)[i]
+        high_20_1d_i = align_htf_to_ltf(prices, df_1d, high_20_1d_arr)[i]
+        low_20_1d_i = align_htf_to_ltf(prices, df_1d, low_20_1d_arr)[i]
         
-        if np.isnan(atr_1d_i) or np.isnan(ema_50_1d_i) or np.isnan(ema_200_1d_i):
+        if np.isnan(atr_1d_i) or np.isnan(ema_50_1d_i) or np.isnan(ema_200_1d_i) or \
+           np.isnan(high_20_1d_i) or np.isnan(low_20_1d_i):
             continue
         
         # Volatility regime: only trade when ATR is above median (avoid chop)
@@ -67,30 +76,30 @@ def generate_signals(prices):
         if close[i] > ema_200_1d_i:
             # Only allow longs in uptrend
             if position == 0:
-                # Long: price above daily EMA50 + volume spike
-                if close[i] > ema_50_1d_i and volume[i] > 2.0 * np.nanmedian(volume[max(0, i-30):i]):
+                # Long: price breaks above daily Donchian high + volume spike
+                if close[i] > high_20_1d_i and volume[i] > 2.0 * np.nanmedian(volume[max(0, i-30):i]):
                     position = 1
                     signals[i] = position_size
             elif position == 1:
-                # Exit: price crosses below EMA50
+                # Exit: price crosses below daily EMA50
                 if close[i] < ema_50_1d_i:
                     position = 0
                     signals[i] = 0.0
         elif close[i] < ema_200_1d_i:
             # Only allow shorts in downtrend
             if position == 0:
-                # Short: price below daily EMA50 + volume spike
-                if close[i] < ema_50_1d_i and volume[i] > 2.0 * np.nanmedian(volume[max(0, i-30):i]):
+                # Short: price breaks below daily Donchian low + volume spike
+                if close[i] < low_20_1d_i and volume[i] > 2.0 * np.nanmedian(volume[max(0, i-30):i]):
                     position = -1
                     signals[i] = -position_size
             elif position == -1:
-                # Exit: price crosses above EMA50
+                # Exit: price crosses above daily EMA50
                 if close[i] > ema_50_1d_i:
                     position = 0
                     signals[i] = 0.0
     
     return signals
 
-name = "4h_DailyEMA50_VolumeSpike_TrendFilter_v1"
+name = "4h_DailyDonchianBreakout_EMA50_TrendFilter_v1"
 timeframe = "4h"
 leverage = 1.0
