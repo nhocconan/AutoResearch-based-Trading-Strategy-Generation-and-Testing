@@ -3,12 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w Donchian Channels with volume confirmation and trend filter.
-# Long when price breaks above weekly upper Donchian Channel (20), volume > 1.5x average, and price above weekly EMA50 (trend filter).
-# Short when price breaks below weekly lower Donchian Channel (20), volume > 1.5x average, and price below weekly EMA50.
-# Exit when price returns to weekly Donchian middle (average of upper and lower) or volume drops below average.
-# Uses weekly structure for major trend, daily for execution. Designed to capture strong trends while avoiding chop.
-# Target: 10-25 trades/year per symbol (40-100 total over 4 years) to minimize fee drag.
+# Hypothesis: 12h strategy using 1-day KAMA with RSI filter and volume confirmation.
+# Long when price crosses above KAMA, RSI > 50, and volume > 1.3x average.
+# Short when price crosses below KAMA, RSI < 50, and volume > 1.3x average.
+# Exit when price crosses back across KAMA or volume drops below average.
+# Uses KAMA for adaptive trend following, RSI for momentum confirmation,
+# and volume for institutional participation. Designed to work in both bull and bear
+# markets by only trading when momentum aligns with trend (RSI >50 for long, <50 for short).
+# Target: 15-30 trades/year per symbol (60-120 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,35 +22,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE for Donchian Channels and EMA
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:  # Need enough for Donchian(20) and EMA(50)
+    # Load 1d data ONCE for KAMA and RSI
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:  # Need enough for KAMA and RSI periods
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Donchian Channels (20)
-    # Upper: highest high over past 20 weeks
-    # Lower: lowest low over past 20 weeks
-    # Middle: average of upper and lower
-    high_series = pd.Series(high_1w)
-    low_series = pd.Series(low_1w)
-    donch_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donch_lower = low_series.rolling(window=20, min_periods=20).min().values
-    donch_middle = (donch_upper + donch_lower) / 2
+    # Calculate KAMA (10, 2, 30)
+    # Efficiency Ratio
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.abs(np.diff(close_1d))
+    er = np.zeros_like(close_1d, dtype=np.float64)
+    er[1:] = change[1:] / np.where(volatility[1:] == 0, 1, volatility[1:])
     
-    # Calculate EMA(50) for trend filter
-    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
     
-    # Align indicators to daily timeframe
-    donch_upper_aligned = align_htf_to_ltf(prices, df_1w, donch_upper)
-    donch_lower_aligned = align_htf_to_ltf(prices, df_1w, donch_lower)
-    donch_middle_aligned = align_htf_to_ltf(prices, df_1w, donch_middle)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    # KAMA calculation
+    kama = np.zeros_like(close_1d, dtype=np.float64)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # Volume confirmation: 1.5x average volume (20-period)
+    # Calculate RSI (14)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss == 0, 0, avg_gain / avg_loss)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Align indicators to 12h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    
+    # Volume confirmation: 1.3x average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -56,53 +70,49 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(50, 20)  # Need EMA50 and Donchian periods
+    start = max(30, 20)  # Need KAMA/RSI and volume MA periods
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donch_upper_aligned[i]) or 
-            np.isnan(donch_lower_aligned[i]) or
-            np.isnan(donch_middle_aligned[i]) or
-            np.isnan(ema_50_aligned[i]) or
+        if (np.isnan(kama_aligned[i]) or 
+            np.isnan(rsi_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
-        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
-        
-        # Trend filter: price relative to EMA50
-        price_above_ema = close[i] > ema_50_aligned[i]
-        price_below_ema = close[i] < ema_50_aligned[i]
+        volume_confirmed = volume[i] > 1.3 * vol_ma[i]
         
         if position == 0:
-            # Look for Donchian breakouts with volume and trend confirmation
-            # Long: price breaks above upper Donchian AND volume confirmed AND price above EMA50
-            if (close[i] > donch_upper_aligned[i] and 
-                volume_confirmed and 
-                price_above_ema):
+            # Look for KAMA crossovers with RSI filter
+            # Long: price crosses above KAMA AND RSI > 50 AND volume confirmation
+            if (close[i] > kama_aligned[i] and 
+                close[i-1] <= kama_aligned[i-1] and 
+                rsi_aligned[i] > 50 and 
+                volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below lower Donchian AND volume confirmed AND price below EMA50
-            elif (close[i] < donch_lower_aligned[i] and 
-                  volume_confirmed and 
-                  price_below_ema):
+            # Short: price crosses below KAMA AND RSI < 50 AND volume confirmation
+            elif (close[i] < kama_aligned[i] and 
+                  close[i-1] >= kama_aligned[i-1] and 
+                  rsi_aligned[i] < 50 and 
+                  volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to middle Donchian or volume drops below average
-            if (close[i] <= donch_middle_aligned[i] or 
-                volume[i] < vol_ma[i]):
+            # Exit long: price crosses back below KAMA or volume drops
+            if (close[i] < kama_aligned[i] or 
+                not volume_confirmed):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to middle Donchian or volume drops below average
-            if (close[i] >= donch_middle_aligned[i] or 
-                volume[i] < vol_ma[i]):
+            # Exit short: price crosses back above KAMA or volume drops
+            if (close[i] > kama_aligned[i] or 
+                not volume_confirmed):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -110,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_Donchian_Channels_Volume_EMAFilter_v1"
-timeframe = "1d"
+name = "12h_1d_KAMA_RSI_VolumeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
