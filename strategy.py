@@ -13,30 +13,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for pivot calculation (HTF)
+    # Load daily data for ATR calculation (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily pivot points (standard formula)
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
-    
-    # Align pivot levels to 12h timeframe
-    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
-    r2_12h = align_htf_to_ltf(prices, df_1d, r2)
-    s2_12h = align_htf_to_ltf(prices, df_1d, s2)
-    
-    # Calculate 14-period daily ATR for volatility filter
+    # Calculate 14-period daily ATR
     tr = np.zeros(len(df_1d))
     tr[0] = high_1d[0] - low_1d[0]
     for i in range(1, len(df_1d)):
@@ -52,65 +38,79 @@ def generate_signals(prices):
         for i in range(14, len(df_1d)):
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Align ATR to 4h timeframe
+    atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Volume spike detection (20-period average on 12h)
+    # Volume spike detection (20-period average on 4h)
     vol_ma_20 = np.full_like(volume, np.nan)
     if len(volume) >= 20:
         for i in range(19, len(volume)):
             vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
+    # Calculate 4-period RSI for overbought/oversold signals
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.full_like(close, np.nan)
+    avg_loss = np.full_like(close, np.nan)
+    if len(close) >= 4:
+        avg_gain[3] = np.mean(gain[:4])
+        avg_loss[3] = np.mean(loss[:4])
+        for i in range(4, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * 3 + gain[i]) / 4
+            avg_loss[i] = (avg_loss[i-1] * 3 + loss[i]) / 4
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(close, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position size for lower drawdown
+    position_size = 0.25  # 25% position size to control drawdown
     
     for i in range(100, n):
         # Skip if any critical data is NaN
-        if (np.isnan(pivot_12h[i]) or 
-            np.isnan(r1_12h[i]) or
-            np.isnan(s1_12h[i]) or
-            np.isnan(r2_12h[i]) or
-            np.isnan(s2_12h[i]) or
-            np.isnan(atr_12h[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(atr_4h[i]) or 
+            np.isnan(vol_ma_20[i]) or
+            np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
-        # Skip low volatility periods (ATR < 0.8% of price)
-        if atr_12h[i] < 0.008 * close[i]:
+        # Skip low volatility periods (ATR < 0.5% of price)
+        if atr_4h[i] < 0.005 * close[i]:
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 12h volume vs 20-period average
+        # Volume ratio: current 4h volume vs 20-period average
         if vol_ma_20[i] <= 0:
             volume_ratio = 0
         else:
             volume_ratio = volume[i] / vol_ma_20[i]
         
         # Volume threshold: require significant spike
-        vol_threshold = 2.0
+        vol_threshold = 1.8
         
         if position == 0:
-            # Long: Price breaks above R2 with volume confirmation
-            if (close[i] > r2_12h[i] and volume_ratio > vol_threshold):
+            # Long: RSI oversold (<30) with volume confirmation
+            if (rsi[i] < 30 and volume_ratio > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below S2 with volume confirmation
-            elif (close[i] < s2_12h[i] and volume_ratio > vol_threshold):
+            # Short: RSI overbought (>70) with volume confirmation
+            elif (rsi[i] > 70 and volume_ratio > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below S1
-            if close[i] < s1_12h[i]:
+            # Exit: RSI returns to neutral (>50)
+            if rsi[i] > 50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above R1
-            if close[i] > r1_12h[i]:
+            # Exit: RSI returns to neutral (<50)
+            if rsi[i] < 50:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -118,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Pivot_R2S2_Breakout_Volume"
-timeframe = "12h"
+name = "4h_1d_ATR_Volume_RSI_MeanReversion"
+timeframe = "4h"
 leverage = 1.0
