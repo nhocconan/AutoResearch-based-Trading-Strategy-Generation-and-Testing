@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour Donchian breakout with volume confirmation and 1-day ADX trend filter.
-Long on 20-period high break, short on 20-period low break, only when 1-day ADX > 25.
-Designed for low frequency (~20-40 trades/year) with strong trend following in both bull and bear markets.
+Hypothesis: 12-hour price breaking above/below 1-week Bollinger Bands (20,2) with volume above 2.0x 24-period average and 1-day ADX > 20.
+Trades in direction of 1-week trend to avoid counter-trend whipsaws. Designed for low frequency (~15-30 trades/year).
 """
 
 import numpy as np
@@ -11,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,11 +18,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 4-hour Donchian channels (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 1-week Bollinger Bands (20,2)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # Calculate 1-day ADX (14-period) - HTF
+    close_1w = df_1w['close'].values
+    sma_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
+    
+    # Calculate 1-week trend (SMA 50)
+    sma_50 = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
+    
+    # Calculate 1-day ADX (14-period)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -59,49 +68,54 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
     adx_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Calculate volume moving average (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Align HTF ADX to LTF
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Calculate 24-period average volume on 12h data (2 days average)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25
     
-    for i in range(20, n):
-        # Skip if any values are NaN
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma[i])):
+    for i in range(50, n):
+        # Get aligned indicators
+        upper_bb_aligned = align_htf_to_ltf(prices, df_1w, upper_bb)[i]
+        lower_bb_aligned = align_htf_to_ltf(prices, df_1w, lower_bb)[i]
+        sma_50_aligned = align_htf_to_ltf(prices, df_1w, sma_50)[i]
+        adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)[i]
+        vol_ma_24_aligned = vol_ma_24[i]  # already LTF
+        
+        # Check for NaN values
+        if (np.isnan(upper_bb_aligned) or np.isnan(lower_bb_aligned) or 
+            np.isnan(sma_50_aligned) or np.isnan(adx_1d_aligned) or 
+            np.isnan(vol_ma_24_aligned)):
             continue
         
-        # Volume confirmation (> 1.5x average)
-        volume_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation (> 2.0x average)
+        volume_confirm = volume[i] > 2.0 * vol_ma_24_aligned
         
-        # ADX trend filter (> 25)
-        trend_filter = adx_1d_aligned[i] > 25
+        # ADX trend filter (> 20)
+        trend_filter = adx_1d_aligned > 20
         
         if position == 0:  # No position - look for entries
             if volume_confirm and trend_filter:
-                # Long: price breaks above Donchian high
-                if close[i] > donch_high[i]:
+                # Long: price breaks above upper BB and trend is up
+                if close[i] > upper_bb_aligned and close[i-1] <= upper_bb_aligned and close[i] > sma_50_aligned:
                     position = 1
                     signals[i] = position_size
-                # Short: price breaks below Donchian low
-                elif close[i] < donch_low[i]:
+                # Short: price breaks below lower BB and trend is down
+                elif close[i] < lower_bb_aligned and close[i-1] >= lower_bb_aligned and close[i] < sma_50_aligned:
                     position = -1
                     signals[i] = -position_size
-        elif position == 1:  # Long position - exit when price breaks below Donchian low
-            if close[i] < donch_low[i]:
+        elif position == 1:  # Long position - exit when price breaks below lower BB
+            if close[i] < lower_bb_aligned and close[i-1] >= lower_bb_aligned:
                 position = 0
                 signals[i] = 0.0
-        elif position == -1:  # Short position - exit when price breaks above Donchian high
-            if close[i] > donch_high[i]:
+        elif position == -1:  # Short position - exit when price breaks above upper BB
+            if close[i] > upper_bb_aligned and close[i-1] <= upper_bb_aligned:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian_1dADX_Volume"
-timeframe = "4h"
+name = "12h_BB_1wTrend_1dADX_Volume"
+timeframe = "12h"
 leverage = 1.0
