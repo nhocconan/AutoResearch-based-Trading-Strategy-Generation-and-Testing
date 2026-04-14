@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -93,6 +93,11 @@ def generate_signals(prices):
     
     atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14)
     
+    # Calculate 20-period volume MA for volume filter (12h)
+    vol_ma_20 = np.full_like(volume, np.nan)
+    for j in range(19, len(volume)):
+        vol_ma_20[j] = np.mean(volume[j-19:j+1])
+    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
@@ -104,16 +109,13 @@ def generate_signals(prices):
             np.isnan(s1_aligned[i]) or 
             np.isnan(ema20_1d_aligned[i]) or 
             np.isnan(rsi14_aligned[i]) or 
-            np.isnan(atr14_aligned[i])):
+            np.isnan(atr14_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Volume ratio: current 12h volume vs 20-period average
-        vol_ma_20 = np.full_like(volume, np.nan)
-        for j in range(19, len(volume)):
-            vol_ma_20[j] = np.mean(volume[j-19:j+1])
-        
-        if np.isnan(vol_ma_20[i]) or vol_ma_20[i] <= 0:
+        if vol_ma_20[i] <= 0:
             volume_ratio = 0
         else:
             volume_ratio = volume[i] / vol_ma_20[i]
