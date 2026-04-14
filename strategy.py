@@ -1,3 +1,8 @@
+# 12h_1dEMA20_BBWidth_RSI_Filter
+# Hypothesis: Price trend following with Bollinger Band width filter and RSI momentum filter on 12h timeframe
+# Uses 1d EMA20 as trend filter, BB width < 5% to avoid chop, RSI between 30-70 to avoid extremes
+# Designed for low trade frequency (~15-25/year) to minimize fee drag while capturing trends in bull/bear markets
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -16,19 +21,9 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Calculate 1d RSI(14) for momentum filter
-    delta = pd.Series(df_1d['close']).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_1d = (100 - (100 / (1 + rs))).values
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Calculate 1d EMA(20) for trend filter
+    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
     # Calculate 1d ATR(14) for volatility filter
     high_series = pd.Series(high)
@@ -40,6 +35,24 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
+    # Calculate 1d Bollinger Bands (20, 2)
+    sma_20_1d = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).mean().values
+    std_20_1d = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).std().values
+    upper_bb_1d = sma_20_1d + (2 * std_20_1d)
+    lower_bb_1d = sma_20_1d - (2 * std_20_1d)
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_1d)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_1d)
+    
+    # Calculate 1d RSI(14) for momentum filter
+    delta = pd.Series(df_1d['close']).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = (100 - (100 / (1 + rs))).values
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
@@ -49,47 +62,53 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(rsi_1d_aligned[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(ema_20_1d_aligned[i]) or 
+            np.isnan(atr[i]) or 
+            np.isnan(upper_bb_aligned[i]) or 
+            np.isnan(lower_bb_aligned[i]) or
+            np.isnan(rsi_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         
-        # Volatility filter: avoid extremely low volatility periods
+        # ATR-based volatility filter: avoid extremely low volatility periods
         atr_ratio = atr[i] / price if price > 0 else 0
-        vol_filter = atr_ratio > 0.002  # Minimum 0.2% ATR relative to price
+        vol_filter = atr_ratio > 0.003  # Minimum 0.3% ATR relative to price
         
-        # Trend filter: price > 1d EMA50 for long, price < 1d EMA50 for short
-        trend_filter_long = price > ema_50_1d_aligned[i]
-        trend_filter_short = price < ema_50_1d_aligned[i]
+        # Bollinger Band squeeze detection: bandwidth < 5% of price
+        bb_width = (upper_bb_aligned[i] - lower_bb_aligned[i]) / price if price > 0 else 0
+        bb_squeeze = bb_width < 0.05
         
-        # Momentum filter: RSI between 35 and 65 to avoid extremes and favor momentum
-        rsi_filter = (rsi_1d_aligned[i] > 35) & (rsi_1d_aligned[i] < 65)
+        # Trend filter: price > 1d EMA20 for long, price < 1d EMA20 for short
+        trend_filter_long = price > ema_20_1d_aligned[i]
+        trend_filter_short = price < ema_20_1d_aligned[i]
+        
+        # Momentum filter: RSI between 30 and 70 to avoid extremes
+        rsi_filter = (rsi_1d_aligned[i] > 30) & (rsi_1d_aligned[i] < 70)
         
         if position == 0:
-            # Long setup: price above 1d EMA50 + volatility filter + momentum filter
-            if (trend_filter_long and vol_filter and rsi_filter):
+            # Long setup: price above 1d EMA20 + volatility filter + not in squeeze + momentum filter
+            if (trend_filter_long and vol_filter and not bb_squeeze and rsi_filter):
                 position = 1
                 signals[i] = position_size
-            # Short setup: price below 1d EMA50 + volatility filter + momentum filter
-            elif (trend_filter_short and vol_filter and rsi_filter):
+            # Short setup: price below 1d EMA20 + volatility filter + not in squeeze + momentum filter
+            elif (trend_filter_short and vol_filter and not bb_squeeze and rsi_filter):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below 1d EMA50
-            if price < ema_50_1d_aligned[i]:
+            # Exit long: price crosses below 1d EMA20
+            if price < ema_20_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above 1d EMA50
-            if price > ema_50_1d_aligned[i]:
+            # Exit short: price crosses above 1d EMA20
+            if price > ema_20_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -97,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1dEMA50_RSI_Volume_Filter"
-timeframe = "6h"
+name = "12h_1dEMA20_BBWidth_RSI_Filter"
+timeframe = "12h"
 leverage = 1.0
