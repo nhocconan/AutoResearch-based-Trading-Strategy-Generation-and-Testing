@@ -16,9 +16,9 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA(21) for trend filter
-    ema_21_1d = pd.Series(df_1d['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
+    # Calculate 1d EMA(34) for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate 1d ATR(14) for volatility filter
     high_1d = df_1d['high'].values
@@ -27,19 +27,20 @@ def generate_signals(prices):
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr2[0] = np.inf  # First value has no previous close
+    tr2[0] = np.inf
     tr3[0] = np.inf
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate 1d Bollinger Band width for squeeze detection
-    sma_20_1d = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).mean().values
-    std_20_1d = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).std().values
-    upper_bb_1d = sma_20_1d + (2 * std_20_1d)
-    lower_bb_1d = sma_20_1d - (2 * std_20_1d)
-    bb_width_1d = (upper_bb_1d - lower_bb_1d) / sma_20_1d
-    bb_width_1d_aligned = align_htf_to_ltf(prices, df_1d, bb_width_1d)
+    # Calculate 12h Donchian(20) for breakout signals
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    upper_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    upper_20_aligned = align_htf_to_ltf(prices, df_12h, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_12h, lower_20)
     
     signals = np.zeros(n)
     position = 0
@@ -50,45 +51,43 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_21_1d_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(atr_1d_aligned[i]) or
-            np.isnan(bb_width_1d_aligned[i])):
+            np.isnan(upper_20_aligned[i]) or
+            np.isnan(lower_20_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # Trend filter: price > 1d EMA21 for long, price < 1d EMA21 for short
-        trend_filter_long = price > ema_21_1d_aligned[i]
-        trend_filter_short = price < ema_21_1d_aligned[i]
+        # Trend filter: price > 1d EMA34 for long, price < 1d EMA34 for short
+        trend_filter_long = price > ema_34_1d_aligned[i]
+        trend_filter_short = price < ema_34_1d_aligned[i]
         
-        # Volatility filter: 1d ATR > 2% of price to avoid low volatility periods
-        vol_filter = atr_1d_aligned[i] / price > 0.02 if price > 0 else False
-        
-        # Bollinger Band squeeze detection: bandwidth < 4%
-        bb_squeeze = bb_width_1d_aligned[i] < 0.04
+        # Volatility filter: 1d ATR > 1.5% of price to avoid low volatility periods
+        vol_filter = atr_1d_aligned[i] / price > 0.015 if price > 0 else False
         
         if position == 0:
-            # Long setup: price above 1d EMA21 + volatility filter + not in squeeze
-            if trend_filter_long and vol_filter and not bb_squeeze:
+            # Long setup: price breaks above 12h Donchian upper + trend + volatility
+            if price > upper_20_aligned[i] and trend_filter_long and vol_filter:
                 position = 1
                 signals[i] = position_size
-            # Short setup: price below 1d EMA21 + volatility filter + not in squeeze
-            elif trend_filter_short and vol_filter and not bb_squeeze:
+            # Short setup: price breaks below 12h Donchian lower + trend + volatility
+            elif price < lower_20_aligned[i] and trend_filter_short and vol_filter:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below 1d EMA21
-            if price < ema_21_1d_aligned[i]:
+            # Exit long: price crosses below 1d EMA34
+            if price < ema_34_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above 1d EMA21
-            if price > ema_21_1d_aligned[i]:
+            # Exit short: price crosses above 1d EMA34
+            if price > ema_34_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -96,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dEMA21_VolFilter_BS_Squeeze_v1"
-timeframe = "4h"
+name = "12h_1dEMA34_12hDonchian20_VolFilter_v1"
+timeframe = "12h"
 leverage = 1.0
