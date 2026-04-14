@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour strategy using weekly pivot points for directional bias and daily ADX for trend strength.
-# Long when price breaks above weekly R2 with daily ADX > 20; short when price breaks below weekly S2 with daily ADX > 20.
-# In low ADX (ADX <= 20), fade at weekly R3/S3 with reversal confirmation.
-# Volume > 1.5x 20-period average confirms breakouts/breakdowns.
-# Weekly pivots provide structural support/resistance that works in both bull and bear markets.
+# Hypothesis: 12-hour strategy using 1-week Bollinger Bands with 1-day volume confirmation.
+# Long when price touches lower BB on 1w with high volume (mean reversion).
+# Short when price touches upper BB on 1w with high volume (mean reversion).
+# Exit when price returns to 1w middle band (SMA).
+# Uses 1-week timeframe for structural levels and 1-day for volume confirmation to reduce noise.
+# Designed to work in both bull and bear markets by capturing mean reversion at extremes.
 # Target: 20-40 trades/year per symbol (80-160 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
@@ -20,137 +21,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for pivots and ADX
+    # Load 1w data ONCE for structural levels (Bollinger Bands)
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Load 1d data ONCE for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     
-    # Load weekly data for pivot calculation (using daily data to compute weekly pivots)
-    # We'll use the same daily data but resample conceptually via rolling window for weekly high/low/close
-    if len(df_1d) < 5:
+    # 1w Bollinger Bands (20, 2)
+    bb_len = 20
+    bb_std = 2
+    if len(df_1w) < bb_len:
         return np.zeros(n)
     
-    # Calculate weekly high, low, close from daily data (simplified: use last 5 days)
-    # For proper weekly pivot, we need actual weekly OHLC, but we'll approximate with 5-day period
-    weekly_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().values
-    weekly_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().values
-    weekly_close = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).last().values
+    close_1w = df_1w['close'].values
+    sma_1w = pd.Series(close_1w).rolling(window=bb_len, min_periods=bb_len).mean().values
+    std_1w = pd.Series(close_1w).rolling(window=bb_len, min_periods=bb_len).std().values
+    bb_upper_1w = sma_1w + bb_std * std_1w
+    bb_lower_1w = sma_1w - bb_std * std_1w
     
-    # Weekly pivot points
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    weekly_s1 = 2 * weekly_pivot - weekly_high
-    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
-    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
-    weekly_r3 = weekly_high + 2 * (weekly_pivot - weekly_low)
-    weekly_s3 = weekly_low - 2 * (weekly_high - weekly_pivot)
+    # Align 1w Bollinger Bands to 12h timeframe
+    bb_upper_1w_aligned = align_htf_to_ltf(prices, df_1w, bb_upper_1w)
+    bb_lower_1w_aligned = align_htf_to_ltf(prices, df_1w, bb_lower_1w)
+    sma_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_1w)
     
-    # Align weekly pivots to 6h
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
-    weekly_r2_aligned = align_htf_to_ltf(prices, df_1d, weekly_r2)
-    weekly_s2_aligned = align_htf_to_ltf(prices, df_1d, weekly_s2)
-    weekly_r3_aligned = align_htf_to_ltf(prices, df_1d, weekly_r3)
-    weekly_s3_aligned = align_htf_to_ltf(prices, df_1d, weekly_s3)
-    
-    # Daily ADX for trend strength
-    if len(df_1d) < 14:
+    # 1-day volume confirmation (20-period average)
+    vol_ma_len = 20
+    if len(df_1d) < vol_ma_len:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smoothed values
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / atr
-    di_minus = 100 * dm_minus_smooth / atr
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume confirmation: 1.5x average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=vol_ma_len, min_periods=vol_ma_len).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(20, 14*2, 5)
+    start = max(bb_len, vol_ma_len)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(adx_aligned[i]) or 
-            np.isnan(weekly_r2_aligned[i]) or
-            np.isnan(weekly_s2_aligned[i]) or
-            np.isnan(weekly_r3_aligned[i]) or
-            np.isnan(weekly_s3_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(bb_upper_1w_aligned[i]) or 
+            np.isnan(bb_lower_1w_aligned[i]) or
+            np.isnan(sma_1w_aligned[i]) or
+            np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend regime: ADX > 20 = trending, ADX <= 20 = ranging
-        trending = adx_aligned[i] > 20
-        
-        # Volume confirmation
-        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: current 12h volume > 1.5x 1d average volume
+        # Convert 1d volume average to 12h equivalent (approximate)
+        volume_confirmed = volume[i] > 1.5 * vol_ma_1d_aligned[i]
         
         if position == 0:
-            if trending:
-                # In trending market: breakout trades in direction of weekly pivot levels
-                if (close[i] > weekly_r2_aligned[i] and 
-                    volume_confirmed):
-                    position = 1
-                    signals[i] = position_size
-                elif (close[i] < weekly_s2_aligned[i] and 
-                      volume_confirmed):
-                    position = -1
-                    signals[i] = -position_size
-                else:
-                    signals[i] = 0.0
+            # Long: price touches or crosses below lower Bollinger Band with volume confirmation
+            if (close[i] <= bb_lower_1w_aligned[i] and 
+                volume_confirmed):
+                position = 1
+                signals[i] = position_size
+            # Short: price touches or crosses above upper Bollinger Band with volume confirmation
+            elif (close[i] >= bb_upper_1w_aligned[i] and 
+                  volume_confirmed):
+                position = -1
+                signals[i] = -position_size
             else:
-                # In ranging market: fade at extreme weekly levels (R3/S3)
-                if (close[i] > weekly_r3_aligned[i] and 
-                    volume_confirmed):
-                    position = -1
-                    signals[i] = -position_size
-                elif (close[i] < weekly_s3_aligned[i] and 
-                      volume_confirmed):
-                    position = 1
-                    signals[i] = position_size
-                else:
-                    signals[i] = 0.0
+                signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to weekly pivot or breaks below S1
-            if (close[i] < weekly_pivot_aligned[i] or 
-                close[i] < weekly_s1_aligned[i]):
+            # Exit long: price returns to or above the 1w middle band (SMA)
+            if close[i] >= sma_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to weekly pivot or breaks above R1
-            if (close[i] > weekly_pivot_aligned[i] or 
-                close[i] > weekly_r1_aligned[i]):
+            # Exit short: price returns to or below the 1w middle band (SMA)
+            if close[i] <= sma_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -158,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_DailyADX_v1"
-timeframe = "6h"
+name = "12h_1wBB_1dVol_MeanRev_v1"
+timeframe = "12h"
 leverage = 1.0
