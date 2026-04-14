@@ -68,12 +68,12 @@ def generate_signals(prices):
         elif not np.isnan(avg_gain[i]) and avg_loss[i] == 0:
             rsi_1d[i] = 100.0
     
-    # Align indicators to 12h timeframe
-    atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
-    vol_filter_12h = align_htf_to_ltf(prices, df_1d, vol_filter_1d.astype(float))
-    rsi_12h = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Align indicators to 4h timeframe (primary timeframe)
+    atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    vol_filter_4h = align_htf_to_ltf(prices, df_1d, vol_filter_1d.astype(float))
+    rsi_4h = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Calculate 12-hour Donchian channels (20-period)
+    # Calculate 4-hour Donchian channels (20-period)
     donch_high = np.full(n, np.nan)
     donch_low = np.full(n, np.nan)
     if n >= 20:
@@ -87,15 +87,15 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical data is NaN
-        if (np.isnan(atr_12h[i]) or
+        if (np.isnan(atr_4h[i]) or
             np.isnan(donch_high[i]) or
             np.isnan(donch_low[i]) or
-            np.isnan(rsi_12h[i])):
+            np.isnan(rsi_4h[i])):
             signals[i] = 0.0
             continue
         
         # Skip low volatility periods (ATR < 1.5% of price)
-        if vol_filter_12h[i] < 0.5:
+        if vol_filter_4h[i] < 0.5:
             signals[i] = 0.0
             continue
         
@@ -109,31 +109,31 @@ def generate_signals(prices):
         r3 = prev_close + (prev_range * 1.1 / 4)
         s3 = prev_close - (prev_range * 1.1 / 4)
         
-        # Align to 12h timeframe
-        r3_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r3))[i]
-        s3_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i]
+        # Align to 4h timeframe
+        r3_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r3))[i]
+        s3_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i]
         
         if position == 0:
-            # Long: Price breaks above 12h Donchian high AND above S3 AND RSI < 70
-            if close[i] > donch_high[i] and close[i] > s3_12h and rsi_12h[i] < 70:
+            # Long: Price breaks above 4h Donchian high AND above S3 AND RSI < 70
+            if close[i] > donch_high[i] and close[i] > s3_4h and rsi_4h[i] < 70:
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below 12h Donchian low AND below R3 AND RSI > 30
-            elif close[i] < donch_low[i] and close[i] < r3_12h and rsi_12h[i] > 30:
+            # Short: Price breaks below 4h Donchian low AND below R3 AND RSI > 30
+            elif close[i] < donch_low[i] and close[i] < r3_4h and rsi_4h[i] > 30:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below 12h Donchian low OR below S3 OR RSI > 70
-            if close[i] < donch_low[i] or close[i] < s3_12h or rsi_12h[i] > 70:
+            # Exit: Price falls back below 4h Donchian low OR below S3 OR RSI > 70
+            if close[i] < donch_low[i] or close[i] < s3_4h or rsi_4h[i] > 70:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above 12h Donchian high OR above R3 OR RSI < 30
-            if close[i] > donch_high[i] or close[i] > r3_12h or rsi_12h[i] < 30:
+            # Exit: Price rises back above 4h Donchian high OR above R3 OR RSI < 30
+            if close[i] > donch_high[i] or close[i] > r3_4h or rsi_4h[i] < 30:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -141,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_R3S3_RSI_Filter"
-timeframe = "12h"
+name = "4h_1d_Camarilla_R3S3_RSI_Filter"
+timeframe = "4h"
 leverage = 1.0
