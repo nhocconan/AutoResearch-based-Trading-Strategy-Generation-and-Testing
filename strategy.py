@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray with 1d ADX Trend Filter and Volume Spike
-# Uses 6h Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13) for momentum
-# 1d ADX (14) provides trend strength filter to avoid low-momentum entries
-# Volume confirmation (>1.5x average) ensures institutional participation
-# Works in both bull and bear markets by trading with the trend when momentum aligns
-# Target: 12-30 trades/year (48-120 total over 4 years) to minimize fee drag
+# Hypothesis: 4h Donchian breakout with 1d ADX trend filter and volume confirmation
+# Uses Donchian channel breakout (20-period) from 4h timeframe for entry signals
+# 1d ADX (14) provides trend strength filter to avoid low-momentum breakouts
+# Volume confirmation (>1.5x average volume) ensures institutional participation
+# Designed to work in both bull and bear markets by trading breakouts in direction of daily trend
+# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,22 +20,14 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA13 and ADX
+    # Load 1d data ONCE before loop for ADX
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA13 for Elder Ray
-    close_1d = df_1d['close'].values
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Calculate 1d Elder Ray components
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    bull_power_1d = high_1d - ema13_1d  # Bull Power = High - EMA13
-    bear_power_1d = low_1d - ema13_1d   # Bear Power = Low - EMA13
-    
-    # Align Elder Ray to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    # Calculate Donchian channel (20-period) on 4h
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
     # Calculate 1d ADX (14) for trend strength
     def calculate_adx(high, low, close, period=14):
@@ -82,6 +74,9 @@ def generate_signals(prices):
                 adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
         return adx
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
@@ -94,11 +89,11 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 50  # for EMA13 and ADX calculations
+    start = 50  # for Donchian and ADX calculations
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(adx_1d_aligned[i]) or np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
@@ -110,26 +105,26 @@ def generate_signals(prices):
         strong_trend = adx_1d_aligned[i] > 25
         
         if position == 0:
-            # Long: Bull Power > 0 and rising with volume filter and strong trend
-            if bull_power_aligned[i] > 0 and bull_power_aligned[i] > bull_power_aligned[i-1] and vol > 1.5 * avg_vol[i] and strong_trend:
+            # Long: price breaks above Donchian high with volume filter and strong trend
+            if price > donchian_high[i] and vol > 1.5 * avg_vol[i] and strong_trend:
                 position = 1
                 signals[i] = position_size
-            # Short: Bear Power < 0 and falling with volume filter and strong trend
-            elif bear_power_aligned[i] < 0 and bear_power_aligned[i] < bear_power_aligned[i-1] and vol > 1.5 * avg_vol[i] and strong_trend:
+            # Short: price breaks below Donchian low with volume filter and strong trend
+            elif price < donchian_low[i] and vol > 1.5 * avg_vol[i] and strong_trend:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Bear Power becomes positive (momentum shift) or ADX weakens
-            if bear_power_aligned[i] > 0 or adx_1d_aligned[i] < 20:
+            # Exit long: price breaks below Donchian low (reversal) or ADX weakens
+            if price < donchian_low[i] or adx_1d_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Bull Power becomes negative (momentum shift) or ADX weakens
-            if bull_power_aligned[i] < 0 or adx_1d_aligned[i] < 20:
+            # Exit short: price breaks above Donchian high (reversal) or ADX weakens
+            if price > donchian_high[i] or adx_1d_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -137,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_1dADX_Volume"
-timeframe = "6h"
+name = "4h_Donchian_Breakout_1dADX_Volume"
+timeframe = "4h"
 leverage = 1.0
