@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1-week ATR-based volatility expansion and 1-day Donchian breakout.
-# Long when price breaks above 1-day Donchian high (20) AND weekly ATR expansion > 1.3x (volatility surge).
-# Short when price breaks below 1-day Donchian low (20) AND weekly ATR expansion > 1.3x.
-# Exit when price returns to 1-day Donchian middle or ATR contraction < 0.8x.
-# Uses volatility expansion to capture momentum bursts in both bull and bear markets,
-# and Donchian channels for clear breakout levels. Designed for low trade frequency
-# to minimize fee drag while capturing strong moves.
-# Target: 15-25 trades/year per symbol (60-100 total over 4 years).
+# Hypothesis: 4h strategy using 1-day RSI extremes with 1-week volume-weighted average price (VWAP) as dynamic support/resistance.
+# Long when RSI < 30 (oversold) AND price > weekly VWAP (bullish bias).
+# Short when RSI > 70 (overbought) AND price < weekly VWAP (bearish bias).
+# Exit when RSI returns to neutral range (40-60).
+# Uses RSI for mean-reversion signals in extreme conditions and weekly VWAP for trend bias.
+# Designed to work in both bull and bear markets by fading extremes only when aligned with higher timeframe trend.
+# Target: 20-35 trades/year per symbol (80-140 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,95 +19,85 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load 1d data ONCE for Donchian channels
+    # Load 1d data for RSI and 1w data for VWAP
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need enough for Donchian(20)
+    df_1w = get_htf_data(prices, '1w')
+    
+    if len(df_1d) < 14:  # Need enough for RSI
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate RSI (14) on daily timeframe
     close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate Donchian channels (20) on 1d
-    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
     
-    # Load 1w data ONCE for ATR
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:  # Need enough for ATR(14)
+    rs = avg_gain / (avg_loss + 1e-10)  # Avoid division by zero
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Calculate VWAP on weekly timeframe
+    if len(df_1w) < 1:
         return np.zeros(n)
     
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # Calculate ATR (14) on 1w
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    typical_price_1w = (high_1w + low_1w + close_1w) / 3
+    vwap_numerator = np.cumsum(typical_price_1w * volume_1w)
+    vwap_denominator = np.cumsum(volume_1w)
+    vwap = vwap_numerator / (vwap_denominator + 1e-10)  # Avoid division by zero
     
-    # Calculate ATR ratio: current ATR / average ATR (50-period)
-    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr / atr_ma
-    
-    # Align indicators to 12h timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
-    donch_mid_aligned = align_htf_to_ltf(prices, df_1d, donch_mid)
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1w, atr_ratio)
+    # Align indicators to 4h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    vwap_aligned = align_htf_to_ltf(prices, df_1w, vwap)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations
-    start = max(30, 20, 50)  # Need Donchian and ATR periods
+    # Start after enough data for RSI calculation
+    start = 14
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or
-            np.isnan(donch_mid_aligned[i]) or
-            np.isnan(atr_ratio_aligned[i])):
+        if (np.isnan(rsi_aligned[i]) or 
+            np.isnan(vwap_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility expansion filter: ATR ratio > 1.3 indicates volatility surge
-        vol_expansion = atr_ratio_aligned[i] > 1.3
-        
-        # Volatility contraction filter: ATR ratio < 0.8 indicates volatility collapse
-        vol_contraction = atr_ratio_aligned[i] < 0.8
-        
         if position == 0:
-            # Look for Donchian breakouts with volatility expansion
-            # Long: price breaks above Donchian high AND volatility expansion
-            if (close[i] > donch_high_aligned[i] and 
-                vol_expansion):
+            # Look for RSI extremes with VWAP filter
+            # Long: RSI < 30 (oversold) AND price > weekly VWAP (bullish bias)
+            if (rsi_aligned[i] < 30 and 
+                close[i] > vwap_aligned[i]):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below Donchian low AND volatility expansion
-            elif (close[i] < donch_low_aligned[i] and 
-                  vol_expansion):
+            # Short: RSI > 70 (overbought) AND price < weekly VWAP (bearish bias)
+            elif (rsi_aligned[i] > 70 and 
+                  close[i] < vwap_aligned[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to Donchian middle or volatility contraction
-            if (close[i] <= donch_mid_aligned[i] or 
-                vol_contraction):
+            # Exit long: RSI returns to neutral range (40-60)
+            if (rsi_aligned[i] >= 40 and 
+                rsi_aligned[i] <= 60):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to Donchian middle or volatility contraction
-            if (close[i] >= donch_mid_aligned[i] or 
-                vol_contraction):
+            # Exit short: RSI returns to neutral range (40-60)
+            if (rsi_aligned[i] >= 40 and 
+                rsi_aligned[i] <= 60):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -116,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Donchian_Breakout_1w_ATR_Expansion_v1"
-timeframe = "12h"
+name = "4h_1dRSI_1wVWAP_ExtremeReversion_v1"
+timeframe = "4h"
 leverage = 1.0
