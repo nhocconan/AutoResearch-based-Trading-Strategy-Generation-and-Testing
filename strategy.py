@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 20:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -91,9 +91,9 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # Reduced position size to 25%
+    position_size = 0.20  # Reduced position size to 20% to control drawdown
     
-    for i in range(100, n):
+    for i in range(20, n):
         # Skip if any critical data is NaN
         if (np.isnan(atr_6h[i]) or
             np.isnan(donch_high[i]) or
@@ -103,13 +103,13 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Skip low volatility periods (ATR < 0.3% of price)
-        if atr_6h[i] / close[i] < 0.003:
+        # Skip low volatility periods (ATR < 0.4% of price)
+        if atr_6h[i] / close[i] < 0.004:
             signals[i] = 0.0
             continue
         
-        # Skip low volume periods (volume < 70% of 20-period MA)
-        if volume[i] < 0.7 * volume_ma[i]:
+        # Skip low volume periods (volume < 60% of 20-period MA)
+        if volume[i] < 0.6 * volume_ma[i]:
             signals[i] = 0.0
             continue
         
@@ -164,6 +164,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Pivot_S3R3_Donchian20_Volume_Filter_v2"
+name = "6h_1d_Pivot_S3R3_Donchian20_Volume_Filter_v3"
 timeframe = "6h"
 leverage = 1.0
