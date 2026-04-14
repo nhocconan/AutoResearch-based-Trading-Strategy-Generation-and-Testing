@@ -3,192 +3,138 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1d Supertrend and 1w ADX trend filter.
-# Supertrend(10, 3) on 1d provides dynamic trend direction and trailing stop.
-# 1w ADX(14) > 25 confirms strong trend on higher timeframe.
-# Long when Supertrend flips to up and 1w ADX > 25.
-# Short when Supertrend flips to down and 1w ADX > 25.
-# Exit when Supertrend flips opposite direction.
-# Designed to capture strong trends while avoiding whipsaws in weak trends.
-# Target: 15-25 trades/year per symbol (60-100 total over 4 years) to minimize fee drag.
+# Hypothesis: 12h strategy combining daily Camarilla pivot levels with volume spike confirmation and
+# 1-week ADX trend filter. Long when price breaks above daily Camarilla H3 level with ADX>25 and
+# volume > 1.5x 20-period average. Short when price breaks below daily Camarilla L3 level with
+# ADX>25 and volume confirmation. Exit when price returns to daily close or ADX drops below 20.
+# Uses Camarilla levels for intraday support/resistance, ADX for trend strength, and volume for
+# confirmation. Designed for 12h timeframe to capture multi-day moves while minimizing trades.
+# Target: 15-25 trades/year per symbol (60-100 total over 4 years) to stay well under fee drag limits.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Load 1d data ONCE for Supertrend
+    # Load daily data ONCE for Camarilla levels and ADX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate True Range and ATR on 1d
+    # Calculate Daily Camarilla Pivot Levels
+    # Pivot = (H + L + C) / 3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    
+    # Camarilla levels: H3/L3 are key breakout levels
+    # H3 = Close + 1.1 * (High - Low) / 2
+    # L3 = Close - 1.1 * (High - Low) / 2
+    camarilla_h3 = close_1d + 1.1 * range_1d / 2.0
+    camarilla_l3 = close_1d - 1.1 * range_1d / 2.0
+    
+    # Daily ADX for trend strength filter
+    # Calculate True Range
     tr1 = np.abs(high_1d[1:] - low_1d[1:])
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     
-    atr_period = 10
-    atr_1d = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    # Calculate Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_minus = np.concatenate([[np.nan], dm_minus])
     
-    # Supertrend parameters
-    factor = 3.0
+    # Smooth TR, DM+, DM- with Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    atr_period = 14
+    tr_smooth = pd.Series(tr).ewm(alpha=1/atr_period, adjust=False).values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/atr_period, adjust=False).values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/atr_period, adjust=False).values
     
-    # Basic upper and lower bands
-    basic_ub = (high_1d + low_1d) / 2 + factor * atr_1d
-    basic_lb = (high_1d + low_1d) / 2 - factor * atr_1d
+    # Calculate DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / tr_smooth
+    di_minus = 100 * dm_minus_smooth / tr_smooth
     
-    # Final upper and lower bands
-    final_ub = np.zeros_like(basic_ub)
-    final_lb = np.zeros_like(basic_lb)
+    # Calculate DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/atr_period, adjust=False).values
     
-    # Initialize first values
-    final_ub[0] = basic_ub[0]
-    final_lb[0] = basic_lb[0]
+    # Load weekly data ONCE for additional trend filter (optional)
+    # Using daily ADX as primary trend filter
     
-    for i in range(1, len(close_1d)):
-        if close_1d[i-1] <= final_ub[i-1]:
-            final_ub[i] = min(basic_ub[i], final_ub[i-1])
-        else:
-            final_ub[i] = basic_ub[i]
-            
-        if close_1d[i-1] >= final_lb[i-1]:
-            final_lb[i] = max(basic_lb[i], final_lb[i-1])
-        else:
-            final_lb[i] = basic_lb[i]
+    # Align indicators to 12h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
     
-    # Supertrend direction: 1 for uptrend, -1 for downtrend
-    supertrend = np.zeros_like(close_1d)
-    direction = np.ones_like(close_1d)  # Start with uptrend assumption
-    
-    supertrend[0] = final_ub[0]
-    direction[0] = 1
-    
-    for i in range(1, len(close_1d)):
-        if close_1d[i] <= final_ub[i]:
-            direction[i] = -1
-            supertrend[i] = final_ub[i]
-        elif close_1d[i] >= final_lb[i]:
-            direction[i] = 1
-            supertrend[i] = final_lb[i]
-        else:
-            direction[i] = direction[i-1]
-            if direction[i] == 1:
-                supertrend[i] = final_lb[i]
-            else:
-                supertrend[i] = final_ub[i]
-    
-    # Load 1w data ONCE for ADX trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate ADX on 1w
-    period = 14
-    
-    # True Range
-    tr1_w = np.abs(high_1w[1:] - low_1w[1:])
-    tr2_w = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3_w = np.abs(low_1w[1:] - close_1w[:-1])
-    tr_w = np.maximum(tr1_w, np.maximum(tr2_w, tr3_w))
-    tr_w = np.concatenate([[np.nan], tr_w])
-    
-    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
-    plus_dm = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
-                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    
-    minus_dm = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
-                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
-    minus_dm = np.concatenate([[0], minus_dm])
-    
-    # Smoothed values using Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    def wilders_smoothing(data, period):
-        if len(data) < period:
-            return np.full_like(data, np.nan)
-        result = np.full_like(data, np.nan)
-        # First value is simple average
-        result[period-1] = np.nansum(data[1:period]) / period
-        # Subsequent values: Wilder's smoothing
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    atr_wilders = wilders_smoothing(tr_w, period)
-    plus_dm_smooth = wilders_smoothing(plus_dm, period)
-    minus_dm_smooth = wilders_smoothing(minus_dm, period)
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / atr_wilders
-    minus_di = 100 * minus_dm_smooth / atr_wilders
-    
-    # DX and ADX
-    dx = np.where((plus_di + minus_di) != 0, 
-                  100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = wilders_smoothing(dx, period)
-    
-    # Align indicators to lower timeframe
-    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend)
-    direction_aligned = align_htf_to_ltf(prices, df_1d, direction)
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    # Volume confirmation: 1.5x average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(30, 30)  # Need Supertrend and ADX
+    start = max(30, 20)  # Need ADX and volume MA
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(supertrend_aligned[i]) or 
-            np.isnan(direction_aligned[i]) or
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or 
+            np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(adx_aligned[i]) or
+            np.isnan(close_1d_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Volume confirmation
+        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
+        
         # Trend filter: ADX > 25 indicates strong trend
         strong_trend = adx_aligned[i] > 25
+        weak_trend = adx_aligned[i] < 20  # Exit when trend weakens
         
         if position == 0:
-            # Look for Supertrend direction changes
-            # Long: Supertrend flips to up AND strong trend
-            if (direction_aligned[i] == 1 and 
-                direction_aligned[i-1] == -1 and 
-                strong_trend):
+            # Look for Camarilla breakouts
+            # Long: price breaks above H3 with strong trend and volume
+            if (close[i] > camarilla_h3_aligned[i] and 
+                strong_trend and 
+                volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: Supertrend flips to down AND strong trend
-            elif (direction_aligned[i] == -1 and 
-                  direction_aligned[i-1] == 1 and 
-                  strong_trend):
+            # Short: price breaks below L3 with strong trend and volume
+            elif (close[i] < camarilla_l3_aligned[i] and 
+                  strong_trend and 
+                  volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Supertrend flips to down
-            if direction_aligned[i] == -1:
+            # Exit long: price returns to daily close or trend weakens
+            if (close[i] <= close_1d_aligned[i] or 
+                weak_trend):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Supertrend flips to up
-            if direction_aligned[i] == 1:
+            # Exit short: price returns to daily close or trend weakens
+            if (close[i] >= close_1d_aligned[i] or 
+                weak_trend):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -196,6 +142,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Supertrend_1wADX_TrendFilter_v1"
-timeframe = "1d"
+name = "12h_Camarilla_H3L3_ADX_VolumeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
