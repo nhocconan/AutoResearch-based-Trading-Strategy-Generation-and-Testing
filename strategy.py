@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Williams %R with 4h trend filter (EMA200) and volume confirmation.
-# Williams %R identifies overbought/oversold conditions for mean reversion entries.
-# 4h EMA200 provides trend bias to avoid counter-trend trades.
-# Volume > 1.3x average confirms institutional participation.
-# Works in bull/bear as 4h EMA200 adapts to trend.
-# Target: 15-37 trades/year per symbol (60-150 total over 4 years).
+# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction (from 1w high/low) and volume confirmation.
+# Weekly pivot (high/low of prior week) defines macro bias: long if price > weekly high, short if price < weekly low.
+# 6h Donchian breakout in direction of weekly pivot captures momentum with trend alignment.
+# Volume > 1.8x average confirms institutional participation and reduces false breakouts.
+# Works in bull/bear as weekly pivot adapts to longer-term trend.
+# Target: 15-30 trades/year per symbol (60-120 total over 4 years).
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,78 +20,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE for trend filter
-    df_4h = get_htf_data(prices, '4h')
+    # Load weekly data ONCE for pivot
+    df_1w = get_htf_data(prices, '1w')
     
-    # 4h EMA(200) for trend filter
-    ema_len = 200
-    if len(df_4h) < ema_len:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    ema_4h = pd.Series(df_4h['close']).ewm(span=ema_len, adjust=False, min_periods=ema_len).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Weekly high and low from completed weekly bar (no look-ahead)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
     
-    # Williams %R (14 periods) on 1h
-    wr_len = 14
-    highest_high = pd.Series(high).rolling(window=wr_len, min_periods=wr_len).max().values
-    lowest_low = pd.Series(low).rolling(window=wr_len, min_periods=wr_len).min().values
-    wr = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Donchian channel (20 periods) on 6h
+    dc_len = 20
+    dc_upper = pd.Series(high).rolling(window=dc_len, min_periods=dc_len).max().shift(1).values
+    dc_lower = pd.Series(low).rolling(window=dc_len, min_periods=dc_len).min().shift(1).values
     
-    # Volume confirmation: 1.3x average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_mask = (hours >= 8) & (hours <= 20)
+    # Volume confirmation: 1.8x average volume (higher threshold to reduce trades)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(50, wr_len, 20)
+    start = max(50, dc_len, 30)
     
     for i in range(start, n):
-        # Skip if any critical data is NaN or outside session
-        if (np.isnan(wr[i]) or 
-            np.isnan(ema_4h_aligned[i]) or
-            np.isnan(vol_ma[i]) or
-            not session_mask[i]):
+        # Skip if any critical data is NaN
+        if (np.isnan(dc_upper[i]) or 
+            np.isnan(dc_lower[i]) or
+            np.isnan(weekly_high_aligned[i]) or
+            np.isnan(weekly_low_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to 4h EMA200
-        above_ema = close[i] > ema_4h_aligned[i]
-        below_ema = close[i] < ema_4h_aligned[i]
+        # Weekly pivot bias: price relative to weekly high/low
+        above_weekly_high = close[i] > weekly_high_aligned[i]
+        below_weekly_low = close[i] < weekly_low_aligned[i]
         
-        # Volume confirmation: current volume > 1.3x average
-        volume_confirmed = volume[i] > 1.3 * vol_ma[i]
+        # Volume confirmation: current volume > 1.8x average
+        volume_confirmed = volume[i] > 1.8 * vol_ma[i]
         
         if position == 0:
-            # Enter long: Williams %R oversold (< -80) + above 4h EMA200 + volume
-            if (wr[i] < -80 and 
-                above_ema and 
+            # Enter long: Donchian breakout above + price > weekly high + volume
+            if (close[i] > dc_upper[i] and 
+                above_weekly_high and 
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Enter short: Williams %R overbought (> -20) + below 4h EMA200 + volume
-            elif (wr[i] > -20 and 
-                  below_ema and 
+            # Enter short: Donchian breakdown below + price < weekly low + volume
+            elif (close[i] < dc_lower[i] and 
+                  below_weekly_low and 
                   volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Williams %R returns to -50 or breaks below 4h EMA200
-            if wr[i] > -50 or close[i] < ema_4h_aligned[i]:
+            # Exit long: price returns below weekly high or breaks below Donchian lower
+            if close[i] < weekly_high_aligned[i] or close[i] < dc_lower[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Williams %R returns to -50 or breaks above 4h EMA200
-            if wr[i] < -50 or close[i] > ema_4h_aligned[i]:
+            # Exit short: price returns above weekly low or breaks above Donchian upper
+            if close[i] > weekly_low_aligned[i] or close[i] > dc_upper[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -99,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_WilliamsR_4hEMA200_Volume_v1"
-timeframe = "1h"
+name = "6h_1w_Donchian_WeeklyPivot_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
