@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-1d Bollinger Band Breakout + 1W Trend + Volume Spike
-Long when price closes above upper Bollinger Band, weekly close > weekly open, and volume > 1.5x average.
-Short when price closes below lower Bollinger Band, weekly close < weekly open, and volume > 1.5x average.
-Exit when price reverses back through the Bollinger middle band.
-Designed for low turnover: ~5-15 trades/year per symbol.
+4h Donchian Breakout + Volume Spike + Weekly Trend Filter
+Long when price breaks above Donchian(20) high, volume > 1.5x 20-bar avg, and weekly close > weekly open.
+Short when price breaks below Donchian(20) low, volume > 1.5x 20-bar avg, and weekly close < weekly open.
+Exit when price reverses back through Donchian middle (10-bar avg).
+Designed for ~25-40 trades/year per symbol.
 """
 
 import numpy as np
@@ -23,25 +23,21 @@ def generate_signals(prices):
     
     # Load weekly data once for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
     weekly_close = df_1w['close'].values
     weekly_open = df_1w['open'].values
     
-    # Calculate 20-period Bollinger Bands
-    bb_period = 20
-    bb_std = 2.0
-    sma = np.full(n, np.nan)
-    std_dev = np.full(n, np.nan)
+    # Donchian channels (20-period)
+    donch_high = np.full(n, np.nan)
+    donch_low = np.full(n, np.nan)
     
-    for i in range(bb_period - 1, n):
-        sma[i] = np.mean(close[i - bb_period + 1:i + 1])
-        std_dev[i] = np.std(close[i - bb_period + 1:i + 1])
+    for i in range(19, n):
+        donch_high[i] = np.max(high[i-19:i+1])
+        donch_low[i] = np.min(low[i-19:i+1])
     
-    upper_band = sma + bb_std * std_dev
-    lower_band = sma - bb_std * std_dev
-    middle_band = sma
+    donch_mid = (donch_high + donch_low) / 2
     
     # Volume filter: 20-period average
     vol_ma = np.full(n, np.nan)
@@ -52,10 +48,10 @@ def generate_signals(prices):
         vol_count += 1
         if vol_count >= 20:
             vol_ma[i] = vol_sum / vol_count
-            vol_sum -= volume[i - 19]
+            vol_sum -= volume[i-19]
             vol_count -= 1
     
-    # Weekly trend: 1 if bullish (close > open), -1 if bearish (close < open)
+    # Weekly trend: 1 if bullish (close > open), -1 if bearish
     weekly_bullish = weekly_close > weekly_open
     weekly_bearish = weekly_close < weekly_open
     
@@ -67,9 +63,9 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25
     
-    for i in range(bb_period - 1, n):
+    for i in range(19, n):
         # Skip if any indicator not ready
-        if np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(middle_band[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(donch_mid[i]) or np.isnan(vol_ma[i]):
             continue
         
         # Get aligned weekly trend values
@@ -80,27 +76,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close above upper Bollinger Band, volume spike, weekly bullish
-            if close[i] > upper_band[i] and volume[i] > vol_ma[i] * 1.5 and weekly_bull > 0.5:
+            # Long: Break above Donchian high, volume spike, weekly bullish
+            if close[i] > donch_high[i] and volume[i] > vol_ma[i] * 1.5 and weekly_bull > 0.5:
                 position = 1
                 signals[i] = position_size
-            # Short: Close below lower Bollinger Band, volume spike, weekly bearish
-            elif close[i] < lower_band[i] and volume[i] > vol_ma[i] * 1.5 and weekly_bear > 0.5:
+            # Short: Break below Donchian low, volume spike, weekly bearish
+            elif close[i] < donch_low[i] and volume[i] > vol_ma[i] * 1.5 and weekly_bear > 0.5:
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
-            # Exit: Price closes below middle Bollinger Band
-            if close[i] < middle_band[i] and close[i-1] >= middle_band[i-1]:
+            # Exit: Price closes below Donchian middle
+            if close[i] < donch_mid[i] and close[i-1] >= donch_mid[i-1]:
                 position = 0
                 signals[i] = 0.0
         elif position == -1:
-            # Exit: Price closes above middle Bollinger Band
-            if close[i] > middle_band[i] and close[i-1] <= middle_band[i-1]:
+            # Exit: Price closes above Donchian middle
+            if close[i] > donch_mid[i] and close[i-1] <= donch_mid[i-1]:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "1d_Bollinger_Breakout_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "4h_Donchian_Breakout_Volume_WeeklyTrend"
+timeframe = "4h"
 leverage = 1.0
