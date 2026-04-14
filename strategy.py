@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian Channel breakout with 1-day ATR filter and volume confirmation
-# Long when price breaks above 20-period Donchian upper band AND ATR(14) > 1.5x 50-period average ATR AND volume > 1.5x 20-period average volume
-# Short when price breaks below 20-period Donchian lower band AND ATR(14) > 1.5x 50-period average ATR AND volume > 1.5x 20-period average volume
-# Exit when price crosses back inside the Donchian Channel (opposite band)
-# Uses Donchian channels to capture breakouts, ATR filter to ensure volatility regime, volume for confirmation
+# Hypothesis: 4-hour Choppiness Index regime filter with daily ATR breakout and volume confirmation
+# Long when price breaks above daily ATR-based upper band AND Choppiness Index < 38.2 (trending) AND volume > 1.5x 20-period average
+# Short when price breaks below daily ATR-based lower band AND Choppiness Index < 38.2 (trending) AND volume > 1.5x 20-period average
+# Exit when price crosses back inside the daily ATR-based channel
+# Uses daily ATR to adapt volatility regime, Choppiness Index to filter choppy markets, volume for confirmation
 # Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,16 +20,10 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for ATR filter
+    # Load 1d data ONCE before loop for ATR and Choppiness Index
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Donchian Channel on 4h (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    upper_donchian = high_series.rolling(window=20, min_periods=20).max().values
-    lower_donchian = low_series.rolling(window=20, min_periods=20).min().values
-    
-    # Calculate ATR on 1d for volatility filter
+    # Calculate ATR on 1d (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -42,60 +36,77 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_50_avg = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
+    
+    # Calculate Choppiness Index on 1d (14-period)
+    atr_sum = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    
+    # Avoid division by zero
+    chop = np.full_like(atr_14, 50.0)  # Default to neutral
+    mask = (highest_high - lowest_low) != 0
+    chop[mask] = 100 * np.log10(atr_sum[mask] / (highest_high[mask] - lowest_low[mask])) / np.log10(14)
+    
+    # Calculate ATR-based channel on 1d (using 1x ATR for breakout sensitivity)
+    upper_channel = pd.Series(close_1d).rolling(window=14, min_periods=14).mean().values + atr_14
+    lower_channel = pd.Series(close_1d).rolling(window=14, min_periods=14).mean().values - atr_14
     
     # Calculate volume average for confirmation (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Align 1d indicators to 4h timeframe
+    upper_channel_aligned = align_htf_to_ltf(prices, df_1d, upper_channel)
+    lower_channel_aligned = align_htf_to_ltf(prices, df_1d, lower_channel)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations (50 for ATR average + buffer)
-    start = 60
+    # Start after enough data for calculations
+    start = 50
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(upper_donchian[i]) or np.isnan(lower_donchian[i]) or 
-            np.isnan(atr_14[i]) or np.isnan(atr_50_avg[i]) or 
+        if (np.isnan(upper_channel_aligned[i]) or np.isnan(lower_channel_aligned[i]) or 
+            np.isnan(chop_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
             np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        atr_current = atr_14[i]
-        atr_threshold = atr_50_avg[i] * 1.5
+        chop_value = chop_aligned[i]
+        atr_value = atr_14_aligned[i]
         vol = volume[i]
         vol_threshold = vol_avg[i] * 1.5
         
-        # Get ATR values aligned to 4h timeframe
-        atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-        atr_50_avg_aligned = align_htf_to_ltf(prices, df_1d, atr_50_avg)
-        
-        atr_current_aligned = atr_14_aligned[i]
-        atr_threshold_aligned = atr_50_avg_aligned[i] * 1.5
+        # Only trade in trending markets (Choppiness Index < 38.2)
+        if chop_value >= 38.2:
+            signals[i] = 0.0
+            continue
         
         if position == 0:
-            # Long setup: price breaks above upper Donchian + ATR filter + volume confirmation
-            if (price > upper_donchian[i] and atr_current_aligned > atr_threshold_aligned and vol > vol_threshold):
+            # Long setup: price breaks above upper channel + volume confirmation
+            if price > upper_channel_aligned[i] and vol > vol_threshold:
                 position = 1
                 signals[i] = position_size
-            # Short setup: price breaks below lower Donchian + ATR filter + volume confirmation
-            elif (price < lower_donchian[i] and atr_current_aligned > atr_threshold_aligned and vol > vol_threshold):
+            # Short setup: price breaks below lower channel + volume confirmation
+            elif price < lower_channel_aligned[i] and vol > vol_threshold:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses back inside Donchian Channel (below lower band)
-            if price < lower_donchian[i]:
+            # Exit long: price crosses back inside channel (below lower band)
+            if price < lower_channel_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses back inside Donchian Channel (above upper band)
-            if price > upper_donchian[i]:
+            # Exit short: price crosses back inside channel (above upper band)
+            if price > upper_channel_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -103,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_1dATR_Volume"
+name = "4h_Choppiness_ATR_Channel_Volume"
 timeframe = "4h"
 leverage = 1.0
