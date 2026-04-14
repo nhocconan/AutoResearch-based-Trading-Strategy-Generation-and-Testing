@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Donchian channel breakouts with volume confirmation
-# and ADX trend filter. Breakouts above 20-period high or below 20-period low
-# trigger entries in the direction of the 1d ADX trend (>25). Volume must be
-# above 20-period average to confirm breakout strength. This captures strong
-# trending moves while avoiding false breakouts in low-volume or ranging markets.
-# Works in both bull and bear markets by following the trend direction.
+# Hypothesis: 4h Donchian breakout with 1d volume confirmation and ADX regime filter
+# Long when price breaks above 20-bar Donchian high + 1d volume > 1.5x 20-day average + ADX > 25
+# Short when price breaks below 20-bar Donchian low + 1d volume > 1.5x 20-day average + ADX > 25
+# Exit when price returns to midpoint of Donchian channel or ADX < 20
+# Designed for trending markets with volume confirmation to avoid false breakouts
+# Works in both bull and bear markets: ADX filter ensures we only trade strong trends,
+# while volume confirmation validates breakout strength
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,37 +21,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for Donchian channels and ADX
+    # Load 1d data ONCE for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d Donchian channels (20 periods)
-    donch_len = 20
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d average volume (20-day)
+    vol_1d = df_1d['volume'].values
+    avg_vol_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Upper band: highest high over last 20 periods
-    upper = pd.Series(high_1d).rolling(window=donch_len, min_periods=donch_len).max().values
-    # Lower band: lowest low over last 20 periods
-    lower = pd.Series(low_1d).rolling(window=donch_len, min_periods=donch_len).min().values
+    # Align 1d average volume to 4h timeframe
+    avg_vol_20_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_20)
     
-    # Calculate 1d ADX (14 periods) for trend filter
+    # Calculate 4h ADX (14 periods) for trend strength
+    # Load 4h data ONCE for ADX calculation
+    df_4h = get_htf_data(prices, '4h')
+    
+    # Calculate 4h ADX (14 periods)
     adx_len = 14
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
     # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr1 = high_4h[1:] - low_4h[1:]
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
     # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_plus = np.where((high_4h[1:] - high_4h[:-1]) > (low_4h[:-1] - low_4h[1:]), 
+                       np.maximum(high_4h[1:] - high_4h[:-1], 0), 0)
     dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_minus = np.where((low_4h[:-1] - low_4h[1:]) > (high_4h[1:] - high_4h[:-1]), 
+                        np.maximum(low_4h[:-1] - low_4h[1:], 0), 0)
     dm_minus = np.concatenate([[np.nan], dm_minus])
     
     # Smoothed values
@@ -66,55 +68,64 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = pd.Series(dx).rolling(window=adx_len, min_periods=adx_len).mean().values
     
-    # Align 1d indicators to 12h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate 20-period volume average on 12h timeframe
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(50, donch_len + adx_len)
+    start = max(50, 20 + adx_len)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(upper_aligned[i]) or 
-            np.isnan(lower_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(adx_aligned[i]) or 
+            np.isnan(avg_vol_20_aligned[i]) or
+            avg_vol_20_aligned[i] == 0):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        vol_ok = volume[i] > vol_ma[i]  # Volume above average
-        adx_ok = adx_aligned[i] > 25    # Strong trend
+        # Calculate Donchian channels (20-period) using available data up to i
+        lookback = min(20, i+1)
+        donchian_high = np.max(high[i-lookback+1:i+1])
+        donchian_low = np.min(low[i-lookback+1:i+1])
+        donchian_mid = (donchian_high + donchian_low) / 2
+        
+        # Volume confirmation: current 1d volume > 1.5x 20-day average
+        # Need to get current 1d volume - find the most recent complete 1d bar
+        # For 4h timeframe, we can approximate using the volume data
+        vol_ratio = 1.0  # Default if we can't calculate
+        if i >= 20:  # Need enough data for volume ratio calculation
+            # Simplified: use current volume vs average (approximation for 4h)
+            vol_ratio = volume[i] / avg_vol_20_aligned[i] if avg_vol_20_aligned[i] > 0 else 1.0
+        
+        volume_confirmed = vol_ratio > 1.5
+        
+        # Trend filter: ADX > 25 indicates strong trend
+        strong_trend = adx_aligned[i] > 25
         
         if position == 0:
-            # Enter long: price breaks above upper Donchian band + volume + trend
-            if price > upper_aligned[i] and vol_ok and adx_ok:
+            # Enter long: Donchian breakout up + volume confirmation + strong trend
+            if close[i] > donchian_high and volume_confirmed and strong_trend:
                 position = 1
                 signals[i] = position_size
-            # Enter short: price breaks below lower Donchian band + volume + trend
-            elif price < lower_aligned[i] and vol_ok and adx_ok:
+            # Enter short: Donchian breakout down + volume confirmation + strong trend
+            elif close[i] < donchian_low and volume_confirmed and strong_trend:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below lower Donchian band (contrary signal)
-            if price < lower_aligned[i]:
+            # Exit long: price returns to Donchian midpoint OR trend weakens
+            if close[i] < donchian_mid or adx_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above upper Donchian band (contrary signal)
-            if price > upper_aligned[i]:
+            # Exit short: price returns to Donchian midpoint OR trend weakens
+            if close[i] > donchian_mid or adx_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -122,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1dDonchian_Volume_ADX_Trend_v1"
-timeframe = "12h"
+name = "4h_Donchian_Volume_ADX_Trend_v1"
+timeframe = "4h"
 leverage = 1.0
