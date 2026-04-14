@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Ichimoku Cloud with daily trend filter and volume confirmation
-# Long when price breaks above Ichimoku cloud on 6h, price above 1d EMA50, and volume >1.5x average
-# Short when price breaks below Ichimoku cloud on 6h, price below 1d EMA50, and volume >1.5x average
-# Exit when price crosses the 6h Tenkan-sen/Kijun-sen midline
-# Uses daily EMA50 for trend filter to avoid counter-trend trades
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
-# Ichimoku provides clear support/resistance levels that work in both bull and bear markets
+# Hypothesis: 4-hour Williams %R with 1-day EMA200 trend filter and volume confirmation
+# Long when Williams %R crosses above -20 from below with volume > 1.5x 20-period average and price above 1d EMA200
+# Short when Williams %R crosses below -80 from above with volume > 1.5x 20-period average and price below 1d EMA200
+# Exit when Williams %R crosses the opposite threshold (-80 for long exit, -20 for short exit)
+# Williams %R identifies overbought/oversold conditions, EMA200 provides trend filter
+# Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and fee drag
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,98 +20,74 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 6h and 1d data ONCE before loop
-    df_6h = get_htf_data(prices, '6h')
+    # Load 4h and 1d data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 6h Ichimoku components
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
+    # Calculate 4h Williams %R (14-period)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high_6h).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_6h).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2
+    highest_high = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_4h) / (highest_high - lowest_low)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high_6h).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_6h).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high_6h).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_6h).rolling(window=52, min_periods=52).min().values
-    senkou_span_b = (period52_high + period52_low) / 2
-    
-    # Calculate 1d EMA50
+    # Calculate 1d EMA200
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, min_periods=200, adjust=False).mean().values
     
-    # Calculate 6h volume average (20-period)
-    vol_6h = df_6h['volume'].values
-    vol_ma_6h = pd.Series(vol_6h).rolling(window=20, min_periods=20).mean().values
+    # Calculate 4h volume average (20-period)
+    vol_4h = df_4h['volume'].values
+    vol_ma_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
     
-    # Align indicators to 6h timeframe
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_6h, tenkan_sen)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_6h, kijun_sen)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_6h, senkou_span_a)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_6h, senkou_span_b)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    vol_ma_6h_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_6h)
+    # Align indicators to 4h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_4h, williams_r)
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations (52 for Senkou Span B)
-    start = 52
+    # Start after enough data for calculations
+    start = 200  # for 200-period EMA
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
-            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_6h_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or 
+            np.isnan(vol_ma_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_6h_current = volume[i]
-        
-        # Determine cloud top and bottom
-        cloud_top = max(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        cloud_bottom = min(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        
-        # Calculate Tenkan/Kijun midline for exit
-        tk_midline = (tenkan_sen_aligned[i] + kijun_sen_aligned[i]) / 2
+        vol_4h_current = volume[i]
         
         if position == 0:
-            # Long setup: price breaks above cloud with volume confirmation and price above 1d EMA50
-            if (price > cloud_top and 
-                vol_6h_current > 1.5 * vol_ma_6h_aligned[i] and  # Volume confirmation
-                price > ema_50_1d_aligned[i]):                 # Price above 1d EMA50 for bullish bias
+            # Long setup: Williams %R crosses above -20 from below with volume confirmation and price above 1d EMA200
+            if (williams_r_aligned[i] > -20 and williams_r_aligned[i-1] <= -20 and 
+                vol_4h_current > 1.5 * vol_ma_4h_aligned[i] and  # Volume confirmation
+                price > ema_200_1d_aligned[i]):                 # Price above 1d EMA200 for bullish bias
                 position = 1
                 signals[i] = position_size
-            # Short setup: price breaks below cloud with volume confirmation and price below 1d EMA50
-            elif (price < cloud_bottom and 
-                  vol_6h_current > 1.5 * vol_ma_6h_aligned[i] and  # Volume confirmation
-                  price < ema_50_1d_aligned[i]):                 # Price below 1d EMA50 for bearish bias
+            # Short setup: Williams %R crosses below -80 from above with volume confirmation and price below 1d EMA200
+            elif (williams_r_aligned[i] < -80 and williams_r_aligned[i-1] >= -80 and 
+                  vol_4h_current > 1.5 * vol_ma_4h_aligned[i] and  # Volume confirmation
+                  price < ema_200_1d_aligned[i]):                 # Price below 1d EMA200 for bearish bias
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below Tenkan/Kijun midline
-            if price < tk_midline:
+            # Exit long: Williams %R crosses below -80
+            if williams_r_aligned[i] < -80 and williams_r_aligned[i-1] >= -80:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above Tenkan/Kijun midline
-            if price > tk_midline:
+            # Exit short: Williams %R crosses above -20
+            if williams_r_aligned[i] > -20 and williams_r_aligned[i-1] <= -20:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -120,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_1dEMA50_Volume"
-timeframe = "6h"
+name = "4h_WilliamsR_1dEMA200_Volume"
+timeframe = "4h"
 leverage = 1.0
