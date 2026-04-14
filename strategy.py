@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian Breakout with 12h Trend Filter and Volume Confirmation
-# Uses Donchian channel (20-period) breakout on 4h for entry signals
-# 12h EMA (50) provides trend direction filter to avoid counter-trend trades
-# Volume confirmation (>1.5x average volume) ensures institutional participation
-# Designed to work in both bull and bear markets by trading breakouts in direction of 12h trend
-# Target: 25-40 trades/year (100-160 total over 4 years) to minimize fee drag
+# Hypothesis: 1h RSI Mean Reversion with 4h Trend Filter and Volume Confirmation
+# Uses RSI(14) on 1h for mean-reversion entries (oversold/overbought)
+# 4h EMA(50) provides trend direction filter to avoid counter-trend trades
+# Volume confirmation (>1.3x average) ensures institutional participation
+# Designed to work in both bull and bear markets by trading mean reversion in direction of 4h trend
+# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,65 +20,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Load 4h data ONCE before loop for EMA trend filter
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate 12h EMA (50) for trend direction
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate 4h EMA (50) for trend direction
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Calculate Donchian Channel (20-period) on 4h data
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    upper_channel = high_series.rolling(window=20, min_periods=20).max().values
-    lower_channel = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate RSI (14-period) on 1h data
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Volume confirmation: volume > 1.5x average volume (20-period)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume confirmation: volume > 1.3x average volume (20-period)
     vol_series = pd.Series(volume)
     avg_vol = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position size
+    position_size = 0.20  # 20% position size
     
     # Start after enough data for calculations
-    start = 20  # for Donchian Channel
+    start = 30  # for RSI and volume
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
-            np.isnan(ema_12h_aligned[i]) or np.isnan(avg_vol[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema_4h_aligned[i]) or np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         
-        # Trend filter: only trade in direction of 12h EMA
-        above_ema = price > ema_12h_aligned[i]
+        # Trend filter: only trade in direction of 4h EMA
+        above_ema = price > ema_4h_aligned[i]
         
         if position == 0:
-            # Long: price breaks above upper channel with volume filter and above 12h EMA
-            if price > upper_channel[i] and vol > 1.5 * avg_vol[i] and above_ema:
+            # Long: RSI oversold (<30) with volume filter and above 4h EMA
+            if rsi[i] < 30 and vol > 1.3 * avg_vol[i] and above_ema:
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below lower channel with volume filter and below 12h EMA
-            elif price < lower_channel[i] and vol > 1.5 * avg_vol[i] and not above_ema:
+            # Short: RSI overbought (>70) with volume filter and below 4h EMA
+            elif rsi[i] > 70 and vol > 1.3 * avg_vol[i] and not above_ema:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below lower channel (reversal) or below 12h EMA
-            if price < lower_channel[i] or price < ema_12h_aligned[i]:
+            # Exit long: RSI returns to neutral (>50) or below 4h EMA
+            if rsi[i] > 50 or price < ema_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above upper channel (reversal) or above 12h EMA
-            if price > upper_channel[i] or price > ema_12h_aligned[i]:
+            # Exit short: RSI returns to neutral (<50) or above 4h EMA
+            if rsi[i] < 50 or price > ema_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -86,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_12hEMA_Volume"
-timeframe = "4h"
+name = "1h_RSI_MeanReversion_4hEMA_Volume"
+timeframe = "1h"
 leverage = 1.0
