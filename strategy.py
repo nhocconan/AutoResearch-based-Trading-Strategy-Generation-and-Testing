@@ -1,39 +1,25 @@
-# 11-07-2025
-# Hypothesis: 4h Donchian breakout with volume confirmation and ADX trend filter
-# Works in bull/bear by only taking breakouts in direction of ADX trend
-# Low turnover: ~25-40 trades/year per target
+#!/usr/bin/env python3
+"""
+12h Volume-Weighted Average Price (VWAP) Reversion + Volume Spike + Daily Trend
+Long when price crosses above VWAP with volume > 1.5x average and daily close > daily open.
+Short when price crosses below VWAP with volume > 1.5x average and daily close < daily open.
+Exit when price crosses back below/above VWAP.
+Designed for low turnover: ~10-20 trades/year per symbol.
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_adx(high, low, close, window=14):
-    """Calculate ADX (Average Directional Index)"""
-    plus_dm = np.diff(high, prepend=high[0])
-    minus_dm = np.diff(low, prepend=low[0]) * -1
-    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
-    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
-    
-    tr1 = np.abs(np.diff(high, prepend=high[0]))
-    tr2 = np.abs(np.diff(low, prepend=low[0]))
-    tr3 = np.abs(np.diff(close, prepend=close[0]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    atr = pd.Series(tr).rolling(window=window, min_periods=window).mean().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=window, min_periods=window).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=window, min_periods=window).mean().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).rolling(window=window, min_periods=window).mean().values
-    return adx
-
-def donchian_channels(high, low, window):
-    upper = pd.Series(high).rolling(window=window, min_periods=window).max().values
-    lower = pd.Series(low).rolling(window=window, min_periods=window).min().values
-    return upper, lower
+def calculate_vwap(high, low, close, volume):
+    """Calculate VWAP for the current period"""
+    typical_price = (high + low + close) / 3
+    vwap = np.nancumsum(typical_price * volume) / np.nancumsum(volume)
+    return vwap
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -41,60 +27,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data for ADX trend filter
+    # Load daily data once for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate ADX on 1d
-    adx = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
-    adx_strong = adx > 25  # Strong trend when ADX > 25
-    adx_weak = adx < 20    # Weak trend when ADX < 20 (for exit)
+    daily_close = df_1d['close'].values
+    daily_open = df_1d['open'].values
     
-    # Align ADX signals to 4h
-    adx_strong_aligned = align_htf_to_ltf(prices, df_1d, adx_strong.astype(float))
-    adx_weak_aligned = align_htf_to_ltf(prices, df_1d, adx_weak.astype(float))
-    
-    # Donchian channels (20-period)
-    upper, lower = donchian_channels(high, low, 20)
+    # Calculate VWAP
+    vwap = calculate_vwap(high, low, close, volume)
     
     # Volume filter: 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ma = np.full(n, np.nan)
+    vol_sum = 0
+    vol_count = 0
+    for i in range(n):
+        vol_sum += volume[i]
+        vol_count += 1
+        if vol_count >= 20:
+            vol_ma[i] = vol_sum / vol_count
+            vol_sum -= volume[i - 19]
+            vol_count -= 1
+    
+    # Daily trend: 1 if bullish (close > open), -1 if bearish (close < open)
+    daily_bullish = daily_close > daily_open
+    daily_bearish = daily_close < daily_open
+    
+    # Create arrays for alignment
+    daily_bullish_arr = daily_bullish.astype(float)
+    daily_bearish_arr = daily_bearish.astype(float)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25
     
-    for i in range(30, n):
-        # Get aligned values
-        strong_trend = adx_strong_aligned[i]
-        weak_trend = adx_weak_aligned[i]
+    for i in range(20, n):
+        # Skip if VWAP or volume MA not ready
+        if np.isnan(vwap[i]) or np.isnan(vol_ma[i]):
+            continue
         
-        if np.isnan(strong_trend) or np.isnan(weak_trend):
+        # Get aligned daily trend values
+        daily_bull = align_htf_to_ltf(prices, df_1d, daily_bullish_arr)[i]
+        daily_bear = align_htf_to_ltf(prices, df_1d, daily_bearish_arr)[i]
+        
+        if np.isnan(daily_bull) or np.isnan(daily_bear):
             continue
         
         if position == 0:
-            # Enter long: break above upper + volume spike + strong uptrend
-            if close[i] > upper[i] and volume[i] > vol_ma[i] * 1.5 and strong_trend > 0.5:
+            # Long: Price crosses above VWAP, volume spike, daily bullish
+            if close[i] > vwap[i] and close[i-1] <= vwap[i-1] and volume[i] > vol_ma[i] * 1.5 and daily_bull > 0.5:
                 position = 1
                 signals[i] = position_size
-            # Enter short: break below lower + volume spike + strong downtrend
-            elif close[i] < lower[i] and volume[i] > vol_ma[i] * 1.5 and strong_trend > 0.5:
+            # Short: Price crosses below VWAP, volume spike, daily bearish
+            elif close[i] < vwap[i] and close[i-1] >= vwap[i-1] and volume[i] > vol_ma[i] * 1.5 and daily_bear > 0.5:
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
-            # Exit: trend weakens or price hits opposite band
-            if weak_trend > 0.5 or close[i] < lower[i]:
+            # Exit: Price crosses below VWAP
+            if close[i] < vwap[i] and close[i-1] >= vwap[i-1]:
                 position = 0
                 signals[i] = 0.0
         elif position == -1:
-            # Exit: trend weakens or price hits opposite band
-            if weak_trend > 0.5 or close[i] > upper[i]:
+            # Exit: Price crosses above VWAP
+            if close[i] > vwap[i] and close[i-1] <= vwap[i-1]:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian_Breakout_Volume_ADX"
-timeframe = "4h"
+name = "12h_VWAP_Reversion_Volume_DailyTrend"
+timeframe = "12h"
 leverage = 1.0
