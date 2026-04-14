@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,123 +13,108 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data for 12h timeframe
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Load 1d data for reference levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Load weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # Calculate ATR on 1d for volatility filter
+    def calculate_atr(high, low, close, period=14):
+        if len(high) < period + 1:
+            return np.full_like(high, np.nan)
+        
+        tr = np.zeros_like(high)
+        for i in range(1, len(high)):
+            tr[i] = max(high[i] - low[i], 
+                       abs(high[i] - high[i-1]), 
+                       abs(low[i] - low[i-1]))
+        
+        atr = np.full_like(high, np.nan)
+        atr[period] = np.nanmean(tr[1:period+1])
+        for i in range(period + 1, len(high)):
+            atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
+        return atr
     
-    close_1w = df_1w['close'].values
+    atr_1d = calculate_atr(high_1d, low_1d, close_1d, 14)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate 12h VWAP (typical price * volume / cumulative volume)
-    typical_price_12h = (high_12h + low_12h + close_12h) / 3
-    cum_vol_12h = np.cumsum(volume_12h)
-    cum_tpv_12h = np.cumsum(typical_price_12h * volume_12h)
-    vwap_12h = np.where(cum_vol_12h > 0, cum_tpv_12h / cum_vol_12h, np.nan)
+    # Calculate 20-period EMA on 1d close for trend filter
+    def calculate_ema(close, period):
+        ema = np.full_like(close, np.nan)
+        if len(close) < period:
+            return ema
+        multiplier = 2 / (period + 1)
+        ema[period-1] = np.mean(close[:period])
+        for i in range(period, len(close)):
+            ema[i] = (close[i] - ema[i-1]) * multiplier + ema[i-1]
+        return ema
     
-    # Calculate weekly EMA20 for trend filter
-    if len(close_1w) < 20:
-        return np.zeros(n)
+    ema20_1d = calculate_ema(close_1d, 20)
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
-    ema20_1w = np.full_like(close_1w, np.nan)
-    alpha = 2.0 / (20 + 1)
-    for i in range(len(close_1w)):
-        if np.isnan(close_1w[i]):
-            ema20_1w[i] = np.nan
-        elif i == 0:
-            ema20_1w[i] = close_1w[i]
-        else:
-            ema20_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema20_1w[i-1]
-    
-    # Align 12h levels and weekly EMA to 12h timeframe
-    high_12h_aligned = align_htf_to_ltf(prices, df_12h, high_12h)
-    low_12h_aligned = align_htf_to_ltf(prices, df_12h, low_12h)
-    vwap_12h_aligned = align_htf_to_ltf(prices, df_12h, vwap_12h)
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
-    
-    # Calculate 12h ATR for volatility filter
-    if len(high_12h) < 14:
-        return np.zeros(n)
-    
-    tr_12h = np.zeros_like(high_12h)
-    for i in range(1, len(high_12h)):
-        if np.isnan(high_12h[i]) or np.isnan(low_12h[i]) or np.isnan(high_12h[i-1]) or np.isnan(low_12h[i-1]):
-            tr_12h[i] = np.nan
-        else:
-            tr_12h[i] = max(high_12h[i] - low_12h[i], 
-                           abs(high_12h[i] - high_12h[i-1]), 
-                           abs(low_12h[i] - low_12h[i-1]))
-    
-    atr_12h = np.full_like(high_12h, np.nan)
-    if len(high_12h) >= 14:
-        atr_12h[13] = np.nanmean(tr_12h[1:14])
-        for i in range(14, len(high_12h)):
-            if np.isnan(tr_12h[i]):
-                atr_12h[i] = atr_12h[i-1]
+    # Calculate volume spike detector on 1d
+    def calculate_volume_ratio(volume, period=20):
+        vol_ma = np.full_like(volume, np.nan)
+        for i in range(period-1, len(volume)):
+            vol_ma[i] = np.mean(volume[i-period+1:i+1])
+        vol_ratio = np.zeros_like(volume)
+        for i in range(len(volume)):
+            if vol_ma[i] > 0:
+                vol_ratio[i] = volume[i] / vol_ma[i]
             else:
-                atr_12h[i] = (atr_12h[i-1] * 13 + tr_12h[i]) / 14
+                vol_ratio[i] = 0
+        return vol_ratio
     
-    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
+    vol_ratio_1d = calculate_volume_ratio(volume_1d, 20)
+    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # Conservative size to limit trades
+    position_size = 0.25  # Conservative size
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if any critical data is NaN
-        if (np.isnan(high_12h_aligned[i]) or np.isnan(low_12h_aligned[i]) or
-            np.isnan(vwap_12h_aligned[i]) or np.isnan(ema20_1w_aligned[i]) or
-            np.isnan(atr_12h_aligned[i])):
+        if (np.isnan(high_1d_aligned[i]) or np.isnan(low_1d_aligned[i]) or
+            np.isnan(atr_1d_aligned[i]) or np.isnan(ema20_1d_aligned[i]) or
+            np.isnan(vol_ratio_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 12h volume vs 20-period average
-        vol_ma_20 = np.full_like(volume_12h, np.nan)
-        for j in range(19, len(volume_12h)):
-            vol_ma_20[j] = np.mean(volume_12h[j-19:j+1])
-        
-        vol_ma_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
-        if np.isnan(vol_ma_20_aligned[i]) or vol_ma_20_aligned[i] <= 0:
-            volume_ratio = 0
-        else:
-            volume_ratio = volume_12h_aligned[i] / vol_ma_20_aligned[i]
+        # Calculate dynamic thresholds based on volatility
+        atr_multiple = atr_1d_aligned[i] * 0.5
         
         if position == 0:
-            # Look for long entries: breakout above 12h high with volume surge in bullish weekly trend
-            if (close[i] > high_12h_aligned[i] and 
-                volume_ratio > 2.0 and  # Volume surge
-                close[i] > ema20_1w_aligned[i]):  # Above weekly EMA20 (bullish trend)
+            # Long: price above EMA20, breaking above recent high with volume spike
+            if (close[i] > ema20_1d_aligned[i] and
+                close[i] > high_1d_aligned[i] + atr_multiple and
+                vol_ratio_1d_aligned[i] > 2.0):
                 position = 1
                 signals[i] = position_size
-            # Look for short entries: breakdown below 12h low with volume surge in bearish weekly trend
-            elif (close[i] < low_12h_aligned[i] and 
-                  volume_ratio > 2.0 and
-                  close[i] < ema20_1w_aligned[i]):  # Below weekly EMA20 (bearish trend)
+            # Short: price below EMA20, breaking below recent low with volume spike
+            elif (close[i] < ema20_1d_aligned[i] and
+                  close[i] < low_1d_aligned[i] - atr_multiple and
+                  vol_ratio_1d_aligned[i] > 2.0):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below 12h VWAP or volatility drops
-            if (close[i] < vwap_12h_aligned[i] or
-                volume_ratio < 1.0):  # Low volume indicates weakening trend
+            # Exit long: price crosses below EMA20 or volatility drops
+            if (close[i] < ema20_1d_aligned[i] or
+                vol_ratio_1d_aligned[i] < 0.8):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above 12h VWAP or volatility drops
-            if (close[i] > vwap_12h_aligned[i] or
-                volume_ratio < 1.0):
+            # Exit short: price crosses above EMA20 or volatility drops
+            if (close[i] > ema20_1d_aligned[i] or
+                vol_ratio_1d_aligned[i] < 0.8):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -137,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1w_VWAP_Breakout_Trend_Filter_v1"
-timeframe = "12h"
+name = "6h_1d_EMA_Volatility_Volume_Breakout_v1"
+timeframe = "6h"
 leverage = 1.0
