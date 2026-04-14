@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,107 +13,110 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for EMA and MACD
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    # Load 12h data for regime and volume filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate MACD(12,26,9) on 1d
-    ema12 = pd.Series(close_1d).ewm(span=12, adjust=False).values
-    ema26 = pd.Series(close_1d).ewm(span=26, adjust=False).values
-    macd_line = ema12 - ema26
-    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False).values
-    macd_hist = macd_line - signal_line
-    
-    # Align MACD components to 6h timeframe
-    macd_hist_6h = align_htf_to_ltf(prices, df_1d, macd_hist)
-    
-    # Calculate EMA50 on 1d for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).values
-    ema50_6h = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Calculate ATR(14) on 1d for volatility filter
-    tr = np.zeros(len(df_1d))
-    tr[0] = high_1d[0] - low_1d[0]
-    for i in range(1, len(df_1d)):
-        tr[i] = max(
-            high_1d[i] - low_1d[i],
-            abs(high_1d[i] - close_1d[i-1]),
-            abs(low_1d[i] - close_1d[i-1])
+    # Calculate 12h ATR(14) for volatility filter
+    tr_12h = np.zeros(len(df_12h))
+    tr_12h[0] = high_12h[0] - low_12h[0]
+    for i in range(1, len(df_12h)):
+        tr_12h[i] = max(
+            high_12h[i] - low_12h[i],
+            abs(high_12h[i] - close_12h[i-1]),
+            abs(low_12h[i] - close_12h[i-1])
         )
     
-    atr_1d = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 14:
-        atr_1d[13] = np.mean(tr[:14])
-        for i in range(14, len(df_1d)):
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
+    atr_12h = np.full(len(df_12h), np.nan)
+    if len(df_12h) >= 14:
+        atr_12h[13] = np.mean(tr_12h[:14])
+        for i in range(14, len(df_12h)):
+            atr_12h[i] = (atr_12h[i-1] * 13 + tr_12h[i]) / 14
     
-    atr_6h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
     
-    # Volume spike detection (20-period average on 6h)
-    vol_ma_20 = np.full_like(volume, np.nan)
-    if len(volume) >= 20:
-        for i in range(19, len(volume)):
-            vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    # Calculate 12h volume average (20-period)
+    vol_ma_20_12h = np.full(len(df_12h), np.nan)
+    if len(df_12h) >= 20:
+        for i in range(19, len(df_12h)):
+            vol_ma_20_12h[i] = np.mean(volume_12h[i-19:i+1])
+    
+    vol_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20_12h)
+    
+    # Load 4h data for Donchian channel
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    
+    # Calculate Donchian(20) on 4h
+    donch_high_4h = np.full(len(df_4h), np.nan)
+    donch_low_4h = np.full(len(df_4h), np.nan)
+    
+    for i in range(19, len(df_4h)):
+        donch_high_4h[i] = np.max(high_4h[i-19:i+1])
+        donch_low_4h[i] = np.min(low_4h[i-19:i+1])
+    
+    donch_high_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_high_4h)
+    donch_low_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_low_4h)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any critical data is NaN
-        if (np.isnan(macd_hist_6h[i]) or 
-            np.isnan(ema50_6h[i]) or
-            np.isnan(atr_6h[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(atr_12h_aligned[i]) or 
+            np.isnan(vol_ma_20_12h_aligned[i]) or
+            np.isnan(donch_high_4h_aligned[i]) or
+            np.isnan(donch_low_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Skip low volatility periods (ATR < 0.5% of price)
-        if atr_6h[i] < 0.005 * close[i]:
+        # Volatility filter: avoid low volatility periods
+        if atr_12h_aligned[i] < 0.003 * close[i]:
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 6h volume vs 20-period average
-        if vol_ma_20[i] <= 0:
+        # Volume filter: require volume spike on 12h
+        if vol_ma_20_12h_aligned[i] <= 0:
             volume_ratio = 0
         else:
-            volume_ratio = volume[i] / vol_ma_20[i]
+            volume_ratio = volume[i] / vol_ma_20_12h_aligned[i]
         
-        # Volume threshold: require significant spike
-        vol_threshold = 2.0
+        vol_threshold = 1.8
         
         if position == 0:
-            # Long: MACD histogram crosses above zero with volume and above EMA50
-            if (macd_hist_6h[i] > 0 and 
-                macd_hist_6h[i-1] <= 0 and
-                volume_ratio > vol_threshold and
-                close[i] > ema50_6h[i]):
+            # Long: price breaks above Donchian high with volume confirmation
+            if (close[i] > donch_high_4h_aligned[i] and 
+                volume_ratio > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short: MACD histogram crosses below zero with volume and below EMA50
-            elif (macd_hist_6h[i] < 0 and 
-                  macd_hist_6h[i-1] >= 0 and
-                  volume_ratio > vol_threshold and
-                  close[i] < ema50_6h[i]):
+            # Short: price breaks below Donchian low with volume confirmation
+            elif (close[i] < donch_low_4h_aligned[i] and 
+                  volume_ratio > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: MACD histogram crosses below zero
-            if macd_hist_6h[i] < 0 and macd_hist_6h[i-1] >= 0:
+            # Exit: price breaks below Donchian low
+            if close[i] < donch_low_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: MACD histogram crosses above zero
-            if macd_hist_6h[i] > 0 and macd_hist_6h[i-1] <= 0:
+            # Exit: price breaks above Donchian high
+            if close[i] > donch_high_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -121,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_MACD_EMA50_Volume_Filter"
-timeframe = "6h"
+name = "4h_12h_Donchian_Volume_Breakout"
+timeframe = "4h"
 leverage = 1.0
