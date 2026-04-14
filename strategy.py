@@ -35,14 +35,6 @@ def generate_signals(prices):
         for i in range(14, len(df_1d)):
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # Calculate daily EMA (50-period)
-    ema_50_1d = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 50:
-        ema_50_1d[49] = np.mean(close_1d[:50])
-        multiplier = 2 / (50 + 1)
-        for i in range(50, len(df_1d)):
-            ema_50_1d[i] = (close_1d[i] * multiplier) + (ema_50_1d[i-1] * (1 - multiplier))
-    
     # Calculate daily volatility filter (ATR > 0.8% of price)
     vol_filter_1d = np.zeros(len(df_1d), dtype=bool)
     for i in range(len(df_1d)):
@@ -64,7 +56,6 @@ def generate_signals(prices):
     
     # Align indicators to 4h timeframe (primary timeframe)
     atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
-    ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     vol_filter_4h = align_htf_to_ltf(prices, df_1d, vol_filter_1d.astype(float))
     vol_spike_4h = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
     
@@ -75,6 +66,10 @@ def generate_signals(prices):
         for i in range(19, n):
             donch_high[i] = np.max(high[i-19:i+1])
             donch_low[i] = np.min(low[i-19:i+1])
+    
+    # Calculate 4-hour EMA (50-period)
+    close_series = pd.Series(close)
+    ema_50_4h = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0
