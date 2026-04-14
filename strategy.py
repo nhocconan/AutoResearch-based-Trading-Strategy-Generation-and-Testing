@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Load 1d data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     # Calculate 1d EMA50 for trend filter
