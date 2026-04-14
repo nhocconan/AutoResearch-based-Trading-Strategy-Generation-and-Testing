@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Donchian breakout with weekly pivot direction and volume confirmation
-# Long when price breaks above Donchian(20) high AND price > weekly pivot support AND volume > 1.5x 20-period average
-# Short when price breaks below Donchian(20) low AND price < weekly pivot resistance AND volume > 1.5x 20-period average
-# Exit when price crosses back inside the Donchian channel (opposite band)
-# Weekly pivot levels derived from previous week's high/low/close
-# This captures strong trending moves with weekly structure context while avoiding counter-trend trades
+# Hypothesis: 12-hour Camarilla pivot reversal with weekly trend filter and volume confirmation
+# Long when price touches Camarilla L3 (support) AND price > weekly EMA50 AND volume > 1.5x 20-period average
+# Short when price touches Camarilla H3 (resistance) AND price < weekly EMA50 AND volume > 1.5x 20-period average
+# Exit when price crosses opposite H3/L3 level or reverses to Camarilla pivot point
+# This captures mean-reversion bounces at strong intraday levels with trend alignment
 # Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
 
 def generate_signals(prices):
@@ -21,35 +20,13 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for pivot calculation
+    # Load weekly data ONCE before loop for EMA50 trend filter
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate Donchian channels on 6h (20-period high/low)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate weekly pivot points from previous week's OHLC
-    # Pivot = (H + L + C) / 3
-    # Support 1 = (2 * Pivot) - High
-    # Resistance 1 = (2 * Pivot) - Low
-    if len(df_1w) > 0:
-        weekly_high = df_1w['high'].values
-        weekly_low = df_1w['low'].values
-        weekly_close = df_1w['close'].values
-        
-        pivot = (weekly_high + weekly_low + weekly_close) / 3
-        support_1 = (2 * pivot) - weekly_high
-        resistance_1 = (2 * pivot) - weekly_low
-        
-        # Align weekly pivot levels to 6h timeframe (with 1-bar delay for completed weekly bar)
-        pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-        support_1_aligned = align_htf_to_ltf(prices, df_1w, support_1)
-        resistance_1_aligned = align_htf_to_ltf(prices, df_1w, resistance_1)
-    else:
-        # Fallback if no weekly data
-        pivot_aligned = np.full(n, np.nan)
-        support_1_aligned = np.full(n, np.nan)
-        resistance_1_aligned = np.full(n, np.nan)
+    # Calculate weekly EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     # Calculate volume average for confirmation (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -58,14 +35,12 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations (20 for Donchian + buffer)
-    start = 30
+    # Start after enough data for calculations
+    start = 50
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(support_1_aligned[i]) or 
-            np.isnan(resistance_1_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
@@ -73,27 +48,59 @@ def generate_signals(prices):
         vol = volume[i]
         vol_threshold = vol_avg[i] * 1.5
         
+        # Calculate Camarilla levels using previous day's OHLC
+        # Need daily OHLC for Camarilla calculation
+        if i < 1:  # Need at least one day of data
+            signals[i] = 0.0
+            continue
+            
+        # Get previous day's OHLC (assuming 12h timeframe, 2 bars per day)
+        prev_day_idx = i - 2
+        if prev_day_idx < 0:
+            signals[i] = 0.0
+            continue
+            
+        # Calculate Camarilla levels for current day based on previous day
+        ph = high[prev_day_idx]  # Previous day high
+        pl = low[prev_day_idx]   # Previous day low
+        pc = close[prev_day_idx] # Previous day close
+        
+        # Camarilla levels
+        range_val = ph - pl
+        if range_val <= 0:
+            signals[i] = 0.0
+            continue
+            
+        # Resistance levels
+        h3 = pc + (range_val * 1.1 / 4)  # H3 = C + 1.1*(H-L)/4
+        h4 = pc + (range_val * 1.1 / 2)  # H4 = C + 1.1*(H-L)/2
+        # Support levels
+        l3 = pc - (range_val * 1.1 / 4)  # L3 = C - 1.1*(H-L)/4
+        l4 = pc - (range_val * 1.1 / 2)  # L4 = C - 1.1*(H-L)/2
+        # Pivot point
+        pp = (ph + pl + pc) / 3
+        
         if position == 0:
-            # Long setup: breakout above Donchian high AND above weekly support AND volume confirmation
-            if (price > high_20[i] and price > support_1_aligned[i] and vol > vol_threshold):
+            # Long setup: price touches L3 support AND above weekly EMA50 AND volume confirmation
+            if (abs(price - l3) < 0.001 * price and price > ema50_1w_aligned[i] and vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: breakdown below Donchian low AND below weekly resistance AND volume confirmation
-            elif (price < low_20[i] and price < resistance_1_aligned[i] and vol > vol_threshold):
+            # Short setup: price touches H3 resistance AND below weekly EMA50 AND volume confirmation
+            elif (abs(price - h3) < 0.001 * price and price < ema50_1w_aligned[i] and vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price falls back below Donchian low (opposite band)
-            if price < low_20[i]:
+            # Exit long: price crosses above H3 or returns to pivot point
+            if price > h3 or abs(price - pp) < 0.0005 * price:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price rises back above Donchian high (opposite band)
-            if price > high_20[i]:
+            # Exit short: price crosses below L3 or returns to pivot point
+            if price < l3 or abs(price - pp) < 0.0005 * price:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -101,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian_WeeklyPivot_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_1wEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
