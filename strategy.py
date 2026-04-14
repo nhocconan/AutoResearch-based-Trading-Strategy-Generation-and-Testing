@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily price action with weekly trend filter and volume confirmation
-# Long when price breaks above daily resistance with volume spike and weekly bullish trend
-# Short when price breaks below daily support with volume spike and weekly bearish trend
-# Exit on daily midline cross
-# Uses weekly trend to avoid counter-trend trades in bear markets
-# Target: 30-100 trades total over 4 years (7-25/year)
+# Hypothesis: 6h Williams Alligator with Elder Ray power and volume confirmation
+# Long when green line > red line (bullish alignment) AND bull power > 0 AND volume > 1.5x average
+# Short when red line > green line (bearish alignment) AND bear power > 0 AND volume > 1.5x average
+# Exit when alignment reverses or volume drops below average
+# Uses Alligator for trend direction, Elder Ray for power confirmation, volume for conviction
+# Target: 60-120 total trades over 4 years (15-30/year)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 40:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,74 +20,83 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily and weekly data ONCE before loop
-    df_daily = get_htf_data(prices, '1d')
-    df_weekly = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily support/resistance levels (20-period lookback)
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
-    resistance = pd.Series(high_daily).rolling(window=20, min_periods=20).max().values
-    support = pd.Series(low_daily).rolling(window=20, min_periods=20).min().values
-    midline = (resistance + support) / 2
+    # Williams Alligator lines (13,8,5 smoothed with future shift)
+    # Jaw (13-period SMMA shifted 8 bars)
+    jaw_raw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
+    jaw = np.roll(jaw_raw, 8)  # shift 8 bars forward
+    jaw[:8] = np.nan  # first 8 values invalid
     
-    # Calculate weekly EMA for trend filter (21-period)
-    close_weekly = df_weekly['close'].values
-    ema_weekly = pd.Series(close_weekly).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Teeth (8-period SMMA shifted 5 bars)
+    teeth_raw = pd.Series(close).rolling(window=8, min_periods=8).mean().values
+    teeth = np.roll(teeth_raw, 5)  # shift 5 bars forward
+    teeth[:5] = np.nan  # first 5 values invalid
     
-    # Calculate daily volume average (20-period)
-    vol_daily = df_daily['volume'].values
-    vol_ma_daily = pd.Series(vol_daily).rolling(window=20, min_periods=20).mean().values
+    # Lips (5-period SMMA shifted 3 bars)
+    lips_raw = pd.Series(close).rolling(window=5, min_periods=5).mean().values
+    lips = np.roll(lips_raw, 3)  # shift 3 bars forward
+    lips[:3] = np.nan  # first 3 values invalid
     
-    # Align indicators to daily timeframe
-    resistance_aligned = align_htf_to_ltf(prices, df_daily, resistance)
-    support_aligned = align_htf_to_ltf(prices, df_daily, support)
-    midline_aligned = align_htf_to_ltf(prices, df_daily, midline)
-    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
-    vol_ma_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_ma_daily)
+    # Elder Ray Power (13-period EMA)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13  # Bull Power = High - EMA13
+    bear_power = ema13 - low   # Bear Power = EMA13 - Low
+    
+    # Volume average (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all indicators to 6h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations
-    start = 60  # for 20-period calculations
+    # Start after enough data for calculations (max shift is 8 for jaw)
+    start = 20  # for 20-period volume MA
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(resistance_aligned[i]) or np.isnan(support_aligned[i]) or 
-            np.isnan(ema_weekly_aligned[i]) or np.isnan(vol_ma_daily_aligned[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        vol_daily_current = volume[i]  # Current daily volume
+        # Alligator alignment: lips > teeth > jaw = bullish, jaw > teeth > lips = bearish
+        bullish_alignment = (lips_aligned[i] > teeth_aligned[i]) and (teeth_aligned[i] > jaw_aligned[i])
+        bearish_alignment = (jaw_aligned[i] > teeth_aligned[i]) and (teeth_aligned[i] > lips_aligned[i])
+        
+        vol_condition = volume[i] > 1.5 * vol_ma_aligned[i]
         
         if position == 0:
-            # Long setup: break above resistance with volume spike and weekly bullish trend
-            if (price > resistance_aligned[i] and 
-                vol_daily_current > 1.8 * vol_ma_daily_aligned[i] and  # Volume spike
-                price > ema_weekly_aligned[i]):                    # Price above weekly EMA for bullish trend
+            # Long setup: bullish alignment AND bull power > 0 AND volume spike
+            if bullish_alignment and (bull_power_aligned[i] > 0) and vol_condition:
                 position = 1
                 signals[i] = position_size
-            # Short setup: break below support with volume spike and weekly bearish trend
-            elif (price < support_aligned[i] and 
-                  vol_daily_current > 1.8 * vol_ma_daily_aligned[i] and  # Volume spike
-                  price < ema_weekly_aligned[i]):                    # Price below weekly EMA for bearish trend
+            # Short setup: bearish alignment AND bear power > 0 AND volume spike
+            elif bearish_alignment and (bear_power_aligned[i] > 0) and vol_condition:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below midline
-            if price < midline_aligned[i]:
+            # Exit long: bearish alignment OR bull power <= 0 OR volume drops
+            if (not bullish_alignment) or (bull_power_aligned[i] <= 0) or (not vol_condition):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above midline
-            if price > midline_aligned[i]:
+            # Exit short: bullish alignment OR bear power <= 0 OR volume drops
+            if (not bearish_alignment) or (bear_power_aligned[i] <= 0) or (not vol_condition):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -95,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Resistance_Support_Volume_WeeklyTrend"
-timeframe = "1d"
+name = "6h_Alligator_ElderRay_Volume"
+timeframe = "6h"
 leverage = 1.0
