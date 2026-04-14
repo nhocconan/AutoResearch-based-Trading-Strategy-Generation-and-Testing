@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy combining 1d Donchian breakout with volume confirmation and 1w RSI trend filter.
-# Uses Donchian(20) from 1d for support/resistance levels, providing robust breakout levels.
-# Long when price breaks above 1d Donchian high with 1w RSI > 50 (uptrend) and volume confirmation.
-# Short when price breaks below 1d Donchian low with 1w RSI < 50 (downtrend) and volume confirmation.
-# Exit when price returns to 1d Donchian midpoint or RSI crosses 50 in opposite direction.
-# Designed to work in both bull and bear markets by using Donchian channels for structure and RSI for trend confirmation.
-# Target: 12-37 trades/year per symbol (50-150 total over 4 years) to minimize fee drag.
+# Hypothesis: 4h strategy using 12h Supertrend for trend direction and 12h ATR breakout for entry.
+# Long when price breaks above 12h ATR-based upper band with Supertrend uptrend and volume confirmation.
+# Short when price breaks below 12h ATR-based lower band with Supertrend downtrend and volume confirmation.
+# Exit when price crosses the Supertrend line or ATR band reverses.
+# Supertrend adapts to volatility, working in both bull and bear markets.
+# Target: 20-25 trades/year per symbol (80-100 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,46 +20,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for Donchian levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load 12h data ONCE for Supertrend and ATR bands
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Donchian(20) on 1d
-    period = 20
-    donchian_high = pd.Series(high_1d).rolling(window=period, min_periods=period).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=period, min_periods=period).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # Calculate ATR for Supertrend
+    tr1 = np.abs(high_12h[1:] - low_12h[1:])
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
-    # Load 1w data ONCE for RSI trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
-        return np.zeros(n)
+    atr_period = 10
+    atr_12h = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
     
-    close_1w = df_1w['close'].values
+    # Supertrend parameters
+    atr_multiplier = 3.0
     
-    # Calculate RSI(14) on 1w
-    delta = np.diff(close_1w, prepend=np.nan)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate basic upper and lower bands
+    hl2 = (high_12h + low_12h) / 2
+    upper_band = hl2 + (atr_multiplier * atr_12h)
+    lower_band = hl2 - (atr_multiplier * atr_12h)
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / avg_loss
-    rs = np.where(avg_loss == 0, 100, rs)
-    rsi_1w = 100 - (100 / (1 + rs))
+    # Initialize Supertrend
+    supertrend = np.full_like(close_12h, np.nan)
+    trend = np.ones_like(close_12h, dtype=int)  # 1 for uptrend, -1 for downtrend
+    
+    # Calculate Supertrend
+    for i in range(1, len(close_12h)):
+        if np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(atr_12h[i]):
+            supertrend[i] = supertrend[i-1] if i > 0 else np.nan
+            trend[i] = trend[i-1] if i > 0 else 1
+            continue
+            
+        if close_12h[i] > upper_band[i-1]:
+            trend[i] = 1
+        elif close_12h[i] < lower_band[i-1]:
+            trend[i] = -1
+        else:
+            trend[i] = trend[i-1]
+            if trend[i] == 1 and lower_band[i] < lower_band[i-1]:
+                lower_band[i] = lower_band[i-1]
+            if trend[i] == -1 and upper_band[i] > upper_band[i-1]:
+                upper_band[i] = upper_band[i-1]
+        
+        if trend[i] == 1:
+            supertrend[i] = lower_band[i]
+        else:
+            supertrend[i] = upper_band[i]
+    
+    # Calculate ATR breakout bands (separate from Supertrend for entry)
+    atr_breakout_period = 14
+    atr_breakout = pd.Series(tr).ewm(span=atr_breakout_period, adjust=False, min_periods=atr_breakout_period).mean().values
+    
+    # ATR breakout bands
+    atr_multiplier_breakout = 1.5
+    upper_breakout = hl2 + (atr_multiplier_breakout * atr_breakout)
+    lower_breakout = hl2 - (atr_multiplier_breakout * atr_breakout)
     
     # Align indicators to lower timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid)
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    supertrend_aligned = align_htf_to_ltf(prices, df_12h, supertrend)
+    trend_aligned = align_htf_to_ltf(prices, df_12h, trend)
+    upper_breakout_aligned = align_htf_to_ltf(prices, df_12h, upper_breakout)
+    lower_breakout_aligned = align_htf_to_ltf(prices, df_12h, lower_breakout)
     
-    # Volume confirmation: 1.5x average volume (20-period)
+    # Volume confirmation: 1.5x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -68,14 +97,14 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(30, 20, 14)  # Need Donchian and RSI
+    start = max(20, 14)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or
-            np.isnan(donchian_mid_aligned[i]) or
-            np.isnan(rsi_1w_aligned[i]) or
+        if (np.isnan(supertrend_aligned[i]) or 
+            np.isnan(trend_aligned[i]) or
+            np.isnan(upper_breakout_aligned[i]) or
+            np.isnan(lower_breakout_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -83,38 +112,34 @@ def generate_signals(prices):
         # Volume confirmation
         volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
-        # Trend filter: RSI > 50 for uptrend, < 50 for downtrend
-        uptrend = rsi_1w_aligned[i] > 50
-        downtrend = rsi_1w_aligned[i] < 50
-        
         if position == 0:
-            # Look for Donchian breakouts
-            # Long: price breaks above Donchian high AND uptrend
-            if (close[i] > donchian_high_aligned[i] and 
-                uptrend and 
+            # Look for ATR breakout entries
+            # Long: price breaks above upper breakout band with uptrend
+            if (close[i] > upper_breakout_aligned[i] and 
+                trend_aligned[i] == 1 and 
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below Donchian low AND downtrend
-            elif (close[i] < donchian_low_aligned[i] and 
-                  downtrend and 
+            # Short: price breaks below lower breakout band with downtrend
+            elif (close[i] < lower_breakout_aligned[i] and 
+                  trend_aligned[i] == -1 and 
                   volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to Donchian midpoint or RSI crosses below 50
-            if (close[i] <= donchian_mid_aligned[i] or 
-                rsi_1w_aligned[i] <= 50):
+            # Exit long: price crosses below Supertrend or breaks below lower breakout band
+            if (close[i] < supertrend_aligned[i] or 
+                close[i] < lower_breakout_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to Donchian midpoint or RSI crosses above 50
-            if (close[i] >= donchian_mid_aligned[i] or 
-                rsi_1w_aligned[i] >= 50):
+            # Exit short: price crosses above Supertrend or breaks above upper breakout band
+            if (close[i] > supertrend_aligned[i] or 
+                close[i] > upper_breakout_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -122,6 +147,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_DonchianBreakout_1wRSI_Volume_v1"
-timeframe = "12h"
+name = "4h_Supertrend_ATRBreakout_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
