@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d trend filter and volume confirmation
+# Hypothesis: 12h Donchian breakout with 1d trend filter and volume confirmation
 # Uses daily EMA200 to filter counter-trend trades in bear/bull markets
 # Donchian(20) provides clear entry/exit with low churn
 # Volume spike confirms breakout strength
-# Target: 20-50 trades/year (80-200 over 4 years) with strict entry conditions
-# Position size: 0.28 to balance return and drawdown
+# Target: 12-37 trades/year (50-150 over 4 years) with strict entry conditions
+# Position size: 0.25 to balance return and drawdown
 
 def generate_signals(prices):
     n = len(prices)
@@ -38,7 +38,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.28
+    position_size = 0.25
     
     for i in range(20, n):
         # Get aligned 1d EMA200
@@ -69,6 +69,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_1dEMA200_Volume"
-timeframe = "4h"
+name = "12h_Donchian_1dEMA200_Volume"
+timeframe = "12h"
 leverage = 1.0
