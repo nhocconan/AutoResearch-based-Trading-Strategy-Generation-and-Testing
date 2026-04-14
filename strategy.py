@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator with 1d trend filter and volume confirmation
-# Long when Alligator jaws (SMA13) > teeth (SMA8) > lips (SMA5) AND 1d EMA(50) rising AND volume > 1.5x average
-# Short when Alligator jaws < teeth < lips AND 1d EMA(50) falling AND volume > 1.5x average
-# Exit when Alligator lines cross in opposite direction OR price crosses 8-period SMA
-# Williams Alligator identifies trend alignment; 1d EMA filters higher timeframe trend; volume confirms institutional participation
-# Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost
+# Hypothesis: 12h Donchian breakout with 1d volatility filter and volume confirmation
+# Long when price breaks above 20-period Donchian upper band AND 1d ATR ratio > 1.2 (high volatility regime) AND volume > 1.5x average
+# Short when price breaks below 20-period Donchian lower band AND 1d ATR ratio > 1.2 AND volume > 1.5x average
+# Exit when price crosses the 10-period SMA (opposite direction) OR ATR ratio drops below 0.8 (low volatility)
+# Donchian captures breakouts; 1d ATR regime filter ensures trades only in high volatility environments; volume confirms conviction
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,16 +20,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for trend filter
+    # Load 1d data ONCE before loop for volatility filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Williams Alligator components (5, 8, 13 period SMAs)
-    sma_5 = pd.Series(close).rolling(window=5, min_periods=5).mean()
-    sma_8 = pd.Series(close).rolling(window=8, min_periods=8).mean()
-    sma_13 = pd.Series(close).rolling(window=13, min_periods=13).mean()
+    # Calculate Donchian channels (20-period)
+    dc_upper = pd.Series(high).rolling(window=20, min_periods=20).max()
+    dc_lower = pd.Series(low).rolling(window=20, min_periods=20).min()
     
-    # Calculate EMA on 1d (50-period) for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean()
+    # Calculate 10-period SMA for exit
+    sma_10 = pd.Series(close).rolling(window=10, min_periods=10).mean()
+    
+    # Calculate ATR on 1d for volatility regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0  # First period has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean()
+    
+    # Calculate ATR ratio (current ATR / 50-period average ATR) to detect volatility regime
+    atr_ma_50 = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean()
+    atr_ratio = atr_1d / atr_ma_50
     
     # Calculate volume average for confirmation (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -39,50 +55,47 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 60
+    start = 50
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(sma_5[i]) or 
-            np.isnan(sma_8[i]) or 
-            np.isnan(sma_13[i]) or 
+        if (np.isnan(dc_upper[i]) or 
+            np.isnan(dc_lower[i]) or 
+            np.isnan(sma_10[i]) or 
+            np.isnan(atr_ratio[i]) or 
             np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
-        # Get EMA values aligned to 4h timeframe
-        ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d.values)
-        ema_val = ema_50_aligned[i]
-        ema_prev = ema_50_aligned[i-1]
+        # Get ATR ratio values aligned to 12h timeframe
+        atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio.values)
+        atr_ratio_val = atr_ratio_aligned[i]
         
-        jaw = sma_13[i]   # Alligator jaws (13-period)
-        teeth = sma_8[i]  # Alligator teeth (8-period)
-        lips = sma_5[i]   # Alligator lips (5-period)
         price = close[i]
         vol = volume[i]
         vol_threshold = vol_avg[i] * 1.5
         
         if position == 0:
-            # Long setup: Alligator aligned bullish (jaws > teeth > lips) AND 1d EMA rising AND volume confirmation
-            if (jaw > teeth > lips and ema_val > ema_prev and vol > vol_threshold):
+            # Long setup: Price breaks above Donchian upper AND high volatility regime (ATR ratio > 1.2) AND volume confirmation
+            if (price > dc_upper[i] and atr_ratio_val > 1.2 and vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: Alligator aligned bearish (jaws < teeth < lips) AND 1d EMA falling AND volume confirmation
-            elif (jaw < teeth < lips and ema_val < ema_prev and vol > vol_threshold):
+            # Short setup: Price breaks below Donchian lower AND high volatility regime AND volume confirmation
+            elif (price < dc_lower[i] and atr_ratio_val > 1.2 and vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Alligator alignment breaks OR price crosses below 8-period SMA
-            if (jaw <= teeth or price < sma_8[i]):
+            # Exit long: Price crosses below 10-period SMA OR volatility drops (ATR ratio < 0.8)
+            if (price < sma_10[i] or atr_ratio_val < 0.8):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Alligator alignment breaks OR price crosses above 8-period SMA
-            if (jaw >= teeth or price > sma_8[i]):
+            # Exit short: Price crosses above 10-period SMA OR volatility drops
+            if (price > sma_10[i] or atr_ratio_val < 0.8):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -90,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsAlligator_1dEMA_Volume"
-timeframe = "4h"
+name = "12h_Donchian_1dATR_Volume"
+timeframe = "12h"
 leverage = 1.0
