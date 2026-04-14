@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour 1-day Supertrend (ATR multiplier 3.0) with volume confirmation.
-# Uses daily Supertrend to capture the dominant trend direction while avoiding whipsaws.
-# Enters long when price closes above Supertrend with volume > 1.5x 20-period average.
-# Enters short when price closes below Supertrend with volume confirmation.
-# Exits when price closes back across the Supertrend line.
-# Designed for 15-35 trades per year per symbol (60-140 total over 4 years) to minimize fee drag.
+# Hypothesis: 12-hour Williams Alligator + Elder Ray Power with 1-week ADX filter.
+# The Williams Alligator (Jaw/Teeth/Lips) identifies trend direction and strength.
+# Elder Ray Power measures bull/bear energy relative to EMA13.
+# 1-week ADX > 25 filters for trending markets only, avoiding whipsaws in ranges.
+# This combination aims for 15-25 trades per year per symbol (60-100 total over 4 years),
+# staying within optimal range to minimize fee drift while capturing strong trends.
+# Works in both bull (Power > 0) and bear (Power < 0) markets by following Alligator alignment.
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,109 +19,143 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Load 1d data ONCE for Supertrend calculation
-    df_1d = get_htf_data(prices, '1d')
+    # Load 12h data ONCE for Alligator and Elder Ray
+    df_12h = get_htf_data(prices, '12h')
     
-    # Supertrend parameters
-    atr_period = 10
-    multiplier = 3.0
+    # Load 1w data ONCE for ADX filter
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < atr_period:
+    # Williams Alligator on 12h: Jaw (SMMA13), Teeth (SMMA8), Lips (SMMA5)
+    # SMMA = smoothed moving average (similar to Wilder's smoothing)
+    def smma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan, dtype=float)
+        res = np.full_like(arr, np.nan, dtype=float)
+        sma = np.mean(arr[:period])
+        res[period-1] = sma
+        for i in range(period, len(arr)):
+            res[i] = (res[i-1] * (period-1) + arr[i]) / period
+        return res
+    
+    if len(df_12h) < 13:
         return np.zeros(n)
     
-    # Calculate ATR on daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    jaw = smma(df_12h['close'].values, 13)
+    teeth = smma(df_12h['close'].values, 8)
+    lips = smma(df_12h['close'].values, 5)
     
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
+    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
     
-    atr = np.zeros_like(tr)
-    atr[atr_period-1] = np.mean(tr[:atr_period])
-    for i in range(atr_period, len(tr)):
-        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
+    # Elder Ray Power on 12h: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema13 = pd.Series(df_12h['close'].values).ewm(span=13, adjust=False).mean().values
+    ema13_aligned = align_htf_to_ltf(prices, df_12h, ema13)
     
-    # Calculate basic upper and lower bands
-    hl2 = (high_1d + low_1d) / 2
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
+    bull_power = high - ema13_aligned
+    bear_power = low - ema13_aligned
     
-    # Initialize Supertrend
-    supertrend = np.zeros_like(close_1d)
-    direction = np.ones_like(close_1d)  # 1 for uptrend, -1 for downtrend
-    
-    supertrend[0] = upper_band[0]
-    direction[0] = 1
-    
-    for i in range(1, len(close_1d)):
-        if close_1d[i] > supertrend[i-1]:
-            direction[i] = 1
-        elif close_1d[i] < supertrend[i-1]:
-            direction[i] = -1
-        else:
-            direction[i] = direction[i-1]
+    # ADX on 1w: measures trend strength
+    def calculate_adx(high_arr, low_arr, close_arr, period=14):
+        if len(high_arr) < period + 1:
+            return np.full_like(high_arr, np.nan, dtype=float)
         
-        if direction[i] == 1:
-            supertrend[i] = max(lower_band[i], supertrend[i-1])
-        else:
-            supertrend[i] = min(upper_band[i], supertrend[i-1])
+        # True Range
+        tr1 = high_arr[1:] - low_arr[1:]
+        tr2 = np.abs(high_arr[1:] - close_arr[:-1])
+        tr3 = np.abs(low_arr[1:] - close_arr[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[np.nan], tr])
+        
+        # Directional Movement
+        plus_dm = np.where((high_arr[1:] - high_arr[:-1]) > (low_arr[:-1] - low_arr[1:]), 
+                           np.maximum(high_arr[1:] - high_arr[:-1], 0), 0)
+        minus_dm = np.where((low_arr[:-1] - low_arr[1:]) > (high_arr[1:] - high_arr[:-1]), 
+                            np.maximum(low_arr[:-1] - low_arr[1:], 0), 0)
+        plus_dm = np.concatenate([[np.nan], plus_dm])
+        minus_dm = np.concatenate([[np.nan], minus_dm])
+        
+        # Smoothed TR, +DM, -DM (using Wilder's smoothing)
+        def wilders_smoothing(arr, period):
+            if len(arr) < period:
+                return np.full_like(arr, np.nan, dtype=float)
+            res = np.full_like(arr, np.nan, dtype=float)
+            # First value is simple average
+            res[period-1] = np.nansum(arr[1:period]) / (period-1) if np.sum(~np.isnan(arr[1:period])) >= (period-1) else np.nan
+            for i in range(period, len(arr)):
+                if np.isnan(res[i-1]) or np.isnan(arr[i]):
+                    res[i] = np.nan
+                else:
+                    res[i] = (res[i-1] * (period-1) + arr[i]) / period
+            return res
+        
+        tr_smoothed = wilders_smoothing(tr, period)
+        plus_dm_smoothed = wilders_smoothing(plus_dm, period)
+        minus_dm_smoothed = wilders_smoothing(minus_dm, period)
+        
+        # Directional Indicators
+        plus_di = 100 * plus_dm_smoothed / tr_smoothed
+        minus_di = 100 * minus_dm_smoothed / tr_smoothed
+        
+        # DX and ADX
+        dx = np.where((plus_di + minus_di) != 0, 
+                      100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+        adx = wilders_smoothing(dx, period)
+        return adx
     
-    # Align Supertrend and direction to 4h timeframe
-    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend)
-    direction_aligned = align_htf_to_ltf(prices, df_1d, direction)
+    if len(df_1w) < 28:  # Need enough for ADX calculation
+        return np.zeros(n)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    adx_1w = calculate_adx(df_1w['high'].values, df_1w['low'].values, df_1w['close'].values, 14)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w, additional_delay_bars=0)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(30, 20)
+    start = max(50, 30)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(supertrend_aligned[i]) or 
-            np.isnan(direction_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(adx_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
+        # Alligator alignment: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
+        alligator_long = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
+        alligator_short = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
+        
+        # Elder Ray: Bull Power > 0 = bullish energy, Bear Power < 0 = bearish energy
+        bullish_energy = bull_power[i] > 0
+        bearish_energy = bear_power[i] < 0
+        
+        # ADX filter: trending market only
+        trending = adx_1w_aligned[i] > 25
         
         if position == 0:
-            # Enter long: price above Supertrend + uptrend + volume
-            if (close[i] > supertrend_aligned[i] and 
-                direction_aligned[i] == 1 and 
-                volume_confirmed):
+            # Enter long: Alligator aligned up + Bull Power positive + trending
+            if alligator_long and bullish_energy and trending:
                 position = 1
                 signals[i] = position_size
-            # Enter short: price below Supertrend + downtrend + volume
-            elif (close[i] < supertrend_aligned[i] and 
-                  direction_aligned[i] == -1 and 
-                  volume_confirmed):
+            # Enter short: Alligator aligned down + Bear Power negative + trending
+            elif alligator_short and bearish_energy and trending:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below Supertrend
-            if close[i] < supertrend_aligned[i]:
+            # Exit long: Alligator alignment breaks OR Bear Power becomes negative
+            if not (alligator_long and bullish_energy):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes above Supertrend
-            if close[i] > supertrend_aligned[i]:
+            # Exit short: Alligator alignment breaks OR Bull Power becomes positive
+            if not (alligator_short and bearish_energy):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -128,6 +163,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Supertrend_Volume_v1"
-timeframe = "4h"
+name = "12h_1w_alligator_elder_ray_adx_v1"
+timeframe = "12h"
 leverage = 1.0
