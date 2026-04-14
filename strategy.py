@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Camarilla pivot levels + volume spike + volume regime filter.
-# Long at L3 level with volume spike, short at H3 level with volume spike.
-# Volume filter: current volume > 2x 20-period average.
-# Exit when price reaches opposite H3/L3 level or closes beyond extreme levels.
-# Uses 1d timeframe for pivot calculation (updated only after daily bar close).
+# Hypothesis: 4h strategy using 1-day RSI(14) and Williams %R(14) mean reversion.
+# In overbought conditions (RSI > 70 and Williams %R > -20), go short.
+# In oversold conditions (RSI < 30 and Williams %R < -80), go long.
+# Volume > 1.5x 20-period average confirms reversal strength.
+# Uses 4h ATR(14) for stoploss: exit when price moves 2x ATR against position.
 # Target: 20-40 trades/year per symbol (80-160 total over 4 years) to minimize fee drag.
-# Works in bull/bear markets by fading extremes at institutional pivot levels.
+# Works in both bull and bear markets by fading extremes.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,37 +21,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for Camarilla pivots
+    # Load 1d data ONCE for mean reversion signals
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla levels from previous 1d bar
-    if len(df_1d) < 2:
+    # Load 4h data ONCE for ATR stoploss
+    df_4h = get_htf_data(prices, '4h')
+    
+    # 1d RSI(14)
+    rsi_len = 14
+    if len(df_1d) < rsi_len:
         return np.zeros(n)
     
-    # Previous day's OHLC
-    prev_close = df_1d['close'].iloc[-2]
-    prev_high = df_1d['high'].iloc[-2]
-    prev_low = df_1d['low'].iloc[-2]
+    delta = np.diff(df_1d['close'].values)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Camarilla multipliers
-    H3 = prev_close + (prev_high - prev_low) * 1.1 / 6
-    L3 = prev_close - (prev_high - prev_low) * 1.1 / 6
-    H4 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    L4 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_len, adjust=False, min_periods=rsi_len).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_len, adjust=False, min_periods=rsi_len).mean().values
     
-    # Expand to full length (same value for all bars until new 1d bar)
-    H3_full = np.full(len(df_1d), H3)
-    L3_full = np.full(len(df_1d), L3)
-    H4_full = np.full(len(df_1d), H4)
-    L4_full = np.full(len(df_1d), L4)
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.concatenate([[np.nan], rsi])  # align with df_1d index
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
-    # Align to 12h timeframe (wait for 1d bar to close)
-    H3_12h = align_htf_to_ltf(prices, df_1d, H3_full)
-    L3_12h = align_htf_to_ltf(prices, df_1d, L3_full)
-    H4_12h = align_htf_to_ltf(prices, df_1d, H4_full)
-    L4_12h = align_htf_to_ltf(prices, df_1d, L4_full)
+    # 1d Williams %R(14)
+    highest_high = pd.Series(df_1d['high'].values).rolling(window=rsi_len, min_periods=rsi_len).max().values
+    lowest_low = pd.Series(df_1d['low'].values).rolling(window=rsi_len, min_periods=rsi_len).min().values
+    williams_r = -100 * (highest_high - df_1d['close'].values) / (highest_high - lowest_low + 1e-10)
+    williams_r = np.concatenate([[np.nan], williams_r])  # align with df_1d index
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # Volume confirmation: 2x average volume
+    # 4h ATR(14) for stoploss
+    atr_len = 14
+    if len(df_4h) < atr_len:
+        return np.zeros(n)
+    
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    tr1 = high_4h[1:] - low_4h[1:]
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
+    
+    atr = pd.Series(tr).ewm(span=atr_len, adjust=False, min_periods=atr_len).mean().values
+    atr_aligned = align_htf_to_ltf(prices, df_4h, atr)
+    
+    # Volume confirmation: 1.5x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -59,51 +77,64 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 20
+    start = max(rsi_len*2, 20)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(H3_12h[i]) or 
-            np.isnan(L3_12h[i]) or
+        if (np.isnan(rsi_aligned[i]) or 
+            np.isnan(williams_r_aligned[i]) or
+            np.isnan(atr_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Mean reversion conditions
+        oversold = (rsi_aligned[i] < 30) and (williams_r_aligned[i] < -80)
+        overbought = (rsi_aligned[i] > 70) and (williams_r_aligned[i] > -20)
+        
         # Volume confirmation
-        volume_confirmed = volume[i] > 2.0 * vol_ma[i]
+        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long at L3 with volume spike
-            if (close[i] <= L3_12h[i] and 
-                volume_confirmed):
+            if oversold and volume_confirmed:
                 position = 1
                 signals[i] = position_size
-            # Short at H3 with volume spike
-            elif (close[i] >= H3_12h[i] and 
-                  volume_confirmed):
+            elif overbought and volume_confirmed:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price reaches H3 or closes below L4
-            if (close[i] >= H3_12h[i] or 
-                close[i] <= L4_12h[i]):
-                position = 0
-                signals[i] = 0.0
+            # Exit long: price drops 2x ATR from entry or mean reversion unwinds
+            # Track entry price approximation using close at signal bar
+            if i > 0:
+                # Approximate entry: use close of previous bar (signal acts on close, fills next open)
+                approx_entry = close[i-1] if i > 0 else close[i]
+                stop_loss = approx_entry - 2 * atr_aligned[i]
+                
+                if close[i] < stop_loss or rsi_aligned[i] > 50:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = position_size
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price reaches L3 or closes above H4
-            if (close[i] <= L3_12h[i] or 
-                close[i] >= H4_12h[i]):
-                position = 0
-                signals[i] = 0.0
+            # Exit short: price rises 2x ATR from entry or mean reversion unwinds
+            if i > 0:
+                approx_entry = close[i-1] if i > 0 else close[i]
+                stop_loss = approx_entry + 2 * atr_aligned[i]
+                
+                if close[i] > stop_loss or rsi_aligned[i] < 50:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -position_size
             else:
                 signals[i] = -position_size
     
     return signals
 
-name = "12h_1d_Camarilla_Volume_Spike_v1"
-timeframe = "12h"
+name = "4h_1d_RSI_Williams_MeanRev_v1"
+timeframe = "4h"
 leverage = 1.0
