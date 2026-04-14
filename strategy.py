@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 12-hour trend filter and volume confirmation
-# Long when price breaks above 4h Donchian upper band with volume >1.5x 20-period average and price above 12h EMA50
-# Short when price breaks below 4h Donchian lower band with volume >1.5x 20-period average and price below 12h EMA50
-# Exit when price crosses the 4h Donchian midline
-# 12-hour EMA50 acts as a trend filter to avoid counter-trend trades
-# Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and fee drag
+# Hypothesis: Daily price action with weekly trend filter and volume confirmation
+# Long when price breaks above daily Donchian upper band with volume >1.5x 20-day average and price above weekly EMA50
+# Short when price breaks below daily Donchian lower band with volume >1.5x 20-day average and price below weekly EMA50
+# Exit when price crosses the daily Donchian midline
+# Weekly EMA50 acts as a trend filter to avoid counter-trend trades
+# Target: 30-100 total trades over 4 years (7-25/year) to balance opportunity and fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,31 +20,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h and 12h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_12h = get_htf_data(prices, '12h')
+    # Load daily and weekly data ONCE before loop
+    df_daily = get_htf_data(prices, '1d')
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate 4h Donchian channel (20-period lookback)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    donchian_upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Calculate daily Donchian channel (20-period lookback)
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    donchian_upper = pd.Series(high_daily).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_daily).rolling(window=20, min_periods=20).min().values
     donchian_middle = (donchian_upper + donchian_lower) / 2
     
-    # Calculate 12h EMA50
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Calculate weekly EMA50
+    close_weekly = df_weekly['close'].values
+    ema_50_weekly = pd.Series(close_weekly).ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Calculate 4h volume average (20-period)
-    vol_4h = df_4h['volume'].values
-    vol_ma_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
+    # Calculate daily volume average (20-period)
+    vol_daily = df_daily['volume'].values
+    vol_ma_daily = pd.Series(vol_daily).rolling(window=20, min_periods=20).mean().values
     
-    # Align indicators to 4h timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
-    donchian_middle_aligned = align_htf_to_ltf(prices, df_4h, donchian_middle)
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
+    # Align indicators to daily timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_daily, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_daily, donchian_lower)
+    donchian_middle_aligned = align_htf_to_ltf(prices, df_daily, donchian_middle)
+    ema_50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_50_weekly)
+    vol_ma_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_ma_daily)
     
     signals = np.zeros(n)
     position = 0
@@ -56,24 +56,24 @@ def generate_signals(prices):
     for i in range(start, n):
         # Skip if any critical data is NaN
         if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma_4h_aligned[i])):
+            np.isnan(ema_50_weekly_aligned[i]) or np.isnan(vol_ma_daily_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_4h_current = volume[i]  # Current 4h volume
+        vol_daily_current = volume[i]  # Current daily volume
         
         if position == 0:
-            # Long setup: break above Donchian upper with volume confirmation and price above 12h EMA50
+            # Long setup: break above Donchian upper with volume confirmation and price above weekly EMA50
             if (price > donchian_upper_aligned[i] and 
-                vol_4h_current > 1.5 * vol_ma_4h_aligned[i] and  # Volume confirmation
-                price > ema_50_12h_aligned[i]):                 # Price above 12h EMA50 for bullish bias
+                vol_daily_current > 1.5 * vol_ma_daily_aligned[i] and  # Volume confirmation
+                price > ema_50_weekly_aligned[i]):                 # Price above weekly EMA50 for bullish bias
                 position = 1
                 signals[i] = position_size
-            # Short setup: break below Donchian lower with volume confirmation and price below 12h EMA50
+            # Short setup: break below Donchian lower with volume confirmation and price below weekly EMA50
             elif (price < donchian_lower_aligned[i] and 
-                  vol_4h_current > 1.5 * vol_ma_4h_aligned[i] and  # Volume confirmation
-                  price < ema_50_12h_aligned[i]):                 # Price below 12h EMA50 for bearish bias
+                  vol_daily_current > 1.5 * vol_ma_daily_aligned[i] and  # Volume confirmation
+                  price < ema_50_weekly_aligned[i]):                 # Price below weekly EMA50 for bearish bias
                 position = -1
                 signals[i] = -position_size
             else:
@@ -95,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_12hEMA50_Volume"
-timeframe = "4h"
+name = "1d_Donchian_WeeklyEMA50_Volume"
+timeframe = "1d"
 leverage = 1.0
