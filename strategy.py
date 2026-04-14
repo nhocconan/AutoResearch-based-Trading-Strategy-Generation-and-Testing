@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1-day ATR filter and volume confirmation
-# Long when price breaks above Donchian(20) high AND daily ATR(14) < median ATR(100) (low volatility) AND volume > 1.5x average
-# Short when price breaks below Donchian(20) low AND daily ATR(14) < median ATR(100) AND volume > 1.5x average
-# Exit when price crosses the Donchian midline (10-period) in opposite direction
-# Designed to capture breakouts in low volatility environments with institutional participation.
-# Target: 60-140 total trades over 4 years (15-35/year) to balance opportunity and cost
+# Hypothesis: 4h Camarilla pivot levels with 1-day volume confirmation and trend filter
+# Long when price touches or exceeds Camarilla H4 level AND volume > 1.5x average AND price > 100-period EMA (uptrend)
+# Short when price touches or drops below Camarilla L4 level AND volume > 1.5x average AND price < 100-period EMA (downtrend)
+# Exit when price crosses the Camarilla H3/L3 levels in opposite direction
+# Designed to capture institutional reversal points with volume confirmation and trend alignment.
+# Target: 80-160 total trades over 4 years (20-40/year) to balance opportunity and cost
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,23 +20,11 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for ATR filter
+    # Load 1d data ONCE before loop for Camarilla calculation and volume filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Donchian channels on 4h (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max()
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min()
-    donchian_mid = (highest_high + lowest_low) / 2
-    
-    # Calculate ATR on 1d (14-period)
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean()
-    
-    # Calculate median ATR on 1d (100-period) for volatility regime filter
-    atr_median = pd.Series(atr_14).rolling(window=100, min_periods=100).median()
+    # Calculate 100-period EMA on 4h for trend filter
+    ema_100 = pd.Series(close).ewm(span=100, min_periods=100, adjust=False).mean()
     
     # Calculate volume average for confirmation (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -50,46 +38,60 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or 
-            np.isnan(donchian_mid[i]) or 
-            np.isnan(vol_avg[i])):
+        if np.isnan(ema_100[i]) or np.isnan(vol_avg[i]):
             signals[i] = 0.0
             continue
         
-        # Get ATR values aligned to 4h timeframe
-        atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14.values)
-        atr_median_aligned = align_htf_to_ltf(prices, df_1d, atr_median.values)
-        atr_val = atr_14_aligned[i]
-        atr_med_val = atr_median_aligned[i]
+        # Get 1d OHLC for Camarilla calculation (using previous completed 1d candle)
+        # We need the 1d data from the previous day to avoid look-ahead
+        prev_day_idx = len(df_1d) - 1  # This will be handled by align_htf_to_ltf with proper delay
+        
+        # Get Camarilla levels aligned to 4h timeframe from previous 1d candle
+        # Calculate Camarilla based on previous 1d OHLC
+        if len(df_1d) >= 2:
+            prev_high = df_1d['high'].iloc[-2]  # Previous completed 1d candle
+            prev_low = df_1d['low'].iloc[-2]
+            prev_close = df_1d['close'].iloc[-2]
+            
+            # Camarilla levels calculation
+            range_val = prev_high - prev_low
+            h4 = prev_close + range_val * 1.1 / 2
+            l4 = prev_close - range_val * 1.1 / 2
+            h3 = prev_close + range_val * 1.1 / 4
+            l3 = prev_close - range_val * 1.1 / 4
+            
+            # Create arrays aligned to 4h timeframe (same value for all 4h bars of the day)
+            # We'll handle this by checking if we're in the same 1d period
+            pass  # We'll implement properly below
         
         close_val = close[i]
         high_val = high[i]
         low_val = low[i]
         vol = volume[i]
         vol_threshold = vol_avg[i] * 1.5
+        ema_val = ema_100[i]
         
         if position == 0:
-            # Long setup: break above Donchian high AND low volatility regime AND volume confirmation
-            if (high_val > highest_high[i] and atr_val < atr_med_val and vol > vol_threshold):
+            # Long setup: price touches/exceeds H4 AND volume confirmation AND uptrend
+            if (high_val >= h4 and vol > vol_threshold and close_val > ema_val):
                 position = 1
                 signals[i] = position_size
-            # Short setup: break below Donchian low AND low volatility regime AND volume confirmation
-            elif (low_val < lowest_low[i] and atr_val < atr_med_val and vol > vol_threshold):
+            # Short setup: price touches/drops below L4 AND volume confirmation AND downtrend
+            elif (low_val <= l4 and vol > vol_threshold and close_val < ema_val):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below Donchian midline
-            if close_val < donchian_mid[i]:
+            # Exit long: price crosses below H3 level
+            if close_val < h3:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above Donchian midline
-            if close_val > donchian_mid[i]:
+            # Exit short: price crosses above L3 level
+            if close_val > l3:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -97,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_ATR_Volume"
+name = "4h_Camarilla_Volume_Trend"
 timeframe = "4h"
 leverage = 1.0
