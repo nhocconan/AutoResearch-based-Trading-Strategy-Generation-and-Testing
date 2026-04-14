@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,50 +13,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Ichimoku components
+    # Load 1d data for pivot points and EMA50
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate Ichimoku components on daily data
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = np.full_like(high_1d, np.nan)
-    period9_low = np.full_like(low_1d, np.nan)
-    for i in range(8, len(high_1d)):
-        period9_high[i] = np.max(high_1d[i-8:i+1])
-        period9_low[i] = np.min(low_1d[i-8:i+1])
-    tenkan_sen = (period9_high + period9_low) / 2
+    # Calculate daily EMA50 for trend
+    ema_50_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 50:
+        ema_50_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_50_1d[i] = (close_1d[i] * 2 + ema_50_1d[i-1] * 48) / 50
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = np.full_like(high_1d, np.nan)
-    period26_low = np.full_like(low_1d, np.nan)
-    for i in range(25, len(high_1d)):
-        period26_high[i] = np.max(high_1d[i-25:i+1])
-        period26_low[i] = np.min(low_1d[i-25:i+1])
-    kijun_sen = (period26_high + period26_low) / 2
+    # Calculate daily pivot points (using prior day's OHLC)
+    pivot_point = np.full_like(close_1d, np.nan)
+    resistance1 = np.full_like(close_1d, np.nan)
+    support1 = np.full_like(close_1d, np.nan)
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    if len(close_1d) >= 2:
+        for i in range(1, len(close_1d)):
+            ph = high_1d[i-1]
+            pl = low_1d[i-1]
+            pc = close_1d[i-1]
+            
+            pp = (ph + pl + pc) / 3.0
+            r1 = 2 * pp - pl
+            s1 = 2 * pp - ph
+            
+            pivot_point[i] = pp
+            resistance1[i] = r1
+            support1[i] = s1
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = np.full_like(high_1d, np.nan)
-    period52_low = np.full_like(low_1d, np.nan)
-    for i in range(51, len(high_1d)):
-        period52_high[i] = np.max(high_1d[i-51:i+1])
-        period52_low[i] = np.min(low_1d[i-51:i+1])
-    senkou_span_b = (period52_high + period52_low) / 2
+    # Align 1d indicators to 12h timeframe
+    ema_50_1d_12h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    pivot_point_12h = align_htf_to_ltf(prices, df_1d, pivot_point)
+    resistance1_12h = align_htf_to_ltf(prices, df_1d, resistance1)
+    support1_12h = align_htf_to_ltf(prices, df_1d, support1)
     
-    # Align Ichimoku components to 6h timeframe
-    tenkan_sen_6h = align_htf_to_ltf(prices, df_1d, tenkan_sen)
-    kijun_sen_6h = align_htf_to_ltf(prices, df_1d, kijun_sen)
-    senkou_span_a_6h = align_htf_to_ltf(prices, df_1d, senkou_span_a)
-    senkou_span_b_6h = align_htf_to_ltf(prices, df_1d, senkou_span_b)
-    
-    # Calculate volume spike indicator on 6h data
+    # Volume spike detection
     vol_ma_20 = np.full_like(volume, np.nan)
     if len(volume) >= 20:
         for i in range(19, len(volume)):
@@ -66,53 +64,49 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25  # 25% position size
     
-    for i in range(52, n):
+    for i in range(50, n):
         # Skip if any critical data is NaN
-        if (np.isnan(tenkan_sen_6h[i]) or 
-            np.isnan(kijun_sen_6h[i]) or 
-            np.isnan(senkou_span_a_6h[i]) or 
-            np.isnan(senkou_span_b_6h[i]) or
+        if (np.isnan(ema_50_1d_12h[i]) or 
+            np.isnan(pivot_point_12h[i]) or 
+            np.isnan(resistance1_12h[i]) or 
+            np.isnan(support1_12h[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 6h volume vs 20-period average
+        # Volume ratio: current 12h volume vs 20-period average
         if vol_ma_20[i] <= 0:
             volume_ratio = 0
         else:
             volume_ratio = volume[i] / vol_ma_20[i]
         
-        # Determine cloud top and bottom
-        cloud_top = max(senkou_span_a_6h[i], senkou_span_b_6h[i])
-        cloud_bottom = min(senkou_span_a_6h[i], senkou_span_b_6h[i])
-        
         if position == 0:
-            # Long: TK cross above cloud with volume spike
-            if (tenkan_sen_6h[i] > kijun_sen_6h[i] and  # TK cross bullish
-                close[i] > cloud_top and                 # Price above cloud
-                volume_ratio > 2.0):                     # Volume confirmation
+            # Long: Price crosses above S1 with volume spike and above daily EMA50
+            if (close[i] > support1_12h[i] and
+                close[i] > ema_50_1d_12h[i] and
+                volume_ratio > 2.0):
                 position = 1
                 signals[i] = position_size
-            # Short: TK cross below cloud with volume spike
-            elif (tenkan_sen_6h[i] < kijun_sen_6h[i] and  # TK cross bearish
-                  close[i] < cloud_bottom and              # Price below cloud
-                  volume_ratio > 2.0):                     # Volume confirmation
+            # Short: Price crosses below R1 with volume spike and below daily EMA50
+            elif (close[i] < resistance1_12h[i] and
+                  close[i] < ema_50_1d_12h[i] and
+                  volume_ratio > 2.0):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: TK cross below cloud or price below cloud
-            if (tenkan_sen_6h[i] < kijun_sen_6h[i] or 
-                close[i] < cloud_bottom):
+            # Exit: Price crosses below pivot or below daily EMA50
+            if (close[i] < pivot_point_12h[i] or 
+                close[i] < ema_50_1d_12h[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: TK cross above cloud or price above cloud
-            if (tenkan_sen_6h[i] > kijun_sen_6h[i] or 
-                close[i] > cloud_top):
+            # Exit: Price crosses above pivot or above daily EMA50
+            if (close[i] > pivot_point_12h[i] or 
+                close[i] > ema_50_1d_12h[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -120,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Ichimoku_TK_Cross_Cloud_Volume"
-timeframe = "6h"
+name = "12h_1d_Pivot_S1R1_EMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
