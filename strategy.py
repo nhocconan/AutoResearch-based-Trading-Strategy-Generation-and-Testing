@@ -26,11 +26,15 @@ def generate_signals(prices):
     pivot = (high_1d + low_1d + close_1d) / 3.0
     r1 = 2 * pivot - low_1d
     s1 = 2 * pivot - high_1d
+    r2 = pivot + (high_1d - low_1d)
+    s2 = pivot - (high_1d - low_1d)
     
     # Align pivot levels to 4h timeframe
     pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
     r1_4h = align_htf_to_ltf(prices, df_1d, r1)
     s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    r2_4h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_4h = align_htf_to_ltf(prices, df_1d, s2)
     
     # Calculate 14-period daily ATR for volatility filter
     tr = np.zeros(len(df_1d))
@@ -65,6 +69,8 @@ def generate_signals(prices):
         if (np.isnan(pivot_4h[i]) or 
             np.isnan(r1_4h[i]) or
             np.isnan(s1_4h[i]) or
+            np.isnan(r2_4h[i]) or
+            np.isnan(s2_4h[i]) or
             np.isnan(atr_4h[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
@@ -85,12 +91,12 @@ def generate_signals(prices):
         vol_threshold = 2.0
         
         if position == 0:
-            # Long: Price breaks above R1 with volume confirmation
-            if (close[i] > r1_4h[i] and volume_ratio > vol_threshold):
+            # Long: Price breaks above R2 with volume confirmation
+            if (close[i] > r2_4h[i] and volume_ratio > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below S1 with volume confirmation
-            elif (close[i] < s1_4h[i] and volume_ratio > vol_threshold):
+            # Short: Price breaks below S2 with volume confirmation
+            elif (close[i] < s2_4h[i] and volume_ratio > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
@@ -112,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Pivot_R1S1_Breakout_Volume"
+name = "4h_1d_Pivot_R2S2_Breakout_Volume"
 timeframe = "4h"
 leverage = 1.0
