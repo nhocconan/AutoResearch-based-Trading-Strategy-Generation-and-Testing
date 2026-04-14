@@ -1,106 +1,94 @@
-# 1d Candlestick Reversal with 1w Trend Filter and Volume Confirmation
-# Takes long when a bullish engulfing pattern forms at support with weekly uptrend and volume spike
-# Takes short when a bearish engulfing pattern forms at resistance with weekly downtrend and volume spike
-# Exits when opposite engulfing pattern forms or trend weakens
-# Designed to capture reversals in both bull and bear markets with confirmation
-# Target: 30-100 trades over 4 years (7-25/year)
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 6h Williams %R Mean Reversion with 12h Trend Filter and Volume Spike
+# Williams %R identifies overbought/oversold conditions on 6h timeframe
+# Trades counter-trend when %R reaches extreme levels (>80 for oversold, <20 for overbought)
+# Only takes trades in direction of 12h trend (using EMA crossover) to avoid fighting major trends
+# Requires volume spike confirmation to ensure momentum behind the move
+# Designed to work in both ranging and trending markets by combining mean reversion with trend filter
+# Target: 60-120 trades over 4 years (15-30/year)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1w EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Calculate 6h Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Calculate 1w ATR for volatility-based support/resistance
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w_shifted = np.roll(close_1w, 1)
-    close_1w_shifted[0] = np.nan
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - close_1w_shifted)
-    tr3 = np.abs(low_1w - close_1w_shifted)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1w = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate 12h EMA crossover for trend filter (9 and 21)
+    close_12h = df_12h['close'].values
+    ema_9 = pd.Series(close_12h).ewm(span=9, adjust=False).mean().values
+    ema_21 = pd.Series(close_12h).ewm(span=21, adjust=False).mean().values
+    # 1 = uptrend (EMA9 > EMA21), -1 = downtrend (EMA9 < EMA21)
+    trend = np.where(ema_9 > ema_21, 1, -1)
     
-    # Calculate dynamic support/resistance levels
-    # Support = weekly low - 0.5 * ATR (dynamic support)
-    # Resistance = weekly high + 0.5 * ATR (dynamic resistance)
-    support_level = np.minimum.reduce([low_1w, np.roll(low_1w, 1), np.roll(low_1w, 2)]) - 0.5 * atr_1w
-    resistance_level = np.maximum.reduce([high_1w, np.roll(high_1w, 1), np.roll(high_1w, 2)]) + 0.5 * atr_1w
+    # Calculate 12h volume average (20-period) for spike detection
+    volume_12h = df_12h['volume'].values
+    vol_ma_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
     
-    # Align 1w indicators to daily timeframe
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    support_level_aligned = align_htf_to_ltf(prices, df_1w, support_level)
-    resistance_level_aligned = align_htf_to_ltf(prices, df_1w, resistance_level)
-    
-    # Calculate 1d volume average (20-period)
-    vol_ma_1d = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align indicators to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r)
+    trend_aligned = align_htf_to_ltf(prices, df_12h, trend)
+    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 50  # for EMA and volume calculations
+    start = 50  # for Williams %R and EMA calculations
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(support_level_aligned[i]) or 
-            np.isnan(resistance_level_aligned[i]) or np.isnan(vol_ma_1d[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(trend_aligned[i]) or 
+            np.isnan(vol_ma_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Bullish engulfing: current green candle engulfs previous red candle
-        bullish_engulfing = (close[i] > open_[i]) and (open_[i] < close[i-1]) and (close[i] > open_[i-1]) and (open_[i-1] > close[i-1])
-        # Bearish engulfing: current red candle engulfs previous green candle
-        bearish_engulfing = (close[i] < open_[i]) and (open_[i] > close[i-1]) and (close[i] < open_[i-1]) and (open_[i-1] < close[i-1])
-        
         price = close[i]
-        vol_ratio = volume[i] / vol_ma_1d[i] if vol_ma_1d[i] > 0 else 0
+        vol_12h_current = volume_12h[i] if i < len(volume_12h) else volume_12h[-1]
         
         if position == 0:
-            # Long setup: bullish engulfing at support with weekly uptrend and volume spike
-            if (bullish_engulfing and 
-                price <= support_level_aligned[i] * 1.02 and  # Near support
-                ema_1w_aligned[i] > np.roll(ema_1w_aligned, 5)[i] and  # Weekly uptrend
-                vol_ratio > 1.5):                             # Volume spike
+            # Long setup: Williams %R oversold (< -80) in uptrend with volume spike
+            if (williams_r_aligned[i] < -80 and 
+                trend_aligned[i] == 1 and 
+                vol_12h_current > 1.5 * vol_ma_12h_aligned[i]):
                 position = 1
                 signals[i] = position_size
-            # Short setup: bearish engulfing at resistance with weekly downtrend and volume spike
-            elif (bearish_engulfing and 
-                  price >= resistance_level_aligned[i] * 0.98 and  # Near resistance
-                  ema_1w_aligned[i] < np.roll(ema_1w_aligned, 5)[i] and  # Weekly downtrend
-                  vol_ratio > 1.5):                             # Volume spike
+            # Short setup: Williams %R overbought (> -20) in downtrend with volume spike
+            elif (williams_r_aligned[i] > -20 and 
+                  trend_aligned[i] == -1 and 
+                  vol_12h_current > 1.5 * vol_ma_12h_aligned[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: bearish engulfing forms or trend weakens
-            if bearish_engulfing or ema_1w_aligned[i] < np.roll(ema_1w_aligned, 5)[i]:
+            # Exit long: Williams %R returns to neutral (> -50) or trend changes
+            if williams_r_aligned[i] > -50 or trend_aligned[i] == -1:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: bullish engulfing forms or trend weakens
-            if bullish_engulfing or ema_1w_aligned[i] > np.roll(ema_1w_aligned, 5)[i]:
+            # Exit short: Williams %R returns to neutral (< -50) or trend changes
+            if williams_r_aligned[i] < -50 or trend_aligned[i] == 1:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -108,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Candlestick_Reversal_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_WilliamsR_MeanReversion_12hTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
