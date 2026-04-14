@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,45 +13,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data for trend and ATR
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 1d data for EMA and MACD
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate True Range and ATR(14) on weekly
-    tr = np.zeros(len(df_1w))
-    tr[0] = high_1w[0] - low_1w[0]
-    for i in range(1, len(df_1w)):
+    # Calculate MACD(12,26,9) on 1d
+    ema12 = pd.Series(close_1d).ewm(span=12, adjust=False).values
+    ema26 = pd.Series(close_1d).ewm(span=26, adjust=False).values
+    macd_line = ema12 - ema26
+    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False).values
+    macd_hist = macd_line - signal_line
+    
+    # Align MACD components to 6h timeframe
+    macd_hist_6h = align_htf_to_ltf(prices, df_1d, macd_hist)
+    
+    # Calculate EMA50 on 1d for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).values
+    ema50_6h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Calculate ATR(14) on 1d for volatility filter
+    tr = np.zeros(len(df_1d))
+    tr[0] = high_1d[0] - low_1d[0]
+    for i in range(1, len(df_1d)):
         tr[i] = max(
-            high_1w[i] - low_1w[i],
-            abs(high_1w[i] - close_1w[i-1]),
-            abs(low_1w[i] - close_1w[i-1])
+            high_1d[i] - low_1d[i],
+            abs(high_1d[i] - close_1d[i-1]),
+            abs(low_1d[i] - close_1d[i-1])
         )
     
-    atr_1w = np.full(len(df_1w), np.nan)
-    if len(df_1w) >= 14:
-        atr_1w[13] = np.mean(tr[:14])
-        for i in range(14, len(df_1w)):
-            atr_1w[i] = (atr_1w[i-1] * 13 + tr[i]) / 14
+    atr_1d = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 14:
+        atr_1d[13] = np.mean(tr[:14])
+        for i in range(14, len(df_1d)):
+            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # Align 1w ATR to daily timeframe
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    atr_6h = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Weekly EMA(20) for trend filter
-    close_1w_series = pd.Series(close_1w)
-    ema_20_1w = close_1w_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Daily Donchian(20) breakout
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume spike detection (20-period average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume spike detection (20-period average on 6h)
+    vol_ma_20 = np.full_like(volume, np.nan)
+    if len(volume) >= 20:
+        for i in range(19, len(volume)):
+            vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0
@@ -59,20 +66,19 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any critical data is NaN
-        if (np.isnan(atr_1w_aligned[i]) or 
-            np.isnan(ema_20_1w_aligned[i]) or
-            np.isnan(high_20[i]) or
-            np.isnan(low_20[i]) or
+        if (np.isnan(macd_hist_6h[i]) or 
+            np.isnan(ema50_6h[i]) or
+            np.isnan(atr_6h[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Skip low volatility periods (ATR < 0.3% of price)
-        if atr_1w_aligned[i] < 0.003 * close[i]:
+        # Skip low volatility periods (ATR < 0.5% of price)
+        if atr_6h[i] < 0.005 * close[i]:
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current daily volume vs 20-period average
+        # Volume ratio: current 6h volume vs 20-period average
         if vol_ma_20[i] <= 0:
             volume_ratio = 0
         else:
@@ -82,30 +88,32 @@ def generate_signals(prices):
         vol_threshold = 2.0
         
         if position == 0:
-            # Long: Price breaks above Donchian high with volume spike and weekly uptrend
-            if (close[i] > high_20[i] and 
+            # Long: MACD histogram crosses above zero with volume and above EMA50
+            if (macd_hist_6h[i] > 0 and 
+                macd_hist_6h[i-1] <= 0 and
                 volume_ratio > vol_threshold and
-                close[i] > ema_20_1w_aligned[i]):
+                close[i] > ema50_6h[i]):
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below Donchian low with volume spike and weekly downtrend
-            elif (close[i] < low_20[i] and 
+            # Short: MACD histogram crosses below zero with volume and below EMA50
+            elif (macd_hist_6h[i] < 0 and 
+                  macd_hist_6h[i-1] >= 0 and
                   volume_ratio > vol_threshold and
-                  close[i] < ema_20_1w_aligned[i]):
+                  close[i] < ema50_6h[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price closes below Donchian low (trend reversal)
-            if close[i] < low_20[i]:
+            # Exit: MACD histogram crosses below zero
+            if macd_hist_6h[i] < 0 and macd_hist_6h[i-1] >= 0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price closes above Donchian high (trend reversal)
-            if close[i] > high_20[i]:
+            # Exit: MACD histogram crosses above zero
+            if macd_hist_6h[i] > 0 and macd_hist_6h[i-1] <= 0:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -113,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyTrend_Donchian_Volume"
-timeframe = "1d"
+name = "6h_1d_MACD_EMA50_Volume_Filter"
+timeframe = "6h"
 leverage = 1.0
