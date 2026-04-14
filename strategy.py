@@ -13,7 +13,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for weekly pivot levels
+    # Get 1d data for daily pivot levels
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -35,22 +35,22 @@ def generate_signals(prices):
     r2 = pp + (high_1d - low_1d)
     s2 = pp - (high_1d - low_1d)
     
-    # Align pivot levels to 6h timeframe
+    # Align pivot levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
     s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
-    # Volume confirmation: volume > 1.5x average volume (20-period)
+    # Volume confirmation: volume > 1.8x average volume (24-period for 4h)
     vol_series = pd.Series(volume)
-    avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
+    avg_vol = vol_series.rolling(window=24, min_periods=24).mean().shift(1).values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 20  # for volume calculation
+    start = 24  # for volume calculation
     
     for i in range(start, n):
         # Skip if any critical data is NaN
@@ -65,11 +65,11 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: price breaks above R2 with volume confirmation
-            if price > r2_aligned[i] and vol > 1.5 * avg_vol[i]:
+            if price > r2_aligned[i] and vol > 1.8 * avg_vol[i]:
                 position = 1
                 signals[i] = position_size
             # Short: price breaks below S2 with volume confirmation
-            elif price < s2_aligned[i] and vol > 1.5 * avg_vol[i]:
+            elif price < s2_aligned[i] and vol > 1.8 * avg_vol[i]:
                 position = -1
                 signals[i] = -position_size
             else:
@@ -91,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Pivot_Breakout_Weekly"
-timeframe = "6h"
+name = "4h_1d_Pivot_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
