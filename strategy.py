@@ -37,7 +37,7 @@ def generate_signals(prices):
     atr_percentile = atr_series_1d.rolling(window=30, min_periods=30).quantile(0.6).values
     volatility_filter = atr_1d > atr_percentile
     
-    # Calculate 12h volume filter: current volume > 1.3x 20-period average
+    # Calculate 4h volume filter: current volume > 1.3x 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     
