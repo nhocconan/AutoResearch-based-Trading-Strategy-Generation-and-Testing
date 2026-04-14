@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy based on daily range expansion with volume confirmation
-# - Uses previous day's high-low range to set breakout levels (adaptive to volatility)
+# Hypothesis: 4h strategy using daily range expansion breakouts with volume confirmation
+# - Uses previous day's high-low range to set adaptive breakout levels (adapts to volatility)
 # - Requires volume > 1.5x 24-period average for institutional confirmation
 # - Filters for high volatility regimes using 80th percentile of daily range/price ratio
 # - Designed to capture volatility expansion in both bull and bear markets
