@@ -22,73 +22,25 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily ATR (14-period) - Wilder's smoothing
-    high_low = high_1d - low_1d
-    high_close = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    low_close = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    # Calculate daily pivot points (using previous day's OHLC)
+    prev_high = np.concatenate([[high_1d[0]], high_1d[:-1]])
+    prev_low = np.concatenate([[low_1d[0]], low_1d[:-1]])
+    prev_close = np.concatenate([[close_1d[0]], close_1d[:-1]])
     
-    atr_1d = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 14:
-        atr_1d[13] = np.mean(tr[:14])
-        for i in range(14, len(df_1d)):
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
+    pivot = (prev_high + prev_low + prev_close) / 3
+    r1 = 2 * pivot - prev_low
+    s1 = 2 * pivot - prev_high
+    r2 = pivot + (prev_high - prev_low)
+    s2 = pivot - (prev_high - prev_low)
+    r3 = prev_high + 2 * (pivot - prev_low)
+    s3 = prev_low - 2 * (prev_high - pivot)
     
-    # Calculate daily ADX (14-period) - Wilder's smoothing
-    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    
-    tr_14 = tr
-    plus_di_14 = np.full(len(df_1d), np.nan)
-    minus_di_14 = np.full(len(df_1d), np.nan)
-    dx_14 = np.full(len(df_1d), np.nan)
-    
-    if len(df_1d) >= 14:
-        # Smooth +DM, -DM, TR
-        plus_dm_smooth = np.full(len(df_1d), np.nan)
-        minus_dm_smooth = np.full(len(df_1d), np.nan)
-        tr_smooth = np.full(len(df_1d), np.nan)
-        
-        plus_dm_smooth[13] = np.sum(plus_dm[1:15])
-        minus_dm_smooth[13] = np.sum(minus_dm[1:15])
-        tr_smooth[13] = np.sum(tr[1:15])
-        
-        for i in range(14, len(df_1d)):
-            plus_dm_smooth[i] = plus_dm_smooth[i-1] - (plus_dm_smooth[i-1] / 14) + plus_dm[i]
-            minus_dm_smooth[i] = minus_dm_smooth[i-1] - (minus_dm_smooth[i-1] / 14) + minus_dm[i]
-            tr_smooth[i] = tr_smooth[i-1] - (tr_smooth[i-1] / 14) + tr[i]
-        
-        plus_di_14 = 100 * plus_dm_smooth / tr_smooth
-        minus_di_14 = 100 * minus_dm_smooth / tr_smooth
-        dx_14 = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
-    
-    adx_14 = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 27:  # Need 14 + 14 for smoothing
-        adx_14[26] = np.mean(dx_14[14:28])
-        for i in range(27, len(df_1d)):
-            adx_14[i] = (adx_14[i-1] * 13 + dx_14[i]) / 14
-    
-    # Align indicators to 6h timeframe
-    atr_6h = align_htf_to_ltf(prices, df_1d, atr_1d)
-    adx_6h = align_htf_to_ltf(prices, df_1d, adx_14)
-    
-    # Calculate 6-hour Donchian channels (20-period)
-    donch_high = np.full(n, np.nan)
-    donch_low = np.full(n, np.nan)
-    if n >= 20:
-        for i in range(19, n):
-            donch_high[i] = np.max(high[i-19:i+1])
-            donch_low[i] = np.min(low[i-19:i+1])
-    
-    # Calculate 6-hour volume moving average (20-period)
-    volume_ma = np.full(n, np.nan)
-    if n >= 20:
-        for i in range(19, n):
-            volume_ma[i] = np.mean(volume[i-19:i+1])
+    # Calculate 6-hour EMA (21-period) for trend filter
+    alpha = 2 / (21 + 1)
+    ema = np.full(n, np.nan)
+    ema[0] = close[0]
+    for i in range(1, n):
+        ema[i] = alpha * close[i] + (1 - alpha) * ema[i-1]
     
     # Calculate 6-hour RSI (14-period)
     delta = np.diff(close, prepend=close[0])
@@ -112,75 +64,61 @@ def generate_signals(prices):
         else:
             rsi[i] = 100
     
+    # Align daily pivot levels to 6h timeframe
+    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
+    r2_6h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_6h = align_htf_to_ltf(prices, df_1d, s2)
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if any critical data is NaN
-        if (np.isnan(atr_6h[i]) or
-            np.isnan(donch_high[i]) or
-            np.isnan(donch_low[i]) or
-            np.isnan(adx_6h[i]) or
-            np.isnan(volume_ma[i]) or
-            np.isnan(rsi[i])):
+        if (np.isnan(ema[i]) or
+            np.isnan(rsi[i]) or
+            np.isnan(pivot_6h[i]) or
+            np.isnan(r1_6h[i]) or
+            np.isnan(s1_6h[i]) or
+            np.isnan(r2_6h[i]) or
+            np.isnan(s2_6h[i]) or
+            np.isnan(r3_6h[i]) or
+            np.isnan(s3_6h[i])):
             signals[i] = 0.0
             continue
         
-        # Skip low volatility periods (ATR < 0.3% of price)
-        if atr_6h[i] / close[i] < 0.003:
-            signals[i] = 0.0
-            continue
-        
-        # Skip low volume periods (volume < 70% of 20-period MA)
-        if volume[i] < 0.7 * volume_ma[i]:
-            signals[i] = 0.0
-            continue
-        
-        # Skip low trend strength (ADX < 25)
-        if adx_6h[i] < 25:
-            signals[i] = 0.0
-            continue
-        
-        # Calculate pivot levels based on previous day's range
-        prev_high = high_1d[i-1] if i > 0 else high_1d[0]
-        prev_low = low_1d[i-1] if i > 0 else low_1d[0]
-        prev_close = close_1d[i-1] if i > 0 else close_1d[0]
-        prev_range = prev_high - prev_low
-        
-        # Pivot levels for reversal at extremes
-        r3 = prev_close + (prev_range * 1.1 / 4)  # Resistance 3
-        s3 = prev_close - (prev_range * 1.1 / 4)  # Support 3
-        r4 = prev_close + (prev_range * 1.1 / 2)  # Resistance 4
-        s4 = prev_close - (prev_range * 1.1 / 2)  # Support 4
-        
-        # Align to 6h timeframe
-        r3_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r3))[i]
-        s3_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i]
-        r4_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r4))[i]
-        s4_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s4))[i]
+        # Skip low volatility periods (avoid chop)
+        if i >= 20:
+            atr_est = np.mean(np.abs(high[i-19:i+1] - low[i-19:i+1]))
+            if atr_est < 0.005 * close[i]:
+                signals[i] = 0.0
+                continue
         
         if position == 0:
-            # Long: Price breaks above 6h Donchian high AND above S3 (support hold) AND RSI > 50 (bullish momentum)
-            if close[i] > donch_high[i] and close[i] > s3_6h and rsi[i] > 50:
+            # Long: Price above EMA (uptrend) AND RSI > 55 (bullish momentum) AND touches S1 support
+            if close[i] > ema[i] and rsi[i] > 55 and low[i] <= s1_6h[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below 6h Donchian low AND below R3 (resistance hold) AND RSI < 50 (bearish momentum)
-            elif close[i] < donch_low[i] and close[i] < r3_6h and rsi[i] < 50:
+            # Short: Price below EMA (downtrend) AND RSI < 45 (bearish momentum) AND touches R1 resistance
+            elif close[i] < ema[i] and rsi[i] < 45 and high[i] >= r1_6h[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below 6h Donchian low OR below S4 OR RSI < 40
-            if close[i] < donch_low[i] or close[i] < s4_6h or rsi[i] < 40:
+            # Exit: Price crosses below EMA OR RSI < 40 OR touches R1 resistance (take profit)
+            if close[i] < ema[i] or rsi[i] < 40 or high[i] >= r1_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above 6h Donchian high OR above R4 OR RSI > 60
-            if close[i] > donch_high[i] or close[i] > r4_6h or rsi[i] > 60:
+            # Exit: Price crosses above EMA OR RSI > 60 OR touches S1 support (take profit)
+            if close[i] > ema[i] or rsi[i] > 60 or low[i] <= s1_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -188,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Pivot_S3R3_Donchian20_Volume_ADX_RSI_Filter"
+name = "6h_1d_Pivot_EMA_RSI_S1S1"
 timeframe = "6h"
 leverage = 1.0
