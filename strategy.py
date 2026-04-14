@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,14 +13,10 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w EMA(34) for trend filter
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Calculate 1w ATR(14) for volatility filter
+    # Calculate 1d ATR(14) for volatility filter
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     close_series = pd.Series(close)
@@ -30,28 +26,36 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1w RSI(14) for momentum filter
-    delta = pd.Series(df_1w['close']).diff()
+    # Calculate 1d Bollinger Band width for squeeze detection
+    sma_20_1d = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).mean().values
+    std_20_1d = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).std().values
+    upper_bb_1d = sma_20_1d + (2 * std_20_1d)
+    lower_bb_1d = sma_20_1d - (2 * std_20_1d)
+    bb_width_1d = (upper_bb_1d - lower_bb_1d) / sma_20_1d
+    bb_width_1d_aligned = align_htf_to_ltf(prices, df_1d, bb_width_1d)
+    
+    # Calculate 1d RSI(14) for momentum filter
+    delta = pd.Series(df_1d['close']).diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
     avg_gain = gain.rolling(window=14, min_periods=14).mean()
     avg_loss = loss.rolling(window=14, min_periods=14).mean()
     rs = avg_gain / avg_loss
-    rsi_1w = (100 - (100 / (1 + rs))).values
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    rsi_1d = (100 - (100 / (1 + rs))).values
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 60
+    start = 50
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(atr[i]) or 
-            np.isnan(rsi_1w_aligned[i])):
+        if (np.isnan(atr[i]) or 
+            np.isnan(rsi_1d_aligned[i]) or
+            np.isnan(bb_width_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -62,34 +66,33 @@ def generate_signals(prices):
         atr_ratio = atr[i] / price if price > 0 else 0
         vol_filter = atr_ratio > 0.003  # Minimum 0.3% ATR relative to price
         
-        # Trend filter: price > 1w EMA34 for long, price < 1w EMA34 for short
-        trend_filter_long = price > ema_34_1w_aligned[i]
-        trend_filter_short = price < ema_34_1w_aligned[i]
+        # Bollinger Band squeeze detection: bandwidth < 5%
+        bb_squeeze = bb_width_1d_aligned[i] < 0.05
         
         # Momentum filter: RSI between 30 and 70 to avoid extremes
-        rsi_filter = (rsi_1w_aligned[i] > 30) & (rsi_1w_aligned[i] < 70)
+        rsi_filter = (rsi_1d_aligned[i] > 30) & (rsi_1d_aligned[i] < 70)
         
         if position == 0:
-            # Long setup: price above 1w EMA34 + volatility filter + momentum filter
-            if (trend_filter_long and vol_filter and rsi_filter):
+            # Long setup: volatility filter + not in squeeze + momentum filter (no trend filter - let price action decide)
+            if (vol_filter and not bb_squeeze and rsi_filter):
                 position = 1
                 signals[i] = position_size
-            # Short setup: price below 1w EMA34 + volatility filter + momentum filter
-            elif (trend_filter_short and vol_filter and rsi_filter):
+            # Short setup: volatility filter + not in squeeze + momentum filter
+            elif (vol_filter and not bb_squeeze and rsi_filter):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below 1w EMA34
-            if price < ema_34_1w_aligned[i]:
+            # Exit long: volatility drops or enters squeeze
+            if (not vol_filter) or bb_squeeze:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above 1w EMA34
-            if price > ema_34_1w_aligned[i]:
+            # Exit short: volatility drops or enters squeeze
+            if (not vol_filter) or bb_squeeze:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -97,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1wEMA34_RSI_Volume_Filter_v1"
-timeframe = "12h"
+name = "4h_1dATR_Vol_BBWidth_RSI_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
