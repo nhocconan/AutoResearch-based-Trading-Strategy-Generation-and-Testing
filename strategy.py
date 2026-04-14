@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Choppiness Index regime filter with Donchian breakout
-# Long when price breaks above Donchian(20) high AND market is trending (CHOP < 38.2)
-# Short when price breaks below Donchian(20) low AND market is trending (CHOP < 38.2)
-# Exit when price crosses back inside Donchian channel
-# Choppiness Index identifies trending vs ranging markets to avoid false breakouts in chop
+# Hypothesis: 4-hour Bollinger Band breakout with 12-hour EMA trend filter and volume confirmation
+# Long when price closes above upper Bollinger Band AND price > 12h EMA50 AND volume > 1.5x 20-period average
+# Short when price closes below lower Bollinger Band AND price < 12h EMA50 AND volume > 1.5x 20-period average
+# Exit when price crosses back inside the Bollinger Bands (opposite band)
+# Uses Bollinger Bands to capture volatility expansions, EMA for trend alignment, volume for confirmation
 # Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost
 
 def generate_signals(prices):
@@ -20,68 +20,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels on 4h (20-period high/low)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Load 12h data ONCE before loop for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate Choppiness Index (14-period) - values 0-100, <38.2 = trending, >61.8 = ranging
-    atr = pd.Series(np.maximum.reduce([
-        high[1:] - low[1:],
-        np.abs(high[1:] - close[:-1]),
-        np.abs(low[1:] - close[:-1])
-    ])).rolling(window=14, min_periods=14).mean().values
-    # Prepend first value to align length
-    atr = np.concatenate([[np.nan], atr])
+    # Calculate Bollinger Bands on 4h (20-period, 2 std dev)
+    close_series = pd.Series(close)
+    sma20 = close_series.rolling(window=20, min_periods=20).mean().values
+    std20 = close_series.rolling(window=20, min_periods=20).std().values
+    upper_band = sma20 + 2 * std20
+    lower_band = sma20 - 2 * std20
     
-    sum_atr14 = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    highest_high14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Avoid division by zero
-    range14 = highest_high14 - lowest_low14
-    chop = np.where(range14 != 0, 100 * np.log10(sum_atr14 / range14) / np.log10(14), 50)
+    # Calculate volume average for confirmation (20-period)
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations
+    # Start after enough data for calculations (20 for Bollinger + buffer)
     start = 30
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(chop[i])):
+        if (np.isnan(sma20[i]) or np.isnan(std20[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        vol = volume[i]
+        vol_threshold = vol_avg[i] * 1.5
         
         if position == 0:
-            # Only trade in trending markets (CHOP < 38.2)
-            if chop[i] < 38.2:
-                # Long setup: breakout above Donchian high
-                if price > high_20[i]:
-                    position = 1
-                    signals[i] = position_size
-                # Short setup: breakdown below Donchian low
-                elif price < low_20[i]:
-                    position = -1
-                    signals[i] = -position_size
-                else:
-                    signals[i] = 0.0
+            # Long setup: close above upper BB + above 12h EMA50 + volume confirmation
+            if (price > upper_band[i] and price > ema50_12h_aligned[i] and vol > vol_threshold):
+                position = 1
+                signals[i] = position_size
+            # Short setup: close below lower BB + below 12h EMA50 + volume confirmation
+            elif (price < lower_band[i] and price < ema50_12h_aligned[i] and vol > vol_threshold):
+                position = -1
+                signals[i] = -position_size
             else:
-                signals[i] = 0.0  # No trades in ranging markets
+                signals[i] = 0.0
         elif position == 1:
-            # Exit long: price falls back below Donchian low (opposite band)
-            if price < low_20[i]:
+            # Exit long: price closes back inside Bollinger Bands (below upper band)
+            if price < upper_band[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price rises back above Donchian high (opposite band)
-            if price > high_20[i]:
+            # Exit short: price closes back inside Bollinger Bands (above lower band)
+            if price > lower_band[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -89,6 +84,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Chop_Donchian_Breakout"
+name = "4h_Bollinger_12hEMA50_Volume"
 timeframe = "4h"
 leverage = 1.0
