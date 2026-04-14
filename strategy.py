@@ -3,13 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1-week Williams Fractal for trend direction and 1d Donchian breakout for entry.
-# Weekly Williams Fractal identifies potential turning points on higher timeframe.
-# 1d Donchian breakout provides entry signals with confirmation from weekly trend.
-# Volume confirmation (>1.5x 20-period average) reduces false breakouts.
-# ATR-based stop loss manages risk via signal=0 when price moves against position.
-# Designed to work in both bull and bear markets by using weekly fractal to avoid counter-trend trades.
-# Target: 15-25 trades/year per symbol (60-100 total over 4 years) to minimize fee drag.
+# Hypothesis: 6h strategy using 12h Williams %R for trend and 1d Williams %R for momentum.
+# Williams %R on 12h determines the primary trend direction (overbought/oversold levels).
+# Williams %R on 1d provides momentum signals for entry timing.
+# Strategy goes long when 12h is oversold and 1d shows bullish momentum.
+# Strategy goes short when 12h is overbought and 1d shows bearish momentum.
+# Designed to work in both bull and bear markets by using 12h Williams %R to identify
+# overextended conditions that are likely to reverse, while using 1d Williams %R
+# to time entries with momentum confirmation.
+# Target: 60-120 total trades over 4 years (15-30/year) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,105 +21,83 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Load weekly data ONCE for Williams Fractal calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    # Load 12h data ONCE for Williams %R trend
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 14:
         return np.zeros(n)
     
-    # Calculate Williams Fractals on weekly data
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate Williams %R on 12h data (14-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Williams Fractal: need 2 bars on each side for confirmation
-    # Bearish fractal: high[n] is highest of [n-2, n-1, n, n+1, n+2]
-    # Bullish fractal: low[n] is lowest of [n-2, n-1, n, n+1, n+2]
-    n_1w = len(high_1w)
-    bearish_fractal = np.zeros(n_1w, dtype=bool)
-    bullish_fractal = np.zeros(n_1w, dtype=bool)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    wr_12h = -100 * (highest_high - close_12h) / (highest_high - lowest_low)
     
-    for i in range(2, n_1w - 2):
-        # Bearish fractal: current high is highest in window
-        if (high_1w[i] >= high_1w[i-2] and high_1w[i] >= high_1w[i-1] and
-            high_1w[i] >= high_1w[i+1] and high_1w[i] >= high_1w[i+2]):
-            bearish_fractal[i] = True
-        # Bullish fractal: current low is lowest in window
-        if (low_1w[i] <= low_1w[i-2] and low_1w[i] <= low_1w[i-1] and
-            low_1w[i] <= low_1w[i+1] and low_1w[i] <= low_1w[i+2]):
-            bullish_fractal[i] = True
+    # Align 12h Williams %R to 6h timeframe
+    wr_12h_aligned = align_htf_to_ltf(prices, df_12h, wr_12h)
     
-    # Convert to trend indicator: 1 for bullish fractal (uptrend bias), -1 for bearish fractal (downtrend bias), 0 otherwise
-    # We need additional delay of 2 bars for confirmation as per Williams Fractal rules
-    fw_fractal = np.where(bullish_fractal, 1, np.where(bearish_fractal, -1, 0)).astype(float)
-    
-    # Align weekly fractal to daily timeframe with additional 2-bar delay for confirmation
-    fw_fractal_aligned = align_htf_to_ltf(prices, df_1w, fw_fractal, additional_delay_bars=2)
-    
-    # Load daily data ONCE for Donchian channels
+    # Load 1d data ONCE for Williams %R momentum
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate Donchian channels (20-period)
+    # Calculate Williams %R on 1d data (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    highest_high_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    wr_1d = -100 * (highest_high_1d - close_1d) / (highest_high_1d - lowest_low_1d)
     
-    # Volume confirmation: 1.5x average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align 1d Williams %R to 6h timeframe
+    wr_1d_aligned = align_htf_to_ltf(prices, df_1d, wr_1d)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(20, 20)  # Need Donchian and volume MA
+    start = 14
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(fw_fractal_aligned[i]) or
-            np.isnan(donchian_high_aligned[i]) or
-            np.isnan(donchian_low_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(wr_12h_aligned[i]) or 
+            np.isnan(wr_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
-        
         if position == 0:
-            # Look for breakouts above 1d Donchian high or below 1d Donchian low
-            # Only trade in direction of weekly Williams Fractal (trend filter)
-            
-            # Long: price breaks above 1d Donchian high AND weekly bullish fractal
-            if (close[i] > donchian_high[i] and 
-                fw_fractal_aligned[i] == 1 and 
-                volume_confirmed):
+            # Long: 12h oversold (< -80) AND 1d showing bullish momentum (> -50 and rising)
+            if (wr_12h_aligned[i] < -80 and 
+                wr_1d_aligned[i] > -50 and 
+                i > start and wr_1d_aligned[i] > wr_1d_aligned[i-1]):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below 1d Donchian low AND weekly bearish fractal
-            elif (close[i] < donchian_low[i] and 
-                  fw_fractal_aligned[i] == -1 and 
-                  volume_confirmed):
+            # Short: 12h overbought (> -20) AND 1d showing bearish momentum (< -50 and falling)
+            elif (wr_12h_aligned[i] > -20 and 
+                  wr_1d_aligned[i] < -50 and 
+                  i > start and wr_1d_aligned[i] < wr_1d_aligned[i-1]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to 1d Donchian low or weekly fractal turns bearish
-            if (close[i] <= donchian_low[i] or 
-                fw_fractal_aligned[i] == -1):
+            # Exit long: 12h becomes overbought OR 1d loses bullish momentum
+            if (wr_12h_aligned[i] > -20 or 
+                wr_1d_aligned[i] < -50):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to 1d Donchian high or weekly fractal turns bullish
-            if (close[i] >= donchian_high[i] or 
-                fw_fractal_aligned[i] == 1):
+            # Exit short: 12h becomes oversold OR 1d loses bearish momentum
+            if (wr_12h_aligned[i] < -80 or 
+                wr_1d_aligned[i] > -50):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -125,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1wWilliamsFractal_1dDonchian_VolumeFilter_v1"
-timeframe = "1d"
+name = "6h_12h1d_WilliamsR_Momentum_v1"
+timeframe = "6h"
 leverage = 1.0
