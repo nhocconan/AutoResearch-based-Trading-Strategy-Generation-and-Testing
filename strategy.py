@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy combining daily Camarilla pivot levels with volume spike confirmation and
-# 1-week ADX trend filter. Long when price breaks above daily Camarilla H3 level with ADX>25 and
-# volume > 1.5x 20-period average. Short when price breaks below daily Camarilla L3 level with
-# ADX>25 and volume confirmation. Exit when price returns to daily close or ADX drops below 20.
-# Uses Camarilla levels for intraday support/resistance, ADX for trend strength, and volume for
-# confirmation. Designed for 12h timeframe to capture multi-day moves while minimizing trades.
-# Target: 15-25 trades/year per symbol (60-100 total over 4 years) to stay well under fee drag limits.
+# Hypothesis: 4h strategy combining 1d volatility-adjusted breakout levels with 1w RSI trend filter.
+# Uses dynamic support/resistance based on prior day's range adjusted by ATR, providing adaptive breakout levels.
+# Long when price breaks above volatility-adjusted resistance with 1w RSI > 50 (uptrend) and volume confirmation.
+# Short when price breaks below volatility-adjusted support with 1w RSI < 50 (downtrend) and volume confirmation.
+# Exit when price returns to prior day's close or RSI crosses 50 in opposite direction.
+# Designed to work in both bull and bear markets by adapting to volatility and using RSI for trend confirmation.
+# Target: 20-25 trades/year per symbol (80-100 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,64 +21,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE for Camarilla levels and ADX
+    # Load 1d data ONCE for volatility-adjusted levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Daily Camarilla Pivot Levels
-    # Pivot = (H + L + C) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    
-    # Camarilla levels: H3/L3 are key breakout levels
-    # H3 = Close + 1.1 * (High - Low) / 2
-    # L3 = Close - 1.1 * (High - Low) / 2
-    camarilla_h3 = close_1d + 1.1 * range_1d / 2.0
-    camarilla_l3 = close_1d - 1.1 * range_1d / 2.0
-    
-    # Daily ADX for trend strength filter
-    # Calculate True Range
+    # Calculate True Range and ATR on 1d
     tr1 = np.abs(high_1d[1:] - low_1d[1:])
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     
-    # Calculate Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_minus = np.concatenate([[np.nan], dm_minus])
-    
-    # Smooth TR, DM+, DM- with Wilder's smoothing (equivalent to EMA with alpha=1/period)
     atr_period = 14
-    tr_smooth = pd.Series(tr).ewm(alpha=1/atr_period, adjust=False).values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/atr_period, adjust=False).values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/atr_period, adjust=False).values
+    atr_1d = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
     
-    # Calculate DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / tr_smooth
-    di_minus = 100 * dm_minus_smooth / tr_smooth
+    # Volatility-adjusted support/resistance: prior day's high/low ± 0.5 * ATR
+    var_resistance = np.roll(high_1d, 1) + 0.5 * np.roll(atr_1d, 1)
+    var_support = np.roll(low_1d, 1) - 0.5 * np.roll(atr_1d, 1)
+    var_resistance[0] = np.nan
+    var_support[0] = np.nan
     
-    # Calculate DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(alpha=1/atr_period, adjust=False).values
+    # Prior 1d close for exit condition
+    prior_close_1d = np.roll(close_1d, 1)
+    prior_close_1d[0] = np.nan
     
-    # Load weekly data ONCE for additional trend filter (optional)
-    # Using daily ADX as primary trend filter
+    # Load 1w data ONCE for RSI trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
+        return np.zeros(n)
     
-    # Align indicators to 12h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+    close_1w = df_1w['close'].values
+    
+    # Calculate RSI(14) on 1w
+    delta = np.diff(close_1w, prepend=np.nan)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / avg_loss
+    rs = np.where(avg_loss == 0, 100, rs)
+    rsi_1w = 100 - (100 / (1 + rs))
+    
+    # Align indicators to lower timeframe
+    var_resistance_aligned = align_htf_to_ltf(prices, df_1d, var_resistance)
+    var_support_aligned = align_htf_to_ltf(prices, df_1d, var_support)
+    prior_close_1d_aligned = align_htf_to_ltf(prices, df_1d, prior_close_1d)
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
     # Volume confirmation: 1.5x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -88,14 +82,14 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(30, 20)  # Need ADX and volume MA
+    start = max(20, 14)  # Need VAR and RSI
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(adx_aligned[i]) or
-            np.isnan(close_1d_aligned[i]) or
+        if (np.isnan(var_resistance_aligned[i]) or 
+            np.isnan(var_support_aligned[i]) or
+            np.isnan(prior_close_1d_aligned[i]) or
+            np.isnan(rsi_1w_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -103,38 +97,38 @@ def generate_signals(prices):
         # Volume confirmation
         volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
-        # Trend filter: ADX > 25 indicates strong trend
-        strong_trend = adx_aligned[i] > 25
-        weak_trend = adx_aligned[i] < 20  # Exit when trend weakens
+        # Trend filter: RSI > 50 for uptrend, < 50 for downtrend
+        uptrend = rsi_1w_aligned[i] > 50
+        downtrend = rsi_1w_aligned[i] < 50
         
         if position == 0:
-            # Look for Camarilla breakouts
-            # Long: price breaks above H3 with strong trend and volume
-            if (close[i] > camarilla_h3_aligned[i] and 
-                strong_trend and 
+            # Look for volatility-adjusted breakouts
+            # Long: price breaks above VAR resistance AND uptrend
+            if (close[i] > var_resistance_aligned[i] and 
+                uptrend and 
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below L3 with strong trend and volume
-            elif (close[i] < camarilla_l3_aligned[i] and 
-                  strong_trend and 
+            # Short: price breaks below VAR support AND downtrend
+            elif (close[i] < var_support_aligned[i] and 
+                  downtrend and 
                   volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to daily close or trend weakens
-            if (close[i] <= close_1d_aligned[i] or 
-                weak_trend):
+            # Exit long: price returns to prior 1d close or RSI crosses below 50
+            if (close[i] <= prior_close_1d_aligned[i] or 
+                rsi_1w_aligned[i] <= 50):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to daily close or trend weakens
-            if (close[i] >= close_1d_aligned[i] or 
-                weak_trend):
+            # Exit short: price returns to prior 1d close or RSI crosses above 50
+            if (close[i] >= prior_close_1d_aligned[i] or 
+                rsi_1w_aligned[i] >= 50):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -142,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_H3L3_ADX_VolumeFilter_v1"
-timeframe = "12h"
+name = "4h_VolatilityAdjustedBreakout_1wRSI_v1"
+timeframe = "4h"
 leverage = 1.0
