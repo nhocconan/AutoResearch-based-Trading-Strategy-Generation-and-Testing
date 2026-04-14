@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Load 1d data for reference levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -94,6 +94,11 @@ def generate_signals(prices):
     # Align ADX to 4h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
+    # Calculate 20-period volume moving average for 4h data
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(19, n):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # Conservative size to limit trades
@@ -101,19 +106,12 @@ def generate_signals(prices):
     for i in range(20, n):
         # Skip if any critical data is NaN
         if (np.isnan(high_1d_aligned[i]) or np.isnan(low_1d_aligned[i]) or
-            np.isnan(vwap_1d_aligned[i]) or np.isnan(adx_aligned[i])):
+            np.isnan(vwap_1d_aligned[i]) or np.isnan(adx_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 4h volume vs 20-period average
-        vol_ma_20 = np.full_like(volume, np.nan)
-        for j in range(19, len(volume)):
-            vol_ma_20[j] = np.mean(volume[j-19:j+1])
-        
-        if np.isnan(vol_ma_20[i]) or vol_ma_20[i] <= 0:
-            volume_ratio = 0
-        else:
-            volume_ratio = volume[i] / vol_ma_20[i]
+        volume_ratio = volume[i] / vol_ma_20[i] if vol_ma_20[i] > 0 else 0
         
         if position == 0:
             # Look for long entries: breakout above 1d high with volume surge in strong trend
