@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
+# 4h_1d_Momentum_Regime_Switch
+# Hypothesis: Combines 4h momentum (RSI) with 1d regime detection (ADX) and volume confirmation.
+# In trending regimes (ADX > 25), follows momentum (RSI > 55 for long, < 45 for short).
+# In ranging regimes (ADX <= 25), mean-reverts at Bollinger Bands (2 std).
+# Volume filter ensures trades occur only with institutional participation.
+# Designed to work in both bull (trend following) and bear (mean reversion in ranges) markets.
+# Target: 20-40 trades/year to minimize fee drag.
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,112 +21,168 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data (HTF) once before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Load daily data (HTF) once before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h EMA (20-period)
-    ema_12h = np.full(len(df_12h), np.nan)
-    if len(df_12h) >= 20:
-        ema_12h[19] = np.mean(close_12h[:20])
-        for i in range(20, len(df_12h)):
-            ema_12h[i] = (close_12h[i] * 2 + ema_12h[i-1] * 18) / 20
-    
-    # Calculate 12h ATR (14-period) - Wilder's smoothing
-    high_low = high_12h - low_12h
-    high_close = np.abs(high_12h - np.concatenate([[close_12h[0]], close_12h[:-1]]))
-    low_close = np.abs(low_12h - np.concatenate([[close_12h[0]], close_12h[:-1]]))
+    # Calculate daily ADX (14-period) for regime detection
+    # True Range
+    high_low = high_1d - low_1d
+    high_close = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    low_close = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
     tr = np.maximum(high_low, np.maximum(high_close, low_close))
     
-    atr_12h = np.full(len(df_12h), np.nan)
-    if len(df_12h) >= 14:
-        atr_12h[13] = np.mean(tr[:14])
-        for i in range(14, len(df_12h)):
-            atr_12h[i] = (atr_12h[i-1] * 13 + tr[i]) / 14
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
     
-    # Align indicators to 6h timeframe
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
-    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
+    # Smoothed values (Wilder's smoothing)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            result[period-1] = np.mean(data[:period])
+            for i in range(period, len(data)):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    # Calculate 6h RSI (14-period)
-    delta = np.diff(close, prepend=close[0])
+    tr14 = wilders_smoothing(tr, 14)
+    plus_dm14 = wilders_smoothing(plus_dm, 14)
+    minus_dm14 = wilders_smoothing(minus_dm, 14)
+    
+    # DI and DX
+    plus_di14 = 100 * plus_dm14 / tr14
+    minus_di14 = 100 * minus_dm14 / tr14
+    dx = 100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14)
+    adx = wilders_smoothing(dx, 14)
+    
+    # Align ADX to 4h
+    adx_4h = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate 4h RSI (14-period)
+    delta = np.diff(close)
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     
-    rsi = np.full(n, np.nan)
-    if n >= 14:
-        avg_gain = np.mean(gain[:14])
-        avg_loss = np.mean(loss[:14])
-        if avg_loss == 0:
-            rsi[13] = 100
-        else:
-            rsi[13] = 100 - (100 / (1 + avg_gain / avg_loss))
+    def rsi_wilder(gain, loss, period):
+        rsi = np.full_like(close, np.nan)
+        if len(gain) >= period:
+            avg_gain = np.mean(gain[:period])
+            avg_loss = np.mean(loss[:period])
+            rs = avg_gain / avg_loss if avg_loss != 0 else 0
+            rsi[period] = 100 - (100 / (1 + rs))
+            for i in range(period+1, len(close)):
+                avg_gain = (avg_gain * (period-1) + gain[i-1]) / period
+                avg_loss = (avg_loss * (period-1) + loss[i-1]) / period
+                rs = avg_gain / avg_loss if avg_loss != 0 else 0
+                rsi[i] = 100 - (100 / (1 + rs))
+        return rsi
+    
+    rsi = rsi_wilder(gain, loss, 14)
+    
+    # Calculate 4h Bollinger Bands (20-period, 2 std)
+    def bollinger_bands(series, period, std_dev):
+        sma = np.full_like(series, np.nan)
+        std = np.full_like(series, np.nan)
+        upper = np.full_like(series, np.nan)
+        lower = np.full_like(series, np.nan)
         
-        for i in range(14, n):
-            avg_gain = (gain[i] + avg_gain * 13) / 14
-            avg_loss = (loss[i] + avg_loss * 13) / 14
-            if avg_loss == 0:
-                rsi[i] = 100
-            else:
-                rsi[i] = 100 - (100 / (1 + avg_gain / avg_loss))
+        for i in range(period-1, len(series)):
+            sma[i] = np.mean(series[i-period+1:i+1])
+            std[i] = np.std(series[i-period+1:i+1])
+            upper[i] = sma[i] + std_dev * std[i]
+            lower[i] = sma[i] - std_dev * std[i]
+        return upper, lower
     
-    # Calculate 6h ATR (14-period) - Wilder's smoothing
-    high_low_6h = high - low
-    high_close_6h = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    low_close_6h = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr_6h = np.maximum(high_low_6h, np.maximum(high_close_6h, low_close_6h))
+    bb_upper, bb_lower = bollinger_bands(close, 20, 2.0)
     
-    atr_6h = np.full(n, np.nan)
-    if n >= 14:
-        atr_6h[13] = np.mean(tr_6h[:14])
-        for i in range(14, n):
-            atr_6h[i] = (atr_6h[i-1] * 13 + tr_6h[i]) / 14
+    # Calculate 4h volume moving average (20-period)
+    volume_ma = np.full(n, np.nan)
+    for i in range(19, n):
+        volume_ma[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25
+    position_size = 0.25  # 25% position size
     
-    for i in range(20, n):
+    for i in range(30, n):  # Start after warmup period
         # Skip if any critical data is NaN
-        if (np.isnan(rsi[i]) or
-            np.isnan(ema_12h_aligned[i]) or
-            np.isnan(atr_12h_aligned[i]) or
-            np.isnan(atr_6h[i])):
+        if (np.isnan(adx_4h[i]) or
+            np.isnan(rsi[i]) or
+            np.isnan(bb_upper[i]) or
+            np.isnan(bb_lower[i]) or
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Skip low volatility periods (ATR < 0.3% of price)
-        if atr_6h[i] / close[i] < 0.003:
+        # Volume filter: require volume > 1.3x 20-period MA
+        if volume[i] < 1.3 * volume_ma[i]:
             signals[i] = 0.0
             continue
         
-        # RSI conditions: oversold (<30) for long, overbought (>70) for short
-        # 12h trend filter: price above EMA for long, below EMA for short
-        # Volatility filter: ATR expansion (current ATR > 1.2 * 12h ATR)
-        if rsi[i] < 30 and close[i] > ema_12h_aligned[i] and atr_6h[i] > 1.2 * atr_12h_aligned[i]:
-            if position <= 0:
-                position = 1
-                signals[i] = position_size
+        # Regime detection: ADX > 25 = trending, ADX <= 25 = ranging
+        is_trending = adx_4h[i] > 25
+        
+        if position == 0:
+            if is_trending:
+                # Trend following: RSI > 55 for long, < 45 for short
+                if rsi[i] > 55:
+                    position = 1
+                    signals[i] = position_size
+                elif rsi[i] < 45:
+                    position = -1
+                    signals[i] = -position_size
             else:
-                signals[i] = position_size
-        elif rsi[i] > 70 and close[i] < ema_12h_aligned[i] and atr_6h[i] > 1.2 * atr_12h_aligned[i]:
-            if position >= 0:
-                position = -1
-                signals[i] = -position_size
+                # Mean reversion: Buy at lower BB, sell at upper BB
+                if close[i] <= bb_lower[i]:
+                    position = 1
+                    signals[i] = position_size
+                elif close[i] >= bb_upper[i]:
+                    position = -1
+                    signals[i] = -position_size
+        elif position == 1:
+            # Exit long: RSI < 45 in trend, or price > middle BB in range
+            if is_trending:
+                if rsi[i] < 45:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = position_size
             else:
-                signals[i] = -position_size
-        else:
-            # Hold current position
-            signals[i] = position_size if position == 1 else (-position_size if position == -1 else 0.0)
+                # Exit at middle Bollinger Band (20-period SMA)
+                middle_band = np.mean(close[i-19:i+1]) if i >= 19 else close[i]
+                if close[i] >= middle_band:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = position_size
+        elif position == -1:
+            # Exit short: RSI > 55 in trend, or price < middle BB in range
+            if is_trending:
+                if rsi[i] > 55:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -position_size
+            else:
+                # Exit at middle Bollinger Band (20-period SMA)
+                middle_band = np.mean(close[i-19:i+1]) if i >= 19 else close[i]
+                if close[i] <= middle_band:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -position_size
     
     return signals
 
-name = "6h_12h_EMA_RSI_Volatility_Filter"
-timeframe = "6h"
+name = "4h_1d_Momentum_Regime_Switch"
+timeframe = "4h"
 leverage = 1.0
