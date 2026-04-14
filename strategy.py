@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+"""
+Hypothesis: 1h timeframe with 4h trend filter and volume confirmation.
+Use 4h EMA20 as trend filter, 1h RSI(14) for mean reversion entries, and volume spike for confirmation.
+Target 15-30 trades/year by requiring: trend alignment, RSI extreme, and volume > 1.5x average.
+Works in bull/bear: trend filter prevents counter-trend trades, mean reversion captures reversals.
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -13,146 +20,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data for trend (HTF)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Load 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # 4h EMA20 for trend
+    close_4h = df_4h['close'].values
+    ema_20_4h = np.full_like(close_4h, np.nan)
+    if len(close_4h) >= 20:
+        ema_20_4h[19] = np.mean(close_4h[:20])
+        for i in range(20, len(close_4h)):
+            ema_20_4h[i] = (close_4h[i] * 2 + ema_20_4h[i-1] * 19) / 21
     
-    # Calculate 12h EMA(50) for trend
-    close_12h_series = pd.Series(close_12h)
-    ema_50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
     
-    # Calculate 12h ADX(14) for trend strength
-    if len(df_12h) >= 14:
-        tr_12h = np.zeros(len(df_12h))
-        tr_12h[0] = high_12h[0] - low_12h[0]
-        for i in range(1, len(df_12h)):
-            tr_12h[i] = max(
-                high_12h[i] - low_12h[i],
-                abs(high_12h[i] - close_12h[i-1]),
-                abs(low_12h[i] - close_12h[i-1])
-            )
-        
-        plus_dm_12h = np.zeros(len(df_12h))
-        minus_dm_12h = np.zeros(len(df_12h))
-        for i in range(1, len(df_12h)):
-            up_move = high_12h[i] - high_12h[i-1]
-            down_move = low_12h[i-1] - low_12h[i]
-            plus_dm_12h[i] = up_move if up_move > down_move and up_move > 0 else 0
-            minus_dm_12h[i] = down_move if down_move > up_move and down_move > 0 else 0
-        
-        atr_12h = np.full(len(df_12h), np.nan)
-        if len(df_12h) >= 14:
-            atr_12h[13] = np.mean(tr_12h[:14])
-            for i in range(14, len(df_12h)):
-                atr_12h[i] = (atr_12h[i-1] * 13 + tr_12h[i]) / 14
-        
-        plus_di_12h = np.full(len(df_12h), np.nan)
-        minus_di_12h = np.full(len(df_12h), np.nan)
-        if len(df_12h) >= 14 and not np.all(np.isnan(atr_12h)):
-            for i in range(13, len(df_12h)):
-                if atr_12h[i] > 0:
-                    plus_di_12h[i] = 100 * np.mean(plus_dm_12h[i-13:i+1]) / atr_12h[i]
-                    minus_di_12h[i] = 100 * np.mean(minus_dm_12h[i-13:i+1]) / atr_12h[i]
-        
-        dx_12h = np.full(len(df_12h), np.nan)
-        for i in range(13, len(df_12h)):
-            if plus_di_12h[i] + minus_di_12h[i] > 0:
-                dx_12h[i] = 100 * abs(plus_di_12h[i] - minus_di_12h[i]) / (plus_di_12h[i] + minus_di_12h[i])
-        
-        adx_12h = np.full(len(df_12h), np.nan)
-        if len(df_12h) >= 27:
-            adx_12h[26] = np.mean(dx_12h[13:27])
-            for i in range(27, len(df_12h)):
-                adx_12h[i] = (adx_12h[i-1] * 13 + dx_12h[i]) / 14
-    else:
-        adx_12h = np.full(len(df_12h), np.nan)
+    # 1h RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    avg_gain = np.full_like(close, np.nan)
+    avg_loss = np.full_like(close, np.nan)
+    if len(close) >= 14:
+        avg_gain[13] = np.mean(gain[1:14])
+        avg_loss[13] = np.mean(loss[1:14])
+        for i in range(14, len(close)):
+            avg_gain[i] = (gain[i] + avg_gain[i-1] * 13) / 14
+            avg_loss[i] = (loss[i] + avg_loss[i-1] * 13) / 14
     
-    # Load 1d data for volatility filter (ATR)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
-        return np.zeros(n)
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(close, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate 1d ATR(14)
-    tr_1d = np.zeros(len(df_1d))
-    tr_1d[0] = high_1d[0] - low_1d[0]
-    for i in range(1, len(df_1d)):
-        tr_1d[i] = max(
-            high_1d[i] - low_1d[i],
-            abs(high_1d[i] - close_1d[i-1]),
-            abs(low_1d[i] - close_1d[i-1])
-        )
-    
-    atr_1d = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 14:
-        atr_1d[13] = np.mean(tr_1d[:14])
-        for i in range(14, len(df_1d)):
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr_1d[i]) / 14
-    
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # Calculate 4h EMA(20) for entry filter
-    close_series = pd.Series(close)
-    ema_20 = close_series.ewm(span=20, adjust=False, min_periods=20).values
+    # 1h volume average (20-period)
+    vol_ma_20 = np.full_like(volume, np.nan)
+    if len(volume) >= 20:
+        for i in range(19, len(volume)):
+            vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position size
+    position_size = 0.20  # 20% position
     
-    for i in range(50, n):
-        # Skip if any critical data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(adx_12h_aligned[i]) or
-            np.isnan(atr_1d_aligned[i]) or
-            np.isnan(ema_20[i])):
+    for i in range(20, n):
+        # Skip if data not ready
+        if (np.isnan(ema_20_4h_aligned[i]) or 
+            np.isnan(rsi[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: only trade in direction of 12h EMA50 when ADX > 20
-        if adx_12h_aligned[i] > 20:
-            trend_up = close[i] > ema_50_12h_aligned[i]
-            trend_down = close[i] < ema_50_12h_aligned[i]
-        else:
-            trend_up = False
-            trend_down = False
-        
-        # Volatility filter: require sufficient volatility
-        if atr_1d_aligned[i] < 0.005 * close[i]:  # Less than 0.5% ATR
+        # Volume filter: require at least 1.5x average volume
+        if vol_ma_20[i] <= 0 or volume[i] < vol_ma_20[i] * 1.5:
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: Price above EMA20 and in uptrend
-            if close[i] > ema_20[i] and trend_up:
+            # Long: Uptrend (price > EMA20) + RSI oversold (<30)
+            if close[i] > ema_20_4h_aligned[i] and rsi[i] < 30:
                 position = 1
                 signals[i] = position_size
-            # Short: Price below EMA20 and in downtrend
-            elif close[i] < ema_20[i] and trend_down:
+            # Short: Downtrend (price < EMA20) + RSI overbought (>70)
+            elif close[i] < ema_20_4h_aligned[i] and rsi[i] > 70:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls below EMA20
-            if close[i] < ema_20[i]:
+            # Exit long: RSI overbought (>70) or trend breaks
+            if rsi[i] > 70 or close[i] < ema_20_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises above EMA20
-            if close[i] > ema_20[i]:
+            # Exit short: RSI oversold (<30) or trend breaks
+            if rsi[i] < 30 or close[i] > ema_20_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -160,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_EMA50_ADX20_EMA20_Trend"
-timeframe = "4h"
+name = "1h_4h_EMA20_RSI_Volume_Filter"
+timeframe = "1h"
 leverage = 1.0
