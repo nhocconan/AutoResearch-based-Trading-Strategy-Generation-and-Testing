@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) + 1d Trend Filter + Volume Confirmation
-# Works in bull/bear: Elder Ray measures bull/bear strength relative to EMA, avoiding traps; 1d EMA filters counter-trend trades
+# Hypothesis: 6h Donchian(20) breakout + 12h pivot direction + volume confirmation
+# Works in bull/bear: Donchian breakouts capture trending moves; 12h pivot acts as trend filter to avoid counter-trend entries
 # Targets: 12-37 trades/year (50-150 over 4 years) by requiring 3-way confluence
 # Position size: 0.25 to manage drawdown
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,56 +18,65 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data once
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 12h data once
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 10:
         return np.zeros(n)
     
-    # 1d EMA200 for trend filter
-    close_1d = df_1d['close'].values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # 12h pivot points from previous day
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Elder Ray components (13-period EMA)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    # Calculate daily pivot from 12h data (using previous 12h bar's data)
+    # Pivot = (H + L + C)/3, R1 = 2*P - L, S1 = 2*P - H
+    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
+    r1_12h = 2 * pivot_12h - low_12h
+    s1_12h = 2 * pivot_12h - high_12h
+    
+    # Align pivot levels to 6h timeframe
+    pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
+    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
+    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
+    
+    # Donchian channels (20-period) on 6h
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume moving average for confirmation
-    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25
     
-    for i in range(13, n):
-        # Get aligned 1d EMA200
-        ema_200_i = align_htf_to_ltf(prices, df_1d, ema_200_1d)[i]
-        
-        if np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(ema_200_i) or np.isnan(vol_ma[i]):
+    for i in range(20, n):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]) or \
+           np.isnan(pivot_12h_aligned[i]) or np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]):
             continue
         
-        # Volume confirmation (1.5x average)
-        volume_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation (1.3x average)
+        volume_confirm = volume[i] > 1.3 * vol_ma[i]
         
-        # Long: Bull Power > 0 (bulls in control) + price above 1d EMA200 + volume
-        if position == 0 and bull_power[i] > 0 and close[i] > ema_200_i and volume_confirm:
+        # Long: Break above Donchian high + price above 12h R1 (bullish bias) + volume
+        if position == 0 and high[i] > donchian_high[i] and close[i] > r1_12h_aligned[i] and volume_confirm:
             position = 1
             signals[i] = position_size
-        # Short: Bear Power < 0 (bears in control) + price below 1d EMA200 + volume
-        elif position == 0 and bear_power[i] < 0 and close[i] < ema_200_i and volume_confirm:
+        # Short: Break below Donchian low + price below 12h S1 (bearish bias) + volume
+        elif position == 0 and low[i] < donchian_low[i] and close[i] < s1_12h_aligned[i] and volume_confirm:
             position = -1
             signals[i] = -position_size
-        # Exit: Opposite Elder Ray signal or trend reversal
+        # Exit: Opposite Donchian breakout or pivot reversal
         elif position != 0:
-            if position == 1 and bear_power[i] < 0:
+            if position == 1 and low[i] < donchian_low[i]:
                 position = 0
                 signals[i] = 0.0
-            elif position == -1 and bull_power[i] > 0:
+            elif position == -1 and high[i] > donchian_high[i]:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "6h_ElderRay_1dEMA200_Volume"
+name = "6h_Donchian_12hPivot_Volume"
 timeframe = "6h"
 leverage = 1.0
