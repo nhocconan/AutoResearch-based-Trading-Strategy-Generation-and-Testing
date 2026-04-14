@@ -13,39 +13,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load 12h and daily data once before loop
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_12h) < 30 or len(df_1d) < 30:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate weekly ATR for volatility filter (14-period)
-    high_low = high_1w - low_1w
-    high_close = np.abs(high_1w - np.roll(close_1w, 1))
-    low_close = np.abs(low_1w - np.roll(close_1w, 1))
+    # Calculate 12h ATR for volatility filter
+    high_low = high - low
+    high_close = np.abs(high - np.roll(close, 1))
+    low_close = np.abs(low - np.roll(close, 1))
     high_close[0] = high_low[0]
     low_close[0] = high_low[0]
     tr = np.maximum(high_low, np.maximum(high_close, low_close))
     tr_series = pd.Series(tr)
     atr = tr_series.rolling(window=14, min_periods=14).mean().values
     
-    # Calculate weekly Donchian channels (20-period) - breakout levels
-    high_series = pd.Series(high_1w)
-    low_series = pd.Series(low_1w)
+    # Calculate 6h Donchian channels (20-period) - breakout levels
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
     donchian_high = high_series.rolling(window=20, min_periods=20).max().shift(1).values
     donchian_low = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Calculate weekly 14-period RSI for trend filter
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    gain_ma = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    loss_ma = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = gain_ma / (loss_ma + 1e-10)
-    rsi_14 = 100 - (100 / (1 + rs))
+    # Calculate daily volatility (ATR) for regime detection
+    high_low_1d = high_1d - low_1d
+    high_close_1d = np.abs(high_1d - np.roll(close_1d, 1))
+    low_close_1d = np.abs(low_1d - np.roll(close_1d, 1))
+    high_close_1d[0] = high_low_1d[0]
+    low_close_1d[0] = high_low_1d[0]
+    tr_1d = np.maximum(high_low_1d, np.maximum(high_close_1d, low_close_1d))
+    tr_series_1d = pd.Series(tr_1d)
+    atr_1d = tr_series_1d.rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate daily ATR percentile for regime filter (trending vs ranging)
+    atr_percentile = pd.Series(atr_1d).rolling(window=50, min_periods=50).quantile(0.5).values
     
     signals = np.zeros(n)
     position = 0
@@ -53,63 +61,79 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any critical data is NaN
-        if np.isnan(atr[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(rsi_14[i]):
+        if np.isnan(atr[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(atr_percentile[i]):
             continue
         
-        # Get previous week's data (1w index)
+        # Get previous day's data for pivot calculation
         if i >= 1:
-            prev_close = close_1w[i-1]
-            prev_high = high_1w[i-1]
-            prev_low = low_1w[i-1]
+            prev_close = close_1d[i-1]
+            prev_high = high_1d[i-1]
+            prev_low = low_1d[i-1]
             
-            # Calculate Donchian breakout levels (previous week)
-            dh = donchian_high[i-1]
-            dl = donchian_low[i-1]
+            # Calculate pivot point and support/resistance levels
+            pivot = (prev_high + prev_low + prev_close) / 3.0
+            range_ = prev_high - prev_low
             
-            # Align Donchian levels to weekly timeframe (constant values for the week)
-            dh_array = np.full(len(df_1w), dh)
-            dl_array = np.full(len(df_1w), dl)
-            dh_1w = align_htf_to_ltf(prices, df_1w, dh_array)[i]
-            dl_1w = align_htf_to_ltf(prices, df_1w, dl_array)[i]
+            # Support and resistance levels
+            s1 = (2 * pivot) - prev_high
+            r1 = (2 * pivot) - prev_low
+            s2 = pivot - (prev_high - prev_low)
+            r2 = pivot + (prev_high - prev_low)
+            s3 = prev_low - 2 * (prev_high - pivot)
+            r3 = prev_high + 2 * (pivot - prev_low)
             
-            # Volume filter: current volume > 1.3x 5-period average
-            vol_ma = np.mean(volume[max(0, i-5):i]) if i >= 5 else volume[i]
+            # Align pivot levels to 6h timeframe
+            pivot_array = np.full(len(df_1d), pivot)
+            s1_array = np.full(len(df_1d), s1)
+            r1_array = np.full(len(df_1d), r1)
+            s2_array = np.full(len(df_1d), s2)
+            r2_array = np.full(len(df_1d), r2)
+            s3_array = np.full(len(df_1d), s3)
+            r3_array = np.full(len(df_1d), r3)
             
-            # Volatility filter: current ATR > 25th percentile of last 50 periods
-            vol_filter = True
-            if i >= 50:
-                vol_percentile = np.percentile(tr[max(0, i-50):i+1], 25)
-                vol_filter = atr[i] > vol_percentile
+            pivot_6h = align_htf_to_ltf(prices, df_1d, pivot_array)[i]
+            s1_6h = align_htf_to_ltf(prices, df_1d, s1_array)[i]
+            r1_6h = align_htf_to_ltf(prices, df_1d, r1_array)[i]
+            s2_6h = align_htf_to_ltf(prices, df_1d, s2_array)[i]
+            r2_6h = align_htf_to_ltf(prices, df_1d, r2_array)[i]
+            s3_6h = align_htf_to_ltf(prices, df_1d, s3_array)[i]
+            r3_6h = align_htf_to_ltf(prices, df_1d, r3_array)[i]
             
-            # Trend filter: weekly RSI between 40 and 60 (avoid extremes)
-            rsi_filter = (rsi_14[i] >= 40) & (rsi_14[i] <= 60)
+            # Volume filter: current volume > 1.5x 10-period average
+            vol_ma = np.mean(volume[max(0, i-10):i]) if i >= 10 else volume[i]
+            
+            # Regime filter: use daily ATR percentile to detect trending markets
+            # Only trade in trending regimes (above median ATR)
+            regime_filter = atr_1d[i] > atr_percentile[i]
             
             if position == 0:
-                # Long: Price breaks above Donchian high with volume, volatility, and RSI filter
-                if (close[i] > dh_1w and close[i-1] <= dh_1w and 
-                    volume[i] > vol_ma * 1.3 and 
-                    vol_filter and rsi_filter):
+                # Long: Price breaks above R2 with volume and in trending regime
+                if (close[i] > r2_6h and close[i-1] <= r2_6h and 
+                    volume[i] > vol_ma * 1.5 and 
+                    close[i] > donchian_high[i] and  # Breakout confirmation
+                    regime_filter):
                     position = 1
                     signals[i] = position_size
-                # Short: Price breaks below Donchian low with volume, volatility, and RSI filter
-                elif (close[i] < dl_1w and close[i-1] >= dl_1w and 
-                      volume[i] > vol_ma * 1.3 and 
-                      vol_filter and rsi_filter):
+                # Short: Price breaks below S2 with volume and in trending regime
+                elif (close[i] < s2_6h and close[i-1] >= s2_6h and 
+                      volume[i] > vol_ma * 1.5 and 
+                      close[i] < donchian_low[i] and  # Breakdown confirmation
+                      regime_filter):
                     position = -1
                     signals[i] = -position_size
             elif position == 1:
-                # Exit: Price breaks below Donchian low (reverse signal)
-                if close[i] < dl_1w:
+                # Exit: Price breaks below S1 (reversal) or drops below Donchian low
+                if close[i] < s1_6h or close[i] < donchian_low[i]:
                     position = 0
                     signals[i] = 0.0
             elif position == -1:
-                # Exit: Price breaks above Donchian high (reverse signal)
-                if close[i] > dh_1w:
+                # Exit: Price breaks above R1 (reversal) or rises above Donchian high
+                if close[i] > r1_6h or close[i] > donchian_high[i]:
                     position = 0
                     signals[i] = 0.0
     
     return signals
 
-name = "1w_Donchian_Breakout_Volume_RSI_Filter"
-timeframe = "1d"
+name = "6h_Pivot_R2_R1_Volume_Breakout_Regime"
+timeframe = "6h"
 leverage = 1.0
