@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h/1d confluence with volume and session filter.
-# Uses 4h trend direction via SMA50, 1d momentum via RSI(14), and 1h for entry timing.
-# Long when: price > 4h SMA50, RSI(1d) > 50, and volume > 1.2x average (momentum long).
-# Short when: price < 4h SMA50, RSI(1d) < 50, and volume > 1.2x average (momentum short).
-# Entry only during active session (08-20 UTC) to avoid low-volume noise.
-# Position size fixed at 0.20 to limit drawdown. Target: 15-30 trades/year.
-# Works in bull/bear by following 4h trend and filtering with 1d momentum.
+# Hypothesis: 12h strategy using 1d Keltner Channels with volume and ADX filters.
+# Long when price breaks above upper Keltner Channel (EMA20 + 2*ATR10) on 1d timeframe,
+# ADX > 25 (trending), and volume > 1.3x average. Short when price breaks below lower
+# Keltner Channel (EMA20 - 2*ATR10) with same conditions. Exit when price returns to
+# EMA20 middle line or ADX drops below 20. Uses volatility-based channels for breakout
+# signals, ADX for trend strength, and volume for confirmation. Designed to work in
+# both bull and bear markets by only trading in strong trends and avoiding chop.
+# Target: 15-30 trades/year per symbol (60-120 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,92 +22,120 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data for trend (SMA50)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # Load 1d data for momentum (RSI)
+    # Load 1d data ONCE for Keltner Channels and ADX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 34:  # Need enough for EMA20, ATR10, ADX14
         return np.zeros(n)
     
-    # Calculate 4h SMA50
-    sma_50_4h = pd.Series(df_4h['close']).rolling(window=50, min_periods=50).mean().values
-    
-    # Calculate 1d RSI(14)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d = np.concatenate([[np.nan], rsi_1d])  # align with close_1d index
     
-    # Align indicators to 1h timeframe
-    sma_50_4h_aligned = align_htf_to_ltf(prices, df_4h, sma_50_4h)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Calculate EMA20 (middle line)
+    ema20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Volume confirmation: 1.2x average volume (24-period on 1h)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Calculate ATR (10)
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    # Calculate Keltner Channels
+    kc_upper = ema20 + 2 * atr
+    kc_lower = ema20 - 2 * atr
+    
+    # Calculate ADX (14)
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align indicators to 12h timeframe
+    kc_upper_aligned = align_htf_to_ltf(prices, df_1d, kc_upper)
+    kc_lower_aligned = align_htf_to_ltf(prices, df_1d, kc_lower)
+    ema20_aligned = align_htf_to_ltf(prices, df_1d, ema20)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Volume confirmation: 1.3x average volume (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.20  # Fixed 20% position
+    position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(50, 24)  # Need SMA50 and volume MA
+    start = max(34, 20)  # Need ADX and EMA/ATR periods
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(sma_50_4h_aligned[i]) or 
-            np.isnan(rsi_1d_aligned[i]) or
+        if (np.isnan(kc_upper_aligned[i]) or 
+            np.isnan(kc_lower_aligned[i]) or
+            np.isnan(ema20_aligned[i]) or
+            np.isnan(adx_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter
-        hour = hours[i]
-        in_session = 8 <= hour <= 20
-        
-        if not in_session:
-            signals[i] = 0.0
-            continue
-        
         # Volume confirmation
-        volume_confirmed = volume[i] > 1.2 * vol_ma[i]
+        volume_confirmed = volume[i] > 1.3 * vol_ma[i]
         
-        # Trend and momentum conditions
-        price_above_sma = close[i] > sma_50_4h_aligned[i]
-        price_below_sma = close[i] < sma_50_4h_aligned[i]
-        rsi_bullish = rsi_1d_aligned[i] > 50
-        rsi_bearish = rsi_1d_aligned[i] < 50
+        # Trend filter: ADX > 25 indicates strong trend
+        strong_trend = adx_aligned[i] > 25
+        
+        # Weak trend filter: ADX < 20 indicates trend weakening
+        weak_trend = adx_aligned[i] < 20
         
         if position == 0:
-            # Look for entries
-            if price_above_sma and rsi_bullish and volume_confirmed:
+            # Look for Keltner Channel breakouts in strong trend
+            # Long: price breaks above upper KC AND strong trend AND volume confirmation
+            if (close[i] > kc_upper_aligned[i] and 
+                strong_trend and 
+                volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            elif price_below_sma and rsi_bearish and volume_confirmed:
+            # Short: price breaks below lower KC AND strong trend AND volume confirmation
+            elif (close[i] < kc_lower_aligned[i] and 
+                  strong_trend and 
+                  volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: trend/momentum reverses or volume drops
-            if (price_below_sma or not rsi_bullish or not volume_confirmed):
+            # Exit long: price returns to EMA20 middle or trend weakens
+            if (close[i] <= ema20_aligned[i] or 
+                weak_trend):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: trend/momentum reverses or volume drops
-            if (price_above_sma or not rsi_bearish or not volume_confirmed):
+            # Exit short: price returns to EMA20 middle or trend weakens
+            if (close[i] >= ema20_aligned[i] or 
+                weak_trend):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -114,6 +143,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4h_1d_SMA_RSI_Volume_Session_v1"
-timeframe = "1h"
+name = "12h_1d_Keltner_Channels_ADX_VolumeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
