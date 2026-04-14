@@ -1,17 +1,14 @@
-#!/usr/bin/env python3
+#\033/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 12h Williams %R for trend and 1d Williams %R for momentum.
-# Williams %R on 12h determines the primary trend direction (overbought/oversold levels).
-# Williams %R on 1d provides momentum signals for entry timing.
-# Strategy goes long when 12h is oversold and 1d shows bullish momentum.
-# Strategy goes short when 12h is overbought and 1d shows bearish momentum.
-# Designed to work in both bull and bear markets by using 12h Williams %R to identify
-# overextended conditions that are likely to reverse, while using 1d Williams %R
-# to time entries with momentum confirmation.
-# Target: 60-120 total trades over 4 years (15-30/year) to minimize fee drag.
+# Hypothesis: 4h strategy combining 4h Williams %R for mean reversion signals with 1d ADX trend filter.
+# Williams %R identifies overbought/oversold conditions for counter-trend entries.
+# 1d ADX > 25 filters for trending markets to avoid false signals in ranging conditions.
+# Volume confirmation (>1.5x 20-period average) ensures breakout validity.
+# Designed to work in both bull and bear markets by using ADX to only take trades in strong trends.
+# Target: 20-35 trades/year per symbol (80-140 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,83 +18,104 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load 12h data ONCE for Williams %R trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 14:
-        return np.zeros(n)
+    # Calculate 4h Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Calculate Williams %R on 12h data (14-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
-    wr_12h = -100 * (highest_high - close_12h) / (highest_high - lowest_low)
-    
-    # Align 12h Williams %R to 6h timeframe
-    wr_12h_aligned = align_htf_to_ltf(prices, df_12h, wr_12h)
-    
-    # Load 1d data ONCE for Williams %R momentum
+    # Load 1d data ONCE for ADX calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Williams %R on 1d data (14-period)
+    # Calculate 1d ADX (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    highest_high_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    wr_1d = -100 * (highest_high_1d - close_1d) / (highest_high_1d - lowest_low_1d)
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
-    # Align 1d Williams %R to 6h timeframe
-    wr_1d_aligned = align_htf_to_ltf(prices, df_1d, wr_1d)
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smoothed values
+    tr_period = 14
+    atr = pd.Series(tr).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * dm_plus_smooth / atr
+    minus_di = 100 * dm_minus_smooth / atr
+    
+    # ADX
+    dx = np.where((plus_di + minus_di) != 0, 
+                  100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = pd.Series(dx).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
+    
+    # Align 1d ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Volume confirmation: 1.5x average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 14
+    start = max(30, 20)  # Need Williams %R and ADX
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(wr_12h_aligned[i]) or 
-            np.isnan(wr_1d_aligned[i])):
+        if (np.isnan(williams_r[i]) or 
+            np.isnan(adx_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Volume confirmation
+        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
+        
+        # ADX trend filter: only trade when ADX > 25 (strong trend)
+        strong_trend = adx_aligned[i] > 25
+        
         if position == 0:
-            # Long: 12h oversold (< -80) AND 1d showing bullish momentum (> -50 and rising)
-            if (wr_12h_aligned[i] < -80 and 
-                wr_1d_aligned[i] > -50 and 
-                i > start and wr_1d_aligned[i] > wr_1d_aligned[i-1]):
+            # Look for mean reversion entries
+            # Long: Williams %R oversold (< -80) in strong trend
+            # Short: Williams %R overbought (> -20) in strong trend
+            if williams_r[i] < -80 and strong_trend and volume_confirmed:
                 position = 1
                 signals[i] = position_size
-            # Short: 12h overbought (> -20) AND 1d showing bearish momentum (< -50 and falling)
-            elif (wr_12h_aligned[i] > -20 and 
-                  wr_1d_aligned[i] < -50 and 
-                  i > start and wr_1d_aligned[i] < wr_1d_aligned[i-1]):
+            elif williams_r[i] > -20 and strong_trend and volume_confirmed:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: 12h becomes overbought OR 1d loses bullish momentum
-            if (wr_12h_aligned[i] > -20 or 
-                wr_1d_aligned[i] < -50):
+            # Exit long: Williams %R returns to overbought or trend weakens
+            if williams_r[i] > -20 or adx_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: 12h becomes oversold OR 1d loses bearish momentum
-            if (wr_12h_aligned[i] < -80 or 
-                wr_1d_aligned[i] > -50):
+            # Exit short: Williams %R returns to oversold or trend weakens
+            if williams_r[i] < -80 or adx_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -105,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h1d_WilliamsR_Momentum_v1"
-timeframe = "6h"
+name = "4h_WilliamsR_1dADX_VolumeFilter_v1"
+timeframe = "4h"
 leverage = 1.0
