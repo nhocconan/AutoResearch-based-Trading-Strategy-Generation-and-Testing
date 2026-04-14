@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R with 1-day momentum filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions in ranging markets
-# 1-day momentum (price change) filters for directional bias
-# Volume > average confirms participation
-# Works in bull markets (buy oversold dips) and bear markets (sell overbought rallies)
-# Target: 20-40 trades/year per symbol with disciplined entries
+# Hypothesis: 12h 1-week Donchian breakout with 1-day volume confirmation
+# Uses 1-week Donchian(20) channels to capture long-term breakouts in both bull and bear markets
+# Confirmed by 1-day volume > 2x average to ensure breakout strength
+# Low turnover expected: ~15-30 trades/year per symbol to avoid fee drag
+# Works in bull markets (breakouts up) and bear markets (breakouts down)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,70 +19,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for momentum and Williams %R
+    # Load 1-week data ONCE for Donchian channels
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate 1-week Donchian channels (20 periods)
+    donch_len = 20
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    upper_channel = pd.Series(high_1w).rolling(window=donch_len, min_periods=donch_len).max().values
+    lower_channel = pd.Series(low_1w).rolling(window=donch_len, min_periods=donch_len).min().values
+    
+    # Align 1-week Donchian channels to 12h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_1w, upper_channel)
+    lower_aligned = align_htf_to_ltf(prices, df_1w, lower_channel)
+    
+    # Load 1-day data ONCE for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Williams %R (14 periods) on daily
-    lookback = 14
-    highest_high = pd.Series(df_1d['high']).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(df_1d['low']).rolling(window=lookback, min_periods=lookback).min().values
-    williams_r = -100 * (highest_high - df_1d['close'].values) / (highest_high - lowest_low)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Calculate 1-day volume average (20 periods)
+    volume_1d = df_1d['volume'].values
+    vol_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1-day momentum (close to close change)
-    daily_momentum = df_1d['close'].pct_change().values
-    daily_momentum_aligned = align_htf_to_ltf(prices, df_1d, daily_momentum)
-    
-    # Calculate volume average (20 periods)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align 1-day volume average to 12h timeframe
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(50, 20)
+    start = max(100, donch_len * 3, 20)  # Ensure sufficient warmup
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(williams_r_aligned[i]) or 
-            np.isnan(daily_momentum_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(upper_aligned[i]) or 
+            np.isnan(lower_aligned[i]) or
+            np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Williams %R levels: oversold < -80, overbought > -20
-        oversold = williams_r_aligned[i] < -80
-        overbought = williams_r_aligned[i] > -20
-        
-        # Momentum filter: positive momentum for longs, negative for shorts
-        mom_pos = daily_momentum_aligned[i] > 0
-        mom_neg = daily_momentum_aligned[i] < 0
-        
-        # Volume confirmation: current volume > average
-        volume_confirmed = volume[i] > vol_ma[i]
+        # Volume confirmation: current volume > 2x average
+        volume_confirmed = volume[i] > 2.0 * vol_ma_aligned[i]
         
         if position == 0:
-            # Enter long: Williams %R oversold + positive momentum + volume
-            if oversold and mom_pos and volume_confirmed:
+            # Enter long: 1-week Donchian breakout up + volume confirmation
+            if (close[i] > upper_aligned[i-1] and volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Enter short: Williams %R overbought + negative momentum + volume
-            elif overbought and mom_neg and volume_confirmed:
+            # Enter short: 1-week Donchian breakout down + volume confirmation
+            elif (close[i] < lower_aligned[i-1] and volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Williams %R returns to neutral (> -50) or momentum turns negative
-            if williams_r_aligned[i] > -50 or daily_momentum_aligned[i] < 0:
+            # Exit long: price crosses below 1-week lower channel
+            if close[i] < lower_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Williams %R returns to neutral (< -50) or momentum turns positive
-            if williams_r_aligned[i] < -50 or daily_momentum_aligned[i] > 0:
+            # Exit short: price crosses above 1-week upper channel
+            if close[i] > upper_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -91,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_Momentum_Volume_v1"
-timeframe = "4h"
+name = "12h_1wDonchian_1dVol_Breakout_v1"
+timeframe = "12h"
 leverage = 1.0
