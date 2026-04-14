@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,13 +15,12 @@ def generate_signals(prices):
     
     # Load daily data (HTF) once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
     # Calculate daily ATR (14-period) for volatility filter
     tr = np.zeros(len(df_1d))
@@ -39,17 +38,9 @@ def generate_signals(prices):
         for i in range(14, len(df_1d)):
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate daily volume SMA (20-period)
-    vol_sma_1d = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 20:
-        for i in range(19, len(df_1d)):
-            vol_sma_1d[i] = np.mean(volume_1d[i-19:i+1])
-    
-    vol_sma_4h = align_htf_to_ltf(prices, df_1d, vol_sma_1d)
-    
-    # Calculate 4-hour Donchian channels (20-period)
+    # Calculate 12-hour Donchian channels (20-period)
     donch_high = np.full(n, np.nan)
     donch_low = np.full(n, np.nan)
     if n >= 20:
@@ -63,20 +54,14 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical data is NaN
-        if (np.isnan(atr_4h[i]) or
+        if (np.isnan(atr_12h[i]) or
             np.isnan(donch_high[i]) or
-            np.isnan(donch_low[i]) or
-            np.isnan(vol_sma_4h[i])):
+            np.isnan(donch_low[i])):
             signals[i] = 0.0
             continue
         
         # Skip low volatility periods (ATR < 0.5% of price)
-        if atr_4h[i] < 0.005 * close[i]:
-            signals[i] = 0.0
-            continue
-        
-        # Skip low volume periods (volume < 50% of daily average)
-        if volume[i] < 0.5 * vol_sma_4h[i]:
+        if atr_12h[i] < 0.005 * close[i]:
             signals[i] = 0.0
             continue
         
@@ -90,31 +75,31 @@ def generate_signals(prices):
         r3 = prev_close + (prev_range * 1.1 / 4)
         s3 = prev_close - (prev_range * 1.1 / 4)
         
-        # Align to 4h timeframe
-        r3_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r3))[i]
-        s3_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i]
+        # Align to 12h timeframe
+        r3_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r3))[i]
+        s3_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i]
         
         if position == 0:
-            # Long: Price breaks above 4h Donchian high AND above S3
-            if close[i] > donch_high[i] and close[i] > s3_4h:
+            # Long: Price breaks above 12h Donchian high AND above S3
+            if close[i] > donch_high[i] and close[i] > s3_12h:
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below 4h Donchian low AND below R3
-            elif close[i] < donch_low[i] and close[i] < r3_4h:
+            # Short: Price breaks below 12h Donchian low AND below R3
+            elif close[i] < donch_low[i] and close[i] < r3_12h:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below 4h Donchian low OR below S3
-            if close[i] < donch_low[i] or close[i] < s3_4h:
+            # Exit: Price falls back below 12h Donchian low OR below S3
+            if close[i] < donch_low[i] or close[i] < s3_12h:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above 4h Donchian high OR above R3
-            if close[i] > donch_high[i] or close[i] > r3_4h:
+            # Exit: Price rises back above 12h Donchian high OR above R3
+            if close[i] > donch_high[i] or close[i] > r3_12h:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -122,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_R3S3_Breakout_Donchian_Volume"
-timeframe = "4h"
+name = "12h_1d_Camarilla_R3S3_Breakout_Donchian"
+timeframe = "12h"
 leverage = 1.0
