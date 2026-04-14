@@ -40,6 +40,14 @@ def generate_signals(prices):
     
     atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
     
+    # Calculate 12-hour Donchian channels (20-period)
+    donch_high = np.full(n, np.nan)
+    donch_low = np.full(n, np.nan)
+    if n >= 20:
+        for i in range(19, n):
+            donch_high[i] = np.max(high[i-19:i+1])
+            donch_low[i] = np.min(low[i-19:i+1])
+    
     # Calculate daily volatility filter (ATR > 1.5% of price)
     vol_filter_1d = np.zeros(len(df_1d))
     for i in range(len(df_1d)):
@@ -49,31 +57,6 @@ def generate_signals(prices):
             vol_filter_1d[i] = False
     vol_filter_12h = align_htf_to_ltf(prices, df_1d, vol_filter_1d.astype(float))
     
-    # Calculate daily pivot levels based on previous day's range
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d[0] = high_1d[0]
-    prev_low_1d[0] = low_1d[0]
-    prev_close_1d[0] = close_1d[0]
-    prev_range_1d = prev_high_1d - prev_low_1d
-    
-    # Camarilla-style pivot levels (R3/S3)
-    r3_1d = prev_close_1d + (prev_range_1d * 1.1 / 4)
-    s3_1d = prev_close_1d - (prev_range_1d * 1.1 / 4)
-    
-    # Align to 12h timeframe
-    r3_12h = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_12h = align_htf_to_ltf(prices, df_1d, s3_1d)
-    
-    # Calculate 12-hour Donchian channels (20-period)
-    donch_high = np.full(n, np.nan)
-    donch_low = np.full(n, np.nan)
-    if n >= 20:
-        for i in range(19, n):
-            donch_high[i] = np.max(high[i-19:i+1])
-            donch_low[i] = np.min(low[i-19:i+1])
-    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
@@ -82,9 +65,7 @@ def generate_signals(prices):
         # Skip if any critical data is NaN
         if (np.isnan(atr_12h[i]) or
             np.isnan(donch_high[i]) or
-            np.isnan(donch_low[i]) or
-            np.isnan(r3_12h[i]) or
-            np.isnan(s3_12h[i])):
+            np.isnan(donch_low[i])):
             signals[i] = 0.0
             continue
         
@@ -93,27 +74,41 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
+        # Calculate daily pivot levels based on previous day's range
+        prev_high = high_1d[i-1] if i > 0 else high_1d[0]
+        prev_low = low_1d[i-1] if i > 0 else low_1d[0]
+        prev_close = close_1d[i-1] if i > 0 else close_1d[0]
+        prev_range = prev_high - prev_low
+        
+        # Camarilla-style pivot levels (R3/S3)
+        r3 = prev_close + (prev_range * 1.1 / 4)
+        s3 = prev_close - (prev_range * 1.1 / 4)
+        
+        # Align to 12h timeframe
+        r3_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r3))[i]
+        s3_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i]
+        
         if position == 0:
             # Long: Price breaks above 12h Donchian high AND above S3
-            if close[i] > donch_high[i] and close[i] > s3_12h[i]:
+            if close[i] > donch_high[i] and close[i] > s3_12h:
                 position = 1
                 signals[i] = position_size
             # Short: Price breaks below 12h Donchian low AND below R3
-            elif close[i] < donch_low[i] and close[i] < r3_12h[i]:
+            elif close[i] < donch_low[i] and close[i] < r3_12h:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Exit: Price falls back below 12h Donchian low OR below S3
-            if close[i] < donch_low[i] or close[i] < s3_12h[i]:
+            if close[i] < donch_low[i] or close[i] < s3_12h:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
             # Exit: Price rises back above 12h Donchian high OR above R3
-            if close[i] > donch_high[i] or close[i] > r3_12h[i]:
+            if close[i] > donch_high[i] or close[i] > r3_12h:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -121,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_R3S3_Breakout_Donchian_VolFilter_v2"
+name = "12h_1d_Camarilla_R3S3_Breakout_Donchian_VolFilter"
 timeframe = "12h"
 leverage = 1.0
