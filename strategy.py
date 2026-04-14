@@ -21,7 +21,6 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
     # Calculate daily pivot points (classic)
     if len(high_1d) < 1:
@@ -34,6 +33,8 @@ def generate_signals(prices):
     s2 = pivot - (high_1d - low_1d)
     r3 = high_1d + 2 * (pivot - low_1d)
     s3 = low_1d - 2 * (high_1d - pivot)
+    r4 = r3 + (high_1d - low_1d)
+    s4 = s3 - (high_1d - low_1d)
     
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
@@ -42,8 +43,10 @@ def generate_signals(prices):
     s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Calculate 20-period EMA for trend filter (daily)
+    # Calculate 20-day EMA for trend filter (daily)
     if len(close_1d) < 20:
         return np.zeros(n)
     
@@ -83,6 +86,11 @@ def generate_signals(prices):
     
     rsi14_aligned = align_htf_to_ltf(prices, df_1d, rsi14)
     
+    # Pre-compute 20-period volume moving average (6h)
+    vol_ma_20 = np.full_like(volume, np.nan)
+    for i in range(19, len(volume)):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
@@ -96,20 +104,15 @@ def generate_signals(prices):
             np.isnan(s2_aligned[i]) or 
             np.isnan(r3_aligned[i]) or 
             np.isnan(s3_aligned[i]) or 
+            np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or 
             np.isnan(ema20_1d_aligned[i]) or 
-            np.isnan(rsi14_aligned[i])):
+            np.isnan(rsi14_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 6h volume vs 20-period average
-        vol_ma_20 = np.full_like(volume, np.nan)
-        for j in range(19, len(volume)):
-            vol_ma_20[j] = np.mean(volume[j-19:j+1])
-        
-        if np.isnan(vol_ma_20[i]) or vol_ma_20[i] <= 0:
-            volume_ratio = 0
-        else:
-            volume_ratio = volume[i] / vol_ma_20[i]
+        volume_ratio = volume[i] / vol_ma_20[i]
         
         if position == 0:
             # Long: Price above S1 + price above EMA20 + RSI > 55 + volume surge
@@ -147,6 +150,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Pivot_R1S1_EMA20_RSI14_Volume"
+name = "6h_1d_Pivot_R1S1_R4S4_EMA20_RSI14_Volume"
 timeframe = "6h"
 leverage = 1.0
