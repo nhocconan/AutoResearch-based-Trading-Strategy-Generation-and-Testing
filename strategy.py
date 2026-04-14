@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour momentum strategy using daily RSI extremes with volume confirmation
-# Long when daily RSI < 30 (oversold) and price closes above 4h VWAP
-# Short when daily RSI > 70 (overbought) and price closes below 4h VWAP
-# VWAP resets daily, providing intraday mean reversion edge
-# Volume filter (>1.5x 20-period EMA) reduces false signals
-# Designed for 20-40 trades/year, works in both bull (buy dips) and bear (sell rallies)
-# Position size: 0.25
+# Hypothesis: 6-hour Elder Ray with 1-day trend filter and volume confirmation
+# Uses Elder Ray (Bull Power/Bear Power) from 6h data for entry signals
+# Daily EMA(50) as trend filter (only long when price > EMA50, short when price < EMA50)
+# Volume confirmation > 1.5x 20-period EMA to reduce false signals
+# Designed for 15-30 trades/year with clear momentum logic
+# Works in bull markets via bull power + uptrend and in bear markets via bear power + downtrend
+# Position size: 0.25 to balance return and drawdown
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,37 +21,19 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data once for RSI
+    # Calculate Elder Ray components (13-period EMA for EMA13)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
+    
+    # Load daily data once for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Calculate daily RSI (14-period)
+    # Calculate daily EMA(50) for trend filter
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    
-    # Calculate 4h VWAP (typical price * volume) / cumulative volume
-    typical_price = (high + low + close) / 3
-    vwap_numerator = typical_price * volume
-    vwap_denominator = volume
-    
-    # Reset VWAP at daily boundaries using date change
-    dates = pd.to_datetime(prices['open_time']).date
-    date_changes = np.concatenate([[True], dates[1:] != dates[:-1]])
-    vwap_cumsum = np.where(date_changes, vwap_numerator, vwap_cumsum_prev + vwap_numerator) if 'vwap_cumsum_prev' in locals() else vwap_numerator
-    vol_cumsum = np.where(date_changes, vwap_denominator, vol_cumsum_prev + vwap_denominator) if 'vol_cumsum_prev' in locals() else vwap_denominator
-    vwap = vwap_cumsum / vol_cumsum
-    
-    # Store for next iteration
-    vwap_cumsum_prev = vwap_cumsum
-    vol_cumsum_prev = vol_cumsum
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Volume moving average for confirmation (20-period EMA)
     vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -60,35 +42,39 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25
     
-    for i in range(20, n):
-        # Get aligned daily RSI
-        rsi_i = align_htf_to_ltf(prices, df_1d, rsi_1d)[i]
+    for i in range(13, n):
+        # Get aligned daily EMA50
+        ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)[i]
         
-        if np.isnan(rsi_i) or np.isnan(vwap[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema50_1d_aligned) or np.isnan(vol_ma[i]):
             continue
+        
+        # Trend filter: only long in uptrend, only short in downtrend
+        uptrend = close[i] > ema50_1d_aligned
+        downtrend = close[i] < ema50_1d_aligned
         
         # Volume confirmation (1.5x average)
         volume_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Long: Daily RSI oversold + price above VWAP + volume
-        if position == 0 and rsi_i < 30 and close[i] > vwap[i] and volume_confirm:
+        # Long: Bull Power > 0 + uptrend + volume confirmation
+        if position == 0 and bull_power[i] > 0 and uptrend and volume_confirm:
             position = 1
             signals[i] = position_size
-        # Short: Daily RSI overbought + price below VWAP + volume
-        elif position == 0 and rsi_i > 70 and close[i] < vwap[i] and volume_confirm:
+        # Short: Bear Power < 0 + downtrend + volume confirmation
+        elif position == 0 and bear_power[i] < 0 and downtrend and volume_confirm:
             position = -1
             signals[i] = -position_size
-        # Exit: Price returns to VWAP or RSI returns to neutral zone
+        # Exit: Opposite signal or loss of momentum
         elif position != 0:
-            if position == 1 and (close[i] < vwap[i] or rsi_i > 50):
+            if position == 1 and (bear_power[i] < 0 or not uptrend):
                 position = 0
                 signals[i] = 0.0
-            elif position == -1 and (close[i] > vwap[i] or rsi_i < 50):
+            elif position == -1 and (bull_power[i] > 0 or not downtrend):
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_DailyRSI_VWAP_Momentum"
-timeframe = "4h"
+name = "6h_ElderRay_DailyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
