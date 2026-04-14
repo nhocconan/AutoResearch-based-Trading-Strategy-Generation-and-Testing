@@ -1,140 +1,98 @@
-# Your trading strategy code here
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy combining 4h ADX for trend strength and 1d RSI for mean reversion
-# Uses 4h ADX > 25 to identify trending markets and 1d RSI < 30 or > 70 for entry signals
-# In trending markets, buys pullbacks (RSI < 30) and sells rallies (RSI > 70)
-# Works in both bull and bear markets: trend filter ensures we trade with the dominant trend,
-# while RSI provides mean-reversion entries within the trend
-# Uses session filter (08-20 UTC) to avoid low-liquidity periods and reduce false signals
+# Hypothesis: 12h Williams %R + 1d EMA trend filter + volume confirmation
+# Williams %R(14) < -80 for oversold, > -20 for overbought
+# 1d EMA(50) determines trend: price > EMA = uptrend, price < EMA = downtrend
+# Volume filter: current volume > 1.5 * 20-period average volume
+# Only take longs in uptrend when oversold, shorts in downtrend when overbought
+# Williams %R exits at -50 level (mean reversion midpoint)
+# Designed for 12h timeframe to reduce trade frequency and avoid fee drag
+# Works in both bull and bear markets: trend filter prevents counter-trend trades
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Load 4h data ONCE for ADX
-    df_4h = get_htf_data(prices, '4h')
-    
-    # Calculate 4h ADX (14 periods)
-    adx_len = 14
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # True Range
-    tr1 = high_4h[1:] - low_4h[1:]
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # Directional Movement
-    dm_plus = np.where((high_4h[1:] - high_4h[:-1]) > (low_4h[:-1] - low_4h[1:]), 
-                       np.maximum(high_4h[1:] - high_4h[:-1], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.where((low_4h[:-1] - low_4h[1:]) > (high_4h[1:] - high_4h[:-1]), 
-                        np.maximum(low_4h[:-1] - low_4h[1:], 0), 0)
-    dm_minus = np.concatenate([[np.nan], dm_minus])
-    
-    # Smoothed values with min_periods
-    tr_sum = pd.Series(tr).rolling(window=adx_len, min_periods=adx_len).sum().values
-    dm_plus_sum = pd.Series(dm_plus).rolling(window=adx_len, min_periods=adx_len).sum().values
-    dm_minus_sum = pd.Series(dm_minus).rolling(window=adx_len, min_periods=adx_len).sum().values
-    
-    # Directional Indicators
-    plus_di = 100 * dm_plus_sum / tr_sum
-    minus_di = 100 * dm_minus_sum / tr_sum
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=adx_len, min_periods=adx_len).mean().values
-    
-    # Align ADX to 1h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
-    
-    # Load 1d data ONCE for RSI
+    # Load 1d data ONCE for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d RSI (14 periods)
-    rsi_len = 14
-    delta = np.diff(df_1d['close'].values, prepend=np.nan)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate 1d EMA(50)
+    ema_len = 50
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=ema_len, adjust=False, min_periods=ema_len).values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Smoothed gains and losses
-    avg_gain = pd.Series(gain).rolling(window=rsi_len, min_periods=rsi_len).mean().values
-    avg_loss = pd.Series(loss).rolling(window=rsi_len, min_periods=rsi_len).mean().values
+    # Calculate Williams %R on 12h data
+    williams_len = 14
+    highest_high = pd.Series(high).rolling(window=williams_len, min_periods=williams_len).max().values
+    lowest_low = pd.Series(low).rolling(window=williams_len, min_periods=williams_len).min().values
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Relative Strength
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.where(avg_loss == 0, 100, rsi)  # Handle division by zero
-    
-    # Align RSI to 1h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Calculate volume filter: volume > 1.5 * 20-period average
+    vol_ma_len = 20
+    vol_ma = pd.Series(volume).rolling(window=vol_ma_len, min_periods=vol_ma_len).mean().values
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(100, adx_len + rsi_len)
+    start = max(50, williams_len, vol_ma_len)
     
     for i in range(start, n):
-        # Skip if any critical data is NaN or outside session
-        if (np.isnan(adx_aligned[i]) or 
-            np.isnan(rsi_aligned[i]) or
-            not in_session[i]):
+        # Skip if any critical data is NaN
+        if (np.isnan(ema_1d_aligned[i]) or 
+            np.isnan(williams_r[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # Trend filter: ADX > 25 indicates trending market
-        trending = adx_aligned[i] > 25
+        # Trend filter: price vs 1d EMA
+        uptrend = price > ema_1d_aligned[i]
+        downtrend = price < ema_1d_aligned[i]
         
-        # Mean reversion signals from RSI
-        oversold = rsi_aligned[i] < 30
-        overbought = rsi_aligned[i] > 70
+        # Williams %R signals
+        oversold = williams_r[i] < -80
+        overbought = williams_r[i] > -20
+        exit_level = williams_r[i] > -50  # For long exit
+        exit_level_short = williams_r[i] < -50  # For short exit
         
         if position == 0:
-            # Enter long: trending + oversold (pullback in uptrend)
-            if trending and oversold:
-                # Additional filter: price above 20-period SMA for uptrend confirmation
-                sma_20 = pd.Series(close[:i+1]).rolling(window=20, min_periods=20).mean().iloc[-1]
-                if price > sma_20:
-                    position = 1
-                    signals[i] = position_size
-            # Enter short: trending + overbought (pullback in downtrend)
-            elif trending and overbought:
-                # Additional filter: price below 20-period SMA for downtrend confirmation
-                sma_20 = pd.Series(close[:i+1]).rolling(window=20, min_periods=20).mean().iloc[-1]
-                if price < sma_20:
-                    position = -1
-                    signals[i] = -position_size
+            # Enter long: uptrend + oversold + volume confirmation
+            if uptrend and oversold and volume_filter[i]:
+                position = 1
+                signals[i] = position_size
+            # Enter short: downtrend + overbought + volume confirmation
+            elif downtrend and overbought and volume_filter[i]:
+                position = -1
+                signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI crosses above 50 (mean reversion complete) or ADX drops
-            if rsi_aligned[i] > 50 or adx_aligned[i] < 20:
+            # Exit long: price crosses above EMA OR Williams %R exits oversold
+            if price < ema_1d_aligned[i] or williams_r[i] > -50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: RSI crosses below 50 (mean reversion complete) or ADX drops
-            if rsi_aligned[i] < 50 or adx_aligned[i] < 20:
+            # Exit short: price crosses below EMA OR Williams %R exits overbought
+            if price > ema_1d_aligned[i] or williams_r[i] < -50:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -142,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4hADX_1dRSI_MeanReversion_v1"
-timeframe = "1h"
+name = "12h_1dEMA_WilliamsR_Volume_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
