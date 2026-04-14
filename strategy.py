@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Load daily data once
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 100:
         return np.zeros(n)
     
     # Daily Donchian channel (20)
@@ -54,8 +54,8 @@ def generate_signals(prices):
         if np.isnan(upper_dc_20_i) or np.isnan(lower_dc_20_i) or np.isnan(atr_ratio_1d_i) or np.isnan(ema_50_1d_i):
             continue
         
-        # Volatility filter: only trade when ATR ratio < 0.8 (low volatility regime)
-        low_vol = atr_ratio_1d_i < 0.8
+        # Volatility filter: only trade when ATR ratio < 0.7 (low volatility regime)
+        low_vol = atr_ratio_1d_i < 0.7
         
         # Volume spike filter (2x median volume)
         vol_median = np.nanmedian(volume[:i+1])
@@ -83,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_LowVol_Volume_Spike_EMA50_Filter"
-timeframe = "4h"
+name = "12h_Donchian_Breakout_LowVol_Volume_Spike_EMA50_Filter"
+timeframe = "12h"
 leverage = 1.0
