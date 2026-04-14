@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Load 1d data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     # Calculate 1d EMA34 for trend filter
@@ -59,7 +59,7 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any critical data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(atr_4h_aligned[i]) or
@@ -78,7 +78,6 @@ def generate_signals(prices):
             continue
         
         # Calculate pivot levels based on previous day's range
-        # Need previous day's data - use index-1 for daily data alignment
         if i >= 1:
             prev_high = high_1d[i-1]
             prev_low = low_1d[i-1]
