@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,12 +13,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data once before loop
+    # Load 1d data once before loop (for 12h timeframe)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Load weekly data once before loop
+    # Load weekly data once before loop (for volatility filter)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 30:
         return np.zeros(n)
@@ -45,9 +45,9 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any critical data is NaN
-        if np.isnan(vol_ma[i]) or np.isnan(atr_1w[-1]) if len(atr_1w) > 0 else True:
+        if np.isnan(vol_ma[i]) or len(atr_1w) == 0:
             continue
         
         # Get 1d index for current 12h bar (12h = 0.5 * 1d)
