@@ -3,112 +3,89 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian Channel breakout with 1-day ADX trend filter and volume confirmation
-# Long when price breaks above 20-period Donchian upper band AND ADX(14) > 25 (trending) AND volume > 1.5x 20-period average volume
-# Short when price breaks below 20-period Donchian lower band AND ADX(14) > 25 AND volume > 1.5x 20-period average volume
-# Exit when price crosses back inside the Donchian Channel (opposite band)
-# Uses ADX to filter for trending markets only, reducing whipsaws in ranging periods
-# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
+# Hypothesis: 4-hour 3-period RSI with 1-day Bollinger Bands mean reversion
+# Long when RSI(3) < 15 AND price < lower Bollinger Band(20,2) on 1d AND volume > 1.5x 20-period average
+# Short when RSI(3) > 85 AND price > upper Bollinger Band(20,2) on 1d AND volume > 1.5x 20-period average
+# Exit when RSI(3) crosses back above 50 (long) or below 50 (short)
+# Uses extreme RSI on lower timeframe for timing, Bollinger Bands on higher timeframe for overextension
+# Target: 100-200 total trades over 4 years (25-50/year) with mean reversion edge in both bull/bear markets
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for ADX filter
+    # Load 1d data ONCE before loop for Bollinger Bands
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Donchian Channel on 12h (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    upper_donchian = high_series.rolling(window=20, min_periods=20).max().values
-    lower_donchian = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate RSI(3) on price closes
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/3, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/3, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate ADX on 1d for trend filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate Bollinger Bands on 1d (20,2)
     close_1d = df_1d['close'].values
-    
-    # True Range calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # First period
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values
-    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
-    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + (2 * std_20)
+    lower_bb = sma_20 - (2 * std_20)
     
     # Calculate volume average for confirmation (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Align 1d indicators to 4h timeframe
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations (50 for ADX + buffer)
-    start = 60
+    # Start after enough data for calculations
+    start = 30
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(upper_donchian[i]) or np.isnan(lower_donchian[i]) or 
-            np.isnan(adx[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(rsi[i]) or np.isnan(upper_bb_aligned[i]) or 
+            np.isnan(lower_bb_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        adx_value = adx[i]
+        rsi_val = rsi[i]
         vol = volume[i]
         vol_threshold = vol_avg[i] * 1.5
         
-        # Get ADX values aligned to 12h timeframe
-        adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-        adx_value_aligned = adx_aligned[i]
-        
         if position == 0:
-            # Long setup: price breaks above upper Donchian + ADX trend filter + volume confirmation
-            if (price > upper_donchian[i] and adx_value_aligned > 25 and vol > vol_threshold):
+            # Long setup: RSI oversold AND price below lower BB AND volume confirmation
+            if (rsi_val < 15 and price < lower_bb_aligned[i] and vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: price breaks below lower Donchian + ADX trend filter + volume confirmation
-            elif (price < lower_donchian[i] and adx_value_aligned > 25 and vol > vol_threshold):
+            # Short setup: RSI overbought AND price above upper BB AND volume confirmation
+            elif (rsi_val > 85 and price > upper_bb_aligned[i] and vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses back inside Donchian Channel (below lower band)
-            if price < lower_donchian[i]:
+            # Exit long: RSI crosses back above 50
+            if rsi_val > 50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses back inside Donchian Channel (above upper band)
-            if price > upper_donchian[i]:
+            # Exit short: RSI crosses back below 50
+            if rsi_val < 50:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -116,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_1dADX_Volume"
-timeframe = "12h"
+name = "4h_RSI3_BBands20_2_Volume"
+timeframe = "4h"
 leverage = 1.0
