@@ -1,8 +1,11 @@
-#!/usr/bin/env python3
+#|#!/usr/bin/env python3
 """
-Hypothesis: 12h price breaks above/below 1-day Donchian(20) channel with volume above 1.5x 24-period average and 1-day ADX > 25.
-Trades in direction of daily trend to avoid counter-trend whipsaws. Uses Donchian for clear breakout signals and ADX for trend strength.
+Hypothesis: 6h 3-bar reversal pattern with volume surge and 1-week trend filter.
+- Long: 3 consecutive closes lower + volume > 1.5x 20-period avg + close > weekly EMA50
+- Short: 3 consecutive closes higher + volume > 1.5x 20-period avg + close < weekly EMA50
+- Exit: Opposite 3-bar reversal or weekly EMA50 cross
 Targets 12-37 trades/year per symbol (48-148 total over 4 years).
+Works in bull/bear by fading short-term exhaustion in trending markets.
 """
 
 import numpy as np
@@ -11,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,96 +22,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily Donchian channel (20-period)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Calculate weekly EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Donchian upper and lower bands
-    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate 20-period average volume
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate daily ADX (14-period)
-    if len(df_1d) < 30:
-        return np.zeros(n)
+    # Detect 3-bar reversal patterns
+    # Three consecutive lower closes
+    lower3 = (close[2:] < close[1:-1]) & (close[1:-1] < close[:-2])
+    lower3 = np.concatenate([[False, False], lower3])
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    close_1d = df_1d['close'].values
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
-    
-    # Smoothed values
-    tr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_plus_14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus_14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_14 / (tr_14 + 1e-10)
-    di_minus = 100 * dm_minus_14 / (tr_14 + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Calculate 24-period average volume (12h periods in a day)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Three consecutive higher closes
+    higher3 = (close[2:] > close[1:-1]) & (close[1:-1] > close[:-2])
+    higher3 = np.concatenate([[False, False], higher3])
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25
     
-    for i in range(60, n):
+    for i in range(20, n):
         # Get aligned indicators
-        upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)[i]
-        lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)[i]
-        adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)[i]
-        vol_ma_24_val = vol_ma_24[i]  # already LTF
+        ema50 = ema50_1w_aligned[i]
+        vol_ma = vol_ma_20[i]
         
         # Check for NaN values
-        if (np.isnan(upper_20_aligned) or np.isnan(lower_20_aligned) or 
-            np.isnan(adx_1d_aligned) or np.isnan(vol_ma_24_val)):
+        if np.isnan(ema50) or np.isnan(vol_ma):
             continue
         
         # Volume confirmation (> 1.5x average)
-        volume_confirm = volume[i] > 1.5 * vol_ma_24_val
-        
-        # ADX trend filter (> 25)
-        trend_filter = adx_1d_aligned > 25
+        volume_confirm = volume[i] > 1.5 * vol_ma
         
         if position == 0:  # No position - look for entries
-            if volume_confirm and trend_filter:
-                # Long: price breaks above upper Donchian band
-                if close[i] > upper_20_aligned and close[i-1] <= upper_20_aligned:
+            if volume_confirm:
+                # Long: 3 lower closes + above weekly EMA50
+                if lower3[i] and close[i] > ema50:
                     position = 1
                     signals[i] = position_size
-                # Short: price breaks below lower Donchian band
-                elif close[i] < lower_20_aligned and close[i-1] >= lower_20_aligned:
+                # Short: 3 higher closes + below weekly EMA50
+                elif higher3[i] and close[i] < ema50:
                     position = -1
                     signals[i] = -position_size
-        elif position == 1:  # Long position - exit when price breaks below lower band
-            if close[i] < lower_20_aligned and close[i-1] >= lower_20_aligned:
+        elif position == 1:  # Long position
+            # Exit: 3 higher closes OR price crosses below weekly EMA50
+            if higher3[i] or (close[i] < ema50 and close[i-1] >= ema50):
                 position = 0
                 signals[i] = 0.0
-        elif position == -1:  # Short position - exit when price breaks above upper band
-            if close[i] > upper_20_aligned and close[i-1] <= upper_20_aligned:
+        elif position == -1:  # Short position
+            # Exit: 3 lower closes OR price crosses above weekly EMA50
+            if lower3[i] or (close[i] > ema50 and close[i-1] <= ema50):
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_1dDonchian20_1dADX25_Volume1.5x_v1"
-timeframe = "12h"
+name = "6h_3bar_reversal_volume_weeklyEMA50_v1"
+timeframe = "6h"
 leverage = 1.0
