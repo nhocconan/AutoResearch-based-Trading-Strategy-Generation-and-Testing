@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -16,82 +16,83 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1d Donchian channels (20-period)
+    high_series = pd.Series(df_1d['high'])
+    low_series = pd.Series(df_1d['low'])
+    upper_donch = high_series.rolling(window=20, min_periods=20).max().values
+    lower_donch = low_series.rolling(window=20, min_periods=20).min().values
+    upper_donch_aligned = align_htf_to_ltf(prices, df_1d, upper_donch)
+    lower_donch_aligned = align_htf_to_ltf(prices, df_1d, lower_donch)
     
     # Calculate 1d ATR(14) for volatility filter
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    close_series = pd.Series(close)
-    tr1 = high_series - low_series
-    tr2 = abs(high_series - close_series.shift(1))
-    tr3 = abs(low_series - close_series.shift(1))
+    high_series_1d = pd.Series(df_1d['high'])
+    low_series_1d = pd.Series(df_1d['low'])
+    close_series_1d = pd.Series(df_1d['close'])
+    tr1 = high_series_1d - low_series_1d
+    tr2 = abs(high_series_1d - close_series_1d.shift(1))
+    tr3 = abs(low_series_1d - close_series_1d.shift(1))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
+    atr_1d = tr.rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate 14-period RSI on 1d closes
-    delta = pd.Series(df_1d['close']).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_1d = rsi.values
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Calculate 1d ADX(14) for trend strength filter
+    plus_dm = high_series_1d.diff()
+    minus_dm = low_series_1d.diff().multiply(-1)
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+    tr_atr = tr.rolling(window=14, min_periods=14).mean()
+    plus_di = 100 * (plus_dm.rolling(window=14, min_periods=14).mean() / tr_atr)
+    minus_di = 100 * (minus_dm.rolling(window=14, min_periods=14).mean() / tr_atr)
+    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+    adx = dx.rolling(window=14, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 100
+    start = 200
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(atr[i]) or 
-            np.isnan(rsi_1d_aligned[i])):
+        if (np.isnan(upper_donch_aligned[i]) or 
+            np.isnan(lower_donch_aligned[i]) or 
+            np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         
-        # ATR-based volatility filter: avoid extremely low volatility periods
-        atr_ratio = atr[i] / price if price > 0 else 0
-        vol_filter = atr_ratio > 0.003  # Minimum 0.3% ATR relative to price
+        # Volatility filter: avoid extremely low volatility periods
+        vol_filter = atr_1d_aligned[i] > (price * 0.01)  # Minimum 1% ATR relative to price
         
-        # Trend filter: price > 1d EMA50 for long, price < 1d EMA50 for short
-        trend_filter_long = price > ema_50_1d_aligned[i]
-        trend_filter_short = price < ema_50_1d_aligned[i]
-        
-        # RSI filter: avoid overbought/oversold extremes
-        rsi_val = rsi_1d_aligned[i]
-        rsi_filter = (rsi_val > 30) & (rsi_val < 70)
+        # Trend strength filter: only trade when ADX > 25
+        trend_filter = adx_aligned[i] > 25
         
         if position == 0:
-            # Long setup: price above 1d EMA50 + volatility filter + RSI not extreme
-            if (trend_filter_long and vol_filter and rsi_filter):
+            # Long setup: price breaks above 1d upper Donchian + volatility + trend strength
+            if (price > upper_donch_aligned[i] and vol_filter and trend_filter):
                 position = 1
                 signals[i] = position_size
-            # Short setup: price below 1d EMA50 + volatility filter + RSI not extreme
-            elif (trend_filter_short and vol_filter and rsi_filter):
+            # Short setup: price breaks below 1d lower Donchian + volatility + trend strength
+            elif (price < lower_donch_aligned[i] and vol_filter and trend_filter):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below 1d EMA50
-            if price < ema_50_1d_aligned[i]:
+            # Exit long: price crosses below 1d lower Donchian (reversal signal)
+            if price < lower_donch_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above 1d EMA50
-            if price > ema_50_1d_aligned[i]:
+            # Exit short: price crosses above 1d upper Donchian (reversal signal)
+            if price > upper_donch_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -99,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dEMA50_RSI_Filter"
+name = "4h_1dDonchian20_Volatility_ADX_Filter"
 timeframe = "4h"
 leverage = 1.0
