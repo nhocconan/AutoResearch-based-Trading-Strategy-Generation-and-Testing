@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,80 +13,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
+    # Load 1d data ONCE before loop for ATR and trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 6h Donchian Channel (20-period)
-    close_series = pd.Series(close)
+    # Calculate ATR (14-period) for volatility filter
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max()
-    donchian_low = low_series.rolling(window=20, min_periods=20).min()
-    donchian_mid = (donchian_high + donchian_low) / 2
+    close_series = pd.Series(close)
+    tr1 = high_series - low_series
+    tr2 = abs(high_series - close_series.shift(1))
+    tr3 = abs(low_series - close_series.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean()
     
-    # Calculate 1d daily pivot points (standard: PP, R1/R2/R3, S1/S2/S3)
-    # Pivot Point = (High + Low + Close) / 3
-    pp_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    # Resistance levels
-    r1_1d = 2 * pp_1d - df_1d['low']
-    r2_1d = pp_1d + (df_1d['high'] - df_1d['low'])
-    r3_1d = df_1d['high'] + 2 * (pp_1d - df_1d['low'])
-    # Support levels
-    s1_1d = 2 * pp_1d - df_1d['high']
-    s2_1d = pp_1d - (df_1d['high'] - df_1d['low'])
-    s3_1d = df_1d['low'] - 2 * (df_1d['high'] - pp_1d)
+    # Calculate 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate volume average for confirmation (20-period)
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    
-    # Align daily pivot levels to 6h timeframe (with 1-bar delay for completed daily bar)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d.values)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d.values)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d.values)
+    # Calculate 14-period RSI for momentum confirmation
+    delta = close_series.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 50
+    start = 60
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
-            np.isnan(vol_avg[i]) or
-            np.isnan(pp_aligned[i]) or
-            np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i])):
+        if (np.isnan(atr[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_threshold = vol_avg[i] * 1.5  # Volume must be 1.5x average
+        
+        # Calculate average volume for confirmation (20-period)
+        vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().iloc[i]
+        
+        # ATR-based volatility filter: avoid extremely low volatility periods
+        atr_ratio = atr[i] / close[i] if close[i] > 0 else 0
+        vol_filter = atr_ratio > 0.01  # Minimum 1% ATR relative to price
+        
+        # Volume confirmation: current volume > 1.5x average
+        vol_confirm = vol > (vol_avg * 1.5) if not np.isnan(vol_avg) else False
+        
+        # Trend filter: price > 1d EMA50 for long, price < 1d EMA50 for short
+        trend_filter_long = price > ema_50_1d_aligned[i]
+        trend_filter_short = price < ema_50_1d_aligned[i]
+        
+        # Momentum filter: RSI between 40 and 60 to avoid overbought/oversold extremes
+        rsi_filter = 40 <= rsi[i] <= 60
         
         if position == 0:
-            # Long setup: Break above Donchian high AND above daily R3 (strong bullish breakout) AND volume confirmation
-            if (price > donchian_high[i] and price > r3_aligned[i] and vol > vol_threshold):
+            # Long setup: price above 1d EMA50 + volume confirmation + volatility filter + RSI filter
+            if (trend_filter_long and vol_confirm and vol_filter and rsi_filter):
                 position = 1
                 signals[i] = position_size
-            # Short setup: Break below Donchian low AND below daily S3 (strong bearish breakout) AND volume confirmation
-            elif (price < donchian_low[i] and price < s3_aligned[i] and vol > vol_threshold):
+            # Short setup: price below 1d EMA50 + volume confirmation + volatility filter + RSI filter
+            elif (trend_filter_short and vol_confirm and vol_filter and rsi_filter):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Price retracement to Donchian middle
-            if price < donchian_mid[i]:
+            # Exit long: price crosses below 1d EMA50
+            if price < ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Price retracement to Donchian middle
-            if price > donchian_mid[i]:
+            # Exit short: price crosses above 1d EMA50
+            if price > ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -94,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian_DailyPivot_Breakout_Volume"
-timeframe = "6h"
+name = "4h_EMA50_Volume_Momentum_Filter"
+timeframe = "4h"
 leverage = 1.0
