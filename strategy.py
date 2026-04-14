@@ -1,13 +1,14 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d ADX trend filter and volume confirmation
+# Hypothesis: 12h Donchian breakout with 1d ADX trend filter and volume confirmation
 # Breakouts above Donchian(20) high or below Donchian(20) low capture momentum
 # 1d ADX(14) > 25 filters for trending markets where breakouts are more reliable
 # Volume > 1.5x 20-period EMA confirms institutional participation
-# Target: 20-30 trades/year with trend-following logic suited for 2025 bear/range conditions
+# Target: 12-37 trades/year with trend-following logic suited for 2025 bear/range conditions
 # Stops via opposite Donchian band touch to avoid whipsaws
 
 def generate_signals(prices):
@@ -98,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_1dADX_TrendBreak"
-timeframe = "4h"
+name = "12h_Donchian_1dADX_TrendBreak"
+timeframe = "12h"
 leverage = 1.0
