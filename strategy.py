@@ -1,12 +1,15 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout + 1d ADX filter + volume confirmation
-# In trending markets (ADX > 25): breakout of 20-period high/low triggers entry
-# In ranging markets (ADX < 20): no trades to avoid false breakouts
-# Volume > 1.5x 20-period average confirms breakout strength
+# Hypothesis: 6h Elder Ray + 1d Regime Filter
+# Bull Power (BP) = Close - EMA13; Bear Power (EP) = EMA13 - Low
+# Trend filter: 1d ADX > 25 (trending) or ADX < 20 (ranging)
+# In trending: enter long when BP > 0 and rising, short when EP > 0 and rising
+# In ranging: fade extremes (buy when BP < 0 and turning up, sell when EP < 0 and turning up)
+# Volume confirmation: > 1.3x 20-period average
 # Designed for 60-120 trades over 4 years with controlled frequency
 
 def generate_signals(prices):
@@ -19,16 +22,15 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period) - no look-ahead
-    # Upper band: highest high of past 20 periods (excluding current)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    # Lower band: lowest low of past 20 periods (excluding current)
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # Elder Ray components (13-period EMA)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = close - ema13  # Close - EMA13
+    bear_power = ema13 - low    # EMA13 - Low
     
     # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1d ADX (14-period) for trend filter
+    # Calculate 1d ADX (14-period) for regime filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -64,44 +66,53 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25
     
-    for i in range(20, n):  # Start after Donchian calculation
+    for i in range(20, n):  # Start after calculations
         # Get aligned 1d ADX
         adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)[i]
         
         # Check for NaN values
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
             np.isnan(vol_ma[i]) or np.isnan(adx_1d_aligned)):
             continue
         
-        # Breakout conditions
-        bullish_breakout = close[i] > donchian_high[i]
-        bearish_breakout = close[i] < donchian_low[i]
+        # Volume confirmation (> 1.3x average)
+        volume_confirm = volume[i] > 1.3 * vol_ma[i]
         
-        # Volume confirmation (> 1.5x average)
-        volume_confirm = volume[i] > 1.5 * vol_ma[i]
-        
-        # Regime filter: only trade in trending markets
-        trending = adx_1d_aligned > 25
+        # Momentum: current vs previous power
+        bull_momentum = bull_power[i] > bull_power[i-1]
+        bear_momentum = bear_power[i] > bear_power[i-1]
         
         if position == 0:  # No position - look for entries
-            if trending and volume_confirm:
-                if bullish_breakout:
-                    position = 1
-                    signals[i] = position_size
-                elif bearish_breakout:
-                    position = -1
-                    signals[i] = -position_size
-        elif position == 1:  # Long position - exit on reversal
-            if close[i] < donchian_low[i]:  # Break below lower band
+            if volume_confirm:
+                # Trending market (ADX > 25): follow momentum
+                if adx_1d_aligned > 25:
+                    if bull_power[i] > 0 and bull_momentum:
+                        position = 1
+                        signals[i] = position_size
+                    elif bear_power[i] > 0 and bear_momentum:
+                        position = -1
+                        signals[i] = -position_size
+                # Ranging market (ADX < 20): fade extremes
+                elif adx_1d_aligned < 20:
+                    if bull_power[i] < 0 and bull_momentum:  # BP negative but turning up
+                        position = 1
+                        signals[i] = position_size
+                    elif bear_power[i] < 0 and bear_momentum:  # EP negative but turning up
+                        position = -1
+                        signals[i] = -position_size
+        elif position == 1:  # Long position - exit conditions
+            # Exit when power fades or reverses
+            if bull_power[i] <= 0 or not bull_momentum:
                 position = 0
                 signals[i] = 0.0
-        elif position == -1:  # Short position - exit on reversal
-            if close[i] > donchian_high[i]:  # Break above upper band
+        elif position == -1:  # Short position - exit conditions
+            # Exit when power fades or reverses
+            if bear_power[i] <= 0 or not bear_momentum:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "6h_Donchian_1dADX_Volume"
+name = "6h_ElderRay_1dADX_Regime"
 timeframe = "6h"
 leverage = 1.0
