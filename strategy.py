@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy with 4h RSI trend filter and 1h volume-weighted VWAP mean reversion
-# 4h RSI > 50 indicates bullish trend bias, < 50 indicates bearish bias
-# 1h VWAP deviation identifies mean reversion opportunities within the trend
-# Volume filter ensures trades occur during sufficient liquidity
-# Designed for 15-35 trades/year to avoid fee drag
+# Hypothesis: 6h strategy combining 1w Ichimoku Cloud (Kijun/Tenkan) with 1d volume spikes.
+# Ichimoku provides trend direction and support/resistance (cloud) from weekly timeframe.
+# Volume spikes on 1d confirm institutional interest for breakout/breakdown entries.
+# Works in bull/bear markets: cloud acts as dynamic support/resistance, volume filters false breaks.
+# Weekly Ichimoku avoids whipsaw; daily volume ensures momentum behind moves.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,96 +19,97 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE for RSI trend filter
-    df_4h = get_htf_data(prices, '4h')
+    # Load 1w data ONCE for Ichimoku
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h RSI (14 periods)
-    rsi_len = 14
-    close_4h = df_4h['close'].values
+    # Calculate Ichimoku components (9, 26, 52)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Price changes
-    delta = np.diff(close_4h, prepend=close_4h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    tenkan_sen = (pd.Series(high_1w).rolling(window=9, min_periods=9).max() + 
+                  pd.Series(low_1w).rolling(window=9, min_periods=9).min()) / 2
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun_sen = (pd.Series(high_1w).rolling(window=26, min_periods=26).max() + 
+                 pd.Series(low_1w).rolling(window=26, min_periods=26).min()) / 2
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan_sen + kijun_sen) / 2)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    senkou_b = ((pd.Series(high_1w).rolling(window=52, min_periods=52).max() + 
+                 pd.Series(low_1w).rolling(window=52, min_periods=52).min()) / 2)
+    # Chikou Span (Lagging Span): Close shifted 26 periods behind (not used for signals)
     
-    # Wilder's smoothing
-    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_len, adjust=False, min_periods=rsi_len).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_len, adjust=False, min_periods=rsi_len).mean().values
+    # Align Ichimoku components to 6h timeframe (wait for weekly bar close)
+    tenkan_aligned = align_htf_to_ltf(prices, df_1w, tenkan_sen.values)
+    kijun_aligned = align_htf_to_ltf(prices, df_1w, kijun_sen.values)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1w, senkou_a.values, additional_delay_bars=26)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1w, senkou_b.values, additional_delay_bars=26)
     
-    # RSI calculation
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.where(avg_loss == 0, 100, rsi)
-    rsi = np.where(avg_gain == 0, 0, rsi)
+    # Load 1d data ONCE for volume spike
+    df_1d = get_htf_data(prices, '1d')
     
-    # Align 4h RSI to 1h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_4h, rsi)
+    # Calculate 1d volume spike (20-period average)
+    vol_1d = df_1d['volume'].values
+    vol_ma = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = vol_1d / vol_ma  # Current volume vs 20-period average
+    vol_ratio = np.where(vol_ma == 0, 1.0, vol_ratio)  # Avoid division by zero
     
-    # Calculate 1h VWAP (volume-weighted average price)
-    typical_price = (high + low + close) / 3
-    vwap_numerator = (typical_price * volume)
-    vwap_denominator = volume
-    
-    # Cumulative VWAP with reset at session boundaries (optional)
-    # Using expanding window for simplicity, but resets daily would be better
-    vwap = np.cumsum(vwap_numerator) / np.cumsum(vwap_denominator)
-    vwap = np.where(np.cumsum(vwap_denominator) == 0, typical_price, vwap)
-    
-    # VWAP deviation as percentage
-    vwap_dev = (close - vwap) / vwap
+    # Align volume ratio to 6h timeframe
+    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(30, rsi_len)
+    start = max(100, 52 + 26)  # Ichimoku needs 52 periods + 26 shift
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if np.isnan(rsi_aligned[i]):
+        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
+            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
+            np.isnan(vol_ratio_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: 4h RSI > 50 = bullish bias, < 50 = bearish bias
-        bullish_bias = rsi_aligned[i] > 50
-        bearish_bias = rsi_aligned[i] < 50
+        price = close[i]
         
-        # Mean reversion signals from VWAP deviation
-        vwap_dev_current = vwap_dev[i]
+        # Determine cloud boundaries and trend
+        upper_cloud = np.maximum(senkou_a_aligned[i], senkou_b_aligned[i])
+        lower_cloud = np.minimum(senkou_a_aligned[i], senkou_b_aligned[i])
+        above_cloud = price > upper_cloud
+        below_cloud = price < lower_cloud
+        in_cloud = (price >= lower_cloud) & (price <= upper_cloud)
         
-        # Oversold/overbought thresholds
-        oversold = vwap_dev_current < -0.015  # -1.5% below VWAP
-        overbought = vwap_dev_current > 0.015  # +1.5% above VWAP
+        # Trend: Tenkan > Kijun = bullish, Tenkan < Kijun = bearish
+        bullish_trend = tenkan_aligned[i] > kijun_aligned[i]
+        bearish_trend = tenkan_aligned[i] < kijun_aligned[i]
         
-        # Volume filter: current volume > 20-period average
-        if i >= 20:
-            vol_avg = np.mean(volume[i-20:i])
-            volume_filter = volume[i] > vol_avg * 0.5  # At least 50% of average
-        else:
-            volume_filter = True  # Not enough data, don't filter
+        # Volume confirmation: significant spike (1.5x average)
+        volume_spike = vol_ratio_aligned[i] > 1.5
         
         if position == 0:
-            # Enter long: bullish bias + oversold + volume
-            if bullish_bias and oversold and volume_filter:
+            # Enter long: price above cloud + bullish trend + volume spike
+            if above_cloud and bullish_trend and volume_spike:
                 position = 1
                 signals[i] = position_size
-            # Enter short: bearish bias + overbought + volume
-            elif bearish_bias and overbought and volume_filter:
+            # Enter short: price below cloud + bearish trend + volume spike
+            elif below_cloud and bearish_trend and volume_spike:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to VWAP or trend weakens
-            if vwap_dev_current > -0.005 or rsi_aligned[i] < 45:  # Near VWAP or RSI weakening
+            # Exit long: price falls below cloud OR trend turns bearish
+            if price < lower_cloud or not bullish_trend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to VWAP or trend weakens
-            if vwap_dev_current < 0.005 or rsi_aligned[i] > 55:  # Near VWAP or RSI weakening
+            # Exit short: price rises above cloud OR trend turns bullish
+            if price > upper_cloud or not bearish_trend:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -116,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4hRSI_VWAP_MeanReversion_v1"
-timeframe = "1h"
+name = "6h_1wIchimoku_1dVolSpike_v1"
+timeframe = "6h"
 leverage = 1.0
