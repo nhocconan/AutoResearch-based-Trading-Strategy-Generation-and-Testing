@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using weekly Donchian breakout with 1d RSI filter and volume confirmation.
-# Weekly Donchian(20) breakout captures major trend direction, avoiding whipsaws in ranging markets.
-# 1d RSI between 40-60 filters for neutral momentum to avoid overextended entries.
-# Volume confirmation (>1.3x 50-period average) reduces false breakouts.
-# Designed for both bull and bear markets by using weekly trend filter (price above/below weekly SMA50).
-# Target: 10-20 trades/year per symbol (40-80 total over 4 years) to minimize fee drag.
+# Hypothesis: 6h strategy using 1d Ichimoku Cloud with 6h Tenkan/Kijun cross and volume confirmation.
+# The Ichimoku Cloud from daily data provides strong support/resistance levels.
+# Tenkan/Kijun cross on 6h timeframe provides entry signals in the direction of the daily trend.
+# Volume confirmation (>1.3x 20-period average) reduces false signals.
+# Works in both bull and bear markets by using daily cloud as trend filter (price above/below cloud).
+# Target: 15-25 trades/year per symbol (60-100 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,65 +20,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for Donchian channels and trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly Donchian channels (20-period)
-    donch_period = 20
-    upper_donch = pd.Series(high_1w).rolling(window=donch_period, min_periods=donch_period).max().values
-    lower_donch = pd.Series(low_1w).rolling(window=donch_period, min_periods=donch_period).min().values
-    
-    # Calculate weekly SMA50 for trend filter
-    sma_period = 50
-    sma_1w = pd.Series(close_1w).rolling(window=sma_period, min_periods=sma_period).mean().values
-    
-    # Load daily data ONCE for RSI and volume confirmation
+    # Load 1d data ONCE for Ichimoku Cloud calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 52:
         return np.zeros(n)
     
+    # Calculate Ichimoku Cloud on 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily RSI (14-period)
-    rsi_period = 14
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    period_tenkan = 9
+    tenkan_sen = (pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max() + 
+                  pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min()) / 2
+    tenkan_sen = tenkan_sen.values
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    period_kijun = 26
+    kijun_sen = (pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max() + 
+                 pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min()) / 2
+    kijun_sen = kijun_sen.values
     
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
     
-    # Align indicators to daily timeframe
-    upper_donch_aligned = align_htf_to_ltf(prices, df_1w, upper_donch)
-    lower_donch_aligned = align_htf_to_ltf(prices, df_1w, lower_donch)
-    sma_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_1w)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2
+    period_senkou_b = 52
+    senkou_span_b = (pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max() + 
+                     pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min()) / 2
+    senkou_span_b = senkou_span_b.values
     
-    # Volume confirmation: 1.3x average volume (50-period)
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Chikou Span (Lagging Span): not used for signals
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    
+    # Load 6h data for Tenkan/Kijun cross calculation
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 26:
+        return np.zeros(n)
+    
+    # Calculate Tenkan-sen and Kijun-sen on 6h data
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    
+    # Tenkan-sen (9-period) on 6h
+    tenkan_sen_6h = (pd.Series(high_6h).rolling(window=9, min_periods=9).max() + 
+                     pd.Series(low_6h).rolling(window=9, min_periods=9).min()) / 2
+    tenkan_sen_6h = tenkan_sen_6h.values
+    
+    # Kijun-sen (26-period) on 6h
+    kijun_sen_6h = (pd.Series(high_6h).rolling(window=26, min_periods=26).max() + 
+                    pd.Series(low_6h).rolling(window=26, min_periods=26).min()) / 2
+    kijun_sen_6h = kijun_sen_6h.values
+    
+    # Volume confirmation: 1.3x average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(donch_period, sma_period, rsi_period, 50)
+    start = max(52, 26, 20)  # Need Ichimoku (52), 6h Kijun (26), volume MA (20)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(upper_donch_aligned[i]) or 
-            np.isnan(lower_donch_aligned[i]) or
-            np.isnan(sma_1w_aligned[i]) or
-            np.isnan(rsi_aligned[i]) or
+        if (np.isnan(tenkan_sen_aligned[i]) or 
+            np.isnan(kijun_sen_aligned[i]) or
+            np.isnan(senkou_span_a_aligned[i]) or
+            np.isnan(senkou_span_b_aligned[i]) or
+            np.isnan(tenkan_sen_6h[i]) or
+            np.isnan(kijun_sen_6h[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -86,44 +103,41 @@ def generate_signals(prices):
         # Volume confirmation
         volume_confirmed = volume[i] > 1.3 * vol_ma[i]
         
-        # Trend filter: price above/below weekly SMA50
-        above_weekly_sma = close[i] > sma_1w_aligned[i]
-        below_weekly_sma = close[i] < sma_1w_aligned[i]
+        # Determine cloud boundaries and trend
+        upper_cloud = np.maximum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        lower_cloud = np.minimum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
         
-        # RSI filter: avoid overextended conditions (40-60 range)
-        rsi_neutral = (rsi_aligned[i] >= 40) & (rsi_aligned[i] <= 60)
+        # 6h Tenkan/Kijun cross
+        tk_cross_bull = tenkan_sen_6h[i] > kijun_sen_6h[i]
+        tk_cross_bear = tenkan_sen_6h[i] < kijun_sen_6h[i]
         
         if position == 0:
-            # Long: price breaks above weekly Donchian upper band + uptrend + RSI neutral + volume
-            if (close[i] > upper_donch_aligned[i] and 
-                above_weekly_sma and 
-                rsi_neutral and 
+            # Long: price above cloud AND bullish TK cross AND volume confirmation
+            if (close[i] > upper_cloud and 
+                tk_cross_bull and 
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below weekly Donchian lower band + downtrend + RSI neutral + volume
-            elif (close[i] < lower_donch_aligned[i] and 
-                  below_weekly_sma and 
-                  rsi_neutral and 
+            # Short: price below cloud AND bearish TK cross AND volume confirmation
+            elif (close[i] < lower_cloud and 
+                  tk_cross_bear and 
                   volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to weekly Donchian middle or trend reverses
-            mid_donch = (upper_donch_aligned[i] + lower_donch_aligned[i]) / 2
-            if (close[i] <= mid_donch or 
-                below_weekly_sma):  # Trend reversal to downside
+            # Exit long: price crosses below cloud OR bearish TK cross
+            if (close[i] < lower_cloud or 
+                tk_cross_bear):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to weekly Donchian middle or trend reverses
-            mid_donch = (upper_donch_aligned[i] + lower_donch_aligned[i]) / 2
-            if (close[i] >= mid_donch or 
-                above_weekly_sma):  # Trend reversal to upside
+            # Exit short: price crosses above cloud OR bullish TK cross
+            if (close[i] > upper_cloud or 
+                tk_cross_bull):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -131,6 +145,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1wDonchian_RSI_VolumeFilter_v1"
-timeframe = "1d"
+name = "6h_1dIchimoku_6hTKCross_VolumeFilter_v1"
+timeframe = "6h"
 leverage = 1.0
