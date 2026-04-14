@@ -3,106 +3,98 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA(14,2,30) direction + RSI(14) extreme + Chop(14) regime filter
-# KAMA adapts to trend: stays flat in range, follows in trend
-# RSI < 30 or > 70 identifies overextended moves for mean reversion
-# Chop > 61.8 indicates ranging market where mean reversion works best
-# Position size 0.25 to manage drawdown in choppy/trending markets
-# Works in bull/bear as it fades extremes in ranging conditions
-# Target: 15-25 trades/year per symbol (60-100 total over 4 years)
+# Hypothesis: 4h Williams Alligator with 1d Elder Ray and volume confirmation.
+# Williams Alligator (SMAs with offsets) identifies trend direction and avoids chop.
+# Elder Ray (13-period EMA vs 13-period high/low) confirms trend strength.
+# Volume > 1.3x average confirms participation.
+# Works in bull/bear as Alligator adapts to trend and filters false signals.
+# Target: 20-35 trades/year per symbol (80-140 total over 4 years).
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate KAMA on close
-    def kama(close, er_len=10, fast_len=2, slow_len=30):
-        change = np.abs(np.diff(close, prepend=close[0]))
-        volatility = np.abs(np.diff(close)).cumsum() - np.abs(np.diff(close, prepend=close[0])).cumsum()
-        er = np.where(volatility != 0, change / volatility, 0)
-        sc = (er * (2/(fast_len+1) - 2/(slow_len+1)) + 2/(slow_len+1)) ** 2
-        kama_out = np.zeros_like(close)
-        kama_out[0] = close[0]
-        for i in range(1, len(close)):
-            kama_out[i] = kama_out[i-1] + sc[i] * (close[i] - kama_out[i-1])
-        return kama_out
+    # Load 1d data ONCE for Elder Ray
+    df_1d = get_htf_data(prices, '1d')
     
-    kama_val = kama(close, 10, 2, 30)
+    # 13-period EMA for Elder Ray
+    ema_len = 13
+    if len(df_1d) < ema_len:
+        return np.zeros(n)
     
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    ema_13 = pd.Series(df_1d['close']).ewm(span=ema_len, adjust=False, min_periods=ema_len).mean().values
+    ema_13_aligned = align_htf_to_ltf(prices, df_1d, ema_13)
     
-    # Choppiness Index(14)
-    atr = np.zeros_like(close)
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(np.roll(high, 1) - close)
-    tr3 = np.abs(np.roll(low, 1) - close)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Williams Alligator on 4h: Jaw (13,8), Teeth (8,5), Lips (5,3)
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    sum_atr = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    range_hl = highest_high - lowest_low
-    chop = np.where(range_hl != 0, 100 * np.log10(sum_atr / range_hl) / np.log10(14), 50)
+    # Volume confirmation: 1.3x average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25
+    position_size = 0.25  # 25% position size
     
-    start = max(30, 14, 14)
+    # Start after enough data for calculations
+    start = max(60, 13, 20)
     
     for i in range(start, n):
-        if (np.isnan(kama_val[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(chop[i])):
+        # Skip if any critical data is NaN
+        if (np.isnan(jaw[i]) or 
+            np.isnan(teeth[i]) or
+            np.isnan(lips[i]) or
+            np.isnan(ema_13_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # KAMA direction: price above/below KAMA
-        price_above_kama = close[i] > kama_val[i]
-        price_below_kama = close[i] < kama_val[i]
+        # Williams Alligator: aligned (jaws > teeth > lips = uptrend, reverse = downtrend)
+        alligator_long = (jaws[i] > teeth[i]) and (teeth[i] > lips[i])
+        alligator_short = (jaws[i] < teeth[i]) and (teeth[i] < lips[i])
         
-        # RSI extremes
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
+        # Elder Ray: bull power = high - EMA13, bear power = EMA13 - low
+        bull_power = high[i] - ema_13_aligned[i]
+        bear_power = ema_13_aligned[i] - low[i]
+        # Require bull/bear power > 0 for confirmation
+        elder_long = bull_power > 0
+        elder_short = bear_power > 0
         
-        # Chop regime: ranging market
-        chop_range = chop[i] > 61.8
+        # Volume confirmation: current volume > 1.3x average
+        volume_confirmed = volume[i] > 1.3 * vol_ma[i]
         
         if position == 0:
-            # Enter long: price below KAMA (dip) + RSI oversold + choppy market
-            if price_below_kama and rsi_oversold and chop_range:
+            # Enter long: Alligator aligned up + Elder Ray bull + volume
+            if (alligator_long and 
+                elder_long and 
+                volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Enter short: price above KAMA (rally) + RSI overbought + choppy market
-            elif price_above_kama and rsi_overbought and chop_range:
+            # Enter short: Alligator aligned down + Elder Ray bear + volume
+            elif (alligator_short and 
+                  elder_short and 
+                  volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses above KAMA or RSI overbought
-            if price_above_kama or rsi[i] > 70:
+            # Exit long: Alligator reverses or Elder Ray turns bearish
+            if not alligator_long or not elder_long:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses below KAMA or RSI oversold
-            if price_below_kama or rsi[i] < 30:
+            # Exit short: Alligator reverses or Elder Ray turns bullish
+            if not alligator_short or not elder_short:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -110,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_KAMA_RSI_Chop_MeanReversion_v1"
-timeframe = "1d"
+name = "4h_1d_WilliamsAlligator_ElderRay_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
