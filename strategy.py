@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout + Daily Trend + Volume Spike
-Long when price breaks above 20-period Donchian high, daily close > daily open, and volume > 1.5x average.
-Short when price breaks below 20-period Donchian low, daily close < daily open, and volume > 1.5x average.
+4h Donchian Breakout + 1W Trend + Volume Spike
+Long when price breaks above 20-period Donchian high, weekly close > weekly open, and volume > 1.5x average.
+Short when price breaks below 20-period Donchian low, weekly close < weekly open, and volume > 1.5x average.
 Exit when price reverses back through the Donchian median.
 Designed for low turnover: ~15-30 trades/year per symbol.
 """
@@ -21,13 +21,13 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data once for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load weekly data once for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    daily_close = df_1d['close'].values
-    daily_open = df_1d['open'].values
+    weekly_close = df_1w['close'].values
+    weekly_open = df_1w['open'].values
     
     # Calculate 20-period Donchian channels
     donch_high = np.full(n, np.nan)
@@ -51,13 +51,13 @@ def generate_signals(prices):
             vol_sum -= volume[i - 19]
             vol_count -= 1
     
-    # Daily trend: 1 if bullish (close > open), -1 if bearish (close < open)
-    daily_bullish = daily_close > daily_open
-    daily_bearish = daily_close < daily_open
+    # Weekly trend: 1 if bullish (close > open), -1 if bearish (close < open)
+    weekly_bullish = weekly_close > weekly_open
+    weekly_bearish = weekly_close < weekly_open
     
     # Create arrays for alignment
-    daily_bullish_arr = daily_bullish.astype(float)
-    daily_bearish_arr = daily_bearish.astype(float)
+    weekly_bullish_arr = weekly_bullish.astype(float)
+    weekly_bearish_arr = weekly_bearish.astype(float)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -68,20 +68,20 @@ def generate_signals(prices):
         if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(vol_ma[i]):
             continue
         
-        # Get aligned daily trend values
-        daily_bull = align_htf_to_ltf(prices, df_1d, daily_bullish_arr)[i]
-        daily_bear = align_htf_to_ltf(prices, df_1d, daily_bearish_arr)[i]
+        # Get aligned weekly trend values
+        weekly_bull = align_htf_to_ltf(prices, df_1w, weekly_bullish_arr)[i]
+        weekly_bear = align_htf_to_ltf(prices, df_1w, weekly_bearish_arr)[i]
         
-        if np.isnan(daily_bull) or np.isnan(daily_bear):
+        if np.isnan(weekly_bull) or np.isnan(weekly_bear):
             continue
         
         if position == 0:
-            # Long: Break above Donchian high, volume spike, daily bullish
-            if close[i] > donch_high[i] and volume[i] > vol_ma[i] * 1.5 and daily_bull > 0.5:
+            # Long: Break above Donchian high, volume spike, weekly bullish
+            if close[i] > donch_high[i] and volume[i] > vol_ma[i] * 1.5 and weekly_bull > 0.5:
                 position = 1
                 signals[i] = position_size
-            # Short: Break below Donchian low, volume spike, daily bearish
-            elif close[i] < donch_low[i] and volume[i] > vol_ma[i] * 1.5 and daily_bear > 0.5:
+            # Short: Break below Donchian low, volume spike, weekly bearish
+            elif close[i] < donch_low[i] and volume[i] > vol_ma[i] * 1.5 and weekly_bear > 0.5:
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
@@ -97,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_DailyTrend_Volume"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_WeeklyTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
