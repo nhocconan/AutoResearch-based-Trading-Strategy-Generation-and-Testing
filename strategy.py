@@ -3,14 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Williams %R mean reversion with 1-week trend filter and volume confirmation
-# Long when Williams %R < -80 (oversold) AND price > weekly EMA50 AND volume > 1.5x 20-period average
-# Short when Williams %R > -20 (overbought) AND price < weekly EMA50 AND volume > 1.5x 20-period average
-# Exit when Williams %R crosses back above -50 (for long) or below -50 (for short)
-# Williams %R identifies overbought/oversold conditions, effective in ranging markets
-# Weekly EMA50 filters for trend direction to avoid counter-trend trades
-# Volume confirmation ensures institutional participation
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Hypothesis: 4-hour Camarilla pivot breakout with 1-week trend filter (EMA50) and volume confirmation
+# Long when price breaks above H4 Camarilla level AND price > weekly EMA50 AND volume > 1.5x 20-period average
+# Short when price breaks below L4 Camarilla level AND price < weekly EMA50 AND volume > 1.5x 20-period average
+# Exit when price crosses back inside the Camarilla H4-L4 range
+# This captures strong trending moves from key intraday pivot levels with volume confirmation while avoiding counter-trend trades
+# Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,12 +23,28 @@ def generate_signals(prices):
     # Load weekly data ONCE before loop for EMA50 trend filter
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate Williams %R (14-period) on 12h
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate daily data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate Camarilla pivot levels from daily data
+    # Using previous day's OHLC for today's levels (standard practice)
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Calculate pivot and ranges
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    
+    # Camarilla levels: H4, H3, L3, L4
+    # H4 = close + 1.5 * range
+    # L4 = close - 1.5 * range
+    h4_1d = close_1d + 1.5 * range_1d
+    l4_1d = close_1d - 1.5 * range_1d
+    
+    # Align daily Camarilla levels to 4h timeframe
+    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
+    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
     
     # Calculate weekly EMA50 for trend filter
     close_1w = df_1w['close'].values
@@ -44,13 +58,13 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations (14 for Williams %R + buffer)
-    start = 20
+    # Start after enough data for calculations
+    start = 50  # Need enough data for weekly EMA50
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(williams_r[i]) or np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
@@ -59,26 +73,26 @@ def generate_signals(prices):
         vol_threshold = vol_avg[i] * 1.5
         
         if position == 0:
-            # Long setup: Williams %R oversold (< -80) AND price > weekly EMA50 AND volume confirmation
-            if (williams_r[i] < -80 and price > ema50_1w_aligned[i] and vol > vol_threshold):
+            # Long setup: breakout above H4 Camarilla level + above weekly EMA50 + volume confirmation
+            if (price > h4_1d_aligned[i] and price > ema50_1w_aligned[i] and vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: Williams %R overbought (> -20) AND price < weekly EMA50 AND volume confirmation
-            elif (williams_r[i] > -20 and price < ema50_1w_aligned[i] and vol > vol_threshold):
+            # Short setup: breakdown below L4 Camarilla level + below weekly EMA50 + volume confirmation
+            elif (price < l4_1d_aligned[i] and price < ema50_1w_aligned[i] and vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Williams %R crosses back above -50 (exiting oversold territory)
-            if williams_r[i] > -50:
+            # Exit long: price falls back below L4 Camarilla level (opposite side of range)
+            if price < l4_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Williams %R crosses back below -50 (exiting overbought territory)
-            if williams_r[i] < -50:
+            # Exit short: price rises back above H4 Camarilla level (opposite side of range)
+            if price > h4_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -86,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsR_1wEMA50_Volume"
-timeframe = "12h"
+name = "4h_1wCamarilla_EMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
