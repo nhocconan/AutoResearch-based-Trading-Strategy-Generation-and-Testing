@@ -3,98 +3,79 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h EMA Crossover with 4h Trend Filter and 1d Volume Regime
-# Uses fast/slow EMA crossovers on 1h for entry timing, filtered by 4h EMA trend direction
-# and 1d volume regime (high volume = active market). Avoids low-volume, choppy periods.
-# Works in bull/bear by only taking trades in direction of higher timeframe trend.
-# Target: 60-150 total trades over 4 years (15-37/year) with session filter (08-20 UTC)
+# Hypothesis: 6h Elder Ray + Weekly EMA Filter + Volume Spike
+# Elder Ray measures bull/bear power: bull_power = high - EMA(13), bear_power = low - EMA(13)
+# Combines with weekly EMA trend filter (avoid counter-trend trades) and volume confirmation
+# Works in bull/bear by only taking Elder Ray signals aligned with weekly trend
+# Target: 50-150 total trades over 4 years (12-37/year)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate indicators on HTF data
-    # 4h EMA for trend direction (20-period)
-    ema_4h = pd.Series(df_4h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # 1d average volume for regime filter (20-period)
-    vol_1d = pd.Series(df_1d['volume'].values)
-    avg_vol_1d = vol_1d.rolling(window=20, min_periods=20).mean().values
-    avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d)
-    
-    # 1h price data
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1h EMA for entry signals (9 and 21 period)
-    ema_fast = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema_slow = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # EMA 13 for Elder Ray calculation
+    close_series = pd.Series(close)
+    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Session filter: 08-20 UTC (pre-compute for efficiency)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Elder Ray components
+    bull_power = high - ema13
+    bear_power = low - ema13
+    
+    # Weekly trend filter: EMA 21 on weekly data
+    df_1w = get_htf_data(prices, '1w')
+    ema21_1w = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
+    
+    # Volume confirmation: volume > 1.5x average volume (20-period)
+    vol_series = pd.Series(volume)
+    avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 30  # for EMA calculations
+    start = 35  # for EMA13 and volume average
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or
-            np.isnan(ema_4h_aligned[i]) or np.isnan(avg_vol_1d_aligned[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(ema21_1w_aligned[i]) or np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
         
-        # Apply session filter
-        if not in_session[i]:
-            if position != 0:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Volume regime filter: only trade when 1d volume > average volume
-        if volume[i] < 0.5 * avg_vol_1d_aligned[i]:  # Avoid very low volume periods
-            if position != 0:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.0
-            continue
+        # Trend filter: only take bullish signals when price > weekly EMA21,
+        # only take bearish signals when price < weekly EMA21
+        weekly_uptrend = close[i] > ema21_1w_aligned[i]
+        weekly_downtrend = close[i] < ema21_1w_aligned[i]
         
         if position == 0:
-            # Long: fast EMA crosses above slow EMA AND price above 4h EMA (uptrend)
-            if ema_fast[i] > ema_slow[i] and close[i] > ema_4h_aligned[i]:
+            # Long: bullish Elder Ray + weekly uptrend + volume spike
+            if bull_power[i] > 0 and weekly_uptrend and volume[i] > 1.5 * avg_vol[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: fast EMA crosses below slow EMA AND price below 4h EMA (downtrend)
-            elif ema_fast[i] < ema_slow[i] and close[i] < ema_4h_aligned[i]:
+            # Short: bearish Elder Ray + weekly downtrend + volume spike
+            elif bear_power[i] < 0 and weekly_downtrend and volume[i] > 1.5 * avg_vol[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: fast EMA crosses below slow EMA
-            if ema_fast[i] < ema_slow[i]:
+            # Exit long: bearish Elder Ray or weekly trend turns down
+            if bear_power[i] < 0 or not weekly_uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: fast EMA crosses above slow EMA
-            if ema_fast[i] > ema_slow[i]:
+            # Exit short: bullish Elder Ray or weekly trend turns up
+            if bull_power[i] > 0 or not weekly_downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -102,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_EMA_Cross_4hTrend_1dVolRegime"
-timeframe = "1h"
+name = "6h_ElderRay_WeeklyEMA_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
