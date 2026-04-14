@@ -16,11 +16,7 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Calculate 1d ATR(14) for volatility filter and position sizing
+    # Calculate 1d ATR(14) for volatility
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     close_series = pd.Series(close)
@@ -28,16 +24,16 @@ def generate_signals(prices):
     tr2 = abs(high_series - close_series.shift(1))
     tr3 = abs(low_series - close_series.shift(1))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
+    atr_1d = tr.rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # Calculate 1d True Range for volatility filter
+    tr_series = pd.Series(tr)
+    tr_avg = tr_series.rolling(window=14, min_periods=14).mean().values
+    tr_avg_aligned = align_htf_to_ltf(prices, df_1d, tr_avg)
     
     # Calculate 24-period average volume for confirmation (1d * 24 = 24h = 1 day)
     vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    
-    # Calculate 1d Donchian(20) for breakout levels
-    donch_high_1d = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
-    donch_low_1d = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
     
     signals = np.zeros(n)
     position = 0
@@ -48,53 +44,48 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(atr[i]) or 
-            np.isnan(vol_avg[i]) or
-            np.isnan(donch_high_aligned[i]) or
-            np.isnan(donch_low_aligned[i])):
+        if (np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(tr_avg_aligned[i]) or 
+            np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         
-        # ATR-based volatility filter: avoid extremely low volatility periods
-        atr_ratio = atr[i] / price if price > 0 else 0
-        vol_filter = atr_ratio > 0.003  # Minimum 0.3% ATR relative to price
+        # Volatility filter: current TR > 1.5x average TR (high volatility)
+        vol_filter = tr_avg_aligned[i] > 0 and tr_series.iloc[i] > (tr_avg_aligned[i] * 1.5)
         
-        # Volume confirmation: current volume > 1.5x average
-        vol_confirm = vol > (vol_avg[i] * 1.5) if not np.isnan(vol_avg[i]) else False
+        # Volume confirmation: current volume > 2x average volume
+        vol_confirm = vol > (vol_avg[i] * 2.0) if not np.isnan(vol_avg[i]) else False
         
-        # Trend filter: price > 1d EMA50 for long, price < 1d EMA50 for short
-        trend_filter_long = price > ema_50_1d_aligned[i]
-        trend_filter_short = price < ema_50_1d_aligned[i]
-        
-        # Donchian breakout conditions
-        breakout_long = price > donch_high_aligned[i]
-        breakout_short = price < donch_low_aligned[i]
+        # Momentum: price change over 6 periods
+        if i >= 6:
+            price_change = (close[i] - close[i-6]) / close[i-6]
+        else:
+            price_change = 0
         
         if position == 0:
-            # Long setup: breakout above 1d Donchian high + EMA50 trend + volume + volatility
-            if (breakout_long and trend_filter_long and vol_confirm and vol_filter):
+            # Long: high volatility + high volume + positive momentum
+            if vol_filter and vol_confirm and price_change > 0.005:
                 position = 1
                 signals[i] = position_size
-            # Short setup: breakout below 1d Donchian low + EMA50 trend + volume + volatility
-            elif (breakout_short and trend_filter_short and vol_confirm and vol_filter):
+            # Short: high volatility + high volume + negative momentum
+            elif vol_filter and vol_confirm and price_change < -0.005:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below 1d EMA50
-            if price < ema_50_1d_aligned[i]:
+            # Exit long: volatility drops or momentum reverses
+            if not vol_filter or price_change < -0.002:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above 1d EMA50
-            if price > ema_50_1d_aligned[i]:
+            # Exit short: volatility drops or momentum reverses
+            if not vol_filter or price_change > 0.002:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -102,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dEMA50_Donchian20_Volume_Filter"
-timeframe = "4h"
+name = "6h_HighVol_Momentum_Breakout"
+timeframe = "6h"
 leverage = 1.0
