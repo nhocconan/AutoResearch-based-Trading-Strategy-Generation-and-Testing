@@ -3,10 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1-day volatility breakout with volume confirmation
-# - Uses daily ATR to set dynamic entry thresholds, adapting to market conditions
-# - Volume confirmation ensures breakouts are supported by participation
-# - Designed to capture volatility expansion phases in both bull and bear markets
+# Hypothesis: 4h strategy combining daily ATR-based breakout levels with volume confirmation and volatility filter
+# - Uses previous day's ATR to set dynamic breakout thresholds (S1/R1) that adapt to market volatility
+# - Requires volume > 1.5x 24-period average to confirm institutional participation
+# - Filters for high volatility regimes using 80th percentile of daily ATR/price ratio
+# - Designed to capture volatility expansion in both bull and bear markets with controlled frequency
 # - Target: 75-200 trades over 4 years to minimize fee drag while capturing significant moves
 # - Discrete position sizing (0.25) to reduce churn and manage drawdown
 
