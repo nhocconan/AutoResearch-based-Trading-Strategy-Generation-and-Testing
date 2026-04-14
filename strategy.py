@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,64 +13,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1h and 4h data once before loop
-    df_1h = get_htf_data(prices, '1h')
-    df_4h = get_htf_data(prices, '4h')
-    
-    if len(df_1h) < 50 or len(df_4h) < 30:
+    # Load weekly data once before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # 4h EMA for trend direction
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # 1h RSI for mean reversion
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # 60-week EMA for long-term trend
+    close_1w_series = pd.Series(close_1w)
+    ema_60w = close_1w_series.ewm(span=60, adjust=False, min_periods=60).mean().values
     
-    # 1h Bollinger Bands for volatility
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
+    # 20-week ATR for volatility measurement
+    high_low = high_1w - low_1w
+    high_close = np.abs(high_1w - np.roll(close_1w, 1))
+    low_close = np.abs(low_1w - np.roll(close_1w, 1))
+    high_close[0] = high_low[0]
+    low_close[0] = high_low[0]
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    tr_series = pd.Series(tr)
+    atr_20w = tr_series.rolling(window=20, min_periods=20).mean().values
     
-    # Session filter: 8-20 UTC
-    hours = prices.index.hour
+    # Align weekly indicators to 6h timeframe
+    ema_60w_6h = align_htf_to_ltf(prices, df_1w, ema_60w)
+    atr_20w_6h = align_htf_to_ltf(prices, df_1w, atr_20w)
+    
+    # 6h ATR for position sizing and volatility filter
+    high_low_6h = high - low
+    high_close_6h = np.abs(high - np.roll(close, 1))
+    low_close_6h = np.abs(low - np.roll(close, 1))
+    high_close_6h[0] = high_low_6h[0]
+    low_close_6h[0] = high_low_6h[0]
+    tr_6h = np.maximum(high_low_6h, np.maximum(high_close_6h, low_close_6h))
+    tr_6h_series = pd.Series(tr_6h)
+    atr_14 = tr_6h_series.rolling(window=14, min_periods=14).mean().values
+    
+    # 6h Donchian channels (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
     signals = np.zeros(n)
-    position_size = 0.20
+    position = 0
+    position_size = 0.25
     
-    for i in range(50, n):
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(rsi_values[i]) or np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]):
+    for i in range(100, n):
+        # Skip if any critical data is NaN
+        if (np.isnan(ema_60w_6h[i]) or np.isnan(atr_20w_6h[i]) or 
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(atr_14[i])):
             continue
         
-        hour = hours[i]
-        in_session = 8 <= hour <= 20
+        # Trend filter: price above/below 60-week EMA
+        uptrend = close[i] > ema_60w_6h[i]
+        downtrend = close[i] < ema_60w_6h[i]
         
-        if not in_session:
-            continue
+        # Volatility filter: current ATR > 1.5x 20-week ATR (expansion)
+        vol_expansion = atr_14[i] > (atr_20w_6h[i] * 1.5)
         
-        # Trend filter: price above/below 4h EMA50
-        trend_up = close[i] > ema_4h_aligned[i]
-        trend_down = close[i] < ema_4h_aligned[i]
-        
-        # Mean reversion signals
-        if trend_up and rsi_values[i] < 30 and close[i] < lower_bb[i]:
-            # Long in uptrend on RSI oversold + BB lower band touch
-            signals[i] = position_size
-        elif trend_down and rsi_values[i] > 70 and close[i] > upper_bb[i]:
-            # Short in downtrend on RSI overbought + BB upper band touch
-            signals[i] = -position_size
+        if position == 0:
+            # Long: Uptrend + volatility expansion + break above Donchian high
+            if (uptrend and vol_expansion and 
+                close[i] > donchian_high[i] and close[i-1] <= donchian_high[i]):
+                position = 1
+                signals[i] = position_size
+            # Short: Downtrend + volatility expansion + break below Donchian low
+            elif (downtrend and vol_expansion and 
+                  close[i] < donchian_low[i] and close[i-1] >= donchian_low[i]):
+                position = -1
+                signals[i] = -position_size
+        elif position == 1:
+            # Exit: Trend reversal or volatility contraction
+            if (not uptrend) or (not vol_expansion) or (close[i] < donchian_low[i]):
+                position = 0
+                signals[i] = 0.0
+        elif position == -1:
+            # Exit: Trend reversal or volatility contraction
+            if (not downtrend) or (not vol_expansion) or (close[i] > donchian_high[i]):
+                position = 0
+                signals[i] = 0.0
     
     return signals
 
-name = "1h_EMA50_RSI_BB_MeanReversion_Session"
-timeframe = "1h"
+name = "6h_1w_EMA60_ATR20_Donchian20_VolExpansion"
+timeframe = "6h"
 leverage = 1.0
