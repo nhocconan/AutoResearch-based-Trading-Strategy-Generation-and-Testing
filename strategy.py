@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w CCI for trend filter and 1d Donchian breakout for entry.
-# Weekly CCI filters trades to align with higher timeframe trend, avoiding counter-trend trades.
-# Daily Donchian breakout (20) provides entry with volume confirmation (>1.5x 20-day average volume).
-# Designed to work in both bull and bear markets by using 1w trend filter to avoid counter-trend trades.
-# Target: 15-25 trades/year per symbol (60-100 total over 4 years) to minimize fee drag.
+# Hypothesis: 12h strategy using 1d Donchian breakout for entry and 1d ADX for trend strength filter.
+# Only take breakouts when ADX > 25 (trending market) to avoid false signals in chop.
+# Volume confirmation (>1.5x 20-period average) ensures breakout validity.
+# Fixed position size of 0.25 to manage risk and reduce fee churn.
+# Designed for 12h timeframe to target 15-30 trades/year per symbol (60-120 total over 4 years).
+# Works in both bull and bear markets by requiring strong trend (ADX>25) before entries.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,33 +20,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE for CCI calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Calculate CCI (20) on 1w data
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Typical price
-    tp = (high_1w + low_1w + close_1w) / 3
-    # SMA of typical price
-    sma_tp = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
-    # Mean deviation
-    md = pd.Series(tp).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
-    # CCI
-    cci = (tp - sma_tp) / (0.015 * md)
-    # Handle division by zero or near-zero md
-    cci = np.where(md == 0, 0, cci)
-    
-    # Align 1w CCI to 1d timeframe
-    cci_1w_aligned = align_htf_to_ltf(prices, df_1w, cci)
-    
-    # Load 1d data ONCE for Donchian channels
+    # Load 1d data ONCE for Donchian channels and ADX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     # Calculate Donchian channels (20-period)
@@ -55,9 +32,41 @@ def generate_signals(prices):
     donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align 1d Donchian channels to 1d timeframe (no change, but for consistency)
+    # Calculate ADX (14-period)
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smoothed values
+    tr_period = 14
+    atr = pd.Series(tr).ewm(alpha=1/tr_period, adjust=False).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/tr_period, adjust=False).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/tr_period, adjust=False).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * dm_plus_smooth / atr
+    minus_di = 100 * dm_minus_smooth / atr
+    
+    # DX and ADX
+    dx = np.where((plus_di + minus_di) != 0, 
+                  100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = pd.Series(dx).ewm(alpha=1/tr_period, adjust=False).mean().values
+    
+    # Align 1d indicators to 12h timeframe
     donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Volume confirmation: 1.5x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -67,13 +76,13 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(20, 20)  # Need Donchian and volume MA
+    start = max(20, 30)  # Need Donchian and ADX
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(cci_1w_aligned[i]) or 
-            np.isnan(donchian_high_aligned[i]) or
+        if (np.isnan(donchian_high_aligned[i]) or 
             np.isnan(donchian_low_aligned[i]) or
+            np.isnan(adx_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -81,36 +90,37 @@ def generate_signals(prices):
         # Volume confirmation
         volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
+        # Trend filter: ADX > 25 indicates trending market
+        trending = adx_aligned[i] > 25
+        
         if position == 0:
             # Look for breakouts above 1d Donchian high or below 1d Donchian low
-            # Only trade in direction of 1w CCI (>100 for uptrend, <-100 for downtrend)
+            # Only trade in trending markets (ADX > 25)
             
-            # Long: price breaks above 1d Donchian high AND 1w CCI > 100 (uptrend)
+            # Long: price breaks above 1d Donchian high AND trending market AND volume confirmation
             if (close[i] > donchian_high_aligned[i] and 
-                cci_1w_aligned[i] > 100 and 
+                trending and 
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below 1d Donchian low AND 1w CCI < -100 (downtrend)
+            # Short: price breaks below 1d Donchian low AND trending market AND volume confirmation
             elif (close[i] < donchian_low_aligned[i] and 
-                  cci_1w_aligned[i] < -100 and 
+                  trending and 
                   volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to 1d Donchian low or 1w CCI turns negative
-            if (close[i] <= donchian_low_aligned[i] or 
-                cci_1w_aligned[i] < 0):
+            # Exit long: price returns to 1d Donchian low
+            if close[i] <= donchian_low_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to 1d Donchian high or 1w CCI turns positive
-            if (close[i] >= donchian_high_aligned[i] or 
-                cci_1w_aligned[i] > 0):
+            # Exit short: price returns to 1d Donchian high
+            if close[i] >= donchian_high_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -118,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1wCCI_1dDonchian_VolumeFilter_v1"
-timeframe = "1d"
+name = "12h_1dDonchian_ADXTrend_VolumeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
