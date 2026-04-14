@@ -13,75 +13,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data (HTF) once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load daily data (HTF) once before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    vol_1d = df_1d['volume'].values
     
-    # Calculate weekly ATR (14-period)
-    tr = np.zeros(len(df_1w))
-    tr[0] = high_1w[0] - low_1w[0]
-    for i in range(1, len(df_1w)):
+    # Calculate daily ATR (14-period)
+    tr = np.zeros(len(df_1d))
+    tr[0] = high_1d[0] - low_1d[0]
+    for i in range(1, len(df_1d)):
         tr[i] = max(
-            high_1w[i] - low_1w[i],
-            abs(high_1w[i] - close_1w[i-1]),
-            abs(low_1w[i] - close_1w[i-1])
+            high_1d[i] - low_1d[i],
+            abs(high_1d[i] - close_1d[i-1]),
+            abs(low_1d[i] - close_1d[i-1])
         )
     
-    atr_1w = np.full(len(df_1w), np.nan)
-    if len(df_1w) >= 14:
-        atr_1w[13] = np.mean(tr[:14])
-        for i in range(14, len(df_1w)):
-            atr_1w[i] = (atr_1w[i-1] * 13 + tr[i]) / 14
+    atr_1d = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 14:
+        atr_1d[13] = np.mean(tr[:14])
+        for i in range(14, len(df_1d)):
+            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # Calculate weekly EMA (50-period) for trend
-    ema_50_1w = np.full(len(df_1w), np.nan)
-    if len(df_1w) >= 50:
-        ema_50_1w[49] = np.mean(close_1w[:50])
-        for i in range(50, len(df_1w)):
-            ema_50_1w[i] = (close_1w[i] * 2 + ema_50_1w[i-1] * 49) / 50
+    # Calculate daily volatility filter (ATR > 1.5% of price)
+    vol_filter_1d = np.zeros(len(df_1d))
+    for i in range(len(df_1d)):
+        if not np.isnan(atr_1d[i]) and close_1d[i] > 0:
+            vol_filter_1d[i] = atr_1d[i] / close_1d[i] > 0.015
+        else:
+            vol_filter_1d[i] = False
     
-    # Calculate weekly RSI (14-period) for momentum
-    delta = np.diff(close_1w, prepend=close_1w[0])
+    # Calculate daily RSI (14-period)
+    delta = np.diff(close_1d, prepend=close_1d[0])
     gain = np.where(delta > 0, delta, 0.0)
     loss = np.where(delta < 0, -delta, 0.0)
     
-    avg_gain = np.full(len(df_1w), np.nan)
-    avg_loss = np.full(len(df_1w), np.nan)
-    if len(df_1w) >= 14:
+    avg_gain = np.full(len(df_1d), np.nan)
+    avg_loss = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 14:
         avg_gain[13] = np.mean(gain[:14])
         avg_loss[13] = np.mean(loss[:14])
-        for i in range(14, len(df_1w)):
+        for i in range(14, len(df_1d)):
             avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
             avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    rsi_1w = np.full(len(df_1w), np.nan)
-    for i in range(len(df_1w)):
+    rsi_1d = np.full(len(df_1d), np.nan)
+    for i in range(len(df_1d)):
         if not np.isnan(avg_loss[i]) and avg_loss[i] != 0:
             rs = avg_gain[i] / avg_loss[i]
-            rsi_1w[i] = 100 - (100 / (1 + rs))
+            rsi_1d[i] = 100 - (100 / (1 + rs))
         elif not np.isnan(avg_gain[i]) and avg_loss[i] == 0:
-            rsi_1w[i] = 100.0
+            rsi_1d[i] = 100.0
     
-    # Calculate weekly volume average (20-period) for volume filter
-    vol_ma_20_1w = np.full(len(df_1w), np.nan)
-    if len(df_1w) >= 20:
-        vol_ma_20_1w[19] = np.mean(volume_1w[:20])
-        for i in range(20, len(df_1w)):
-            vol_ma_20_1w[i] = (volume_1w[i] + vol_ma_20_1w[i-1] * 19) / 20
+    # Calculate daily volume average (20-period)
+    vol_ma_1d = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 20:
+        vol_ma_1d[19] = np.mean(vol_1d[:20])
+        for i in range(20, len(df_1d)):
+            vol_ma_1d[i] = (vol_ma_1d[i-1] * 19 + vol_1d[i]) / 20
     
-    # Align indicators to 12h timeframe
-    atr_12h = align_htf_to_ltf(prices, df_1w, atr_1w)
-    ema_50_12h = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    rsi_12h = align_htf_to_ltf(prices, df_1w, rsi_1w)
-    vol_ma_20_12h = align_htf_to_ltf(prices, df_1w, vol_ma_20_1w)
+    # Calculate volume spike filter (current volume > 1.5x 20-day average)
+    vol_spike_1d = np.zeros(len(df_1d))
+    for i in range(len(df_1d)):
+        if not np.isnan(vol_ma_1d[i]) and vol_ma_1d[i] > 0:
+            vol_spike_1d[i] = vol_1d[i] > vol_ma_1d[i] * 1.5
+        else:
+            vol_spike_1d[i] = False
     
-    # Calculate 12-hour Donchian channels (20-period)
+    # Align indicators to 4h timeframe (primary timeframe)
+    atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    vol_filter_4h = align_htf_to_ltf(prices, df_1d, vol_filter_1d.astype(float))
+    rsi_4h = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    vol_spike_4h = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
+    
+    # Calculate 4-hour Donchian channels (20-period)
     donch_high = np.full(n, np.nan)
     donch_low = np.full(n, np.nan)
     if n >= 20:
@@ -95,46 +104,53 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical data is NaN
-        if (np.isnan(atr_12h[i]) or
-            np.isnan(ema_50_12h[i]) or
-            np.isnan(rsi_12h[i]) or
-            np.isnan(vol_ma_20_12h[i]) or
+        if (np.isnan(atr_4h[i]) or
             np.isnan(donch_high[i]) or
-            np.isnan(donch_low[i])):
+            np.isnan(donch_low[i]) or
+            np.isnan(rsi_4h[i])):
             signals[i] = 0.0
             continue
         
-        # Skip low volatility periods (ATR < 1% of price)
-        if atr_12h[i] / close[i] < 0.01:
+        # Skip low volatility periods (ATR < 1.5% of price)
+        if vol_filter_4h[i] < 0.5:
             signals[i] = 0.0
             continue
         
-        # Skip low volume periods (volume < 20-period MA)
-        if volume[i] < vol_ma_20_12h[i]:
-            signals[i] = 0.0
-            continue
+        # Calculate daily pivot levels based on previous day's range
+        prev_high = high_1d[i-1] if i > 0 else high_1d[0]
+        prev_low = low_1d[i-1] if i > 0 else low_1d[0]
+        prev_close = close_1d[i-1] if i > 0 else close_1d[0]
+        prev_range = prev_high - prev_low
+        
+        # Camarilla-style pivot levels (R3/S3)
+        r3 = prev_close + (prev_range * 1.1 / 4)
+        s3 = prev_close - (prev_range * 1.1 / 4)
+        
+        # Align to 4h timeframe
+        r3_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r3))[i]
+        s3_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i]
         
         if position == 0:
-            # Long: Price breaks above 12h Donchian high AND price > weekly EMA50 AND RSI < 70
-            if close[i] > donch_high[i] and close[i] > ema_50_12h[i] and rsi_12h[i] < 70:
+            # Long: Price breaks above 4h Donchian high AND above S3 AND RSI < 70 AND volume spike
+            if close[i] > donch_high[i] and close[i] > s3_4h and rsi_4h[i] < 70 and vol_spike_4h[i] > 0.5:
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below 12h Donchian low AND price < weekly EMA50 AND RSI > 30
-            elif close[i] < donch_low[i] and close[i] < ema_50_12h[i] and rsi_12h[i] > 30:
+            # Short: Price breaks below 4h Donchian low AND below R3 AND RSI > 30 AND volume spike
+            elif close[i] < donch_low[i] and close[i] < r3_4h and rsi_4h[i] > 30 and vol_spike_4h[i] > 0.5:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below 12h Donchian low OR below weekly EMA50 OR RSI > 70
-            if close[i] < donch_low[i] or close[i] < ema_50_12h[i] or rsi_12h[i] > 70:
+            # Exit: Price falls back below 4h Donchian low OR below S3 OR RSI > 70
+            if close[i] < donch_low[i] or close[i] < s3_4h or rsi_4h[i] > 70:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above 12h Donchian high OR above weekly EMA50 OR RSI < 30
-            if close[i] > donch_high[i] or close[i] > ema_50_12h[i] or rsi_12h[i] < 30:
+            # Exit: Price rises back above 4h Donchian high OR above R3 OR RSI < 30
+            if close[i] > donch_high[i] or close[i] > r3_4h or rsi_4h[i] < 30:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -142,6 +158,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1w_EMA50_RSI_VolumeFilter"
-timeframe = "12h"
+name = "4h_1d_Camarilla_R3S3_RSI_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
