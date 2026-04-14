@@ -3,13 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1d EMA trend filter and volume confirmation
-# Works in bull/bear: trend filter avoids counter-trend trades, volume confirms breakout strength
-# Target: 12-37 trades/year (50-150 over 4 years) to avoid fee drag
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,63 +18,79 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA(50) for trend filter
+    # Calculate daily ATR(14) for volatility regime
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 12h Donchian channels (20-period)
-    lookback = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1d = np.concatenate([[np.nan], tr_1d])
+    atr_1d = np.full(len(tr_1d), np.nan)
     
-    for i in range(lookback-1, n):
-        highest_high[i] = np.max(high[i-lookback+1:i+1])
-        lowest_low[i] = np.min(low[i-lookback+1:i+1])
+    for i in range(14, len(tr_1d)):
+        atr_1d[i] = np.nanmean(tr_1d[i-13:i+1])
     
-    # Align daily EMA to 12h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate daily EMA(50) for trend
+    close_1d_series = pd.Series(close_1d)
+    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Calculate daily EMA(200) for long-term trend filter
+    close_1d_series2 = pd.Series(close_1d)
+    ema_200_1d = close_1d_series2.ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Create arrays for alignment
+    atr_1d_arr = atr_1d
+    ema_50_1d_arr = ema_50_1d
+    ema_200_1d_arr = ema_200_1d
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.25
+    position_size = 0.30
     
-    for i in range(lookback, n):
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema_50_aligned[i]):
+    for i in range(100, n):
+        # Get aligned daily data
+        atr_1d_i = align_htf_to_ltf(prices, df_1d, atr_1d_arr)[i]
+        ema_50_1d_i = align_htf_to_ltf(prices, df_1d, ema_50_1d_arr)[i]
+        ema_200_1d_i = align_htf_to_ltf(prices, df_1d, ema_200_1d_arr)[i]
+        
+        if np.isnan(atr_1d_i) or np.isnan(ema_50_1d_i) or np.isnan(ema_200_1d_i):
             continue
-            
-        # Volume filter: above average volume
-        vol_ma = np.mean(volume[max(0, i-10):i+1])
-        if volume[i] < 0.5 * vol_ma:  # Avoid low volume breakouts
+        
+        # Volatility regime: only trade when ATR is above median (avoid chop)
+        if atr_1d_i < np.nanmedian(atr_1d):
             continue
-            
-        # Long: breakout above Donchian high + above daily EMA50
-        if close[i] > highest_high[i] and close[i] > ema_50_aligned[i]:
+        
+        # Only trade in direction of long-term trend (above/below EMA200)
+        if close[i] > ema_200_1d_i:
+            # Only allow longs in uptrend
             if position == 0:
-                position = 1
-                signals[i] = position_size
-            elif position == -1:  # Reverse from short
-                position = 1
-                signals[i] = position_size
-                
-        # Short: breakdown below Donchian low + below daily EMA50
-        elif close[i] < lowest_low[i] and close[i] < ema_50_aligned[i]:
+                # Long: price above daily EMA50 + volume spike
+                if close[i] > ema_50_1d_i and volume[i] > 2.0 * np.nanmedian(volume[max(0, i-30):i]):
+                    position = 1
+                    signals[i] = position_size
+            elif position == 1:
+                # Exit: price crosses below EMA50
+                if close[i] < ema_50_1d_i:
+                    position = 0
+                    signals[i] = 0.0
+        elif close[i] < ema_200_1d_i:
+            # Only allow shorts in downtrend
             if position == 0:
-                position = -1
-                signals[i] = -position_size
-            elif position == 1:  # Reverse from long
-                position = -1
-                signals[i] = -position_size
-                
-        # Exit: reverse signal or return to EMA50
-        elif position == 1 and close[i] < ema_50_aligned[i]:
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and close[i] > ema_50_aligned[i]:
-            position = 0
-            signals[i] = 0.0
+                # Short: price below daily EMA50 + volume spike
+                if close[i] < ema_50_1d_i and volume[i] > 2.0 * np.nanmedian(volume[max(0, i-30):i]):
+                    position = -1
+                    signals[i] = -position_size
+            elif position == -1:
+                # Exit: price crosses above EMA50
+                if close[i] > ema_50_1d_i:
+                    position = 0
+                    signals[i] = 0.0
     
     return signals
 
-name = "12h_Donchian_Breakout_EMA50_Volume"
-timeframe = "12h"
+name = "4h_DailyEMA50_VolumeSpike_TrendFilter_v1"
+timeframe = "4h"
 leverage = 1.0
