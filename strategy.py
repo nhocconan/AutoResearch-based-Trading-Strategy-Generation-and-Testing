@@ -47,9 +47,6 @@ def generate_signals(prices):
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1d ATR for exit threshold
-    atr_exit_threshold = atr_1d * 0.15
-    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25
