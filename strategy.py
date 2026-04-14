@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla Pivot Breakout with Volume and 12h Trend Filter
-# Uses daily Camarilla pivot levels (R3/S3 for fade, R4/S4 for breakout)
-# 12h EMA (50) provides trend direction to filter breakouts
-# Volume confirmation (>1.5x average) ensures momentum
-# Designed to work in both bull and bear markets by trading breakouts in direction of higher timeframe trend
-# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag
+# Hypothesis: 4h Choppiness Index regime filter + 1d Donchian breakout with volume confirmation
+# Uses Choppiness Index (14) to determine market regime: >61.8 = range (mean reversion), <38.2 = trending
+# In trending regime: trade 1d Donchian(20) breakout in direction of trend
+# In ranging regime: trade mean reversion at Bollinger Bands (20,2) with 1d trend filter
+# Volume confirmation (>1.5x average) ensures institutional participation
+# Designed to adapt to both trending and ranging markets, reducing whipsaw in chop
+# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,99 +21,114 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data for Camarilla pivots and 12h EMA ONCE before loop
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate daily Camarilla pivot levels
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # R4 = Close + Range * 1.1/2
-    # R3 = Close + Range * 1.1/4
-    # S3 = Close - Range * 1.1/4
-    # S4 = Close - Range * 1.1/2
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    range_hl = df_1d['high'] - df_1d['low']
-    pivot = typical_price.values
-    r4 = (df_1d['close'] + range_hl * 1.1 / 2).values
-    r3 = (df_1d['close'] + range_hl * 1.1 / 4).values
-    s3 = (df_1d['close'] - range_hl * 1.1 / 4).values
-    s4 = (df_1d['close'] - range_hl * 1.1 / 2).values
+    # 1d Donchian channels (20)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Align Camarilla levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # 1d EMA (50) for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Load 12h EMA data
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Choppiness Index (14) - using 1d data
+    atr_1d = pd.Series(np.maximum(np.maximum(high_1d - low_1d, np.abs(high_1d - np.roll(df_1d['close'], 1))), np.abs(low_1d - np.roll(df_1d['close'], 1)))).rolling(window=14, min_periods=14).mean().values
+    sum_tr = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+    max_hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(sum_tr / (max_hh - min_ll)) / np.log10(14)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Volume confirmation: volume > 1.5x average volume (30-period)
+    # Bollinger Bands (20, 2) for ranging market
+    close_series = pd.Series(close)
+    ma_20 = close_series.rolling(window=20, min_periods=20).mean().values
+    std_20 = close_series.rolling(window=20, min_periods=20).std().values
+    upper_bb = ma_20 + 2 * std_20
+    lower_bb = ma_20 - 2 * std_20
+    
+    # Volume confirmation: volume > 1.5x average volume (20-period)
     vol_series = pd.Series(volume)
-    avg_vol = vol_series.rolling(window=30, min_periods=30).mean().shift(1).values
+    avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 50  # for 12h EMA calculation
+    start = 50  # for 1d EMA and Donchian calculation
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(pivot_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(avg_vol[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or np.isnan(chop_aligned[i]) or 
+            np.isnan(ma_20[i]) or np.isnan(std_20[i]) or np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        
-        # Trend filter: only trade in direction of 12h EMA
-        trend_up = price > ema_50_12h_aligned[i]
-        trend_down = price < ema_50_12h_aligned[i]
+        chop_val = chop_aligned[i]
         
         if position == 0:
-            # Long breakout: price breaks above R4 with volume filter and uptrend
-            if price > r4_aligned[i] and vol > 1.5 * avg_vol[i] and trend_up:
-                position = 1
-                signals[i] = position_size
-            # Short breakdown: price breaks below S4 with volume filter and downtrend
-            elif price < s4_aligned[i] and vol > 1.5 * avg_vol[i] and trend_down:
-                position = -1
-                signals[i] = -position_size
-            # Long fade: price rejects at S3 with volume filter and uptrend
-            elif price < s3_aligned[i] and vol > 1.5 * avg_vol[i] and trend_up and i > start and close[i-1] >= s3_aligned[i-1]:
-                position = 1
-                signals[i] = position_size
-            # Short fade: price rejects at R3 with volume filter and downtrend
-            elif price > r3_aligned[i] and vol > 1.5 * avg_vol[i] and trend_down and i > start and close[i-1] <= r3_aligned[i-1]:
-                position = -1
-                signals[i] = -position_size
+            # Trending regime (CHOP < 38.2): Donchian breakout
+            if chop_val < 38.2:
+                # Long: price breaks above 1d Donchian high with volume filter and uptrend
+                if price > donchian_high_aligned[i] and vol > 1.5 * avg_vol[i] and price > ema_50_1d_aligned[i]:
+                    position = 1
+                    signals[i] = position_size
+                # Short: price breaks below 1d Donchian low with volume filter and downtrend
+                elif price < donchian_low_aligned[i] and vol > 1.5 * avg_vol[i] and price < ema_50_1d_aligned[i]:
+                    position = -1
+                    signals[i] = -position_size
+            # Ranging regime (CHOP > 61.8): Mean reversion at Bollinger Bands
+            elif chop_val > 61.8:
+                # Long: price touches lower BB with volume filter and 1d uptrend
+                if price <= lower_bb[i] and vol > 1.5 * avg_vol[i] and price > ema_50_1d_aligned[i]:
+                    position = 1
+                    signals[i] = position_size
+                # Short: price touches upper BB with volume filter and 1d downtrend
+                elif price >= upper_bb[i] and vol > 1.5 * avg_vol[i] and price < ema_50_1d_aligned[i]:
+                    position = -1
+                    signals[i] = -position_size
+            # Neutral regime (38.2 <= CHOP <= 61.8): no trading
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below pivot (mean reversion) or stops at R3
-            if price < pivot_aligned[i]:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = position_size
+            # Exit conditions
+            if chop_val < 38.2:  # trending: exit when price crosses 1d EMA
+                if price < ema_50_1d_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = position_size
+            else:  # ranging or neutral: exit when price reaches middle Bollinger Band
+                if price >= ma_20[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above pivot (mean reversion) or stops at S3
-            if price > pivot_aligned[i]:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = -position_size
+            # Exit conditions
+            if chop_val < 38.2:  # trending: exit when price crosses 1d EMA
+                if price > ema_50_1d_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -position_size
+            else:  # ranging or neutral: exit when price reaches middle Bollinger Band
+                if price <= ma_20[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -position_size
     
     return signals
 
-name = "6h_Camarilla_Pivot_Breakout_Volume_Trend"
-timeframe = "6h"
+name = "4h_Chop_DonchianBB_Regime"
+timeframe = "4h"
 leverage = 1.0
