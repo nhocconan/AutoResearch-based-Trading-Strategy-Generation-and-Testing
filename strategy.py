@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -13,59 +13,50 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for monthly pivot levels and volume
+    # Get 1d data for weekly pivot levels (actual weekly from daily)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate monthly pivot points using prior month's OHLC
-    # Approximate monthly by using 20-day period (1 trading month)
-    period = 20
-    if len(high_1d) < period:
-        return np.zeros(n)
-    
-    # Rolling max/min/mean for monthly high/low/close
-    high_series = pd.Series(high_1d)
-    low_series = pd.Series(low_1d)
-    close_series = pd.Series(close_1d)
-    volume_series = pd.Series(volume_1d)
-    
-    monthly_high = high_series.rolling(window=period, min_periods=period).max().shift(1).values
-    monthly_low = low_series.rolling(window=period, min_periods=period).min().shift(1).values
-    monthly_close = close_series.rolling(window=period, min_periods=period).mean().shift(1).values
-    monthly_volume = volume_series.rolling(window=period, min_periods=period).mean().shift(1).values
+    # Calculate weekly pivot points using prior week's OHLC
+    # Assuming 5 trading days per week, use 5-day rolling
+    week_high = pd.Series(high_1d).rolling(window=5, min_periods=5).max().shift(5).values
+    week_low = pd.Series(low_1d).rolling(window=5, min_periods=5).min().shift(5).values
+    week_close = pd.Series(close_1d).rolling(window=5, min_periods=5).last().shift(5).values
     
     # Pivot point: (H + L + C) / 3
-    pp = (monthly_high + monthly_low + monthly_close) / 3
+    pp = (week_high + week_low + week_close) / 3
     # Resistance and support levels
-    r1 = 2 * pp - monthly_low
-    s1 = 2 * pp - monthly_high
-    r2 = pp + (monthly_high - monthly_low)
-    s2 = pp - (monthly_high - monthly_low)
+    r1 = 2 * pp - week_low
+    s1 = 2 * pp - week_high
     
-    # Align pivot levels to 4h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    # Align pivot levels to 1d timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
-    # Volume confirmation: current 4h volume > 1.5x monthly average volume
-    vol_series_4h = pd.Series(volume)
-    avg_vol_4h = vol_series_4h.rolling(window=20, min_periods=20).mean().shift(1).values
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    # Weekly EMA20 for trend
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # Volume confirmation: volume > 1.5x average volume (20-period)
+    vol_series = pd.Series(volume)
+    avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    start = max(20, 20)  # 20 for volume and pivot calculations
+    # Start after enough data for calculations
+    start = max(20, 20, 20)  # 20 for weekly calculations
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(avg_vol_4h[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
         
@@ -73,25 +64,25 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long: price breaks above R1 resistance with volume confirmation
-            if price > r1_aligned[i] and vol > 1.5 * avg_vol_4h[i]:
+            # Long: price crosses above R1 pivot AND above weekly EMA20 with volume
+            if price > r1_aligned[i] and price > ema_20_1w_aligned[i] and vol > 1.5 * avg_vol[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below S1 support with volume confirmation
-            elif price < s1_aligned[i] and vol > 1.5 * avg_vol_4h[i]:
+            # Short: price crosses below S1 pivot AND below weekly EMA20 with volume
+            elif price < s1_aligned[i] and price < ema_20_1w_aligned[i] and vol > 1.5 * avg_vol[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below S1 support
+            # Exit long: price crosses below S1 pivot
             if price < s1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above R1 resistance
+            # Exit short: price crosses above R1 pivot
             if price > r1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
@@ -100,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Monthly_Pivot_Breakout_Volume"
-timeframe = "4h"
+name = "1d_1w_Pivot_EMA_Volume"
+timeframe = "1d"
 leverage = 1.0
