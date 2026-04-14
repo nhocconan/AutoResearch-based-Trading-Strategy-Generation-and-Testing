@@ -21,7 +21,6 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
     
     # Calculate 1d ATR (14-period) for volatility filter
     high_low_1d = high_1d - low_1d
