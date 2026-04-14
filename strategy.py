@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation
-# Trend from 1d EMA(50) provides directional bias to avoid counter-trend trades
+# Hypothesis: 4h Donchian breakout with 1d trend filter and volume confirmation
+# Trend from 1d EMA (20) provides directional bias to avoid counter-trend trades
 # 4h Donchian(20) breakout captures momentum in direction of 1d trend
-# Volume > 1.5x average confirms institutional participation
+# Volume > 1.8x average confirms institutional participation
 # Works in bull/bear as 1d EMA adapts to trend
-# Target: 20-40 trades/year per symbol (80-160 total over 4 years)
+# Target: 20-50 trades/year per symbol (80-200 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,8 +23,8 @@ def generate_signals(prices):
     # Load 1d data ONCE for trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d EMA(50) for trend filter
-    ema_len = 50
+    # 1d EMA(20) for trend filter
+    ema_len = 20
     if len(df_1d) < ema_len:
         return np.zeros(n)
     
@@ -36,7 +36,7 @@ def generate_signals(prices):
     dc_upper = pd.Series(high).rolling(window=dc_len, min_periods=dc_len).max().shift(1).values
     dc_lower = pd.Series(low).rolling(window=dc_len, min_periods=dc_len).min().shift(1).values
     
-    # Volume confirmation: 1.5x average volume
+    # Volume confirmation: 1.8x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -55,12 +55,12 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to 1d EMA50
+        # Trend filter: price relative to 1d EMA20
         above_ema = close[i] > ema_1d_aligned[i]
         below_ema = close[i] < ema_1d_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x average
-        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: current volume > 1.8x average
+        volume_confirmed = volume[i] > 1.8 * vol_ma[i]
         
         if position == 0:
             # Enter long: Donchian breakout above + above 1d EMA + volume
@@ -94,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_EMA50_Donchian_Volume_v1"
+name = "4h_1d_EMA20_Donchian_Volume_v1"
 timeframe = "4h"
 leverage = 1.0
