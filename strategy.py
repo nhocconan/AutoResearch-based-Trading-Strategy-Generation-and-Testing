@@ -23,26 +23,24 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 14-day ATR for volatility (daily)
-    if len(high_1d) < 14:
+    # Calculate 20-period Donchian channels (daily)
+    if len(high_1d) < 20:
         return np.zeros(n)
     
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr0 = np.array([np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])])
-    tr = np.concatenate([tr0, np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Upper band: highest high over last 20 periods
+    upper_20 = np.full_like(high_1d, np.nan)
+    for i in range(19, len(high_1d)):
+        upper_20[i] = np.max(high_1d[i-19:i+1])
     
-    atr14 = np.full_like(close_1d, np.nan)
-    for i in range(13, len(tr)):
-        if i == 13:
-            atr14[i] = np.mean(tr[0:14])
-        else:
-            atr14[i] = (atr14[i-1] * 13 + tr[i]) / 14
+    # Lower band: lowest low over last 20 periods
+    lower_20 = np.full_like(low_1d, np.nan)
+    for i in range(19, len(low_1d)):
+        lower_20[i] = np.min(low_1d[i-19:i+1])
     
-    atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14)
+    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
     
-    # Calculate 50-day SMA for trend (daily)
+    # Calculate 50-day SMA for trend filter (daily)
     if len(close_1d) < 50:
         return np.zeros(n)
     
@@ -83,17 +81,18 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position size
+    position_size = 0.30  # 30% position size
     
     for i in range(50, n):
         # Skip if any critical data is NaN
-        if (np.isnan(atr14_aligned[i]) or 
+        if (np.isnan(upper_20_aligned[i]) or 
+            np.isnan(lower_20_aligned[i]) or 
             np.isnan(sma50_1d_aligned[i]) or 
             np.isnan(rsi14_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 4h volume vs 20-period average
+        # Volume ratio: current 12h volume vs 20-period average
         vol_ma_20 = np.full_like(volume, np.nan)
         for j in range(19, len(volume)):
             vol_ma_20[j] = np.mean(volume[j-19:j+1])
@@ -104,31 +103,33 @@ def generate_signals(prices):
             volume_ratio = volume[i] / vol_ma_20[i]
         
         if position == 0:
-            # Long: Price above 50-day SMA + RSI > 55 + volume surge
-            if (close[i] > sma50_1d_aligned[i] and
+            # Long: Price breaks above upper Donchian + price above SMA50 + RSI > 55 + volume surge
+            if (close[i] > upper_20_aligned[i] and
+                close[i] > sma50_1d_aligned[i] and
                 rsi14_aligned[i] > 55 and
-                volume_ratio > 2.5):
+                volume_ratio > 2.0):
                 position = 1
                 signals[i] = position_size
-            # Short: Price below 50-day SMA + RSI < 45 + volume surge
-            elif (close[i] < sma50_1d_aligned[i] and
+            # Short: Price breaks below lower Donchian + price below SMA50 + RSI < 45 + volume surge
+            elif (close[i] < lower_20_aligned[i] and
+                  close[i] < sma50_1d_aligned[i] and
                   rsi14_aligned[i] < 45 and
-                  volume_ratio > 2.5):
+                  volume_ratio > 2.0):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price crosses below 50-day SMA OR RSI < 40
-            if (close[i] < sma50_1d_aligned[i] or 
+            # Exit: Price breaks below lower Donchian OR RSI < 40
+            if (close[i] < lower_20_aligned[i] or 
                 rsi14_aligned[i] < 40):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price crosses above 50-day SMA OR RSI > 60
-            if (close[i] > sma50_1d_aligned[i] or 
+            # Exit: Price breaks above upper Donchian OR RSI > 60
+            if (close[i] > upper_20_aligned[i] or 
                 rsi14_aligned[i] > 60):
                 position = 0
                 signals[i] = 0.0
@@ -137,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_SMA50_RSI14_Volume_Filter_v3"
-timeframe = "4h"
+name = "12h_1d_Donchian20_SMA50_RSI14_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
