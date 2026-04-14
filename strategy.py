@@ -21,6 +21,7 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
     # Calculate daily ATR (14-period) for volatility filter
     tr = np.zeros(len(df_1d))
@@ -40,6 +41,17 @@ def generate_signals(prices):
     
     atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
     
+    # Calculate daily volume average (20-period)
+    vol_avg_1d = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 20:
+        vol_sum = np.sum(volume_1d[:20])
+        vol_avg_1d[19] = vol_sum / 20
+        for i in range(20, len(df_1d)):
+            vol_sum = vol_sum - volume_1d[i-20] + volume_1d[i]
+            vol_avg_1d[i] = vol_sum / 20
+    
+    vol_avg_12h = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    
     # Calculate 12-hour Donchian channels (20-period)
     donch_high = np.full(n, np.nan)
     donch_low = np.full(n, np.nan)
@@ -56,12 +68,18 @@ def generate_signals(prices):
         # Skip if any critical data is NaN
         if (np.isnan(atr_12h[i]) or
             np.isnan(donch_high[i]) or
-            np.isnan(donch_low[i])):
+            np.isnan(donch_low[i]) or
+            np.isnan(vol_avg_12h[i])):
             signals[i] = 0.0
             continue
         
         # Skip low volatility periods (ATR < 0.5% of price)
         if atr_12h[i] < 0.005 * close[i]:
+            signals[i] = 0.0
+            continue
+        
+        # Skip low volume periods (volume < 50% of 20-day average)
+        if volume[i] < 0.5 * vol_avg_12h[i]:
             signals[i] = 0.0
             continue
         
@@ -80,11 +98,11 @@ def generate_signals(prices):
         s3_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i]
         
         if position == 0:
-            # Long: Price breaks above 12h Donchian high AND above S3
+            # Long: Price breaks above 12h Donchian high AND above S3 with volume confirmation
             if close[i] > donch_high[i] and close[i] > s3_12h:
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below 12h Donchian low AND below R3
+            # Short: Price breaks below 12h Donchian low AND below R3 with volume confirmation
             elif close[i] < donch_low[i] and close[i] < r3_12h:
                 position = -1
                 signals[i] = -position_size
@@ -107,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_R3S3_Breakout_Donchian"
+name = "12h_1d_Camarilla_R3S3_Breakout_Donchian_Volume"
 timeframe = "12h"
 leverage = 1.0
