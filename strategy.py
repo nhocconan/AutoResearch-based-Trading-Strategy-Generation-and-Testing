@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -13,13 +13,14 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for pivot levels
+    # Get 1d data for weekly pivot levels
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points using prior week's OHLC (approximated with 5-day lookback)
+    # Calculate weekly pivot points (using prior week's OHLC)
+    # Weekly high: max of last 5 days (trading week)
     weekly_high = pd.Series(high_1d).rolling(window=5, min_periods=5).max().shift(1).values
     weekly_low = pd.Series(low_1d).rolling(window=5, min_periods=5).min().shift(1).values
     weekly_close = pd.Series(close_1d).rolling(window=5, min_periods=5).last().shift(1).values
@@ -29,20 +30,15 @@ def generate_signals(prices):
     # Resistance levels
     r1 = 2 * pp - weekly_low
     r2 = pp + (weekly_high - weekly_low)
+    r3 = weekly_high + 2 * (pp - weekly_low)
     # Support levels
     s1 = 2 * pp - weekly_high
     s2 = pp - (weekly_high - weekly_low)
+    s3 = weekly_low - 2 * (pp - weekly_low)
     
-    # Align pivot levels to 4h timeframe (wait for daily bar close)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    # Weekly EMA50 for trend
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align pivot levels to 1d timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     # Volume confirmation: volume > 1.5x average volume (20-period)
     vol_series = pd.Series(volume)
@@ -53,12 +49,12 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(50, 20)  # 50 for weekly EMA, 20 for volume
+    start = 20  # 20 for volume
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(avg_vol[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
         
@@ -66,26 +62,26 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long: price breaks above R2 resistance AND above weekly EMA50 with volume
-            if price > r2_aligned[i] and price > ema_50_1w_aligned[i] and vol > 1.5 * avg_vol[i]:
+            # Long: price breaks above R3 pivot with volume
+            if price > r3_aligned[i] and vol > 1.5 * avg_vol[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below S2 support AND below weekly EMA50 with volume
-            elif price < s2_aligned[i] and price < ema_50_1w_aligned[i] and vol > 1.5 * avg_vol[i]:
+            # Short: price breaks below S3 pivot with volume
+            elif price < s3_aligned[i] and vol > 1.5 * avg_vol[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below S2 support
-            if price < s2_aligned[i]:
+            # Exit long: price breaks below S3
+            if price < s3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above R2 resistance
-            if price > r2_aligned[i]:
+            # Exit short: price breaks above R3
+            if price > r3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -93,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1w_Weekly_Pivot_Breakout_Trend"
-timeframe = "4h"
+name = "1d_1w_Weekly_Pivot_Breakout"
+timeframe = "1d"
 leverage = 1.0
