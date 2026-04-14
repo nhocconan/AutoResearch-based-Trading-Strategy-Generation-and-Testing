@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h price breaking above/below 1-day Donchian Channel (20) with volume above 2x 50-period average and 1-day ADX > 25.
+Hypothesis: 4h price breaking above/below 1-day Donchian Channel (20) with volume above 1.5x 20-period average and 1-day ADX > 25.
 Trades in direction of daily trend to avoid counter-trend whipsaws. Uses daily timeframe for trend filtering.
-Target: 20-30 trades/year per symbol (80-120 total over 4 years).
+Target: 25-35 trades/year per symbol (100-140 total over 4 years).
 """
 
 import numpy as np
@@ -69,8 +69,8 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
     adx_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 50-period average volume
-    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Calculate 20-period average volume
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
@@ -82,16 +82,16 @@ def generate_signals(prices):
         lower_dc_aligned = align_htf_to_ltf(prices, df_1d, lower_dc)[i]
         mid_dc_aligned = align_htf_to_ltf(prices, df_1d, mid_dc)[i]
         adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)[i]
-        vol_ma_50_aligned = vol_ma_50[i]  # already LTF
+        vol_ma_20_aligned = vol_ma_20[i]  # already LTF
         
         # Check for NaN values
         if (np.isnan(upper_dc_aligned) or np.isnan(lower_dc_aligned) or 
             np.isnan(mid_dc_aligned) or np.isnan(adx_1d_aligned) or 
-            np.isnan(vol_ma_50_aligned)):
+            np.isnan(vol_ma_20_aligned)):
             continue
         
-        # Volume confirmation (> 2x average)
-        volume_confirm = volume[i] > 2.0 * vol_ma_50_aligned
+        # Volume confirmation (> 1.5x average)
+        volume_confirm = volume[i] > 1.5 * vol_ma_20_aligned
         
         # ADX trend filter (> 25)
         trend_filter = adx_1d_aligned > 25
@@ -117,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dDC20_1dADX25_Volume"
+name = "4h_1dDC20_1dADX25_Volume_v2"
 timeframe = "4h"
 leverage = 1.0
