@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Bollinger Band breakout with weekly Keltner channel filter
-# Long when price breaks above BB upper band AND is above KC upper band (strong bullish momentum)
-# Short when price breaks below BB lower band AND is below KC lower band (strong bearish momentum)
-# Exit when price crosses the Bollinger middle band (mean reversion)
-# Bollinger Bands identify volatility expansion/contraction, Keltner Channel confirms trend strength
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee dust while capturing momentum bursts
+# Hypothesis: 4-hour Volume-Weighted Average Price (VWAP) deviation with 1-day trend filter
+# Long when price deviates below VWAP by 1.5 ATR AND 1-day EMA50 is rising
+# Short when price deviates above VWAP by 1.5 ATR AND 1-day EMA50 is falling
+# Exit when price returns to VWAP (mean reversion)
+# VWAP captures institutional interest, deviation identifies overextension, daily EMA filters trend
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag while capturing mean reversion
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,75 +20,73 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h and 1w data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    df_1w = get_htf_data(prices, '1w')
+    # Calculate VWAP on 4h
+    typical_price = (high + low + close) / 3.0
+    vwap_numerator = np.cumsum(typical_price * volume)
+    vwap_denominator = np.cumsum(volume)
+    vwap = vwap_numerator / vwap_denominator
     
-    # Calculate Bollinger Bands on 12h: 20-period, 2 std dev
-    close_12h = df_12h['close'].values
-    bb_middle = pd.Series(close_12h).rolling(window=20, min_periods=20).mean()
-    bb_std = pd.Series(close_12h).rolling(window=20, min_periods=20).std()
-    bb_upper = (bb_middle + 2 * bb_std).values
-    bb_lower = (bb_middle - 2 * bb_std).values
+    # Calculate ATR(14) for deviation threshold
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Keltner Channel on 1w: 20-period EMA, ATR(10) * 1.5
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    kc_middle = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean()
-    tr1 = pd.Series(high_1w - low_1w)
-    tr2 = pd.Series(abs(high_1w - pd.Series(close_1w).shift(1)))
-    tr3 = pd.Series(abs(low_1w - pd.Series(close_1w).shift(1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=10, adjust=False, min_periods=10).mean()
-    kc_upper = (kc_middle + 1.5 * atr).values
-    kc_lower = (kc_middle - 1.5 * atr).values
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Align indicators to 12h timeframe
-    bb_middle_aligned = align_htf_to_ltf(prices, df_12h, bb_middle.values)
-    bb_upper_aligned = align_htf_to_ltf(prices, df_12h, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_12h, bb_lower)
-    kc_upper_aligned = align_htf_to_ltf(prices, df_1w, kc_upper, additional_delay_bars=1)
-    kc_lower_aligned = align_htf_to_ltf(prices, df_1w, kc_lower, additional_delay_bars=1)
+    # Calculate 1-day EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Calculate EMA50 slope (rising/falling)
+    ema50_slope = np.zeros_like(ema50_1d_aligned)
+    ema50_slope[1:] = ema50_1d_aligned[1:] - ema50_1d_aligned[:-1]
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 40
+    start = 50
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(bb_middle_aligned[i]) or np.isnan(bb_upper_aligned[i]) or 
-            np.isnan(bb_lower_aligned[i]) or np.isnan(kc_upper_aligned[i]) or 
-            np.isnan(kc_lower_aligned[i])):
+        if (np.isnan(vwap[i]) or np.isnan(atr[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(ema50_slope[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        vwap_val = vwap[i]
+        atr_val = atr[i]
+        ema50_val = ema50_1d_aligned[i]
+        slope = ema50_slope[i]
         
         if position == 0:
-            # Long setup: price above BB upper AND above KC upper (strong bullish momentum)
-            if price > bb_upper_aligned[i] and price > kc_upper_aligned[i]:
+            # Long: price below VWAP by 1.5*ATR AND daily EMA50 rising
+            if (price < vwap_val - 1.5 * atr_val) and (slope > 0):
                 position = 1
                 signals[i] = position_size
-            # Short setup: price below BB lower AND below KC lower (strong bearish momentum)
-            elif price < bb_lower_aligned[i] and price < kc_lower_aligned[i]:
+            # Short: price above VWAP by 1.5*ATR AND daily EMA50 falling
+            elif (price > vwap_val + 1.5 * atr_val) and (slope < 0):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below BB middle (mean reversion)
-            if price < bb_middle_aligned[i]:
+            # Exit long: price returns to VWAP (mean reversion)
+            if price >= vwap_val:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above BB middle (mean reversion)
-            if price > bb_middle_aligned[i]:
+            # Exit short: price returns to VWAP (mean reversion)
+            if price <= vwap_val:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -96,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Bollinger_Keltner_Momentum"
-timeframe = "12h"
+name = "4h_VWAP_Deviation_1dEMA50"
+timeframe = "4h"
 leverage = 1.0
