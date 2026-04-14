@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -16,80 +16,81 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d Donchian channels (20-day high/low)
+    # Calculate 1d EMA(21) for trend filter
+    ema_21_1d = pd.Series(df_1d['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
+    
+    # Calculate 1d ATR(14) for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    donch_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donch_high_20_aligned = align_htf_to_ltf(prices, df_1d, donch_high_20)
-    donch_low_20_aligned = align_htf_to_ltf(prices, df_1d, donch_low_20)
-    
-    # Calculate 1d volume average (20-period)
-    volume_1d = df_1d['volume'].values
-    vol_avg_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
-    
-    # Calculate 1d ATR (14-period) for volatility filter
+    close_1d = df_1d['close'].values
     tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1)) if 'close_1d' in locals() else np.abs(high_1d - np.roll(df_1d['close'].values, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1)) if 'close_1d' in locals() else np.abs(low_1d - np.roll(df_1d['close'].values, 1))
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr2[0] = np.inf
     tr3[0] = np.inf
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # Calculate 1d RSI(14) for momentum filter
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 50
+    start = 100
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donch_high_20_aligned[i]) or 
-            np.isnan(donch_low_20_aligned[i]) or
-            np.isnan(vol_avg_20_aligned[i]) or
-            np.isnan(atr_14_aligned[i])):
+        if (np.isnan(ema_21_1d_aligned[i]) or 
+            np.isnan(atr_1d_aligned[i]) or
+            np.isnan(rsi_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol = volume[i]
         
-        # Trend filter: price above/below 1d Donchian mid-point
-        donch_mid = (donch_high_20_aligned[i] + donch_low_20_aligned[i]) / 2
-        trend_filter_long = price > donch_mid
-        trend_filter_short = price < donch_mid
+        # Trend filter: price > 1d EMA21 for long, price < 1d EMA21 for short
+        trend_filter_long = price > ema_21_1d_aligned[i]
+        trend_filter_short = price < ema_21_1d_aligned[i]
         
-        # Volume filter: current volume > 1.5x 20-day average
-        vol_filter = vol > (1.5 * vol_avg_20_aligned[i])
+        # Volatility filter: 1d ATR > 1.5% of price to avoid low volatility periods
+        vol_filter = atr_1d_aligned[i] / price > 0.015 if price > 0 else False
         
-        # Volatility filter: ATR > 1.5% of price
-        vol_filter_atr = atr_14_aligned[i] / price > 0.015 if price > 0 else False
+        # Momentum filter: RSI between 30 and 70 to avoid extremes
+        mom_filter = (rsi_1d_aligned[i] >= 30) & (rsi_1d_aligned[i] <= 70)
         
         if position == 0:
-            # Long setup: price breaks above Donchian high + volume + volatility
-            if price > donch_high_20_aligned[i] and vol_filter and vol_filter_atr:
+            # Long setup: price above 1d EMA21 + volatility filter + momentum filter
+            if trend_filter_long and vol_filter and mom_filter:
                 position = 1
                 signals[i] = position_size
-            # Short setup: price breaks below Donchian low + volume + volatility
-            elif price < donch_low_20_aligned[i] and vol_filter and vol_filter_atr:
+            # Short setup: price below 1d EMA21 + volatility filter + momentum filter
+            elif trend_filter_short and vol_filter and mom_filter:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below Donchian low
-            if price < donch_low_20_aligned[i]:
+            # Exit long: price crosses below 1d EMA21
+            if price < ema_21_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above Donchian high
-            if price > donch_high_20_aligned[i]:
+            # Exit short: price crosses above 1d EMA21
+            if price > ema_21_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -97,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1dDonchian20_VolVolATR_Breakout_v1"
-timeframe = "6h"
+name = "4h_1dEMA21_VolFilter_RSI_Momentum_v1"
+timeframe = "4h"
 leverage = 1.0
