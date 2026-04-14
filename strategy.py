@@ -3,109 +3,105 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Fisher Transform (Ehlers) with 1-day volume regime filter
-# Long when Fisher crosses above -1.5 in low volatility regime (mean reversion bounce)
-# Short when Fisher crosses below +1.5 in low volatility regime (mean reversion fade)
-# Exit when Fisher crosses zero (mean reversion complete)
-# Fisher Transform identifies extreme price movements likely to revert, volume filter avoids trending markets
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag while capturing reversals
+# Hypothesis: 6-hour Bollinger Band squeeze breakout with 1-day volume confirmation
+# Long when Bollinger Bands compress (low volatility) then break upward with volume
+# Short when Bollinger Bands compress then break downward with volume
+# Uses Bollinger Band width percentile to detect squeeze, breakout confirmed by volume spike
+# Works in both bull and bear markets by capturing volatility breakouts after consolidation
+# Target: 60-120 total trades over 4 years (15-30/year) to minimize fee drag
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
     # Load 6h and 1d data ONCE before loop
     df_6h = get_htf_data(prices, '6h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Fisher Transform on 6h (Ehlers, length=10)
+    # Calculate Bollinger Bands on 6h: 20-period, 2 std dev
     close_6h = df_6h['close'].values
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
+    sma_20 = pd.Series(close_6h).rolling(window=20, min_periods=20).mean()
+    std_20 = pd.Series(close_6h).rolling(window=20, min_periods=20).std()
+    upper_bb = sma_20 + (2 * std_20)
+    lower_bb = sma_20 - (2 * std_20)
+    bb_width = upper_bb - lower_bb
     
-    # Normalize price to -1 to +1 range over lookback period
-    length = 10
-    highest_high = pd.Series(high_6h).rolling(window=length, min_periods=length).max().values
-    lowest_low = pd.Series(low_6h).rolling(window=length, min_periods=length).min().values
+    # Calculate Bollinger Band width percentile (50-period lookback) to detect squeeze
+    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=50).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
     
-    # Avoid division by zero
-    diff = highest_high - lowest_low
-    diff = np.where(diff == 0, 1e-10, diff)
-    
-    # Value from -1 to +1
-    value = 2 * ((close_6h - lowest_low) / diff) - 1
-    value = np.clip(value, -0.999, 0.999)  # Prevent log domain errors
-    
-    # Fisher Transform
-    fisher = np.zeros_like(value)
-    for i in range(1, len(value)):
-        fisher[i] = 0.5 * np.log((1 + value[i]) / (1 - value[i])) + 0.5 * fisher[i-1]
-    
-    # Calculate 1-day volume regime (low volume = mean reversion favorable)
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_1d = vol_1d / vol_ma_1d  # Current volume vs average
+    # Calculate 1-day volume average (20-period) for volume confirmation
+    volume_1d = df_1d['volume'].values
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
     # Align indicators to 6h timeframe
-    fisher_aligned = align_htf_to_ltf(prices, df_6h, fisher)
-    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    bb_width_percentile_aligned = align_htf_to_ltf(prices, df_6h, bb_width_percentile)
+    upper_bb_aligned = align_htf_to_ltf(prices, df_6h, upper_bb.values)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_6h, lower_bb.values)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 30
+    start = 50
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(fisher_aligned[i]) or np.isnan(vol_ratio_1d_aligned[i])):
+        if (np.isnan(bb_width_percentile_aligned[i]) or 
+            np.isnan(upper_bb_aligned[i]) or 
+            np.isnan(lower_bb_aligned[i]) or 
+            np.isnan(vol_ma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        fisher_val = fisher_aligned[i]
-        vol_ratio = vol_ratio_1d_aligned[i]
+        price = close[i]
+        vol = volume[i]
         
-        # Only trade in low volume regime (mean reversion environment)
-        if vol_ratio < 1.2:  # Below average volume
-            if position == 0:
-                # Long when Fisher crosses above -1.5 (oversold bounce)
-                if fisher_val > -1.5 and fisher_aligned[i-1] <= -1.5:
-                    position = 1
-                    signals[i] = position_size
-                # Short when Fisher crosses below +1.5 (overbought fade)
-                elif fisher_val < 1.5 and fisher_aligned[i-1] >= 1.5:
-                    position = -1
-                    signals[i] = -position_size
-                else:
-                    signals[i] = 0.0
-            elif position == 1:
-                # Exit long when Fisher crosses zero (mean reversion complete)
-                if fisher_val < 0 and fisher_aligned[i-1] >= 0:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = position_size
-            elif position == -1:
-                # Exit short when Fisher crosses zero (mean reversion complete)
-                if fisher_val > 0 and fisher_aligned[i-1] <= 0:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -position_size
-        else:
-            # High volume regime - likely trending, stay flat
-            signals[i] = 0.0
-            position = 0  # Force flat in trending markets
+        # Bollinger squeeze condition: BB width in lowest 20% percentile (compression)
+        squeeze = bb_width_percentile_aligned[i] < 20
+        
+        # Volume confirmation: current volume > 1.5x 20-day average volume
+        vol_confirm = vol > (1.5 * vol_ma_20_aligned[i])
+        
+        if position == 0:
+            # Long entry: squeeze breakout upward with volume
+            if squeeze and (price > upper_bb_aligned[i]) and vol_confirm:
+                position = 1
+                signals[i] = position_size
+            # Short entry: squeeze breakout downward with volume
+            elif squeeze and (price < lower_bb_aligned[i]) and vol_confirm:
+                position = -1
+                signals[i] = -position_size
+            else:
+                signals[i] = 0.0
+        elif position == 1:
+            # Exit long: price returns to middle of Bollinger Bands (mean reversion)
+            bb_middle = (upper_bb_aligned[i] + lower_bb_aligned[i]) / 2
+            if price < bb_middle:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = position_size
+        elif position == -1:
+            # Exit short: price returns to middle of Bollinger Bands
+            bb_middle = (upper_bb_aligned[i] + lower_bb_aligned[i]) / 2
+            if price > bb_middle:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -position_size
     
     return signals
 
-name = "6h_Fisher_1dVolumeRegime"
+name = "6h_BollingerSqueeze_VolumeBreakout"
 timeframe = "6h"
 leverage = 1.0
