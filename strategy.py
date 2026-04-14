@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator with Elder Ray power and volume confirmation
-# Long when green line > red line (bullish alignment) AND bull power > 0 AND volume > 1.5x average
-# Short when red line > green line (bearish alignment) AND bear power > 0 AND volume > 1.5x average
-# Exit when alignment reverses or volume drops below average
-# Uses Alligator for trend direction, Elder Ray for power confirmation, volume for conviction
-# Target: 60-120 total trades over 4 years (15-30/year)
+# Hypothesis: 12h Donchian channel breakout with volume confirmation and weekly trend filter
+# Long when price breaks above 24-period (12-day) Donchian high with volume spike and weekly bullish trend
+# Short when price breaks below 24-period Donchian low with volume spike and weekly bearish trend
+# Exit on opposite Donchian band touch
+# Uses weekly trend to avoid counter-trend trades in bear markets
+# Target: 15-30 trades per symbol over 4 years (4-7.5/year)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,83 +20,74 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load 12h and weekly data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Williams Alligator lines (13,8,5 smoothed with future shift)
-    # Jaw (13-period SMMA shifted 8 bars)
-    jaw_raw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
-    jaw = np.roll(jaw_raw, 8)  # shift 8 bars forward
-    jaw[:8] = np.nan  # first 8 values invalid
+    # Calculate 12h Donchian channels (24-period lookback for 12-day equivalent)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    donchian_high = pd.Series(high_12h).rolling(window=24, min_periods=24).max().values
+    donchian_low = pd.Series(low_12h).rolling(window=24, min_periods=24).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Teeth (8-period SMMA shifted 5 bars)
-    teeth_raw = pd.Series(close).rolling(window=8, min_periods=8).mean().values
-    teeth = np.roll(teeth_raw, 5)  # shift 5 bars forward
-    teeth[:5] = np.nan  # first 5 values invalid
+    # Calculate weekly EMA for trend filter (21-period)
+    close_weekly = df_weekly['close'].values
+    ema_weekly = pd.Series(close_weekly).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Lips (5-period SMMA shifted 3 bars)
-    lips_raw = pd.Series(close).rolling(window=5, min_periods=5).mean().values
-    lips = np.roll(lips_raw, 3)  # shift 3 bars forward
-    lips[:3] = np.nan  # first 3 values invalid
+    # Calculate 12h volume average (24-period)
+    vol_12h = df_12h['volume'].values
+    vol_ma_12h = pd.Series(vol_12h).rolling(window=24, min_periods=24).mean().values
     
-    # Elder Ray Power (13-period EMA)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13  # Bull Power = High - EMA13
-    bear_power = ema13 - low   # Bear Power = EMA13 - Low
-    
-    # Volume average (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all indicators to 6h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)
+    # Align indicators to 12h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_12h, donchian_mid)
+    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
+    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations (max shift is 8 for jaw)
-    start = 20  # for 20-period volume MA
+    # Start after enough data for calculations
+    start = 60  # for 24-period calculations
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(ema_weekly_aligned[i]) or np.isnan(vol_ma_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Alligator alignment: lips > teeth > jaw = bullish, jaw > teeth > lips = bearish
-        bullish_alignment = (lips_aligned[i] > teeth_aligned[i]) and (teeth_aligned[i] > jaw_aligned[i])
-        bearish_alignment = (jaw_aligned[i] > teeth_aligned[i]) and (teeth_aligned[i] > lips_aligned[i])
-        
-        vol_condition = volume[i] > 1.5 * vol_ma_aligned[i]
+        price = close[i]
+        vol_12h_current = volume[i]  # Current 12h volume
         
         if position == 0:
-            # Long setup: bullish alignment AND bull power > 0 AND volume spike
-            if bullish_alignment and (bull_power_aligned[i] > 0) and vol_condition:
+            # Long setup: break above Donchian high with volume spike and weekly bullish trend
+            if (price > donchian_high_aligned[i] and 
+                vol_12h_current > 1.8 * vol_ma_12h_aligned[i] and  # Volume spike
+                price > ema_weekly_aligned[i]):                    # Price above weekly EMA for bullish trend
                 position = 1
                 signals[i] = position_size
-            # Short setup: bearish alignment AND bear power > 0 AND volume spike
-            elif bearish_alignment and (bear_power_aligned[i] > 0) and vol_condition:
+            # Short setup: break below Donchian low with volume spike and weekly bearish trend
+            elif (price < donchian_low_aligned[i] and 
+                  vol_12h_current > 1.8 * vol_ma_12h_aligned[i] and  # Volume spike
+                  price < ema_weekly_aligned[i]):                    # Price below weekly EMA for bearish trend
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: bearish alignment OR bull power <= 0 OR volume drops
-            if (not bullish_alignment) or (bull_power_aligned[i] <= 0) or (not vol_condition):
+            # Exit long: price touches Donchian low (opposite band)
+            if price <= donchian_low_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: bullish alignment OR bear power <= 0 OR volume drops
-            if (not bearish_alignment) or (bear_power_aligned[i] <= 0) or (not vol_condition):
+            # Exit short: price touches Donchian high (opposite band)
+            if price >= donchian_high_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -104,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Alligator_ElderRay_Volume"
-timeframe = "6h"
+name = "12h_Donchian_Breakout_Volume_WeeklyTrend"
+timeframe = "12h"
 leverage = 1.0
