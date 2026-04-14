@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily RSI reversal with weekly trend filter for mean reversion
-# Weekly RSI > 50 defines bullish bias (long bias), < 50 bearish bias (short bias)
-# Daily RSI < 30 triggers long in bullish bias, > 70 triggers short in bearish bias
-# Exit when daily RSI returns to neutral zone (40-60)
-# Works in bull markets: buy dips in uptrend (weekly RSI > 50 + daily oversold)
-# Works in bear markets: sell rallies in downtrend (weekly RSI < 50 + daily overbought)
-# Low frequency: daily signals only, ~10-25 trades/year expected
+# Hypothesis: 12h strategy using 1d Donchian channel breakouts with volume confirmation
+# and ADX trend filter. Breakouts above 20-period high or below 20-period low
+# trigger entries in the direction of the 1d ADX trend (>25). Volume must be
+# above 20-period average to confirm breakout strength. This captures strong
+# trending moves while avoiding false breakouts in low-volume or ranging markets.
+# Works in both bull and bear markets by following the trend direction.
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,89 +16,105 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load weekly data ONCE for trend bias
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE for Donchian channels and ADX
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly RSI (14 periods)
-    rsi_len = 14
-    delta = np.diff(df_1w['close'].values, prepend=np.nan)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate 1d Donchian channels (20 periods)
+    donch_len = 20
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[rsi_len] = np.nanmean(gain[1:rsi_len+1])
-    avg_loss[rsi_len] = np.nanmean(loss[1:rsi_len+1])
+    # Upper band: highest high over last 20 periods
+    upper = pd.Series(high_1d).rolling(window=donch_len, min_periods=donch_len).max().values
+    # Lower band: lowest low over last 20 periods
+    lower = pd.Series(low_1d).rolling(window=donch_len, min_periods=donch_len).min().values
     
-    for i in range(rsi_len+1, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * (rsi_len-1) + gain[i]) / rsi_len
-        avg_loss[i] = (avg_loss[i-1] * (rsi_len-1) + loss[i]) / rsi_len
+    # Calculate 1d ADX (14 periods) for trend filter
+    adx_len = 14
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi_1w = 100 - (100 / (1 + rs))
-    rsi_1w = np.concatenate([np.full(rsi_len, np.nan), rsi_1w])
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Align weekly RSI to daily timeframe
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_minus = np.concatenate([[np.nan], dm_minus])
     
-    # Calculate daily RSI (14 periods)
-    delta_daily = np.diff(close, prepend=np.nan)
-    gain_daily = np.where(delta_daily > 0, delta_daily, 0)
-    loss_daily = np.where(delta_daily < 0, -delta_daily, 0)
+    # Smoothed values
+    tr_sum = pd.Series(tr).rolling(window=adx_len, min_periods=adx_len).sum().values
+    dm_plus_sum = pd.Series(dm_plus).rolling(window=adx_len, min_periods=adx_len).sum().values
+    dm_minus_sum = pd.Series(dm_minus).rolling(window=adx_len, min_periods=adx_len).sum().values
     
-    avg_gain_daily = np.zeros_like(gain_daily)
-    avg_loss_daily = np.zeros_like(loss_daily)
-    avg_gain_daily[rsi_len] = np.nanmean(gain_daily[1:rsi_len+1])
-    avg_loss_daily[rsi_len] = np.nanmean(loss_daily[1:rsi_len+1])
+    # Directional Indicators
+    plus_di = 100 * dm_plus_sum / tr_sum
+    minus_di = 100 * dm_minus_sum / tr_sum
     
-    for i in range(rsi_len+1, len(gain_daily)):
-        avg_gain_daily[i] = (avg_gain_daily[i-1] * (rsi_len-1) + gain_daily[i]) / rsi_len
-        avg_loss_daily[i] = (avg_loss_daily[i-1] * (rsi_len-1) + loss_daily[i]) / rsi_len
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=adx_len, min_periods=adx_len).mean().values
     
-    rs_daily = np.divide(avg_gain_daily, avg_loss_daily, out=np.full_like(avg_gain_daily, np.nan), where=avg_loss_daily!=0)
-    rsi_daily = 100 - (100 / (1 + rs_daily))
-    rsi_daily = np.concatenate([np.full(rsi_len, np.nan), rsi_daily])
+    # Align 1d indicators to 12h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate 20-period volume average on 12h timeframe
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(50, 2 * rsi_len)
+    start = max(50, donch_len + adx_len)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(rsi_1w_aligned[i]) or 
-            np.isnan(rsi_daily[i])):
+        if (np.isnan(upper_aligned[i]) or 
+            np.isnan(lower_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        weekly_rsi = rsi_1w_aligned[i]
-        daily_rsi = rsi_daily[i]
+        price = close[i]
+        vol_ok = volume[i] > vol_ma[i]  # Volume above average
+        adx_ok = adx_aligned[i] > 25    # Strong trend
         
         if position == 0:
-            # Enter long: weekly bullish bias + daily oversold
-            if weekly_rsi > 50 and daily_rsi < 30:
+            # Enter long: price breaks above upper Donchian band + volume + trend
+            if price > upper_aligned[i] and vol_ok and adx_ok:
                 position = 1
                 signals[i] = position_size
-            # Enter short: weekly bearish bias + daily overbought
-            elif weekly_rsi < 50 and daily_rsi > 70:
+            # Enter short: price breaks below lower Donchian band + volume + trend
+            elif price < lower_aligned[i] and vol_ok and adx_ok:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: daily RSI returns to neutral (40-60)
-            if 40 <= daily_rsi <= 60:
+            # Exit long: price breaks below lower Donchian band (contrary signal)
+            if price < lower_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: daily RSI returns to neutral (40-60)
-            if 40 <= daily_rsi <= 60:
+            # Exit short: price breaks above upper Donchian band (contrary signal)
+            if price > upper_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -107,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1wRSI_1dRSI_MeanReversion_v1"
-timeframe = "1d"
+name = "12h_1dDonchian_Volume_ADX_Trend_v1"
+timeframe = "12h"
 leverage = 1.0
