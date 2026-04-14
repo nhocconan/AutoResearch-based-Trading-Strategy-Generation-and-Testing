@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using daily VWAP bands with volume confirmation
-# - Uses daily VWAP and standard deviation to create dynamic support/resistance bands
-# - Requires volume > 1.3x 24-period average for institutional confirmation
-# - Trades breakouts above upper band (long) or below lower band (short)
-# - Designed to capture volatility expansion with controlled frequency
-# - Target: 75-200 trades over 4 years to minimize fee drag while capturing significant moves
+# Hypothesis: 12h strategy using daily Camarilla pivot levels with volume confirmation and ADX trend filter
+# - Uses previous day's Camarilla pivot levels (S1/S2/S3, R1/R2/R3) for mean reversion
+# - Requires volume > 1.5x 24-period average for institutional confirmation
+# - Filters for trending markets using ADX > 25 to avoid ranging whipsaws
+# - Designed to capture mean reversion in both bull and bear markets with controlled frequency
+# - Target: 50-150 trades over 4 years to minimize fee drag while capturing significant reversals
 # - Discrete position sizing (0.25) to reduce churn and manage drawdown
 
 def generate_signals(prices):
@@ -30,41 +30,80 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Calculate daily VWAP and standard deviation bands
-    typical_price = (high_1d + low_1d + close_1d) / 3
-    tp_volume = typical_price * df_1d['volume'].values
+    # Calculate ADX for trend filtering
+    # True Range
+    high_low = high_1d - low_1d
+    high_close = np.abs(high_1d - np.roll(close_1d, 1))
+    low_close = np.abs(low_1d - np.roll(close_1d, 1))
+    high_close[0] = high_low[0]
+    low_close[0] = high_low[0]
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
     
-    # Cumulative sums for VWAP calculation
-    cum_tpv = np.cumsum(tp_volume)
-    cum_volume = np.cumsum(df_1d['volume'].values)
-    vwap = np.divide(cum_tpv, cum_volume, out=np.zeros_like(cum_tpv), where=cum_volume!=0)
+    # Directional Movement
+    up_move = np.diff(high_1d, prepend=high_1d[0])
+    down_move = np.diff(low_1d, prepend=low_1d[0])
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Calculate standard deviation of typical price from VWAP
-    squared_diff = (typical_price - vwap) ** 2
-    cum_squared_diff = np.cumsum(squared_diff * df_1d['volume'].values)
-    variance = np.divide(cum_squared_diff, cum_volume, out=np.zeros_like(cum_squared_diff), where=cum_volume!=0)
-    std_dev = np.sqrt(variance)
+    # Smoothed values
+    tr_period = 14
+    tr_smooth = pd.Series(tr).ewm(alpha=1/tr_period, adjust=False).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/tr_period, adjust=False).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/tr_period, adjust=False).mean().values
     
-    # Upper and lower bands (1 standard deviation)
-    upper_band = vwap + std_dev
-    lower_band = vwap - std_dev
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / tr_smooth
+    minus_di = 100 * minus_dm_smooth / tr_smooth
     
-    # 4h volume filter: current volume > 1.3x 24-period average (1 day)
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/tr_period, adjust=False).mean().values
+    
+    # Calculate Camarilla pivot levels from previous day
+    # Camarilla formula: 
+    # R4 = C + ((H-L) * 1.1/2)
+    # R3 = C + ((H-L) * 1.1/4)
+    # R2 = C + ((H-L) * 1.1/6)
+    # R1 = C + ((H-L) * 1.1/12)
+    # PP = (H + L + C) / 3
+    # S1 = C - ((H-L) * 1.1/12)
+    # S2 = C - ((H-L) * 1.1/6)
+    # S3 = C - ((H-L) * 1.1/4)
+    # S4 = C - ((H-L) * 1.1/2)
+    
+    # Calculate for each day
+    camarilla_s1 = np.zeros(len(df_1d))
+    camarilla_s2 = np.zeros(len(df_1d))
+    camarilla_s3 = np.zeros(len(df_1d))
+    camarilla_r1 = np.zeros(len(df_1d))
+    camarilla_r2 = np.zeros(len(df_1d))
+    camarilla_r3 = np.zeros(len(df_1d))
+    
+    for i in range(len(df_1d)):
+        h = high_1d[i]
+        l = low_1d[i]
+        c = close_1d[i]
+        range_hl = h - l
+        
+        camarilla_s1[i] = c - (range_hl * 1.1 / 12)
+        camarilla_s2[i] = c - (range_hl * 1.1 / 6)
+        camarilla_s3[i] = c - (range_hl * 1.1 / 4)
+        camarilla_r1[i] = c + (range_hl * 1.1 / 12)
+        camarilla_r2[i] = c + (range_hl * 1.1 / 6)
+        camarilla_r3[i] = c + (range_hl * 1.1 / 4)
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_s1_12h = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    camarilla_s2_12h = align_htf_to_ltf(prices, df_1d, camarilla_s2)
+    camarilla_s3_12h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_r1_12h = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_r2_12h = align_htf_to_ltf(prices, df_1d, camarilla_r2)
+    camarilla_r3_12h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    adx_12h = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Volume filter: current volume > 1.5x 24-period average (1 day)
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=24, min_periods=24).mean().values
-    
-    # 4h Donchian channels (20-period) for exit signals
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().shift(1).values
-    
-    # Create arrays for VWAP bands alignment
-    upper_band_array = upper_band
-    lower_band_array = lower_band
-    
-    upper_band_4h = align_htf_to_ltf(prices, df_1d, upper_band_array)
-    lower_band_4h = align_htf_to_ltf(prices, df_1d, lower_band_array)
     
     signals = np.zeros(n)
     position = 0
@@ -72,34 +111,43 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical data is NaN
-        if np.isnan(vwap[i-1]) or np.isnan(std_dev[i-1]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
-           np.isnan(vol_ma[i]) or np.isnan(upper_band_4h[i]) or np.isnan(lower_band_4h[i]):
+        if np.isnan(adx_12h[i]) or np.isnan(camarilla_s1_12h[i]) or np.isnan(camarilla_r1_12h[i]) or \
+           np.isnan(vol_ma[i]):
+            continue
+        
+        # Only trade in trending markets (ADX > 25)
+        if adx_12h[i] <= 25:
+            # If we have a position, exit when trend weakens
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: Price breaks above upper band with volume confirmation
-            if (close[i] > upper_band_4h[i] and close[i-1] <= upper_band_4h[i] and 
-                volume[i] > vol_ma[i] * 1.3):
+            # Mean reversion entries:
+            # Long when price touches or goes below S1 with volume confirmation
+            # Short when price touches or goes above R1 with volume confirmation
+            if (low[i] <= camarilla_s1_12h[i] and 
+                volume[i] > vol_ma[i] * 1.5):
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below lower band with volume confirmation
-            elif (close[i] < lower_band_4h[i] and close[i-1] >= lower_band_4h[i] and 
-                  volume[i] > vol_ma[i] * 1.3):
+            elif (high[i] >= camarilla_r1_12h[i] and 
+                  volume[i] > vol_ma[i] * 1.5):
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
-            # Exit: Price breaks below lower band or drops below Donchian low
-            if close[i] < lower_band_4h[i] or close[i] < donchian_low[i]:
+            # Exit long: price reaches R1 (mean reversion target) or S2 (stop)
+            if high[i] >= camarilla_r1_12h[i] or low[i] <= camarilla_s2_12h[i]:
                 position = 0
                 signals[i] = 0.0
         elif position == -1:
-            # Exit: Price breaks above upper band or rises above Donchian high
-            if close[i] > upper_band_4h[i] or close[i] > donchian_high[i]:
+            # Exit short: price reaches S1 (mean reversion target) or R2 (stop)
+            if low[i] <= camarilla_s1_12h[i] or high[i] >= camarilla_r2_12h[i]:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_1d_VWAP_Bands_Volume_Breakout"
-timeframe = "4h"
+name = "12h_1d_Camarilla_Pivot_MeanReversion_Volume_ADX"
+timeframe = "12h"
 leverage = 1.0
