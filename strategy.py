@@ -38,7 +38,40 @@ def generate_signals(prices):
         for i in range(14, len(df_1d)):
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
+    # Calculate daily volatility filter (ATR > 1.5% of price)
+    vol_filter_1d = np.zeros(len(df_1d))
+    for i in range(len(df_1d)):
+        if not np.isnan(atr_1d[i]) and close_1d[i] > 0:
+            vol_filter_1d[i] = atr_1d[i] / close_1d[i] > 0.015
+        else:
+            vol_filter_1d[i] = False
+    
+    # Calculate daily RSI (14-period)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    
+    avg_gain = np.full(len(df_1d), np.nan)
+    avg_loss = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 14:
+        avg_gain[13] = np.mean(gain[:14])
+        avg_loss[13] = np.mean(loss[:14])
+        for i in range(14, len(df_1d)):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rsi_1d = np.full(len(df_1d), np.nan)
+    for i in range(len(df_1d)):
+        if not np.isnan(avg_loss[i]) and avg_loss[i] != 0:
+            rs = avg_gain[i] / avg_loss[i]
+            rsi_1d[i] = 100 - (100 / (1 + rs))
+        elif not np.isnan(avg_gain[i]) and avg_loss[i] == 0:
+            rsi_1d[i] = 100.0
+    
+    # Align indicators to 12h timeframe
     atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    vol_filter_12h = align_htf_to_ltf(prices, df_1d, vol_filter_1d.astype(float))
+    rsi_12h = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     # Calculate 12-hour Donchian channels (20-period)
     donch_high = np.full(n, np.nan)
@@ -48,15 +81,6 @@ def generate_signals(prices):
             donch_high[i] = np.max(high[i-19:i+1])
             donch_low[i] = np.min(low[i-19:i+1])
     
-    # Calculate daily volatility filter (ATR > 1.5% of price)
-    vol_filter_1d = np.zeros(len(df_1d))
-    for i in range(len(df_1d)):
-        if not np.isnan(atr_1d[i]) and close_1d[i] > 0:
-            vol_filter_1d[i] = atr_1d[i] / close_1d[i] > 0.015
-        else:
-            vol_filter_1d[i] = False
-    vol_filter_12h = align_htf_to_ltf(prices, df_1d, vol_filter_1d.astype(float))
-    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
@@ -65,7 +89,8 @@ def generate_signals(prices):
         # Skip if any critical data is NaN
         if (np.isnan(atr_12h[i]) or
             np.isnan(donch_high[i]) or
-            np.isnan(donch_low[i])):
+            np.isnan(donch_low[i]) or
+            np.isnan(rsi_12h[i])):
             signals[i] = 0.0
             continue
         
@@ -89,26 +114,26 @@ def generate_signals(prices):
         s3_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i]
         
         if position == 0:
-            # Long: Price breaks above 12h Donchian high AND above S3
-            if close[i] > donch_high[i] and close[i] > s3_12h:
+            # Long: Price breaks above 12h Donchian high AND above S3 AND RSI < 70
+            if close[i] > donch_high[i] and close[i] > s3_12h and rsi_12h[i] < 70:
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below 12h Donchian low AND below R3
-            elif close[i] < donch_low[i] and close[i] < r3_12h:
+            # Short: Price breaks below 12h Donchian low AND below R3 AND RSI > 30
+            elif close[i] < donch_low[i] and close[i] < r3_12h and rsi_12h[i] > 30:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below 12h Donchian low OR below S3
-            if close[i] < donch_low[i] or close[i] < s3_12h:
+            # Exit: Price falls back below 12h Donchian low OR below S3 OR RSI > 70
+            if close[i] < donch_low[i] or close[i] < s3_12h or rsi_12h[i] > 70:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above 12h Donchian high OR above R3
-            if close[i] > donch_high[i] or close[i] > r3_12h:
+            # Exit: Price rises back above 12h Donchian high OR above R3 OR RSI < 30
+            if close[i] > donch_high[i] or close[i] > r3_12h or rsi_12h[i] < 30:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -116,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_R3S3_Breakout_Donchian_VolFilter"
+name = "12h_1d_Camarilla_R3S3_RSI_Filter"
 timeframe = "12h"
 leverage = 1.0
