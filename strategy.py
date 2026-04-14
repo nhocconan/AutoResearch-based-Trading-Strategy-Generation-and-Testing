@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,99 +13,99 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data for weekly pivot points
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    # Calculate weekly pivot points (using prior week's OHLC)
-    pivot_point = np.full_like(close_1w, np.nan)
-    resistance1 = np.full_like(close_1w, np.nan)
-    support1 = np.full_like(close_1w, np.nan)
-    
-    if len(close_1w) >= 2:
-        for i in range(1, len(close_1w)):
-            ph = high_1w[i-1]
-            pl = low_1w[i-1]
-            pc = close_1w[i-1]
-            
-            pp = (ph + pl + pc) / 3.0
-            r1 = 2 * pp - pl
-            s1 = 2 * pp - ph
-            
-            pivot_point[i] = pp
-            resistance1[i] = r1
-            support1[i] = s1
-    
-    # Load 1d data for volume confirmation
+    # Load 1d data for daily ATR and ATR-based channel
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    volume_1d = df_1d['volume'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate daily volume SMA20
-    vol_sma_20_1d = np.full_like(volume_1d, np.nan)
-    if len(volume_1d) >= 20:
-        for i in range(19, len(volume_1d)):
-            vol_sma_20_1d[i] = np.mean(volume_1d[i-19:i+1])
+    # Calculate daily ATR(14)
+    atr_14_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 15:
+        tr = np.maximum(
+            high_1d[1:] - low_1d[1:],
+            np.maximum(
+                np.abs(high_1d[1:] - close_1d[:-1]),
+                np.abs(low_1d[1:] - close_1d[:-1])
+            )
+        )
+        atr_14_1d[14] = np.mean(tr[:14])
+        for i in range(15, len(close_1d)):
+            atr_14_1d[i] = (atr_14_1d[i-1] * 13 + tr[i-1]) / 14
     
-    # Align weekly pivot points to 6h timeframe
-    pivot_point_6h = align_htf_to_ltf(prices, df_1w, pivot_point)
-    resistance1_6h = align_htf_to_ltf(prices, df_1w, resistance1)
-    support1_6h = align_htf_to_ltf(prices, df_1w, support1)
+    # Calculate ATR-based channels (Keltner-like) on 1d
+    # Upper: EMA(20) + 1.5 * ATR(14)
+    # Lower: EMA(20) - 1.5 * ATR(14)
+    ema_20_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 20:
+        ema_20_1d[19] = np.mean(close_1d[:20])
+        for i in range(20, len(close_1d)):
+            ema_20_1d[i] = (close_1d[i] * 2 + ema_20_1d[i-1] * 18) / 20
     
-    # Align daily volume SMA20 to 6h timeframe
-    vol_sma_20_1d_6h = align_htf_to_ltf(prices, df_1d, vol_sma_20_1d)
+    upper_channel_1d = np.full_like(close_1d, np.nan)
+    lower_channel_1d = np.full_like(close_1d, np.nan)
+    if len(ema_20_1d) >= 20 and len(atr_14_1d) >= 15:
+        for i in range(20, len(close_1d)):
+            if not np.isnan(ema_20_1d[i]) and not np.isnan(atr_14_1d[i]):
+                upper_channel_1d[i] = ema_20_1d[i] + 1.5 * atr_14_1d[i]
+                lower_channel_1d[i] = ema_20_1d[i] - 1.5 * atr_14_1d[i]
+    
+    # Align 1d indicators to 12h timeframe
+    upper_channel_12h = align_htf_to_ltf(prices, df_1d, upper_channel_1d)
+    lower_channel_12h = align_htf_to_ltf(prices, df_1d, lower_channel_1d)
+    ema_20_1d_12h = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    
+    # Volume spike detection on 12h
+    vol_ma_20 = np.full_like(volume, np.nan)
+    if len(volume) >= 20:
+        for i in range(19, len(volume)):
+            vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    for i in range(100, n):
+    for i in range(60, n):
         # Skip if any critical data is NaN
-        if (np.isnan(pivot_point_6h[i]) or 
-            np.isnan(resistance1_6h[i]) or 
-            np.isnan(support1_6h[i]) or
-            np.isnan(vol_sma_20_1d_6h[i])):
+        if (np.isnan(upper_channel_12h[i]) or 
+            np.isnan(lower_channel_12h[i]) or
+            np.isnan(ema_20_1d_12h[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 6h volume vs daily volume SMA20
-        if vol_sma_20_1d_6h[i] <= 0:
+        # Volume ratio: current 12h volume vs 20-period average
+        if vol_ma_20[i] <= 0:
             volume_ratio = 0
         else:
-            volume_ratio = volume[i] / vol_sma_20_1d_6h[i]
+            volume_ratio = volume[i] / vol_ma_20[i]
         
         if position == 0:
-            # Long: Price crosses above S1 with volume spike and above weekly pivot
-            if (close[i] > support1_6h[i] and
-                close[i] > pivot_point_6h[i] and
-                volume_ratio > 2.0):
+            # Long: Price breaks above upper channel with volume spike
+            if (close[i] > upper_channel_12h[i] and volume_ratio > 2.0):
                 position = 1
                 signals[i] = position_size
-            # Short: Price crosses below R1 with volume spike and below weekly pivot
-            elif (close[i] < resistance1_6h[i] and
-                  close[i] < pivot_point_6h[i] and
-                  volume_ratio > 2.0):
+            # Short: Price breaks below lower channel with volume spike
+            elif (close[i] < lower_channel_12h[i] and volume_ratio > 2.0):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price crosses below weekly pivot
-            if close[i] < pivot_point_6h[i]:
+            # Exit: Price closes below EMA(20) or breaks below lower channel
+            if (close[i] < ema_20_1d_12h[i] or 
+                close[i] < lower_channel_12h[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price crosses above weekly pivot
-            if close[i] > pivot_point_6h[i]:
+            # Exit: Price closes above EMA(20) or breaks above upper channel
+            if (close[i] > ema_20_1d_12h[i] or 
+                close[i] > upper_channel_12h[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -113,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_Pivot_S1R1_Volume_Filter"
-timeframe = "6h"
+name = "12h_1d_ATR_Channel_Volume_Breakout"
+timeframe = "12h"
 leverage = 1.0
