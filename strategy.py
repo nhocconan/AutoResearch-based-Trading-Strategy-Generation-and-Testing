@@ -13,14 +13,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data once
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Load 1d data once
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate RSI (14-period) on 12h data
-    close_12h = df_12h['close'].values
-    delta = np.diff(close_12h, prepend=close_12h[0])
+    # Calculate 1d RSI (14-period)
+    close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     
@@ -29,25 +29,34 @@ def generate_signals(prices):
     avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     rs = avg_gain / (avg_loss + 1e-10)
-    rsi_12h = 100 - (100 / (1 + rs))
+    rsi_1d = 100 - (100 / (1 + rs))
     
-    # Calculate ATR (14-period) on 12h data
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h_prev = np.roll(close_12h, 1)
-    close_12h_prev[0] = close_12h[0]
+    # Calculate 1d ADX (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_prev = np.roll(close_1d, 1)
+    close_1d_prev[0] = close_1d[0]
     
-    tr = np.maximum(high_12h - low_12h, 
-                    np.maximum(np.abs(high_12h - close_12h_prev), 
-                               np.abs(low_12h - close_12h_prev)))
+    tr = np.maximum(high_1d - low_1d, 
+                    np.maximum(np.abs(high_1d - close_1d_prev), 
+                               np.abs(low_1d - close_1d_prev)))
     
-    atr_12h = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
     
-    # Calculate 12h EMA (50-period) on close
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    plus_dm[0] = 0
+    minus_dm[0] = 0
     
-    # Calculate 6-period average volume (4h periods in a day for 12h TF)
-    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    tr_ma = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / (tr_ma + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / (tr_ma + 1e-10)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Calculate 6-period average volume (4h periods in a day for 6h TF)
+    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     signals = np.zeros(n)
     position = 0
@@ -55,40 +64,38 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Get aligned indicators
-        rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)[i]
-        atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)[i]
-        ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)[i]
-        vol_ma_6_val = vol_ma_6[i]  # already LTF
+        rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)[i]
+        adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)[i]
+        vol_ma_4_val = vol_ma_4[i]  # already LTF
         
         # Check for NaN values
-        if (np.isnan(rsi_12h_aligned) or np.isnan(atr_12h_aligned) or 
-            np.isnan(ema_50_12h_aligned) or np.isnan(vol_ma_6_val)):
+        if (np.isnan(rsi_1d_aligned) or np.isnan(adx_1d_aligned) or np.isnan(vol_ma_4_val)):
             continue
         
-        # Volume confirmation (> 1.5x average)
-        volume_confirm = volume[i] > 1.5 * vol_ma_6_val
+        # Volume confirmation (> 1.2x average)
+        volume_confirm = volume[i] > 1.2 * vol_ma_4_val
         
         if position == 0:  # No position - look for entries
             if volume_confirm:
-                # Long: RSI < 30 (oversold) and price above EMA50 (bullish bias)
-                if rsi_12h_aligned < 30 and close[i] > ema_50_12h_aligned:
+                # Long: Strong trend (ADX > 25) and oversold (RSI < 30)
+                if adx_1d_aligned > 25 and rsi_1d_aligned < 30:
                     position = 1
                     signals[i] = position_size
-                # Short: RSI > 70 (overbought) and price below EMA50 (bearish bias)
-                elif rsi_12h_aligned > 70 and close[i] < ema_50_12h_aligned:
+                # Short: Strong trend (ADX > 25) and overbought (RSI > 70)
+                elif adx_1d_aligned > 25 and rsi_1d_aligned > 70:
                     position = -1
                     signals[i] = -position_size
-        elif position == 1:  # Long position - exit when RSI > 70 (overbought)
-            if rsi_12h_aligned > 70:
+        elif position == 1:  # Long position - exit when trend weakens or RSI overbought
+            if adx_1d_aligned < 20 or rsi_1d_aligned > 70:
                 position = 0
                 signals[i] = 0.0
-        elif position == -1:  # Short position - exit when RSI < 30 (oversold)
-            if rsi_12h_aligned < 30:
+        elif position == -1:  # Short position - exit when trend weakens or RSI oversold
+            if adx_1d_aligned < 20 or rsi_1d_aligned < 30:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "6h_RSI12h_OverboughtOversold_EMA50_Volume1.5x_v1"
+name = "6h_ADX25_RSI_Extremes_Volume1.2x_v1"
 timeframe = "6h"
 leverage = 1.0
