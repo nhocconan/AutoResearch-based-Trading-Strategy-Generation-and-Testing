@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian breakout with 1-week EMA200 trend filter and volume confirmation
-# Long when price breaks above Donchian(20) high AND price > weekly EMA200 AND volume > 1.5x 20-period average
-# Short when price breaks below Donchian(20) low AND price < weekly EMA200 AND volume > 1.5x 20-period average
-# Exit when price crosses back inside the Donchian channel (opposite band)
-# Uses weekly trend to avoid counter-trend trades in bear markets. Target: 50-150 total trades over 4 years.
+# Hypothesis: 1-day Donchian(20) breakout with 1-week EMA200 trend filter and volume confirmation
+# Long when price breaks above daily Donchian high AND price > weekly EMA200 AND volume > 1.5x 20-day average
+# Short when price breaks below daily Donchian low AND price < weekly EMA200 AND volume > 1.5x 20-day average
+# Exit when price crosses back inside the daily Donchian channel (opposite band)
+# Uses weekly EMA200 to avoid counter-trend trades in bear markets, targeting 30-100 trades over 4 years
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,7 +22,7 @@ def generate_signals(prices):
     # Load weekly data ONCE before loop for EMA200 trend filter
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate Donchian channels on 4h (20-period high/low)
+    # Calculate daily Donchian channels (20-period high/low)
     high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -31,15 +31,15 @@ def generate_signals(prices):
     ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
     ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
-    # Calculate volume average for confirmation (20-period)
+    # Calculate volume average for confirmation (20-day)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations (200 for weekly EMA + buffer)
-    start = 210
+    # Start after enough data for calculations (20 for Donchian + buffer)
+    start = 50
     
     for i in range(start, n):
         # Skip if any critical data is NaN
@@ -80,6 +80,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_1wEMA200_Volume"
-timeframe = "4h"
+name = "1d_Donchian_1wEMA200_Volume"
+timeframe = "1d"
 leverage = 1.0
