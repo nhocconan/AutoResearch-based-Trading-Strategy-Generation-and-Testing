@@ -3,13 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour strategy using 1-day Supertrend (ATR=10, mult=3) for trend filter and 12-hour Donchian channel breakout for entries.
-# In trending markets (Supertrend bullish), buy breakouts above upper Donchian(20).
-# In bearish trends (Supertrend bearish), sell breakdowns below lower Donchian(20).
-# Volume > 1.5x 20-period average confirms momentum.
-# ATR-based stop loss: exit when price moves against position by 2.5x ATR.
-# Target: 12-37 trades/year per symbol (48-148 total over 4 years) to minimize fee drag.
-# Works in both bull and bear markets by following the trend via Supertrend.
+# Hypothesis: 4h strategy using 12h Supertrend for trend direction and 4h Donchian breakout with volume confirmation.
+# In strong trends (Supertrend direction), trade breakouts in the direction of the trend.
+# In weak trends or ranging markets, avoid trades to reduce whipsaw.
+# Volume > 1.5x 20-period average confirms breakout strength.
+# Target: 20-40 trades/year per symbol (80-160 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,131 +19,122 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Load 12h data ONCE for trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # 1d Supertrend (ATR=10, mult=3) for trend direction
+    # 12h Supertrend (ATR=10, mult=3) for trend direction
     atr_len = 10
     mult = 3
-    if len(df_1d) < atr_len:
+    if len(df_12h) < atr_len:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
     # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     
     # ATR
-    atr_1d = pd.Series(tr).ewm(span=atr_len, adjust=False, min_periods=atr_len).mean().values
+    atr = pd.Series(tr).ewm(span=atr_len, adjust=False, min_periods=atr_len).mean().values
+    
+    # Upper and Lower Bands
+    hl2 = (high_12h + low_12h) / 2
+    upper_band = hl2 + mult * atr
+    lower_band = hl2 - mult * atr
     
     # Supertrend calculation
-    hl2 = (high_1d + low_1d) / 2
-    upperband = hl2 + (mult * atr_1d)
-    lowerband = hl2 - (mult * atr_1d)
+    supertrend = np.zeros_like(close_12h)
+    direction = np.ones_like(close_12h)  # 1 for uptrend, -1 for downtrend
     
-    # Initialize Supertrend arrays
-    supertrend = np.zeros_like(close_1d)
-    direction = np.ones_like(close_1d)  # 1 for uptrend, -1 for downtrend
-    
-    # First valid value
-    supertrend[0] = upperband[0]
+    supertrend[0] = upper_band[0] if not np.isnan(upper_band[0]) else close_12h[0]
     direction[0] = 1
     
-    for i in range(1, len(close_1d)):
-        if np.isnan(atr_1d[i]) or np.isnan(upperband[i]) or np.isnan(lowerband[i]):
+    for i in range(1, len(close_12h)):
+        if np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(atr[i]):
             supertrend[i] = supertrend[i-1]
             direction[i] = direction[i-1]
         else:
-            if close_1d[i] > supertrend[i-1]:
+            if close_12h[i] > supertrend[i-1]:
                 direction[i] = 1
-            elif close_1d[i] < supertrend[i-1]:
+            elif close_12h[i] < supertrend[i-1]:
                 direction[i] = -1
             else:
                 direction[i] = direction[i-1]
             
             if direction[i] == 1:
-                supertrend[i] = max(lowerband[i], supertrend[i-1])
+                supertrend[i] = max(lower_band[i], supertrend[i-1])
             else:
-                supertrend[i] = min(upperband[i], supertrend[i-1])
+                supertrend[i] = min(upper_band[i], supertrend[i-1])
     
-    # Supertrend direction: 1 = uptrend, -1 = downtrend
-    supertrend_direction = direction
-    supertrend_direction_aligned = align_htf_to_ltf(prices, df_1d, supertrend_direction)
+    # Align Supertrend direction to 4h timeframe
+    supertrend_direction_aligned = align_htf_to_ltf(prices, df_12h, direction)
     
-    # 12-hour Donchian channel (20 periods)
-    dc_len = 20
-    if n < dc_len:
+    # 4h Donchian Channel (20 periods)
+    donch_len = 20
+    if len(high) < donch_len:
         return np.zeros(n)
     
-    # Calculate Donchian channels
-    highest_high = pd.Series(high).rolling(window=dc_len, min_periods=dc_len).max().values
-    lowest_low = pd.Series(low).rolling(window=dc_len, min_periods=dc_len).min().values
+    highest_high = pd.Series(high).rolling(window=donch_len, min_periods=donch_len).max().values
+    lowest_low = pd.Series(low).rolling(window=donch_len, min_periods=donch_len).min().values
     
     # Volume confirmation: 1.5x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR for stop loss (12-hour ATR)
-    atr_len_stop = 10
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
-    atr_12h = pd.Series(tr).ewm(span=atr_len_stop, adjust=False, min_periods=atr_len_stop).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(dc_len, atr_len_stop*2, 20)
+    start = max(donch_len, 20)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
         if (np.isnan(supertrend_direction_aligned[i]) or 
             np.isnan(highest_high[i]) or
             np.isnan(lowest_low[i]) or
-            np.isnan(vol_ma[i]) or
-            np.isnan(atr_12h[i])):
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
+        
+        # Trend direction from 12h Supertrend
+        uptrend = supertrend_direction_aligned[i] == 1
+        downtrend = supertrend_direction_aligned[i] == -1
         
         # Volume confirmation
         volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Look for breakout/breakdown in direction of 1d Supertrend
-            if supertrend_direction_aligned[i] == 1:  # Uptrend
-                # Buy breakout above upper Donchian
-                if (close[i] > highest_high[i] and 
-                    volume_confirmed):
+            if uptrend and volume_confirmed:
+                # Long breakout above Donchian high in uptrend
+                if close[i] > highest_high[i]:
                     position = 1
                     signals[i] = position_size
-            elif supertrend_direction_aligned[i] == -1:  # Downtrend
-                # Sell breakdown below lower Donchian
-                if (close[i] < lowest_low[i] and 
-                    volume_confirmed):
+                else:
+                    signals[i] = 0.0
+            elif downtrend and volume_confirmed:
+                # Short breakdown below Donchian low in downtrend
+                if close[i] < lowest_low[i]:
                     position = -1
                     signals[i] = -position_size
+                else:
+                    signals[i] = 0.0
+            else:
+                signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below lower Donchian or hits ATR-based stop
-            # Stop loss: 2.5 * ATR below highest high since entry (simplified: use current ATR)
-            if (close[i] < lowest_low[i] or 
-                close[i] < (high[i] - 2.5 * atr_12h[i])):  # Simplified stop
+            # Exit long: price breaks below Donchian low or trend reverses
+            if close[i] < lowest_low[i] or supertrend_direction_aligned[i] != 1:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes above upper Donchian or hits ATR-based stop
-            if (close[i] > highest_high[i] or 
-                close[i] > (low[i] + 2.5 * atr_12h[i])):  # Simplified stop
+            # Exit short: price breaks above Donchian high or trend reverses
+            if close[i] > highest_high[i] or supertrend_direction_aligned[i] != -1:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -153,6 +142,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Supertrend_Donchian_Breakout_v1"
-timeframe = "12h"
+name = "4h_12h_Supertrend_Donchian_Breakout_v1"
+timeframe = "4h"
 leverage = 1.0
