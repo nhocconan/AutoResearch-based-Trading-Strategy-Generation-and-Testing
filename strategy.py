@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Load daily data (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -40,15 +40,15 @@ def generate_signals(prices):
     upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
     lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
     
-    # Calculate 50-day SMA for trend filter (daily)
-    if len(close_1d) < 50:
+    # Calculate 10-period SMA for trend filter (daily)
+    if len(close_1d) < 10:
         return np.zeros(n)
     
-    sma50_1d = np.full_like(close_1d, np.nan)
-    for i in range(49, len(close_1d)):
-        sma50_1d[i] = np.mean(close_1d[i-49:i+1])
+    sma10_1d = np.full_like(close_1d, np.nan)
+    for i in range(9, len(close_1d)):
+        sma10_1d[i] = np.mean(close_1d[i-9:i+1])
     
-    sma50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
+    sma10_1d_aligned = align_htf_to_ltf(prices, df_1d, sma10_1d)
     
     # Calculate 14-day RSI for momentum (daily)
     if len(close_1d) < 14:
@@ -79,42 +79,40 @@ def generate_signals(prices):
     
     rsi14_aligned = align_htf_to_ltf(prices, df_1d, rsi14)
     
+    # Pre-calculate volume moving average (20-period)
+    vol_ma_20 = np.full_like(volume, np.nan)
+    for i in range(19, len(volume)):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    
     signals = np.zeros(n)
     position = 0
-    position_size = 0.30  # 30% position size
+    position_size = 0.25  # 25% position size
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if any critical data is NaN
         if (np.isnan(upper_20_aligned[i]) or 
             np.isnan(lower_20_aligned[i]) or 
-            np.isnan(sma50_1d_aligned[i]) or 
-            np.isnan(rsi14_aligned[i])):
+            np.isnan(sma10_1d_aligned[i]) or 
+            np.isnan(rsi14_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 12h volume vs 20-period average
-        vol_ma_20 = np.full_like(volume, np.nan)
-        for j in range(19, len(volume)):
-            vol_ma_20[j] = np.mean(volume[j-19:j+1])
-        
-        if np.isnan(vol_ma_20[i]) or vol_ma_20[i] <= 0:
-            volume_ratio = 0
-        else:
-            volume_ratio = volume[i] / vol_ma_20[i]
+        volume_ratio = volume[i] / vol_ma_20[i] if vol_ma_20[i] > 0 else 0
         
         if position == 0:
-            # Long: Price breaks above upper Donchian + price above SMA50 + RSI > 55 + volume surge
+            # Long: Price breaks above upper Donchian + price above SMA10 + RSI > 55 + volume surge
             if (close[i] > upper_20_aligned[i] and
-                close[i] > sma50_1d_aligned[i] and
+                close[i] > sma10_1d_aligned[i] and
                 rsi14_aligned[i] > 55 and
-                volume_ratio > 2.0):
+                volume_ratio > 1.5):
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below lower Donchian + price below SMA50 + RSI < 45 + volume surge
+            # Short: Price breaks below lower Donchian + price below SMA10 + RSI < 45 + volume surge
             elif (close[i] < lower_20_aligned[i] and
-                  close[i] < sma50_1d_aligned[i] and
+                  close[i] < sma10_1d_aligned[i] and
                   rsi14_aligned[i] < 45 and
-                  volume_ratio > 2.0):
+                  volume_ratio > 1.5):
                 position = -1
                 signals[i] = -position_size
             else:
@@ -138,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Donchian20_SMA50_RSI14_Volume_v1"
+name = "12h_1d_Donchian20_SMA10_RSI14_Volume_v1"
 timeframe = "12h"
 leverage = 1.0
