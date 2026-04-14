@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h 1D Camarilla Pivot + Volume Spike + Choppiness Regime Filter
-Long when price touches Camarilla L3 with volume spike in choppy market.
-Short when price touches Camarilla H3 with volume spike in choppy market.
-Exit on touch of opposite H3/L3 level or when choppiness drops below 38.2 (trending).
-Designed for low turnover: ~15-30 trades/year per symbol.
+1d Bollinger Band Width + RSI + Volume Confirmation Strategy
+Hypothesis: In ranging markets (low Bollinger Band Width), price tends to revert to the mean.
+We use Bollinger Band Width percentile to detect ranging regimes, RSI for mean reversion signals,
+and volume confirmation to filter false signals. Works in both bull and bear markets because
+it adapts to volatility regimes rather than assuming trend direction.
 """
 import numpy as np
 import pandas as pd
@@ -20,81 +20,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data once
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
+    close_series = pd.Series(close)
+    bb_middle = close_series.rolling(window=bb_period, min_periods=bb_period).mean().values
+    bb_std_dev = close_series.rolling(window=bb_period, min_periods=bb_period).std().values
+    bb_upper = bb_middle + bb_std * bb_std_dev
+    bb_lower = bb_middle - bb_std * bb_std_dev
     
-    # Calculate Camarilla levels from previous day
-    # Camarilla: H4 = C + (H-L)*1.1/2, H3 = C + (H-L)*1.1/4, L3 = C - (H-L)*1.1/4, L4 = C - (H-L)*1.1/2
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Bollinger Band Width
+    bb_width = (bb_upper - bb_lower) / bb_middle
     
-    # Avoid look-ahead: use previous day's data
-    rng = prev_high - prev_low
-    H3 = prev_close + rng * 1.1 / 4
-    L3 = prev_close - rng * 1.1 / 4
+    # Bollinger Band Width percentile (50-period lookback) to detect ranging regimes
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=20).rank(pct=True).values
     
-    # Align to 12h timeframe
-    H3_12h = align_htf_to_ltf(prices, df_1d, H3)
-    L3_12h = align_htf_to_ltf(prices, df_1d, L3)
+    # RSI (14)
+    rsi_period = 14
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
+    avg_loss = loss.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
+    rs = avg_gain / avg_loss.replace(0, 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    # Choppiness index on daily (need OHLC)
-    # Chop = 100 * log10(sum(ATR(14)) / (n * (highest-high - lowest-low))) / log10(n)
-    # Simplified: use rolling std dev of returns as proxy for chop
-    returns = np.log(df_1d['close'] / df_1d['close'].shift(1))
-    chop_raw = returns.rolling(window=14, min_periods=14).std().values
-    # Normalize to 0-100 scale (approximation)
-    chop_raw = np.nan_to_num(chop_raw, nan=0.0)
-    chop_max = np.maximum.accumulate(chop_raw)
-    chop = 100 * chop_raw / (chop_max + 1e-10)
-    chop = np.nan_to_num(chop, nan=50.0)
-    chop_12h = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Volume spike: current volume > 2x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
+    # Volume moving average (20-period)
+    volume_series = pd.Series(volume)
+    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25
     
-    for i in range(20, n):
-        # Skip if chop data not ready
-        if np.isnan(chop_12h[i]):
+    for i in range(50, n):
+        # Regime filter: ranging market (low Bollinger Band Width)
+        # Using 30th percentile as threshold for ranging markets
+        if bb_width_percentile[i] > 0.30:
             continue
             
-        # Only trade in choppy market (Chop > 61.8 = ranging)
-        if chop_12h[i] <= 61.8:
-            # If trending, exit any position
-            if position != 0:
-                position = 0
-                signals[i] = 0.0
-            continue
-        
-        if position == 0:
-            # Long: price at L3 with volume spike
-            if low[i] <= L3_12h[i] and vol_spike[i]:
-                position = 1
-                signals[i] = position_size
-            # Short: price at H3 with volume spike
-            elif high[i] >= H3_12h[i] and vol_spike[i]:
-                position = -1
-                signals[i] = -position_size
-        elif position == 1:
-            # Exit long: price touches H3 or chop drops
-            if high[i] >= H3_12h[i] or chop_12h[i] < 61.8:
-                position = 0
-                signals[i] = 0.0
-        elif position == -1:
-            # Exit short: price touches L3 or chop drops
-            if low[i] <= L3_12h[i] or chop_12h[i] < 61.8:
-                position = 0
-                signals[i] = 0.0
+        # Mean reversion signals with volume confirmation
+        # Long: price near lower band + RSI oversold + volume confirmation
+        if (close[i] <= bb_lower[i] * 1.01 and  # Allow small tolerance
+            rsi_values[i] < 30 and
+            volume[i] > vol_ma[i] * 1.5):
+            signals[i] = position_size
+            
+        # Short: price near upper band + RSI overbought + volume confirmation
+        elif (close[i] >= bb_upper[i] * 0.99 and  # Allow small tolerance
+              rsi_values[i] > 70 and
+              volume[i] > vol_ma[i] * 1.5):
+            signals[i] = -position_size
+            
+        # Exit: RSI returns to neutral zone (40-60)
+        elif 40 <= rsi_values[i] <= 60:
+            signals[i] = 0.0
     
     return signals
 
-name = "12h_1D_Camarilla_Pivot_Volume_Chop"
-timeframe = "12h"
+name = "1d_BBWidth_RSI_Volume_MeanReversion"
+timeframe = "1d"
 leverage = 1.0
