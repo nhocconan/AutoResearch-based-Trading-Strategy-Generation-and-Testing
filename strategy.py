@@ -13,103 +13,134 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily timeframe for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load weekly data (HTF) once before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Daily EMA50 for trend direction
-    ema50_1d = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 50:
-        ema50_1d[49] = np.mean(close_1d[:50])
-        for i in range(50, len(df_1d)):
-            ema50_1d[i] = (close_1d[i] * 2 + ema50_1d[i-1] * 49) / 51
+    # Calculate weekly ATR (14-period) - Wilder's smoothing
+    high_low = high_1w - low_1w
+    high_close = np.abs(high_1w - np.concatenate([[close_1w[0]], close_1w[:-1]]))
+    low_close = np.abs(low_1w - np.concatenate([[close_1w[0]], close_1w[:-1]]))
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
     
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    atr_1w = np.full(len(df_1w), np.nan)
+    if len(df_1w) >= 14:
+        atr_1w[13] = np.mean(tr[:14])
+        for i in range(14, len(df_1w)):
+            atr_1w[i] = (atr_1w[i-1] * 13 + tr[i]) / 14
     
-    # Daily ATR(14) for volatility filter
-    tr = np.maximum(high_1d - low_1d, 
-                    np.maximum(np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]])),
-                               np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))))
+    # Calculate weekly ADX (14-period) - Wilder's smoothing
+    plus_dm = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    minus_dm = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    # Pad to same length
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
     
-    atr14_1d = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 14:
-        atr14_1d[13] = np.mean(tr[:14])
-        for i in range(14, len(df_1d)):
-            atr14_1d[i] = (atr14_1d[i-1] * 13 + tr[i]) / 14
+    tr_14 = tr
+    plus_di_14 = np.full(len(df_1w), np.nan)
+    minus_di_14 = np.full(len(df_1w), np.nan)
+    dx_14 = np.full(len(df_1w), np.nan)
     
-    atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
+    if len(df_1w) >= 14:
+        # Smooth +DM, -DM, TR
+        plus_dm_smooth = np.full(len(df_1w), np.nan)
+        minus_dm_smooth = np.full(len(df_1w), np.nan)
+        tr_smooth = np.full(len(df_1w), np.nan)
+        
+        plus_dm_smooth[13] = np.sum(plus_dm[1:15])
+        minus_dm_smooth[13] = np.sum(minus_dm[1:15])
+        tr_smooth[13] = np.sum(tr[1:15])
+        
+        for i in range(14, len(df_1w)):
+            plus_dm_smooth[i] = plus_dm_smooth[i-1] - (plus_dm_smooth[i-1] / 14) + plus_dm[i]
+            minus_dm_smooth[i] = minus_dm_smooth[i-1] - (minus_dm_smooth[i-1] / 14) + minus_dm[i]
+            tr_smooth[i] = tr_smooth[i-1] - (tr_smooth[i-1] / 14) + tr[i]
+        
+        plus_di_14 = 100 * plus_dm_smooth / tr_smooth
+        minus_di_14 = 100 * minus_dm_smooth / tr_smooth
+        dx_14 = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
     
-    # 1-hour Bollinger Bands (20, 2) for mean reversion entries
-    bb_ma = np.full(n, np.nan)
-    bb_std = np.full(n, np.nan)
+    adx_1w = np.full(len(df_1w), np.nan)
+    if len(df_1w) >= 27:  # Need 14 + 14 for smoothing
+        adx_1w[26] = np.mean(dx_14[14:28])
+        for i in range(27, len(df_1w)):
+            adx_1w[i] = (adx_1w[i-1] * 13 + dx_14[i]) / 14
+    
+    # Align weekly indicators to 6h timeframe
+    atr_6h = align_htf_to_ltf(prices, df_1w, atr_1w)
+    adx_6h = align_htf_to_ltf(prices, df_1w, adx_1w)
+    
+    # Calculate 6-hour Donchian channels (20-period)
+    donch_high = np.full(n, np.nan)
+    donch_low = np.full(n, np.nan)
     if n >= 20:
         for i in range(19, n):
-            bb_ma[i] = np.mean(close[i-19:i+1])
-            bb_std[i] = np.std(close[i-19:i+1])
+            donch_high[i] = np.max(high[i-19:i+1])
+            donch_low[i] = np.min(low[i-19:i+1])
     
-    bb_upper = bb_ma + 2 * bb_std
-    bb_lower = bb_ma - 2 * bb_std
-    
-    # Session filter: 8-20 UTC
-    hours = prices.index.hour
+    # Calculate 6-hour volume moving average (20-period)
+    volume_ma = np.full(n, np.nan)
+    if n >= 20:
+        for i in range(19, n):
+            volume_ma[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
     for i in range(50, n):
-        # Session filter
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
-        
         # Skip if any critical data is NaN
-        if (np.isnan(ema50_1d_aligned[i]) or
-            np.isnan(atr14_1d_aligned[i]) or
-            np.isnan(bb_upper[i]) or
-            np.isnan(bb_lower[i])):
+        if (np.isnan(atr_6h[i]) or
+            np.isnan(adx_6h[i]) or
+            np.isnan(donch_high[i]) or
+            np.isnan(donch_low[i]) or
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: ATR > 0.5% of price
-        if atr14_1d_aligned[i] / close[i] < 0.005:
+        # Skip low volatility periods (ATR < 0.5% of price)
+        if atr_6h[i] / close[i] < 0.005:
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below daily EMA50
-        if close[i] > ema50_1d_aligned[i]:
-            trend = 1  # uptrend
-        else:
-            trend = -1  # downtrend
+        # Skip low volume periods (volume < 80% of 20-period MA)
+        if volume[i] < 0.8 * volume_ma[i]:
+            signals[i] = 0.0
+            continue
         
-        # Mean reversion entries with trend filter
+        # Skip low trend strength (ADX < 25)
+        if adx_6h[i] < 25:
+            signals[i] = 0.0
+            continue
+        
         if position == 0:
-            # Long in uptrend: price touches lower Bollinger Band
-            if trend == 1 and close[i] <= bb_lower[i]:
+            # Long: Price breaks above 6h Donchian high AND weekly ADX > 25
+            if close[i] > donch_high[i] and adx_6h[i] > 25:
                 position = 1
                 signals[i] = position_size
-            # Short in downtrend: price touches upper Bollinger Band
-            elif trend == -1 and close[i] >= bb_upper[i]:
+            # Short: Price breaks below 6h Donchian low AND weekly ADX > 25
+            elif close[i] < donch_low[i] and adx_6h[i] > 25:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price touches middle Bollinger Band or trend changes
-            if close[i] >= bb_ma[i] or trend == -1:
+            # Exit: Price falls back below 6h Donchian low OR weekly ADX < 20
+            if close[i] < donch_low[i] or adx_6h[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price touches middle Bollinger Band or trend changes
-            if close[i] <= bb_ma[i] or trend == 1:
+            # Exit: Price rises back above 6h Donchian high OR weekly ADX < 20
+            if close[i] > donch_high[i] or adx_6h[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -117,6 +148,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_DailyEMA50_BB_MeanReversion_SessionFilter"
-timeframe = "1h"
+name = "6h_1w_Donchian_ADX_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
