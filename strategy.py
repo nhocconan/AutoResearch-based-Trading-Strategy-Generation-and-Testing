@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for volatility filter and pivot points
+    # Load 1d data for volatility filter and pivots
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 14:
         return np.zeros(n)
@@ -38,10 +38,10 @@ def generate_signals(prices):
         for i in range(14, len(df_1d)):
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # Align 1d ATR to 12h timeframe
+    # Align 1d ATR to 4h timeframe
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Load 1d data for pivot points
+    # Calculate 1d pivot points (Pivot, R1, S1)
     pivot_point = np.full_like(close_1d, np.nan)
     resistance1 = np.full_like(close_1d, np.nan)
     support1 = np.full_like(close_1d, np.nan)
@@ -60,10 +60,10 @@ def generate_signals(prices):
             resistance1[i] = r1
             support1[i] = s1
     
-    # Align 1d pivots to 12h timeframe
-    pivot_point_12h = align_htf_to_ltf(prices, df_1d, pivot_point)
-    resistance1_12h = align_htf_to_ltf(prices, df_1d, resistance1)
-    support1_12h = align_htf_to_ltf(prices, df_1d, support1)
+    # Align 1d pivots to 4h timeframe
+    pivot_point_4h = align_htf_to_ltf(prices, df_1d, pivot_point)
+    resistance1_4h = align_htf_to_ltf(prices, df_1d, resistance1)
+    support1_4h = align_htf_to_ltf(prices, df_1d, support1)
     
     # Volume spike detection (20-period average)
     vol_ma_20 = np.full_like(volume, np.nan)
@@ -75,11 +75,11 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25  # 25% position size
     
-    for i in range(20, n):
+    for i in range(60, n):
         # Skip if any critical data is NaN
-        if (np.isnan(pivot_point_12h[i]) or 
-            np.isnan(resistance1_12h[i]) or
-            np.isnan(support1_12h[i]) or
+        if (np.isnan(pivot_point_4h[i]) or 
+            np.isnan(resistance1_4h[i]) or
+            np.isnan(support1_4h[i]) or
             np.isnan(vol_ma_20[i]) or
             np.isnan(atr_1d_aligned[i])):
             signals[i] = 0.0
@@ -90,7 +90,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 12h volume vs 20-period average
+        # Volume ratio: current 4h volume vs 20-period average
         if vol_ma_20[i] <= 0:
             volume_ratio = 0
         else:
@@ -101,12 +101,12 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: Price breaks above R1 with volume spike and adequate volatility
-            if (close[i] > resistance1_12h[i] and 
+            if (close[i] > resistance1_4h[i] and 
                 volume_ratio > vol_threshold):
                 position = 1
                 signals[i] = position_size
             # Short: Price breaks below S1 with volume spike and adequate volatility
-            elif (close[i] < support1_12h[i] and 
+            elif (close[i] < support1_4h[i] and 
                   volume_ratio > vol_threshold):
                 position = -1
                 signals[i] = -position_size
@@ -114,14 +114,14 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Exit: Price closes below pivot point (mean reversion)
-            if close[i] < pivot_point_12h[i]:
+            if close[i] < pivot_point_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
             # Exit: Price closes above pivot point (mean reversion)
-            if close[i] > pivot_point_12h[i]:
+            if close[i] > pivot_point_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -129,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1dATR_Vol_Filter_Pivot_Breakout"
-timeframe = "12h"
+name = "4h_1dATR_Vol_Filter_Pivot_Breakout"
+timeframe = "4h"
 leverage = 1.0
