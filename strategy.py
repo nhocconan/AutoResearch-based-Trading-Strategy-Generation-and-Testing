@@ -1,15 +1,15 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Williams Alligator with daily volume confirmation and weekly trend filter
-# Long when price is above Alligator teeth (red line) with volume expansion and weekly bullish trend
-# Short when price is below Alligator teeth with volume expansion and weekly bearish trend
-# Exit when price crosses Alligator jaws (blue line)
-# Uses Williams Alligator (13,8,5 SMAs) to identify trend phases and avoid choppy markets
-# Target: 20-50 trades per symbol over 4 years (5-12.5/year) to minimize fee drag
-# Williams Alligator is effective in both trending and ranging markets when combined with volume and trend filters
+# Hypothesis: 1-day Choppiness Index regime filter + 1-week EMA trend + volume spike
+# Long when: Choppiness > 61.8 (range), price > weekly EMA (uptrend), volume > 2x average
+# Short when: Choppiness > 61.8 (range), price < weekly EMA (downtrend), volume > 2x average
+# Exit when Choppiness < 38.2 (trending regime) or opposite signal
+# Uses weekly EMA to avoid counter-trend trades and Choppiness to identify range-bound markets
+# Target: 15-30 trades per symbol over 4 years (4-7.5/year) to minimize fee drag
+# This combines regime detection with trend following for range-bound markets
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,112 +21,87 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h and weekly data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Load daily and weekly data ONCE before loop
+    df_daily = get_htf_data(prices, '1d')
     df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate Williams Alligator on 4h timeframe
-    # Jaw (Blue Line): 13-period SMMA, smoothed 8 periods ahead
-    # Teeth (Red Line): 8-period SMMA, smoothed 5 periods ahead
-    # Lips (Green Line): 5-period SMMA, smoothed 3 periods ahead
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Calculate Choppiness Index (14-period) on daily data
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    close_daily = df_daily['close'].values
     
-    # Calculate median price (typical price) for Alligator
-    typical_price_4h = (high_4h + low_4h + close_4h) / 3
+    # True Range
+    tr1 = high_daily[1:] - low_daily[1:]
+    tr2 = np.abs(high_daily[1:] - close_daily[:-1])
+    tr3 = np.abs(low_daily[1:] - close_daily[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # Align with original array
     
-    # Calculate SMMA (Smoothed Moving Average) - equivalent to Wilder's smoothing
-    def smma(data, period):
-        if len(data) < period:
-            return np.full_like(data, np.nan, dtype=float)
-        result = np.full_like(data, np.nan, dtype=float)
-        # First value is SMA
-        result[period-1] = np.mean(data[:period])
-        # Subsequent values are smoothed
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # ATR (14-period)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Alligator lines
-    jaw = smma(typical_price_4h, 13)  # Blue line
-    teeth = smma(typical_price_4h, 8)  # Red line
-    lips = smma(typical_price_4h, 5)   # Green line
-    
-    # Shift jaw forward by 8, teeth by 5, lips by 3 (as per Williams Alligator)
-    jaw_shifted = np.roll(jaw, 8)
-    teeth_shifted = np.roll(teeth, 5)
-    lips_shifted = np.roll(lips, 3)
-    
-    # For the shifted periods, we need to handle the NaN propagation
-    jaw_shifted[:8] = np.nan
-    teeth_shifted[:5] = np.nan
-    lips_shifted[:3] = np.nan
-    
-    # Calculate 4h volume average (20-period)
-    vol_4h = df_4h['volume'].values
-    vol_ma_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
+    # Choppiness Index
+    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high_daily).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_daily).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(sum_tr / (atr * 14)) / np.log10(14)
+    chop = np.where((highest_high - lowest_low) == 0, 50, chop)  # Avoid division by zero
     
     # Calculate weekly EMA for trend filter (21-period)
     close_weekly = df_weekly['close'].values
     ema_weekly = pd.Series(close_weekly).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Align indicators to 4h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_4h, jaw_shifted)
-    teeth_aligned = align_htf_to_ltf(prices, df_4h, teeth_shifted)
-    lips_aligned = align_htf_to_ltf(prices, df_4h, lips_shifted)
+    # Calculate daily volume average (20-period)
+    vol_daily = df_daily['volume'].values
+    vol_ma_daily = pd.Series(vol_daily).rolling(window=20, min_periods=20).mean().values
+    
+    # Align indicators to daily timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_daily, chop)
     ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
-    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
+    vol_ma_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_ma_daily)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations (max shift + period)
-    start = 30  # for Alligator calculations
+    # Start after enough data for calculations
+    start = 35  # for 14-period chop + 20-period vol
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(ema_weekly_aligned[i]) or 
-            np.isnan(vol_ma_4h_aligned[i])):
+        if (np.isnan(chop_aligned[i]) or np.isnan(ema_weekly_aligned[i]) or 
+            np.isnan(vol_ma_daily_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_4h_current = volume[i]  # Current 4h volume
+        vol_daily_current = volume[i]  # Current daily volume
         
         if position == 0:
-            # Long setup: price above teeth (red line) with volume expansion and weekly bullish trend
-            # Alligator lines should be aligned: lips > teeth > jaw (bullish alignment)
-            if (price > teeth_aligned[i] and 
-                lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i] and  # Bullish alignment
-                vol_4h_current > 1.5 * vol_ma_4h_aligned[i] and        # Volume expansion
-                price > ema_weekly_aligned[i]):                        # Price above weekly EMA for bullish trend
+            # Long setup: range market (chop > 61.8), price above weekly EMA, volume spike
+            if (chop_aligned[i] > 61.8 and 
+                price > ema_weekly_aligned[i] and 
+                vol_daily_current > 2.0 * vol_ma_daily_aligned[i]):
                 position = 1
                 signals[i] = position_size
-            # Short setup: price below teeth (red line) with volume expansion and weekly bearish trend
-            # Alligator lines should be aligned: lips < teeth < jaw (bearish alignment)
-            elif (price < teeth_aligned[i] and 
-                  lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i] and  # Bearish alignment
-                  vol_4h_current > 1.5 * vol_ma_4h_aligned[i] and        # Volume expansion
-                  price < ema_weekly_aligned[i]):                        # Price below weekly EMA for bearish trend
+            # Short setup: range market (chop > 61.8), price below weekly EMA, volume spike
+            elif (chop_aligned[i] > 61.8 and 
+                  price < ema_weekly_aligned[i] and 
+                  vol_daily_current > 2.0 * vol_ma_daily_aligned[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below lips (green line) or Alligator lines lose bullish alignment
-            if (price < lips_aligned[i] or 
-                not (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i])):  # Lost bullish alignment
+            # Exit long: trending regime (chop < 38.2) or price crosses below weekly EMA
+            if chop_aligned[i] < 38.2 or price < ema_weekly_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above lips (green line) or Alligator lines lose bearish alignment
-            if (price > lips_aligned[i] or 
-                not (lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i])):  # Lost bearish alignment
+            # Exit short: trending regime (chop < 38.2) or price crosses above weekly EMA
+            if chop_aligned[i] < 38.2 or price > ema_weekly_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -134,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsAlligator_WeeklyTrend_Volume"
-timeframe = "4h"
+name = "1d_Choppiness_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
