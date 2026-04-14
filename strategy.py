@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Williams Alligator with 12-hour trend filter and volume confirmation
-# Long when price > Alligator Jaw (13-period smoothed median) AND Alligator Mouth is open (Jaw < Teeth < Lips) AND price > 12h EMA50 AND volume > 1.5x 20-period average
-# Short when price < Alligator Jaw AND Alligator Mouth is open (Lips < Teeth < Jaw) AND price < 12h EMA50 AND volume > 1.5x 20-period average
-# Exit when price crosses back inside the Alligator Jaw (opposite condition)
-# Williams Alligator identifies trend direction and strength; 12h EMA50 filters for higher timeframe trend; volume confirms momentum
-# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
+# Hypothesis: 4-hour Choppiness Index regime filter with Donchian breakout
+# Long when price breaks above Donchian(20) high AND market is trending (CHOP < 38.2)
+# Short when price breaks below Donchian(20) low AND market is trending (CHOP < 38.2)
+# Exit when price crosses back inside Donchian channel
+# Choppiness Index identifies trending vs ranging markets to avoid false breakouts in chop
+# Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,73 +20,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Williams Alligator components on 6h (13, 8, 5 periods with smoothing)
-    median = (high + low) / 2
+    # Calculate Donchian channels on 4h (20-period high/low)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Jaw: 13-period SMMA of median, shifted 8 bars
-    jaw_raw = pd.Series(median).rolling(window=13, min_periods=13).mean()
-    jaw = jaw_raw.shift(8)
+    # Calculate Choppiness Index (14-period) - values 0-100, <38.2 = trending, >61.8 = ranging
+    atr = pd.Series(np.maximum.reduce([
+        high[1:] - low[1:],
+        np.abs(high[1:] - close[:-1]),
+        np.abs(low[1:] - close[:-1])
+    ])).rolling(window=14, min_periods=14).mean().values
+    # Prepend first value to align length
+    atr = np.concatenate([[np.nan], atr])
     
-    # Teeth: 8-period SMMA of median, shifted 5 bars
-    teeth_raw = pd.Series(median).rolling(window=8, min_periods=8).mean()
-    teeth = teeth_raw.shift(5)
+    sum_atr14 = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    highest_high14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
     
-    # Lips: 5-period SMMA of median, shifted 3 bars
-    lips_raw = pd.Series(median).rolling(window=5, min_periods=5).mean()
-    lips = lips_raw.shift(3)
-    
-    # Load 12h data ONCE before loop for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    
-    # Calculate volume average for confirmation (20-period)
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Avoid division by zero
+    range14 = highest_high14 - lowest_low14
+    chop = np.where(range14 != 0, 100 * np.log10(sum_atr14 / range14) / np.log10(14), 50)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations (max shift + periods)
-    start = 25
+    # Start after enough data for calculations
+    start = 30
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol = volume[i]
-        vol_threshold = vol_avg[i] * 1.5
-        
-        # Check if Alligator Mouth is open (trending condition)
-        jaw_open = jaw[i] < teeth[i] < lips[i]  # bullish alignment
-        teeth_open = lips[i] < teeth[i] < jaw[i]  # bearish alignment
         
         if position == 0:
-            # Long setup: price > Jaw AND Jaw < Teeth < Lips (bullish alignment) AND price > 12h EMA50 AND volume confirmation
-            if (price > jaw[i] and jaw_open and price > ema50_12h_aligned[i] and vol > vol_threshold):
-                position = 1
-                signals[i] = position_size
-            # Short setup: price < Jaw AND Lips < Teeth < Jaw (bearish alignment) AND price < 12h EMA50 AND volume confirmation
-            elif (price < jaw[i] and teeth_open and price < ema50_12h_aligned[i] and vol > vol_threshold):
-                position = -1
-                signals[i] = -position_size
+            # Only trade in trending markets (CHOP < 38.2)
+            if chop[i] < 38.2:
+                # Long setup: breakout above Donchian high
+                if price > high_20[i]:
+                    position = 1
+                    signals[i] = position_size
+                # Short setup: breakdown below Donchian low
+                elif price < low_20[i]:
+                    position = -1
+                    signals[i] = -position_size
+                else:
+                    signals[i] = 0.0
             else:
-                signals[i] = 0.0
+                signals[i] = 0.0  # No trades in ranging markets
         elif position == 1:
-            # Exit long: price falls back below Jaw OR Alligator closes mouth (loss of trend)
-            if price < jaw[i] or not jaw_open:
+            # Exit long: price falls back below Donchian low (opposite band)
+            if price < low_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price rises back above Jaw OR Alligator closes mouth (loss of trend)
-            if price > jaw[i] or not teeth_open:
+            # Exit short: price rises back above Donchian high (opposite band)
+            if price > high_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -94,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsAlligator_12hEMA50_Volume"
-timeframe = "6h"
+name = "4h_Chop_Donchian_Breakout"
+timeframe = "4h"
 leverage = 1.0
