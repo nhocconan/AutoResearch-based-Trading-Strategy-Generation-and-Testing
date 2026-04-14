@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy combining daily volatility breakout with weekly RSI trend filter.
-# Uses volatility-adjusted breakout levels based on prior day's range and ATR, providing adaptive support/resistance.
-# Long when price breaks above volatility-adjusted resistance with 1w RSI > 50 (uptrend) and volume confirmation.
-# Short when price breaks below volatility-adjusted support with 1w RSI < 50 (downtrend) and volume confirmation.
-# Exit when price returns to prior day's close or RSI crosses 50 in opposite direction.
-# Designed to work in both bull and bear markets by adapting to volatility and using RSI for trend confirmation.
-# Target: 20-25 trades/year per symbol (80-100 total over 4 years) to minimize fee drag.
+# Hypothesis: 6h strategy using 1-day pivot points with range-bound and breakout conditions.
+# Long when price breaks above R3 with volume and price > 1-day VWAP (bullish continuation).
+# Short when price breaks below S3 with volume and price < 1-day VWAP (bearish continuation).
+# Fade trades: long at S1 with price < VWAP and RSI < 30, short at R1 with price > VWAP and RSI > 70.
+# Uses 1-day pivot levels (classic formula) for structure, VWAP for intraday bias, and volume for confirmation.
+# Designed to work in both trending and ranging markets by adapting to price action relative to pivot levels.
+# Target: 15-25 trades/year per symbol (60-100 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,60 +21,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for volatility-adjusted levels
+    # Load 1d data ONCE for pivot levels and VWAP
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate True Range and ATR on 1d
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
+    # Calculate 1-day VWAP
+    vwap_1d = (close_1d * volume_1d).cumsum() / volume_1d.cumsum()
+    vwap_1d[volume_1d.cumsum() == 0] = np.nan
     
-    atr_period = 14
-    atr_1d = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    # Calculate classic pivot points: P = (H + L + C)/3
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    # Support and resistance levels
+    s1 = 2 * pivot - high_1d
+    s2 = pivot - (high_1d - low_1d)
+    s3 = low_1d - 2 * (high_1d - pivot)
+    r1 = 2 * pivot - low_1d
+    r2 = pivot + (high_1d - low_1d)
+    r3 = high_1d + 2 * (pivot - low_1d)
     
-    # Volatility-adjusted support/resistance: prior day's high/low ± 0.5 * ATR
-    var_resistance = np.roll(high_1d, 1) + 0.5 * np.roll(atr_1d, 1)
-    var_support = np.roll(low_1d, 1) - 0.5 * np.roll(atr_1d, 1)
-    var_resistance[0] = np.nan
-    var_support[0] = np.nan
-    
-    # Prior 1d close for exit condition
-    prior_close_1d = np.roll(close_1d, 1)
-    prior_close_1d[0] = np.nan
-    
-    # Load 1w data ONCE for RSI trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    
-    # Calculate RSI(14) on 1w
-    delta = np.diff(close_1w, prepend=np.nan)
+    # Load 1d RSI for fade filter confirmation
+    delta = np.diff(close_1d, prepend=np.nan)
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    
     avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     rs = avg_gain / avg_loss
     rs = np.where(avg_loss == 0, 100, rs)
-    rsi_1w = 100 - (100 / (1 + rs))
+    rsi_1d = 100 - (100 / (1 + rs))
     
-    # Align indicators to lower timeframe
-    var_resistance_aligned = align_htf_to_ltf(prices, df_1d, var_resistance)
-    var_support_aligned = align_htf_to_ltf(prices, df_1d, var_support)
-    prior_close_1d_aligned = align_htf_to_ltf(prices, df_1d, prior_close_1d)
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # Align all indicators to 6h timeframe
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Volume confirmation: 1.5x average volume
+    # Volume confirmation: 1.5x average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -82,14 +74,16 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(20, 14)  # Need VAR and RSI
+    start = max(20, 14)  # Need VWAP and RSI
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(var_resistance_aligned[i]) or 
-            np.isnan(var_support_aligned[i]) or
-            np.isnan(prior_close_1d_aligned[i]) or
-            np.isnan(rsi_1w_aligned[i]) or
+        if (np.isnan(vwap_1d_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or
+            np.isnan(r3_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
+            np.isnan(r1_aligned[i]) or
+            np.isnan(rsi_1d_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -97,38 +91,51 @@ def generate_signals(prices):
         # Volume confirmation
         volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
-        # Trend filter: RSI > 50 for uptrend, < 50 for downtrend
-        uptrend = rsi_1w_aligned[i] > 50
-        downtrend = rsi_1w_aligned[i] < 50
+        # Price relative to VWAP for bias
+        price_above_vwap = close[i] > vwap_1d_aligned[i]
+        price_below_vwap = close[i] < vwap_1d_aligned[i]
         
         if position == 0:
-            # Look for volatility-adjusted breakouts
-            # Long: price breaks above VAR resistance AND uptrend
-            if (close[i] > var_resistance_aligned[i] and 
-                uptrend and 
-                volume_confirmed):
+            # Breakout continuation trades
+            # Long: break above R3 with volume and price > VWAP
+            if (close[i] > r3_aligned[i] and 
+                volume_confirmed and 
+                price_above_vwap):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below VAR support AND downtrend
-            elif (close[i] < var_support_aligned[i] and 
-                  downtrend and 
-                  volume_confirmed):
+            # Short: break below S3 with volume and price < VWAP
+            elif (close[i] < s3_aligned[i] and 
+                  volume_confirmed and 
+                  price_below_vwap):
+                position = -1
+                signals[i] = -position_size
+            # Fade trades at S1/R1
+            # Long: at S1 with price < VWAP and oversold RSI
+            elif (close[i] <= s1_aligned[i] and 
+                  price_below_vwap and 
+                  rsi_1d_aligned[i] < 30):
+                position = 1
+                signals[i] = position_size
+            # Short: at R1 with price > VWAP and overbought RSI
+            elif (close[i] >= r1_aligned[i] and 
+                  price_above_vwap and 
+                  rsi_1d_aligned[i] > 70):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to prior 1d close or RSI crosses below 50
-            if (close[i] <= prior_close_1d_aligned[i] or 
-                rsi_1w_aligned[i] <= 50):
+            # Exit long: price returns to pivot or RSI > 70 (overbought)
+            if (close[i] <= pivot_aligned[i] or 
+                rsi_1d_aligned[i] >= 70):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to prior 1d close or RSI crosses above 50
-            if (close[i] >= prior_close_1d_aligned[i] or 
-                rsi_1w_aligned[i] >= 50):
+            # Exit short: price returns to pivot or RSI < 30 (oversold)
+            if (close[i] >= pivot_aligned[i] or 
+                rsi_1d_aligned[i] <= 30):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -136,6 +143,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_VolatilityAdjustedBreakout_1wRSI_v1"
-timeframe = "1d"
+name = "6h_1dPivot_RangeBreakout_Fade_v1"
+timeframe = "6h"
 leverage = 1.0
