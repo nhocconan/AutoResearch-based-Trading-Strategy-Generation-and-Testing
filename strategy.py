@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,46 +13,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data for pivot calculation
+    # Load 1-day data for weekly pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 15:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily pivot points (standard formula)
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
+    # Calculate weekly pivot points (using Friday's data)
+    # We'll use the last available daily data as proxy for weekly
+    # For true weekly pivot, we would need: (weekly high + weekly low + weekly close) / 3
+    # Since we don't have weekly aggregation, we use daily with lookback
     
-    # Align pivot levels to 4h timeframe
-    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
-    r2_4h = align_htf_to_ltf(prices, df_1d, r2)
-    s2_4h = align_htf_to_ltf(prices, df_1d, s2)
+    # Calculate 5-day rolling high/low/close for weekly approximation
+    if len(high_1d) >= 5:
+        weekly_high = np.full(len(high_1d), np.nan)
+        weekly_low = np.full(len(high_1d), np.nan)
+        weekly_close = np.full(len(high_1d), np.nan)
+        
+        for i in range(4, len(high_1d)):
+            weekly_high[i] = np.max(high_1d[i-4:i+1])
+            weekly_low[i] = np.min(low_1d[i-4:i+1])
+            weekly_close[i] = close_1d[i]  # Using current day's close as weekly close proxy
+        
+        # Weekly pivot point
+        weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+        weekly_r1 = 2 * weekly_pivot - weekly_low
+        weekly_s1 = 2 * weekly_pivot - weekly_high
+        weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
+        weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
+        
+        # Align weekly levels to 6h timeframe
+        weekly_pivot_6h = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+        weekly_r2_6h = align_htf_to_ltf(prices, df_1d, weekly_r2)
+        weekly_s2_6h = align_htf_to_ltf(prices, df_1d, weekly_s2)
+    else:
+        return np.zeros(n)
     
-    # Calculate daily ATR for volatility filter
-    tr = np.zeros(len(df_1d))
-    tr[0] = high_1d[0] - low_1d[0]
-    for i in range(1, len(df_1d)):
-        tr[i] = max(
-            high_1d[i] - low_1d[i],
-            abs(high_1d[i] - close_1d[i-1]),
-            abs(low_1d[i] - close_1d[i-1])
-        )
-    
-    atr_1d = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 14:
-        atr_1d[13] = np.mean(tr[:14])
-        for i in range(14, len(df_1d)):
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
-    
-    atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # Volume spike detection (20-period average on 4h)
+    # Volume spike detection (20-period average on 6h)
     vol_ma_20 = np.full_like(volume, np.nan)
     if len(volume) >= 20:
         for i in range(19, len(volume)):
@@ -60,55 +60,49 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position size for lower drawdown
+    position_size = 0.25  # 25% position size
     
     for i in range(30, n):
         # Skip if any critical data is NaN
-        if (np.isnan(pivot_4h[i]) or 
-            np.isnan(r2_4h[i]) or
-            np.isnan(s2_4h[i]) or
-            np.isnan(atr_4h[i]) or
+        if (np.isnan(weekly_pivot_6h[i]) or 
+            np.isnan(weekly_r2_6h[i]) or
+            np.isnan(weekly_s2_6h[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Skip low volatility periods (ATR < 0.8% of price)
-        if atr_4h[i] < 0.008 * close[i]:
-            signals[i] = 0.0
-            continue
-        
-        # Volume ratio: current 4h volume vs 20-period average
+        # Volume ratio: current 6h volume vs 20-period average
         if vol_ma_20[i] <= 0:
             volume_ratio = 0
         else:
             volume_ratio = volume[i] / vol_ma_20[i]
         
         # Volume threshold: require significant spike
-        vol_threshold = 2.5
+        vol_threshold = 2.0
         
         if position == 0:
-            # Long: Price breaks above R2 with volume confirmation
-            if (close[i] > r2_4h[i] and 
+            # Long: Price breaks above weekly R2 with volume confirmation
+            if (close[i] > weekly_r2_6h[i] and 
                 volume_ratio > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below S2 with volume confirmation
-            elif (close[i] < s2_4h[i] and 
+            # Short: Price breaks below weekly S2 with volume confirmation
+            elif (close[i] < weekly_s2_6h[i] and 
                   volume_ratio > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below pivot
-            if close[i] < pivot_4h[i]:
+            # Exit: Price falls back below weekly pivot
+            if close[i] < weekly_pivot_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above pivot
-            if close[i] > pivot_4h[i]:
+            # Exit: Price rises back above weekly pivot
+            if close[i] > weekly_pivot_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -116,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Pivot_R2S2_Breakout_v2"
-timeframe = "4h"
+name = "6h_1d_WeeklyPivot_R2S2_Breakout"
+timeframe = "6h"
 leverage = 1.0
