@@ -20,18 +20,6 @@ def generate_signals(prices):
     ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
     ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # Calculate 1d RSI(14) for mean reversion
-    close_1d = pd.Series(df_1d['close'])
-    delta = close_1d.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rs = rs.replace([np.inf, -np.inf], 100)  # avoid division by zero
-    rsi_14_1d = (100 - (100 / (1 + rs))).values
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
-    
     # Calculate 1d ATR(14) for volatility filter
     high_series = pd.Series(high)
     low_series = pd.Series(low)
@@ -41,6 +29,14 @@ def generate_signals(prices):
     tr3 = abs(low_series - close_series.shift(1))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate 1d Bollinger Bands (20, 2)
+    sma_20_1d = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).mean().values
+    std_20_1d = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).std().values
+    upper_bb_1d = sma_20_1d + (2 * std_20_1d)
+    lower_bb_1d = sma_20_1d - (2 * std_20_1d)
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_1d)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_1d)
     
     signals = np.zeros(n)
     position = 0
@@ -52,8 +48,9 @@ def generate_signals(prices):
     for i in range(start, n):
         # Skip if any critical data is NaN
         if (np.isnan(ema_20_1d_aligned[i]) or 
-            np.isnan(rsi_14_1d_aligned[i]) or 
-            np.isnan(atr[i])):
+            np.isnan(atr[i]) or 
+            np.isnan(upper_bb_aligned[i]) or 
+            np.isnan(lower_bb_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -64,35 +61,35 @@ def generate_signals(prices):
         atr_ratio = atr[i] / price if price > 0 else 0
         vol_filter = atr_ratio > 0.003  # Minimum 0.3% ATR relative to price
         
+        # Bollinger Band squeeze detection: bandwidth < 5% of price
+        bb_width = (upper_bb_aligned[i] - lower_bb_aligned[i]) / price if price > 0 else 0
+        bb_squeeze = bb_width < 0.05
+        
         # Trend filter: price > 1d EMA20 for long, price < 1d EMA20 for short
         trend_filter_long = price > ema_20_1d_aligned[i]
         trend_filter_short = price < ema_20_1d_aligned[i]
         
-        # Mean reversion: RSI < 30 for long, RSI > 70 for short
-        mean_revert_long = rsi_14_1d_aligned[i] < 30
-        mean_revert_short = rsi_14_1d_aligned[i] > 70
-        
         if position == 0:
-            # Long setup: price above 1d EMA20 + volatility filter + RSI oversold
-            if (trend_filter_long and vol_filter and mean_revert_long):
+            # Long setup: price above 1d EMA20 + volatility filter + not in squeeze
+            if (trend_filter_long and vol_filter and not bb_squeeze):
                 position = 1
                 signals[i] = position_size
-            # Short setup: price below 1d EMA20 + volatility filter + RSI overbought
-            elif (trend_filter_short and vol_filter and mean_revert_short):
+            # Short setup: price below 1d EMA20 + volatility filter + not in squeeze
+            elif (trend_filter_short and vol_filter and not bb_squeeze):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below 1d EMA20 OR RSI > 50 (mean reversion exit)
-            if price < ema_20_1d_aligned[i] or rsi_14_1d_aligned[i] > 50:
+            # Exit long: price crosses below 1d EMA20
+            if price < ema_20_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above 1d EMA20 OR RSI < 50 (mean reversion exit)
-            if price > ema_20_1d_aligned[i] or rsi_14_1d_aligned[i] < 50:
+            # Exit short: price crosses above 1d EMA20
+            if price > ema_20_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -100,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1dEMA20_RSI14_MeanReversion"
-timeframe = "6h"
+name = "12h_1dEMA20_BBWidth_Filter"
+timeframe = "12h"
 leverage = 1.0
