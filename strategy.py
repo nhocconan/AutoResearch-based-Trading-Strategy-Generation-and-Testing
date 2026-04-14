@@ -3,16 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Weekly Donchian Breakout with Daily Volume Confirmation and ADX Trend Filter
-# Takes long when price breaks above weekly Donchian upper band with daily volume spike and ADX > 25
-# Takes short when price breaks below weekly Donchian lower band with daily volume spike and ADX > 25
-# Exits when price crosses back below/above the weekly Donchian midline or volume drops
-# Designed to capture strong trends with volume confirmation, avoiding choppy markets
-# Target: 15-40 trades per symbol over 4 years (4-10/year)
+# Hypothesis: 6h Elder Ray Power with 12h Trend Filter and Volume Spike
+# Uses Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) to measure bull/bear strength
+# Long when Bull Power > 0 and rising + price above 12h EMA20 + volume spike
+# Short when Bear Power > 0 and rising + price below 12h EMA20 + volume spike
+# Uses 12h EMA20 as trend filter to avoid counter-trend trades
+# Volume spike filter (1.5x average) ensures participation during strong moves
+# Designed to work in both bull (strong bull power) and bear (strong bear power) markets
+# Target: 60-120 trades over 4 years (15-30/year)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,102 +22,76 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly and daily data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
-    df_daily = get_htf_data(prices, '1d')
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate weekly Donchian channels (20-period)
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    donchian_high = pd.Series(high_weekly).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_weekly).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # Calculate EMA13 for Elder Ray (using close prices)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate daily ADX for trend strength
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
-    close_daily = df_daily['close'].values
+    # Calculate Elder Ray components
+    bull_power = high - ema13  # High - EMA13
+    bear_power = ema13 - low   # EMA13 - Low
     
-    # True Range
-    tr1 = high_daily[1:] - low_daily[1:]
-    tr2 = np.abs(high_daily[1:] - close_daily[:-1])
-    tr3 = np.abs(low_daily[1:] - close_daily[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate 12h EMA20 for trend filter
+    close_12h = df_12h['close'].values
+    ema20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema20_12h)
     
-    # Directional Movement
-    dm_plus = np.where((high_daily[1:] - high_daily[:-1]) > (low_daily[:-1] - low_daily[1:]), 
-                       np.maximum(high_daily[1:] - high_daily[:-1], 0), 0)
-    dm_minus = np.where((low_daily[:-1] - low_daily[1:]) > (high_daily[1:] - high_daily[:-1]), 
-                        np.maximum(low_daily[:-1] - low_daily[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
+    # Calculate volume average (20-period) for spike detection
+    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Smoothed values
-    tr_14 = pd.Series(tr).ewm(span=14, adjust=False).mean().values
-    dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False).mean().values
-    dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False).mean().values
+    # Calculate Elder Ray smoothing (13-period) to detect rising power
+    bull_power_smooth = pd.Series(bull_power).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bear_power_smooth = pd.Series(bear_power).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(span=14, adjust=False).mean().values
-    
-    # Calculate daily volume average (20-period)
-    vol_daily = df_daily['volume'].values
-    vol_ma_daily = pd.Series(vol_daily).rolling(window=20, min_periods=20).mean().values
-    
-    # Align indicators to daily timeframe (since we're using 1d timeframe)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_weekly, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_weekly, donchian_low)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_weekly, donchian_mid)
-    adx_aligned = align_htf_to_ltf(prices, df_daily, adx)
-    vol_ma_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_ma_daily)
+    # Detect rising power (current > previous)
+    bull_power_rising = bull_power_smooth > np.roll(bull_power_smooth, 1)
+    bear_power_rising = bear_power_smooth > np.roll(bear_power_smooth, 1)
+    # Handle first element
+    bull_power_rising[0] = False
+    bear_power_rising[0] = False
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 100  # for Donchian and ADX calculations
+    start = 20  # for EMA calculations
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_daily_aligned[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema20_12h_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_daily_current = volume[i]  # Use current daily volume
         
         if position == 0:
-            # Long setup: break above weekly Donchian high with volume spike and strong trend
-            if (price > donchian_high_aligned[i] and 
-                vol_daily_current > 1.5 * vol_ma_daily_aligned[i] and  # Volume spike
-                adx_aligned[i] > 25):                           # Strong trend
+            # Long setup: Bull Power > 0 and rising + price above 12h EMA20 + volume spike
+            if (bull_power[i] > 0 and bull_power_rising[i] and 
+                price > ema20_12h_aligned[i] and 
+                volume[i] > 1.5 * vol_ma[i]):
                 position = 1
                 signals[i] = position_size
-            # Short setup: break below weekly Donchian low with volume spike and strong trend
-            elif (price < donchian_low_aligned[i] and 
-                  vol_daily_current > 1.5 * vol_ma_daily_aligned[i] and  # Volume spike
-                  adx_aligned[i] > 25):                           # Strong trend
+            # Short setup: Bear Power > 0 and rising + price below 12h EMA20 + volume spike
+            elif (bear_power[i] > 0 and bear_power_rising[i] and 
+                  price < ema20_12h_aligned[i] and 
+                  volume[i] > 1.5 * vol_ma[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below weekly Donchian mid or volume drops
-            if price < donchian_mid_aligned[i] or vol_daily_current < vol_ma_daily_aligned[i]:
+            # Exit long: Bull Power becomes negative or price crosses below 12h EMA20
+            if bull_power[i] <= 0 or price < ema20_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above weekly Donchian mid or volume drops
-            if price > donchian_mid_aligned[i] or vol_daily_current < vol_ma_daily_aligned[i]:
+            # Exit short: Bear Power becomes negative or price crosses above 12h EMA20
+            if bear_power[i] <= 0 or price > ema20_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -123,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyDonchian_Breakout_DailyVolume_ADX"
-timeframe = "1d"
+name = "6h_ElderRay_12hEMA_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
