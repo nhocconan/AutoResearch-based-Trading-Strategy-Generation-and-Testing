@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla Pivot Breakout with 1d EMA Trend Filter and Volume Confirmation
-# Uses Camarilla pivot levels from daily data for entry signals
-# 1d EMA (50) provides trend direction filter to avoid counter-trend trades
-# Volume confirmation (>1.8x average volume) ensures institutional participation
-# Designed to work in both bull and bear markets by trading breakouts in direction of 1d trend
-# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag
+# Hypothesis: 4h 1d High-Low Range Breakout with Volume Confirmation and Choppiness Filter
+# Uses the previous day's high-low range to establish a breakout channel
+# Breaks above previous day's high or below previous day's low trigger entries
+# Volume confirmation (>1.5x average) ensures significant participation
+# Choppiness filter (CHOP > 61.8) avoids false breakouts in ranging markets
+# Designed to capture momentum moves in both bull and bear markets
+# Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,97 +21,77 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for pivot calculation and EMA trend filter
+    # Load 1d data ONCE before loop for range and choppiness
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA (50) for trend direction
+    # Calculate 1d high, low, close for range breakout
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate Camarilla pivot levels from previous day
-    # Camarilla formulas:
-    # H4 = close + 1.1 * (high - low) / 2
-    # H3 = close + 1.1 * (high - low) / 4
-    # H2 = close + 1.1 * (high - low) / 6
-    # H1 = close + 1.1 * (high - low) / 12
-    # L1 = close - 1.1 * (high - low) / 12
-    # L2 = close - 1.1 * (high - low) / 6
-    # L3 = close - 1.1 * (high - low) / 4
-    # L4 = close - 1.1 * (high - low) / 2
+    # Calculate 1d True Range for Choppiness indicator
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align with 1d index
     
-    prev_high = df_1d['high'].values
-    prev_low = df_1d['low'].values
-    prev_close = df_1d['close'].values
+    # Calculate Choppiness Index (14-period)
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
     
-    # Calculate pivot levels for previous day
-    high_low_range = prev_high - prev_low
+    # Align 1d data to 4h
+    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
+    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop, additional_delay_bars=1)
     
-    H1 = prev_close + 1.1 * high_low_range / 12
-    H2 = prev_close + 1.1 * high_low_range / 6
-    H3 = prev_close + 1.1 * high_low_range / 4
-    H4 = prev_close + 1.1 * high_low_range / 2
-    
-    L1 = prev_close - 1.1 * high_low_range / 12
-    L2 = prev_close - 1.1 * high_low_range / 6
-    L3 = prev_close - 1.1 * high_low_range / 4
-    L4 = prev_close - 1.1 * high_low_range / 2
-    
-    # Align pivot levels to 12h timeframe (use previous day's levels)
-    H1_aligned = align_htf_to_ltf(prices, df_1d, H1)
-    H2_aligned = align_htf_to_ltf(prices, df_1d, H2)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L1_aligned = align_htf_to_ltf(prices, df_1d, L1)
-    L2_aligned = align_htf_to_ltf(prices, df_1d, L2)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    
-    # Volume confirmation: volume > 1.8x average volume (30-period)
+    # Volume confirmation: volume > 1.5x average volume (20-period)
     vol_series = pd.Series(volume)
-    avg_vol = vol_series.rolling(window=30, min_periods=30).mean().values
+    avg_vol = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 30  # for volume average
+    start = 20  # for volume average
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(H1_aligned[i]) or np.isnan(L1_aligned[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(avg_vol[i])):
+        if (np.isnan(high_1d_aligned[i]) or np.isnan(low_1d_aligned[i]) or 
+            np.isnan(chop_aligned[i]) or np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         
-        # Trend filter: only trade in direction of 1d EMA
-        above_ema = price > ema_1d_aligned[i]
+        # Choppiness filter: only trade when market is trending (CHOP < 61.8)
+        trending = chop_aligned[i] < 61.8
         
         if position == 0:
-            # Long: price breaks above H3 with volume filter and above 1d EMA
-            if price > H3_aligned[i] and vol > 1.8 * avg_vol[i] and above_ema:
+            # Long: price breaks above previous day's high with volume filter and trending market
+            if price > high_1d_aligned[i] and vol > 1.5 * avg_vol[i] and trending:
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below L3 with volume filter and below 1d EMA
-            elif price < L3_aligned[i] and vol > 1.8 * avg_vol[i] and not above_ema:
+            # Short: price breaks below previous day's low with volume filter and trending market
+            elif price < low_1d_aligned[i] and vol > 1.5 * avg_vol[i] and trending:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below H2 (reversal) or below 1d EMA
-            if price < H2_aligned[i] or price < ema_1d_aligned[i]:
+            # Exit long: price breaks below previous day's low or chop becomes too high
+            if price < low_1d_aligned[i] or chop_aligned[i] >= 61.8:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above L2 (reversal) or above 1d EMA
-            if price > L2_aligned[i] or price > ema_1d_aligned[i]:
+            # Exit short: price breaks above previous day's high or chop becomes too high
+            if price > high_1d_aligned[i] or chop_aligned[i] >= 61.8:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -118,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_Pivot_Breakout_1dEMA_Volume"
-timeframe = "12h"
+name = "4h_1d_High_Low_Range_Breakout_Volume_Chop"
+timeframe = "4h"
 leverage = 1.0
