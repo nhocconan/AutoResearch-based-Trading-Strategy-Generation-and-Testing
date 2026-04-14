@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,94 +13,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data (primary) and 1w data (HTF)
+    # Load 1d data
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 30 or len(df_1w) < 5:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
-    close_1w = df_1w['close'].values
     
-    # Calculate 1d EMA(50) for trend filter
+    # Calculate 12h EMA on 1d close (trend filter)
     close_1d_series = pd.Series(close_1d)
-    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_12h_1d = close_1d_series.ewm(span=12, adjust=False, min_periods=12).values
     
-    # Calculate 1w EMA(20) for HTF trend
-    close_1w_series = pd.Series(close_1w)
-    ema_20_1w = close_1w_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate 1d ATR for volatility filter
+    tr = np.maximum(high_1d - low_1d, 
+                    np.maximum(np.abs(high_1d - np.roll(high_1d, 1)), 
+                               np.abs(low_1d - np.roll(low_1d, 1))))
+    tr[0] = high_1d[0] - low_1d[0]
+    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).values
     
-    # Calculate 1d ATR(14) for volatility filter
-    high_low = high_1d - low_1d
-    high_close = np.abs(np.concatenate([[np.nan], high_1d[:-1]]) - close_1d)
-    low_close = np.abs(np.concatenate([[np.nan], low_1d[:-1]]) - close_1d)
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    tr = pd.Series(tr)
-    atr_14 = tr.rolling(window=14, min_periods=14).mean().values
+    # Align 1d indicators to 12h timeframe
+    ema_12h_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_12h_1d)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate 1d RSI(14) for momentum
-    delta = np.diff(close_1d, prepend=np.nan)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    gain_series = pd.Series(gain)
-    loss_series = pd.Series(loss)
-    avg_gain = gain_series.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = loss_series.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate Donchian channels on 1d (20-period)
+    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align all indicators to 1d timeframe (since we're using 1d timeframe)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w, additional_delay_bars=0)
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Align Donchian channels to 12h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    
+    # Calculate volume ratio on 12h (current vs 20-period average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position size
+    position_size = 0.25
     
-    for i in range(50, n):  # Start after enough data for indicators
+    for i in range(20, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_20_1w_aligned[i]) or
-            np.isnan(atr_14_aligned[i]) or np.isnan(rsi_aligned[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or
+            np.isnan(ema_12h_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or
+            np.isnan(vol_ma_20[i]) or vol_ma_20[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: avoid extremely low volatility
-        if atr_14_aligned[i] < 0.01 * close[i]:  # Less than 1% of price
-            signals[i] = 0.0
-            continue
+        volume_ratio = volume[i] / vol_ma_20[i]
         
         if position == 0:
-            # Long entry: price above EMA50 (1d trend), above EMA20 (1w trend), RSI > 50
-            if (close[i] > ema_50_1d_aligned[i] and 
-                close[i] > ema_20_1w_aligned[i] and
-                rsi_aligned[i] > 50):
+            # Long: breakout above 1d Donchian high + volume surge + above 12h EMA
+            if (close[i] > donch_high_aligned[i] and 
+                volume_ratio > 2.0 and
+                close[i] > ema_12h_1d_aligned[i]):
                 position = 1
                 signals[i] = position_size
-            # Short entry: price below EMA50 (1d trend), below EMA20 (1w trend), RSI < 50
-            elif (close[i] < ema_50_1d_aligned[i] and 
-                  close[i] < ema_20_1w_aligned[i] and
-                  rsi_aligned[i] < 50):
+            # Short: breakdown below 1d Donchian low + volume surge + below 12h EMA
+            elif (close[i] < donch_low_aligned[i] and 
+                  volume_ratio > 2.0 and
+                  close[i] < ema_12h_1d_aligned[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below EMA50 or RSI < 40
-            if (close[i] < ema_50_1d_aligned[i] or
-                rsi_aligned[i] < 40):
+            # Exit: close below 12h EMA or ATR-based trailing stop
+            if (close[i] < ema_12h_1d_aligned[i] or
+                close[i] < high[i] - 2.5 * atr_1d_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above EMA50 or RSI > 60
-            if (close[i] > ema_50_1d_aligned[i] or
-                rsi_aligned[i] > 60):
+            # Exit: close above 12h EMA or ATR-based trailing stop
+            if (close[i] > ema_12h_1d_aligned[i] or
+                close[i] > low[i] + 2.5 * atr_1d_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -108,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA50_EMA20_RSI_Filter_v1"
-timeframe = "1d"
+name = "12h_1d_Donchian_EMA_Volume_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
