@@ -18,17 +18,17 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d close EMA21 for trend filter
+    # Calculate 1d close EMA34 for trend filter
     close_1d = df_1d['close'].values
-    ema_21_1d = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 21:
-        multiplier = 2 / (21 + 1)
-        ema_21_1d[20] = np.mean(close_1d[:21])
-        for i in range(21, len(df_1d)):
-            ema_21_1d[i] = (close_1d[i] - ema_21_1d[i-1]) * multiplier + ema_21_1d[i-1]
+    ema_34_1d = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 34:
+        multiplier = 2 / (34 + 1)
+        ema_34_1d[33] = np.mean(close_1d[:34])
+        for i in range(34, len(df_1d)):
+            ema_34_1d[i] = (close_1d[i] - ema_34_1d[i-1]) * multiplier + ema_34_1d[i-1]
     
-    # Align 1d EMA21 to 4h timeframe
-    ema_21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
+    # Align 1d EMA34 to 4h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate 1d ATR (14-period) for volatility filter
     high_1d = df_1d['high'].values
@@ -61,7 +61,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_21_1d_aligned[i]) or
+        if (np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(atr_4h_aligned[i]) or
             np.isnan(volume_ma[i])):
             signals[i] = 0.0
@@ -95,11 +95,11 @@ def generate_signals(prices):
             
             if position == 0:
                 # Long: Price rejects S3 with volume and trend alignment
-                if low[i] <= s3 and close[i] > s3 and volume[i] > volume_ma[i] and close[i] > ema_21_1d_aligned[i]:
+                if low[i] <= s3 and close[i] > s3 and volume[i] > volume_ma[i] and close[i] > ema_34_1d_aligned[i]:
                     position = 1
                     signals[i] = position_size
                 # Short: Price rejects R3 with volume and trend alignment
-                elif high[i] >= r3 and close[i] < r3 and volume[i] > volume_ma[i] and close[i] < ema_21_1d_aligned[i]:
+                elif high[i] >= r3 and close[i] < r3 and volume[i] > volume_ma[i] and close[i] < ema_34_1d_aligned[i]:
                     position = -1
                     signals[i] = -position_size
                 else:
@@ -129,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Pivot_S3R3_Rejection_Volume_Filter"
+name = "4h_1d_Pivot_S3R3_Rejection_Volume_Filter_v2"
 timeframe = "4h"
 leverage = 1.0
