@@ -13,13 +13,13 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for weekly pivot levels
+    # Get daily data for weekly pivot levels
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot points using prior day's OHLC as proxy for weekly
+    # Calculate weekly pivot points using previous day's OHLC
     prev_high = np.roll(high_1d, 1)
     prev_low = np.roll(low_1d, 1)
     prev_close = np.roll(close_1d, 1)
@@ -33,11 +33,11 @@ def generate_signals(prices):
     r1 = 2 * pp - prev_low
     s1 = 2 * pp - prev_high
     
-    # Align pivot levels to 4h timeframe (wait for 1d bar close)
+    # Align pivot levels to 1d timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume confirmation: volume > 1.3x average volume (20-period)
+    # Volume confirmation: volume > 1.5x average volume (20-period)
     vol_series = pd.Series(volume)
     avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
@@ -46,7 +46,7 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(20, 20)  # 20 for pivot and volume
+    start = 20
     
     for i in range(start, n):
         # Skip if any critical data is NaN
@@ -60,11 +60,11 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: price breaks above R1 pivot with volume
-            if price > r1_aligned[i] and vol > 1.3 * avg_vol[i]:
+            if price > r1_aligned[i] and vol > 1.5 * avg_vol[i]:
                 position = 1
                 signals[i] = position_size
             # Short: price breaks below S1 pivot with volume
-            elif price < s1_aligned[i] and vol > 1.3 * avg_vol[i]:
+            elif price < s1_aligned[i] and vol > 1.5 * avg_vol[i]:
                 position = -1
                 signals[i] = -position_size
             else:
@@ -86,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Pivot_Breakout_Volume"
-timeframe = "4h"
+name = "1d_1w_Pivot_Breakout_Volume"
+timeframe = "1d"
 leverage = 1.0
