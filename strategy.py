@@ -22,7 +22,7 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Calculate 1d ATR (14-period) for regime filter
+    # Calculate 1d ATR (14-period) for volatility regime filter
     high_low_1d = high_1d - low_1d
     high_close_1d = np.abs(high_1d - np.roll(close_1d, 1))
     low_close_1d = np.abs(low_1d - np.roll(close_1d, 1))
@@ -38,13 +38,13 @@ def generate_signals(prices):
     donchian_high = high_series.rolling(window=20, min_periods=20).max().shift(1).values
     donchian_low = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Calculate 4h volume filter: current volume > 1.5x 10-period average
+    # Calculate 4h volume filter: current volume > 1.3x 15-period average
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=10, min_periods=10).mean().values
+    vol_ma = vol_series.rolling(window=15, min_periods=15).mean().values
     
-    # Calculate 1d volatility regime: ATR > 50th percentile of past 50 days
+    # Calculate 1d volatility regime: ATR > 60th percentile of past 30 days
     atr_series_1d = pd.Series(atr_1d)
-    atr_percentile = atr_series_1d.rolling(window=50, min_periods=50).quantile(0.5).values
+    atr_percentile = atr_series_1d.rolling(window=30, min_periods=30).quantile(0.6).values
     volatility_filter = atr_1d > atr_percentile
     
     signals = np.zeros(n)
@@ -67,43 +67,43 @@ def generate_signals(prices):
             pivot = (prev_high + prev_low + prev_close) / 3.0
             range_ = prev_high - prev_low
             
-            # Support and resistance levels (focus on S2/R2 for breakout)
-            s2 = pivot - range_
-            r2 = pivot + range_
+            # Focus on S1/R1 for tighter entries (fewer trades)
+            s1 = pivot - range_
+            r1 = pivot + range_
             
-            # Align S2/R2 levels to 4h timeframe
-            s2_array = np.full(len(df_1d), s2)
-            r2_array = np.full(len(df_1d), r2)
+            # Align S1/R1 levels to 4h timeframe
+            s1_array = np.full(len(df_1d), s1)
+            r1_array = np.full(len(df_1d), r1)
             
-            s2_4h = align_htf_to_ltf(prices, df_1d, s2_array)[i]
-            r2_4h = align_htf_to_ltf(prices, df_1d, r2_array)[i]
+            s1_4h = align_htf_to_ltf(prices, df_1d, s1_array)[i]
+            r1_4h = align_htf_to_ltf(prices, df_1d, r1_array)[i]
             
             if position == 0:
-                # Long: Price breaks above R2 with volume and in volatile regime
-                if (close[i] > r2_4h and close[i-1] <= r2_4h and 
-                    volume[i] > vol_ma[i] * 1.5 and 
+                # Long: Price breaks above R1 with volume and in volatile regime
+                if (close[i] > r1_4h and close[i-1] <= r1_4h and 
+                    volume[i] > vol_ma[i] * 1.3 and 
                     volatility_filter[i]):
                     position = 1
                     signals[i] = position_size
-                # Short: Price breaks below S2 with volume and in volatile regime
-                elif (close[i] < s2_4h and close[i-1] >= s2_4h and 
-                      volume[i] > vol_ma[i] * 1.5 and 
+                # Short: Price breaks below S1 with volume and in volatile regime
+                elif (close[i] < s1_4h and close[i-1] >= s1_4h and 
+                      volume[i] > vol_ma[i] * 1.3 and 
                       volatility_filter[i]):
                     position = -1
                     signals[i] = -position_size
             elif position == 1:
-                # Exit: Price breaks below S2 (reversal) or drops below Donchian low
-                if close[i] < s2_4h or close[i] < donchian_low[i]:
+                # Exit: Price breaks below S1 (reversal) or drops below Donchian low
+                if close[i] < s1_4h or close[i] < donchian_low[i]:
                     position = 0
                     signals[i] = 0.0
             elif position == -1:
-                # Exit: Price breaks above S2 (reversal) or rises above Donchian high
-                if close[i] > s2_4h or close[i] > donchian_high[i]:
+                # Exit: Price breaks above S1 (reversal) or rises above Donchian high
+                if close[i] > s1_4h or close[i] > donchian_high[i]:
                     position = 0
                     signals[i] = 0.0
     
     return signals
 
-name = "4h_S2R2_Breakout_Vol_VolatilityFilter"
+name = "4h_S1R1_Breakout_Vol_VolatilityFilter_v2"
 timeframe = "4h"
 leverage = 1.0
