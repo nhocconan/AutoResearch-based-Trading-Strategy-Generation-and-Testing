@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy combining Donchian breakout with 1d volatility filter and volume confirmation.
-# Long when price breaks above Donchian(20) high with above-average volatility and volume.
-# Short when price breaks below Donchian(20) low with above-average volatility and volume.
-# Exit when price returns to Donchian middle or volatility drops below average.
-# Uses volatility filter to avoid whipsaws in low-volatility periods.
-# Designed for 12h timeframe to reduce trade frequency and minimize fee drag.
-# Target: 15-25 trades/year per symbol (60-100 total over 4 years).
+# Hypothesis: 4h Donchian breakout with volume confirmation and 1d ADX trend filter.
+# Long when price breaks above Donchian(20) high with volume > 1.5x average and ADX > 25 (trending).
+# Short when price breaks below Donchian(20) low with volume > 1.5x average and ADX > 25.
+# Exit when price returns to Donchian midpoint or ADX falls below 20 (range).
+# Designed to capture strong trends in both bull and bear markets while avoiding chop.
+# Target: 25-35 trades/year per symbol (100-140 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,40 +20,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for Donchian channels and volatility
+    # Donchian channels (20-period) on 4h
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    donchian_mid = (highest_high + lowest_low) / 2
+    
+    # Load 1d data ONCE for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Donchian channels (20-period)
-    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2
-    
-    # Calculate ATR for volatility filter
+    # Calculate ADX(14) on 1d
+    # True Range
     tr1 = np.abs(high_1d[1:] - low_1d[1:])
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     
-    atr_period = 14
-    atr_1d = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
     
-    # Calculate average ATR for volatility regime filter
-    atr_ma = pd.Series(atr_1d).rolling(window=10, min_periods=10).mean().values
+    # Smoothed values
+    tr_period = 14
+    atr = pd.Series(tr).ewm(alpha=1/tr_period, adjust=False, min_periods=tr_period).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/tr_period, adjust=False, min_periods=tr_period).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/tr_period, adjust=False, min_periods=tr_period).mean().values / atr
     
-    # Align indicators to 12h timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
-    donch_mid_aligned = align_htf_to_ltf(prices, df_1d, donch_mid)
-    atr_ma_aligned = align_htf_to_ltf(prices, df_1d, atr_ma)
+    # DX and ADX
+    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
+    dx = np.where((plus_di + minus_di) == 0, 0, dx)
+    adx = pd.Series(dx).ewm(alpha=1/tr_period, adjust=False, min_periods=tr_period).mean().values
     
-    # Volume confirmation: 1.3x average volume
+    # Align ADX to 4h
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Volume confirmation: 1.5x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -62,52 +73,52 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(20, 20)  # Need Donchian and volatility MA
+    start = max(lookback, 30)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or
-            np.isnan(donch_mid_aligned[i]) or
-            np.isnan(atr_ma_aligned[i]) or
+        if (np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or
+            np.isnan(adx_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when volatility is above average
-        high_volatility = atr_1d[i] > atr_ma_aligned[i] if not np.isnan(atr_1d[i]) else False
-        
         # Volume confirmation
-        volume_confirmed = volume[i] > 1.3 * vol_ma[i]
+        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
+        
+        # Trend filter: ADX > 25 for trending market
+        trending = adx_aligned[i] > 25
+        ranging = adx_aligned[i] < 20  # Exit when ranging
         
         if position == 0:
-            # Look for Donchian breakouts with volatility and volume confirmation
-            # Long: price breaks above Donchian high
-            if (close[i] > donch_high_aligned[i] and 
-                high_volatility and 
+            # Look for Donchian breakouts
+            # Long: price breaks above Donchian high AND trending AND volume
+            if (close[i] > highest_high[i] and 
+                trending and 
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below Donchian low
-            elif (close[i] < donch_low_aligned[i] and 
-                  high_volatility and 
+            # Short: price breaks below Donchian low AND trending AND volume
+            elif (close[i] < lowest_low[i] and 
+                  trending and 
                   volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to Donchian middle or volatility drops
-            if (close[i] <= donch_mid_aligned[i] or 
-                not high_volatility):
+            # Exit long: price returns to midpoint or ADX drops below 20 (ranging)
+            if (close[i] <= donchian_mid[i] or 
+                adx_aligned[i] < 20):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to Donchian middle or volatility drops
-            if (close[i] >= donch_mid_aligned[i] or 
-                not high_volatility):
+            # Exit short: price returns to midpoint or ADX drops below 20 (ranging)
+            if (close[i] >= donchian_mid[i] or 
+                adx_aligned[i] < 20):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -115,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_DonchianBreakout_VolumeFilter_v1"
-timeframe = "12h"
+name = "4h_DonchianBreakout_ADX_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
