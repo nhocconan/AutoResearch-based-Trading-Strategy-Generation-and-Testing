@@ -3,91 +3,81 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Camarilla pivot level breakout with 1-day trend filter and volume confirmation
-# Long when price breaks above H3 level AND price > daily EMA50 AND volume > 1.3x 20-period average
-# Short when price breaks below L3 level AND price < daily EMA50 AND volume > 1.3x 20-period average
-# Exit when price crosses back inside the H3/L3 range (between H3 and L3)
-# Camarilla levels derived from previous 1-day OHLC; effective in ranging and trending markets
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag while capturing meaningful moves
+# Hypothesis: 4-hour Choppiness Index regime filter + 1-day RSI mean reversion
+# Long when 1-day RSI < 30 AND Choppiness Index > 61.8 (range regime)
+# Short when 1-day RSI > 70 AND Choppiness Index > 61.8 (range regime)
+# Exit when RSI crosses back to neutral (40-60 range)
+# Uses regime filter to avoid trending markets where mean reversion fails
+# Target: 75-200 total trades over 4 years (19-50/year)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for Camarilla calculation and EMA50 trend filter
+    # Load daily data ONCE before loop for RSI
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily EMA50 for trend filter
+    # Calculate 1-day RSI (14-period)
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Calculate volume average for confirmation (20-period)
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate Camarilla levels from previous day's OHLC
-    # H4 = C + (H-L)*1.1/2, H3 = C + (H-L)*1.1/4, L3 = C - (H-L)*1.1/4, L4 = C - (H-L)*1.1/2
-    # We use H3/L3 as primary breakout levels
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    
-    # Avoid division by zero or invalid calculations
-    hl_range = prev_high - prev_low
-    hl_range = np.where(hl_range == 0, 1e-10, hl_range)  # prevent zero range
-    
-    H3 = prev_close + hl_range * 1.1 / 4
-    L3 = prev_close - hl_range * 1.1 / 4
-    
-    # Align Camarilla levels to 12h timeframe (use previous day's levels for current day)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    # Calculate Choppiness Index on 4h (14-period)
+    atr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    atr[0] = high[0] - low[0]  # first value
+    sum_atr14 = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    highest_high14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(sum_atr14 / (highest_high14 - lowest_low14)) / np.log10(14)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations (need at least 1 day of history)
-    start = 1
+    # Start after enough data for calculations
+    start = 14
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        vol = volume[i]
-        vol_threshold = vol_avg[i] * 1.3
+        rsi = rsi_1d_aligned[i]
+        chop_val = chop[i]
         
         if position == 0:
-            # Long setup: breakout above H3 + above daily EMA50 + volume confirmation
-            if (price > H3_aligned[i] and price > ema50_1d_aligned[i] and vol > vol_threshold):
+            # Long setup: RSI oversold AND choppy market (range regime)
+            if rsi < 30 and chop_val > 61.8:
                 position = 1
                 signals[i] = position_size
-            # Short setup: breakdown below L3 + below daily EMA50 + volume confirmation
-            elif (price < L3_aligned[i] and price < ema50_1d_aligned[i] and vol > vol_threshold):
+            # Short setup: RSI overbought AND choppy market (range regime)
+            elif rsi > 70 and chop_val > 61.8:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price falls back below L3 (return to neutral zone)
-            if price < L3_aligned[i]:
+            # Exit long: RSI returns to neutral range (40-60)
+            if rsi >= 40:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price rises back above H3 (return to neutral zone)
-            if price > H3_aligned[i]:
+            # Exit short: RSI returns to neutral range (40-60)
+            if rsi <= 60:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -95,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_1dEMA50_Volume"
-timeframe = "12h"
+name = "4h_Chop_RSI_MeanReversion"
+timeframe = "4h"
 leverage = 1.0
