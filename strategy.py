@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h price breaking above/below 1-day Donchian Channel (20) with volume above 1.5x 20-period average and 1-day ADX > 20.
-Trades in direction of daily trend to avoid counter-trend whipsaws. Uses daily timeframe for trend filtering.
-Targets 30-40 trades/year per symbol (120-160 total over 4 years).
+Hypothesis: 4h price crossing above/below 1-day Exponential Moving Average (50) with volume above 1.3x 20-period average and 1-day ADX > 25.
+Trades in direction of daily trend to avoid counter-trend whipsaws. Uses EMA for smoother trend following.
+Targets 25-35 trades/year per symbol (100-140 total over 4 years).
 """
 
 import numpy as np
@@ -19,20 +19,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1-day Donchian Channel (20-period)
+    # Calculate 1-day EMA (50-period)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Upper and lower bands
-    upper_dc = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_dc = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Middle line for trend
-    mid_dc = (upper_dc + lower_dc) / 2
+    close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Calculate 1-day ADX (14-period)
     if len(df_1d) < 30:
@@ -78,45 +71,42 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Get aligned indicators
-        upper_dc_aligned = align_htf_to_ltf(prices, df_1d, upper_dc)[i]
-        lower_dc_aligned = align_htf_to_ltf(prices, df_1d, lower_dc)[i]
-        mid_dc_aligned = align_htf_to_ltf(prices, df_1d, mid_dc)[i]
+        ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)[i]
         adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)[i]
         vol_ma_20_aligned = vol_ma_20[i]  # already LTF
         
         # Check for NaN values
-        if (np.isnan(upper_dc_aligned) or np.isnan(lower_dc_aligned) or 
-            np.isnan(mid_dc_aligned) or np.isnan(adx_1d_aligned) or 
+        if (np.isnan(ema_50_aligned) or np.isnan(adx_1d_aligned) or 
             np.isnan(vol_ma_20_aligned)):
             continue
         
-        # Volume confirmation (> 1.5x average)
-        volume_confirm = volume[i] > 1.5 * vol_ma_20_aligned
+        # Volume confirmation (> 1.3x average)
+        volume_confirm = volume[i] > 1.3 * vol_ma_20_aligned
         
-        # ADX trend filter (> 20)
-        trend_filter = adx_1d_aligned > 20
+        # ADX trend filter (> 25)
+        trend_filter = adx_1d_aligned > 25
         
         if position == 0:  # No position - look for entries
             if volume_confirm and trend_filter:
-                # Long: price breaks above upper DC and trend is up (above mid)
-                if close[i] > upper_dc_aligned and close[i-1] <= upper_dc_aligned and close[i] > mid_dc_aligned:
+                # Long: price crosses above EMA and trending up
+                if close[i] > ema_50_aligned and close[i-1] <= ema_50_aligned:
                     position = 1
                     signals[i] = position_size
-                # Short: price breaks below lower DC and trend is down (below mid)
-                elif close[i] < lower_dc_aligned and close[i-1] >= lower_dc_aligned and close[i] < mid_dc_aligned:
+                # Short: price crosses below EMA and trending down
+                elif close[i] < ema_50_aligned and close[i-1] >= ema_50_aligned:
                     position = -1
                     signals[i] = -position_size
-        elif position == 1:  # Long position - exit when price breaks below lower DC
-            if close[i] < lower_dc_aligned and close[i-1] >= lower_dc_aligned:
+        elif position == 1:  # Long position - exit when price crosses below EMA
+            if close[i] < ema_50_aligned and close[i-1] >= ema_50_aligned:
                 position = 0
                 signals[i] = 0.0
-        elif position == -1:  # Short position - exit when price breaks above upper DC
-            if close[i] > upper_dc_aligned and close[i-1] <= upper_dc_aligned:
+        elif position == -1:  # Short position - exit when price crosses above EMA
+            if close[i] > ema_50_aligned and close[i-1] <= ema_50_aligned:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_1dDC20_1dADX20_Volume_v1"
+name = "4h_1dEMA50_1dADX25_Volume_v1"
 timeframe = "4h"
 leverage = 1.0
