@@ -13,42 +13,50 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend and volume context
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    # Get 1d data for pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h_series = pd.Series(close_12h)
-    ema50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate pivot points using prior day's OHLC
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Calculate 12h volume average (20-period)
-    volume_12h_series = pd.Series(volume_12h)
-    avg_vol_12h = volume_12h_series.rolling(window=20, min_periods=20).mean().shift(1).values
+    # Pivot point: (H + L + C) / 3
+    pp = (prev_high + prev_low + prev_close) / 3
+    # Resistance and support levels
+    r1 = 2 * pp - prev_low
+    s1 = 2 * pp - prev_high
+    r2 = pp + (high_1d - low_1d)
+    s2 = pp - (high_1d - low_1d)
     
-    # Align 12h indicators to 6h timeframe
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    avg_vol_12h_aligned = align_htf_to_ltf(prices, df_12h, avg_vol_12h)
+    # Align pivot levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
-    # Calculate 6h Donchian channels (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().shift(1).values
+    # Volume confirmation: volume > 1.5x average volume (20-period)
+    vol_series = pd.Series(volume)
+    avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 50  # for EMA50 calculation
+    start = 20  # for volume calculation
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(avg_vol_12h_aligned[i]) or
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
+            np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
         
@@ -56,30 +64,26 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long: price breaks above Donchian high with 12h uptrend and volume confirmation
-            if (price > donchian_high[i] and 
-                price > ema50_12h_aligned[i] and 
-                vol > 1.5 * avg_vol_12h_aligned[i]):
+            # Long: price breaks above R2 with volume confirmation
+            if price > r2_aligned[i] and vol > 1.5 * avg_vol[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below Donchian low with 12h downtrend and volume confirmation
-            elif (price < donchian_low[i] and 
-                  price < ema50_12h_aligned[i] and 
-                  vol > 1.5 * avg_vol_12h_aligned[i]):
+            # Short: price breaks below S2 with volume confirmation
+            elif price < s2_aligned[i] and vol > 1.5 * avg_vol[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below Donchian low
-            if price < donchian_low[i]:
+            # Exit long: price breaks below S1
+            if price < s1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above Donchian high
-            if price > donchian_high[i]:
+            # Exit short: price breaks above R1
+            if price > r1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -87,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_Donchian_EMA50_Volume"
-timeframe = "6h"
+name = "4h_1d_Pivot_Breakout_Weekly"
+timeframe = "4h"
 leverage = 1.0
