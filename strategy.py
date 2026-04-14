@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1-day Donchian breakout with volume confirmation and 1-day ADX trend filter.
-# Long when price breaks above 1-day Donchian high (20) and volume > 1.5x 20-period average AND ADX > 25.
-# Short when price breaks below 1-day Donchian low (20) and volume > 1.5x 20-period average AND ADX > 25.
-# Exit when price returns to 1-day Donchian midpoint or ADX drops below 20.
-# This combines trend (ADX), volatility (Donchian), and volume to capture strong moves while avoiding false breakouts.
-# Target: 20-50 trades/year per symbol (80-200 total over 4 years) to balance opportunity and cost.
+# Hypothesis: 6h strategy using 1-day 200-day Simple Moving Average (SMA) as long-term trend filter
+# and 1-day Bollinger Bands for mean reversion entries. Long when price crosses below lower BB
+# in an uptrend (price > SMA200), short when price crosses above upper BB in a downtrend
+# (price < SMA200). Exit when price returns to SMA200 or Bollinger Band middle.
+# Uses volatility-adjusted bands (2 standard deviations) to adapt to market conditions.
+# Target: 15-25 trades/year per symbol (60-100 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,120 +20,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for Donchian, volume average, and ADX
+    # Load 1d data ONCE for SMA200 and Bollinger Bands
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need enough for Donchian(20) and ADX(14)
+    if len(df_1d) < 200:  # Need enough for SMA(200)
         return np.zeros(n)
     
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate Donchian channels (20-period)
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2.0
+    # Calculate 200-day Simple Moving Average
+    sma_200 = np.full_like(close_1d, np.nan)
+    for i in range(199, len(close_1d)):
+        sma_200[i] = np.mean(close_1d[i-199:i+1])
     
-    # Calculate 20-period average volume
-    avg_volume = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate Bollinger Bands (20-period, 2 standard deviations)
+    sma_20 = np.full_like(close_1d, np.nan)
+    std_20 = np.full_like(close_1d, np.nan)
     
-    # Calculate ADX (14)
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    for i in range(19, len(close_1d)):
+        sma_20[i] = np.mean(close_1d[i-19:i+1])
+        std_20[i] = np.std(close_1d[i-19:i+1])
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # Upper and Lower Bollinger Bands
+    upper_bb = sma_20 + (2 * std_20)
+    lower_bb = sma_20 - (2 * std_20)
+    middle_bb = sma_20  # 20-period SMA
     
-    # Smoothed values (Wilder's smoothing)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            result[period-1] = np.nanmean(data[1:period+1])
-            for i in range(period, len(data)):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    tr_14 = wilders_smoothing(tr, 14)
-    dm_plus_14 = wilders_smoothing(dm_plus, 14)
-    dm_minus_14 = wilders_smoothing(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = wilders_smoothing(dx, 14)
-    
-    # Align indicators to 4h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid)
-    avg_volume_aligned = align_htf_to_ltf(prices, df_1d, avg_volume)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align indicators to 6h timeframe
+    sma_200_aligned = align_htf_to_ltf(prices, df_1d, sma_200)
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    middle_bb_aligned = align_htf_to_ltf(prices, df_1d, middle_bb)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations
-    start = max(34, 20)  # Need ADX and Donchian periods
+    # Start after enough data for calculations (need 200 days for SMA200)
+    start = 200
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or
-            np.isnan(avg_volume_aligned[i]) or
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(sma_200_aligned[i]) or 
+            np.isnan(upper_bb_aligned[i]) or
+            np.isnan(lower_bb_aligned[i]) or
+            np.isnan(middle_bb_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume condition: current volume > 1.5x 20-period average
-        volume_condition = volume[i] > 1.5 * avg_volume_aligned[i]
-        
-        # Trend filter: ADX > 25 indicates strong trend
-        strong_trend = adx_aligned[i] > 25
-        
-        # Weak trend filter: ADX < 20 indicates trend weakening
-        weak_trend = adx_aligned[i] < 20
+        # Trend filter: price relative to 200-day SMA
+        above_sma200 = close[i] > sma_200_aligned[i]
+        below_sma200 = close[i] < sma_200_aligned[i]
         
         if position == 0:
-            # Look for breakout entries in strong trend with volume
-            # Long: price breaks above Donchian high AND volume condition AND strong trend
-            if (close[i] > donchian_high_aligned[i] and 
-                volume_condition and 
-                strong_trend):
+            # Look for mean reversion entries
+            # Long: price crosses below lower BB AND in uptrend (price > SMA200)
+            if (close[i] < lower_bb_aligned[i] and 
+                above_sma200):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below Donchian low AND volume condition AND strong trend
-            elif (close[i] < donchian_low_aligned[i] and 
-                  volume_condition and 
-                  strong_trend):
+            # Short: price crosses above upper BB AND in downtrend (price < SMA200)
+            elif (close[i] > upper_bb_aligned[i] and 
+                  below_sma200):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to Donchian midpoint or trend weakens
-            if (close[i] <= donchian_mid_aligned[i] or 
-                weak_trend):
+            # Exit long: price returns to middle BB or crosses above SMA200 (trend change)
+            if (close[i] >= middle_bb_aligned[i] or 
+                close[i] >= sma_200_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to Donchian midpoint or trend weakens
-            if (close[i] >= donchian_mid_aligned[i] or 
-                weak_trend):
+            # Exit short: price returns to middle BB or crosses below SMA200 (trend change)
+            if (close[i] <= middle_bb_aligned[i] or 
+                close[i] <= sma_200_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -141,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Donchian_Breakout_Volume_ADX_Filter_v1"
-timeframe = "4h"
+name = "6h_1d_SMA200_BollingerBands_MeanReversion_v1"
+timeframe = "6h"
 leverage = 1.0
