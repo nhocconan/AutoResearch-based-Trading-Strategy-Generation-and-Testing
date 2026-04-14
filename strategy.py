@@ -3,16 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy combining 1d Donchian breakout with 1w ADX trend filter.
-# Long when price breaks above 1d Donchian high with 1w ADX > 25 (strong trend) and volume confirmation.
-# Short when price breaks below 1d Donchian low with 1w ADX > 25 (strong trend) and volume confirmation.
-# Exit when price returns to 1d close or ADX falls below 20 (trend weakening).
-# Designed to work in both bull and bear markets by using ADX to filter for strong trends only.
-# Target: 25-35 trades/year per symbol (100-140 total over 4 years) to minimize fee drag.
+# Hypothesis: 6h strategy using 1d OHLC-based pivot points (classic floor trader pivots) 
+# combined with 60-period EMA trend filter on 6h and volume confirmation. 
+# Pivots provide objective support/resistance levels derived from prior day's action. 
+# Long when price crosses above R1 with EMA60 uptrend and volume > 1.5x average. 
+# Short when price crosses below S1 with EMA60 downtrend and volume confirmation. 
+# Exit when price touches opposite pivot level (S1 for long, R1 for short) or EMA crosses opposite direction. 
+# Uses daily pivots which adapt to volatility and work in both trending and ranging markets. 
+# Target: 20-30 trades/year per symbol (80-120 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,69 +22,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for Donchian levels
+    # Load 1d data ONCE for pivot points
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 20-period Donchian channels on 1d
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate classic pivot points: P = (H+L+C)/3
+    # R1 = 2*P - L, S1 = 2*P - H
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
     
-    # Prior 1d close for exit condition
-    prior_close_1d = np.roll(close_1d, 1)
-    prior_close_1d[0] = np.nan
-    
-    # Load 1w data ONCE for ADX trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load 6h data ONCE for EMA60 trend filter
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 60:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    close_6h = df_6h['close'].values
+    ema_6h = pd.Series(close_6h).ewm(span=60, adjust=False, min_periods=60).mean().values
     
-    # Calculate ADX(14) on 1w
-    # True Range
-    tr1 = np.abs(high_1w[1:] - low_1w[1:])
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
+    # Align indicators to lower timeframe (primary timeframe is 6h, so no alignment needed for 6h EMA)
+    # But we need to align daily pivots to 6h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # Directional Movement
-    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
-                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
-                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # For 6h EMA, since primary timeframe is 6h, we can use directly but need to align index
+    # Actually, we're already on 6h timeframe, so no alignment needed
+    ema_6h_aligned = ema_6h  # Already on correct timeframe
     
-    # Smoothed values
-    atr_1w = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / atr_1w
-    di_minus = 100 * dm_minus_smooth / atr_1w
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    dx = np.where((di_plus + di_minus) == 0, 0, dx)
-    adx_1w = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Align indicators to lower timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    prior_close_1d_aligned = align_htf_to_ltf(prices, df_1d, prior_close_1d)
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
-    
-    # Volume confirmation: 1.5x average volume
+    # Volume confirmation: 1.5x average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -90,14 +63,14 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(20, 30)  # Need Donchian and ADX
+    start = max(60, 20)  # Need EMA60 and volume MA
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or
-            np.isnan(prior_close_1d_aligned[i]) or
-            np.isnan(adx_1w_aligned[i]) or
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or
+            np.isnan(pivot_aligned[i]) or
+            np.isnan(ema_6h_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -105,38 +78,36 @@ def generate_signals(prices):
         # Volume confirmation
         volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
-        # Trend filter: ADX > 25 for strong trend
-        strong_trend = adx_1w_aligned[i] > 25
-        weak_trend = adx_1w_aligned[i] < 20
+        # Trend filter: EMA60 slope (simplified: current vs previous)
+        ema_now = ema_6h_aligned[i]
+        ema_prev = ema_6h_aligned[i-1] if i > 0 else ema_now
+        ema_uptrend = ema_now > ema_prev
+        ema_downtrend = ema_now < ema_prev
         
         if position == 0:
-            # Look for Donchian breakouts
-            # Long: price breaks above Donchian high AND strong trend
-            if (close[i] > donchian_high_aligned[i] and 
-                strong_trend and 
-                volume_confirmed):
+            # Look for pivot breakouts
+            # Long: price crosses above R1 with EMA uptrend and volume
+            if (close[i] > r1_aligned[i] and close[i-1] <= r1_aligned[i-1] and 
+                ema_uptrend and volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below Donchian low AND strong trend
-            elif (close[i] < donchian_low_aligned[i] and 
-                  strong_trend and 
-                  volume_confirmed):
+            # Short: price crosses below S1 with EMA downtrend and volume
+            elif (close[i] < s1_aligned[i] and close[i-1] >= s1_aligned[i-1] and 
+                  ema_downtrend and volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to prior 1d close or trend weakens
-            if (close[i] <= prior_close_1d_aligned[i] or 
-                weak_trend):
+            # Exit long: price touches S1 or EMA turns down
+            if (close[i] <= s1_aligned[i] or not ema_uptrend):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to prior 1d close or trend weakens
-            if (close[i] >= prior_close_1d_aligned[i] or 
-                weak_trend):
+            # Exit short: price touches R1 or EMA turns up
+            if (close[i] >= r1_aligned[i] or not ema_downtrend):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -144,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1dDonchian_1wADX_TrendFilter_v1"
+name = "6h_PivotPoints_EMA60_VolumeFilter_v1"
 timeframe = "6h"
 leverage = 1.0
