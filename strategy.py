@@ -13,7 +13,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for reference levels
+    # Load weekly data for trend filter and volatility context
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    # Calculate weekly EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # Calculate weekly ATR for volatility context
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    tr1w = np.maximum(high_1w - low_1w, 
+                      np.maximum(np.abs(high_1w - np.roll(close_1w, 1)), 
+                                 np.abs(low_1w - np.roll(close_1w, 1))))
+    tr1w[0] = high_1w[0] - low_1w[0]  # first period
+    atr1w = pd.Series(tr1w).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr1w_aligned = align_htf_to_ltf(prices, df_1w, atr1w)
+    
+    # Load daily data for entry signals
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -21,83 +41,14 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 1-day VWAP (typical price * volume / cumulative volume)
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3
-    cum_vol = np.cumsum(volume_1d)
-    cum_tpv = np.cumsum(typical_price_1d * volume_1d)
-    vwap_1d = np.where(cum_vol > 0, cum_tpv / cum_vol, np.nan)
+    # Calculate Donchian channel (20-day) on daily data
+    highest_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align 1d levels to 4h timeframe
-    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
-    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
-    
-    # Calculate ADX on 1d data (Wilder smoothing)
-    if len(high_1d) < 14:
-        return np.zeros(n)
-    
-    plus_dm = np.zeros_like(high_1d)
-    minus_dm = np.zeros_like(high_1d)
-    tr = np.zeros_like(high_1d)
-    
-    for i in range(1, len(high_1d)):
-        if np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(high_1d[i-1]) or np.isnan(low_1d[i-1]):
-            continue
-        high_diff = high_1d[i] - high_1d[i-1]
-        low_diff = low_1d[i-1] - low_1d[i]
-        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
-        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
-        tr[i] = max(high_1d[i] - low_1d[i], 
-                   abs(high_1d[i] - high_1d[i-1]), 
-                   abs(low_1d[i] - low_1d[i-1]))
-    
-    # Wilder smoothing (alpha = 1/14)
-    atr = np.zeros_like(high_1d)
-    plus_di = np.zeros_like(high_1d)
-    minus_di = np.zeros_like(high_1d)
-    dx = np.zeros_like(high_1d)
-    adx = np.full_like(high_1d, np.nan)
-    
-    if len(high_1d) >= 14:
-        # Initial values (first 14 periods)
-        atr[13] = np.nansum(tr[1:14])
-        plus_dm_sum = np.nansum(plus_dm[1:14])
-        minus_dm_sum = np.nansum(minus_dm[1:14])
-        
-        for i in range(14, len(high_1d)):
-            if np.isnan(tr[i]) or np.isnan(plus_dm[i]) or np.isnan(minus_dm[i]):
-                atr[i] = atr[i-1]
-                plus_dm_sum = plus_dm_sum
-                minus_dm_sum = minus_dm_sum
-            else:
-                atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-                plus_dm_sum = (plus_dm_sum * 13 + plus_dm[i]) / 14
-                minus_dm_sum = (minus_dm_sum * 13 + minus_dm[i]) / 14
-            
-            if atr[i] > 0:
-                plus_di[i] = 100 * plus_dm_sum / atr[i]
-                minus_di[i] = 100 * minus_dm_sum / atr[i]
-                if plus_di[i] + minus_di[i] > 0:
-                    dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
-        
-        # Calculate ADX as smoothed DX (14-period)
-        if len(high_1d) >= 27:
-            adx[26] = np.nanmean(dx[14:27])
-            for i in range(27, len(high_1d)):
-                if np.isnan(dx[i]):
-                    adx[i] = adx[i-1]
-                else:
-                    adx[i] = (adx[i-1] * 13 + dx[i]) / 14
-    
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate 20-period volume moving average for 4h data
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(19, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    # Align Donchian levels to 1d timeframe (will be used for 1d entries)
+    highest_20_aligned = align_htf_to_ltf(prices, df_1d, highest_20)
+    lowest_20_aligned = align_htf_to_ltf(prices, df_1d, lowest_20)
     
     signals = np.zeros(n)
     position = 0
@@ -105,41 +56,41 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any critical data is NaN
-        if (np.isnan(high_1d_aligned[i]) or np.isnan(low_1d_aligned[i]) or
-            np.isnan(vwap_1d_aligned[i]) or np.isnan(adx_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(highest_20_aligned[i]) or np.isnan(lowest_20_aligned[i]) or
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(atr1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        volume_ratio = volume[i] / vol_ma_20[i] if vol_ma_20[i] > 0 else 0
+        # Weekly volatility filter: avoid extremely low volatility periods
+        if atr1w_aligned[i] < np.nanpercentile(atr1w_aligned[:i+1], 20):
+            signals[i] = 0.0
+            continue
         
         if position == 0:
-            # Look for long entries: breakout above 1d high with volume surge in strong trend
-            if (close[i] > high_1d_aligned[i] and 
-                volume_ratio > 2.5 and  # Higher threshold to reduce trades
-                adx_aligned[i] > 30):   # Require stronger trend
+            # Long: price breaks above weekly EMA50 AND breaks above 20-day high
+            if (close[i] > ema50_1w_aligned[i] and 
+                close[i] > highest_20_aligned[i]):
                 position = 1
                 signals[i] = position_size
-            # Look for short entries: breakdown below 1d low with volume surge in strong trend
-            elif (close[i] < low_1d_aligned[i] and 
-                  volume_ratio > 2.5 and
-                  adx_aligned[i] > 30):
+            # Short: price breaks below weekly EMA50 AND breaks below 20-day low
+            elif (close[i] < ema50_1w_aligned[i] and 
+                  close[i] < lowest_20_aligned[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below 1d VWAP or ADX falls indicating trend exhaustion
-            if (close[i] < vwap_1d_aligned[i] or
-                adx_aligned[i] < 25):
+            # Exit long: price crosses below weekly EMA50 OR 20-day low
+            if (close[i] < ema50_1w_aligned[i] or
+                close[i] < lowest_20_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above 1d VWAP or ADX falls indicating trend exhaustion
-            if (close[i] > vwap_1d_aligned[i] or
-                adx_aligned[i] < 25):
+            # Exit short: price crosses above weekly EMA50 OR 20-day high
+            if (close[i] > ema50_1w_aligned[i] or
+                close[i] > highest_20_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -147,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_PriceChannel_Breakout_Volume_Trend_v3"
-timeframe = "4h"
+name = "1d_WeeklyEMA50_Donchian20_Breakout_v1"
+timeframe = "1d"
 leverage = 1.0
