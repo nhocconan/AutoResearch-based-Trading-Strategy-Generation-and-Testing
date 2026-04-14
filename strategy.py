@@ -1,17 +1,18 @@
-# 12h_1w_Camarilla_Breakout_Volume_Filter_v1
-# Uses weekly Camarilla pivot levels from 1w for breakout signals
-# 1d EMA (50) as trend filter to avoid counter-trend trades
-# Volume confirmation (>1.5x average) ensures institutional participation
-# Designed to work in both bull and bear markets by trading breakouts in direction of 1d trend
-# Target: 15-40 trades/year (60-160 total over 4 years) to minimize fee drag
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 4h Camarilla Pivot Breakout with 1D Volume Spike and Choppiness Filter
+# Camarilla pivot levels (support/resistance) derived from previous day's OHLC provide high-probability breakout levels.
+# Volume spike (>2x average) confirms institutional participation and reduces false breakouts.
+# Choppiness index > 61.8 indicates ranging market where mean reversion at pivot levels works best.
+# Designed to work in both bull and bear markets by trading mean reversion in ranging conditions and breakouts in trending.
+# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag.
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,88 +20,107 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for weekly Camarilla pivots
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate weekly Camarilla pivot levels
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Weekly Camarilla levels
-    range_1w = high_1w - low_1w
-    camarilla_h4 = close_1w + range_1w * 1.500
-    camarilla_h3 = close_1w + range_1w * 1.250
-    camarilla_h2 = close_1w + range_1w * 1.166
-    camarilla_h1 = close_1w + range_1w * 1.083
-    camarilla_l1 = close_1w - range_1w * 1.083
-    camarilla_l2 = close_1w - range_1w * 1.166
-    camarilla_l3 = close_1w - range_1w * 1.250
-    camarilla_l4 = close_1w - range_1w * 1.500
-    
-    # Align Camarilla levels to 12h timeframe
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h4)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
-    camarilla_h2_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h2)
-    camarilla_h1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h1)
-    camarilla_l1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l1)
-    camarilla_l2_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l2)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l4)
-    
-    # Load 1d data ONCE before loop for EMA trend filter
+    # Load 1D data ONCE before loop for Camarilla pivots and choppiness
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA (50) for trend direction
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate 1D typical price for pivot calculations
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    typical_price_arr = typical_price.values
     
-    # Volume confirmation: volume > 1.5x average volume (30-period)
+    # Camarilla pivot levels: R4, R3, R2, R1, PP, S1, S2, S3, S4
+    # R4 = Close + 1.5 * (High - Low)
+    # R3 = Close + 1.1 * (High - Low)
+    # R2 = Close + 1.6 * (High - Low) / 2
+    # R1 = Close + 1.1 * (High - Low) / 2
+    # PP = (High + Low + Close) / 3
+    # S1 = Close - 1.1 * (High - Low) / 2
+    # S2 = Close - 1.6 * (High - Low) / 2
+    # S3 = Close - 1.1 * (High - Low)
+    # S4 = Close - 1.5 * (High - Low)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels for each day
+    camarilla_s4 = close_1d - 1.5 * (high_1d - low_1d)
+    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d)
+    camarilla_s2 = close_1d - 0.55 * (high_1d - low_1d)
+    camarilla_s1 = close_1d - 0.275 * (high_1d - low_1d)
+    camarilla_pp = typical_price_arr
+    camarilla_r1 = close_1d + 0.275 * (high_1d - low_1d)
+    camarilla_r2 = close_1d + 0.55 * (high_1d - low_1d)
+    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d)
+    camarilla_r4 = close_1d + 1.5 * (high_1d - low_1d)
+    
+    # Align Camarilla levels to 4h timeframe
+    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s2)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    
+    # Calculate Choppiness Index on 1D (14-period)
+    # CHOP = 100 * log10(sum(ATR) / (max(high) - min(low))) / log10(n)
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_14 = tr.rolling(window=14, min_periods=14).sum()
+    max_high_14 = df_1d['high'].rolling(window=14, min_periods=14).max()
+    min_low_14 = df_1d['low'].rolling(window=14, min_periods=14).min()
+    chop_raw = 100 * np.log10(atr_14 / (max_high_14 - min_low_14)) / np.log10(14)
+    chop_values = chop_raw.fillna(50).values  # fill NaN with 50 (neutral)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_values)
+    
+    # Volume confirmation: volume > 2x average volume (20-period)
     vol_series = pd.Series(volume)
-    avg_vol = vol_series.rolling(window=30, min_periods=30).mean().shift(1).values
+    avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 60  # for EMA and Camarilla calculations
+    start = 50  # for Camarilla and volume calculations
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(avg_vol[i])):
+        if (np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(chop_aligned[i]) or np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         
-        # Trend filter: only trade in direction of 1d EMA
-        above_ema = price > ema_1d_aligned[i]
+        # Choppiness filter: only trade when market is ranging (CHOP > 61.8)
+        is_ranging = chop_aligned[i] > 61.8
         
         if position == 0:
-            # Long: price breaks above H4 with volume filter and above 1d EMA
-            if price > camarilla_h4_aligned[i] and vol > 1.5 * avg_vol[i] and above_ema:
+            # Long: price breaks above S1 with volume filter in ranging market
+            if price > s1_aligned[i] and vol > 2.0 * avg_vol[i] and is_ranging:
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below L4 with volume filter and below 1d EMA
-            elif price < camarilla_l4_aligned[i] and vol > 1.5 * avg_vol[i] and not above_ema:
+            # Short: price breaks below R1 with volume filter in ranging market
+            elif price < r1_aligned[i] and vol > 2.0 * avg_vol[i] and is_ranging:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below L4 (reversal) or below 1d EMA
-            if price < camarilla_l4_aligned[i] or price < ema_1d_aligned[i]:
+            # Exit long: price reaches pivot point or stops below S1
+            if price >= pp_aligned[i] or price <= s1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above H4 (reversal) or above 1d EMA
-            if price > camarilla_h4_aligned[i] or price > ema_1d_aligned[i]:
+            # Exit short: price reaches pivot point or stops above R1
+            if price <= pp_aligned[i] or price >= r1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -108,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1w_Camarilla_Breakout_Volume_Filter_v1"
-timeframe = "12h"
+name = "4h_Camarilla_Pivot_Volume_Chop"
+timeframe = "4h"
 leverage = 1.0
