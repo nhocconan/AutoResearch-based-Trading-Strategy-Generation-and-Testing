@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Fractal Breakout with 1d Volume Confirmation and Trend Filter
-# Uses Williams Fractals on 1d to identify potential reversal points
-# Long when price breaks above bearish fractal with volume spike and ADX > 20
-# Short when price breaks below bullish fractal with volume spike and ADX > 20
-# Exits when price returns to the opposite fractal level
-# Designed to capture reversals at key support/resistance levels with volume confirmation
-# Target: 50-150 total trades over 4 years (12-37/year)
+# Hypothesis: 12h KAMA Trend with 1d RSI Filter and Volume Confirmation
+# Uses Kaufman's Adaptive Moving Average (KAMA) on 12h to identify adaptive trend direction.
+# Enters long when KAMA turns upward, RSI(14) on 1d is above 50 (bullish momentum), and 1d volume is above average.
+# Enters short when KAMA turns downward, RSI(14) on 1d is below 50 (bearish momentum), and 1d volume is above average.
+# Exits when KAMA direction reverses or volume drops below average.
+# Designed to work in both bull and bear markets by adapting to volatility and using volume/momentum confirmation.
+# Target: 20-50 trades per symbol over 4 years (5-12.5/year)
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,73 +21,53 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
+    # Load 12h and 1d data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Williams Fractals on 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 12h KAMA (adaptive moving average)
+    close_12h = df_12h['close'].values
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close_12h, n=10))  # |close[t] - close[t-10]|
+    volatility = np.sum(np.abs(np.diff(close_12h, n=1)), axis=0)  # sum of |close[t] - close[t-1]| over 10 periods
+    # Handle first 10 values
+    change = np.concatenate([[np.nan] * 10, change])
+    volatility = np.concatenate([[np.nan] * 10, volatility])
+    # Avoid division by zero
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2 / (2 + 1) - 2 / (30 + 1)) + 2 / (30 + 1)) ** 2  # fast=2, slow=30
+    # Calculate KAMA
+    kama = np.full_like(close_12h, np.nan)
+    kama[0] = close_12h[0]
+    for i in range(1, len(close_12h)):
+        if np.isnan(sc[i]):
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
     
-    # Williams Fractal: bearish (high) and bullish (low)
-    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n-1] > high[n-3] and high[n-1] > high[n+1]
-    # Bullish fractal: low[n-2] > low[n-1] < low[n] and low[n-1] < low[n-3] and low[n-1] < low[n+1]
-    n_1d = len(high_1d)
-    bearish_fractal = np.full(n_1d, np.nan)
-    bullish_fractal = np.full(n_1d, np.nan)
-    
-    for i in range(2, n_1d - 2):
-        if (high_1d[i-2] < high_1d[i-1] and 
-            high_1d[i] < high_1d[i-1] and
-            high_1d[i-3] < high_1d[i-1] and
-            high_1d[i+1] < high_1d[i-1]):
-            bearish_fractal[i-1] = high_1d[i-1]  # Value at the fractal point
-        
-        if (low_1d[i-2] > low_1d[i-1] and 
-            low_1d[i] > low_1d[i-1] and
-            low_1d[i-3] > low_1d[i-1] and
-            low_1d[i+1] > low_1d[i-1]):
-            bullish_fractal[i-1] = low_1d[i-1]  # Value at the fractal point
-    
-    # Calculate 1d ADX for trend filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d RSI (14-period)
     close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
-    
-    # Smoothed values
-    tr_14 = pd.Series(tr).ewm(span=14, adjust=False).mean().values
-    dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False).mean().values
-    dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False).mean().values
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(span=14, adjust=False).mean().values
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    # First average gain/loss
+    avg_gain = np.concatenate([[np.nan] * 14, [np.mean(gain[:14])]])
+    avg_loss = np.concatenate([[np.nan] * 14, [np.mean(loss[:14])]])
+    # Smooth subsequent values
+    for i in range(15, len(gain)+1):
+        avg_gain = np.append(avg_gain, (avg_gain[-1] * 13 + gain[i-1]) / 14)
+        avg_loss = np.append(avg_loss, (avg_loss[-1] * 13 + loss[i-1]) / 14)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
     # Calculate 1d volume average (20-period)
     vol_1d = df_1d['volume'].values
     vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align indicators to 6h timeframe
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align indicators to 12h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_12h, kama)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
@@ -95,43 +75,45 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 50  # for fractal and ADX calculations
+    start = 50  # for KAMA and RSI calculations
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # Get previous KAMA to detect direction change
+        prev_kama = kama_aligned[i-1] if i > 0 else kama_aligned[i]
         price = close[i]
         vol_1d_current = vol_1d[i] if i < len(vol_1d) else vol_1d[-1]
         
         if position == 0:
-            # Long setup: price breaks above bearish fractal with volume spike and trend filter
-            if (price > bearish_fractal_aligned[i] and 
-                vol_1d_current > 1.5 * vol_ma_1d_aligned[i] and  # Volume spike
-                adx_aligned[i] > 20):                           # Trend filter
+            # Long setup: KAMA turning up, RSI > 50, volume above average
+            if (kama_aligned[i] > prev_kama and 
+                rsi_aligned[i] > 50 and 
+                vol_1d_current > vol_ma_1d_aligned[i]):
                 position = 1
                 signals[i] = position_size
-            # Short setup: price breaks below bullish fractal with volume spike and trend filter
-            elif (price < bullish_fractal_aligned[i] and 
-                  vol_1d_current > 1.5 * vol_ma_1d_aligned[i] and  # Volume spike
-                  adx_aligned[i] > 20):                           # Trend filter
+            # Short setup: KAMA turning down, RSI < 50, volume above average
+            elif (kama_aligned[i] < prev_kama and 
+                  rsi_aligned[i] < 50 and 
+                  vol_1d_current > vol_ma_1d_aligned[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to bullish fractal level
-            if price <= bullish_fractal_aligned[i]:
+            # Exit long: KAMA turns down or volume drops below average
+            if kama_aligned[i] < prev_kama or vol_1d_current < vol_ma_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to bearish fractal level
-            if price >= bearish_fractal_aligned[i]:
+            # Exit short: KAMA turns up or volume drops below average
+            if kama_aligned[i] > prev_kama or vol_1d_current < vol_ma_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -139,6 +121,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Williams_Fractal_Breakout_1dVolume_ADX"
-timeframe = "6h"
+name = "12h_KAMA_1dRSI_Volume"
+timeframe = "12h"
 leverage = 1.0
