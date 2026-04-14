@@ -20,11 +20,12 @@ def generate_signals(prices):
     
     # Calculate 1d close for pivot calculations
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 1d EMA50 for trend filter (more stable than SMA)
+    # Calculate 1d EMA50 for trend filter
     ema_50_1d = np.full(len(df_1d), np.nan)
     if len(df_1d) >= 50:
-        # Use pandas EMA for accuracy and efficiency
         ema_series = pd.Series(close_1d).ewm(span=50, adjust=False).mean()
         ema_50_1d = ema_series.values
     
@@ -32,17 +33,11 @@ def generate_signals(prices):
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate 1d ATR (14-period) for volatility filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range calculation
     high_low = high_1d - low_1d
     high_close = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
     low_close = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
     tr = np.maximum(high_low, np.maximum(high_close, low_close))
     
-    # ATR with proper smoothing
     atr_1d = np.full(len(df_1d), np.nan)
     if len(df_1d) >= 14:
         atr_1d[13] = np.mean(tr[:14])
@@ -55,13 +50,12 @@ def generate_signals(prices):
     # Calculate 4h volume moving average (20-period) for volume filter
     volume_ma = np.full(n, np.nan)
     if n >= 20:
-        # Use pandas rolling mean for efficiency
         volume_series = pd.Series(volume)
         volume_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # Reduced size for better risk management
+    position_size = 0.25  # Conservative size to manage drawdown
     
     for i in range(50, n):
         # Skip if any critical data is NaN
@@ -85,15 +79,17 @@ def generate_signals(prices):
         if i >= 1:
             # Get previous day's data (1d index)
             prev_close = close_1d[i-1]
+            prev_high = high_1d[i-1]
+            prev_low = low_1d[i-1]
             
-            # Calculate dynamic pivot levels based on volatility
-            # Using ATR-based levels instead of fixed percentages
-            atr_value = atr_1d[i-1]
-            pivot_range = atr_value * 2.5  # 2.5x ATR for pivot width
-            
-            # S3 and R3 levels (extreme rejection zones)
-            s3 = prev_close - pivot_range
-            r3 = prev_close + pivot_range
+            # Calculate pivot points (standard formula)
+            pivot = (prev_high + prev_low + prev_close) / 3.0
+            s1 = (2 * pivot) - prev_high
+            r1 = (2 * pivot) - prev_low
+            s2 = pivot - (prev_high - prev_low)
+            r2 = pivot + (prev_high - prev_low)
+            s3 = prev_low - 2 * (prev_high - pivot)
+            r3 = prev_high + 2 * (pivot - prev_low)
             
             # Align S3/R3 to 4h timeframe (constant values for the day)
             s3_array = np.full(len(df_1d), s3)
@@ -114,8 +110,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
             elif position == 1:
                 # Exit: Price breaks S3 again or reaches mean reversion target
-                # Calculate dynamic exit level
-                exit_level = prev_close - (pivot_range * 0.3)  # 30% of pivot range
+                # Dynamic exit at 50% of the range from S3 to pivot
+                exit_level = s3 + (pivot - s3) * 0.5
                 exit_array = np.full(len(df_1d), exit_level)
                 exit_4h = align_htf_to_ltf(prices, df_1d, exit_array)[i]
                 if low[i] <= s3 or close[i] <= exit_4h:
@@ -125,8 +121,8 @@ def generate_signals(prices):
                     signals[i] = position_size
             elif position == -1:
                 # Exit: Price breaks R3 again or reaches mean reversion target
-                # Calculate dynamic exit level
-                exit_level = prev_close + (pivot_range * 0.3)  # 30% of pivot range
+                # Dynamic exit at 50% of the range from pivot to R3
+                exit_level = r3 - (r3 - pivot) * 0.5
                 exit_array = np.full(len(df_1d), exit_level)
                 exit_4h = align_htf_to_ltf(prices, df_1d, exit_array)[i]
                 if high[i] >= r3 or close[i] >= exit_4h:
@@ -139,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Pivot_S3R3_Rejection_Volume_Filter_v4"
+name = "4h_1d_Pivot_S3R3_Rejection_Volume_Filter_v5"
 timeframe = "4h"
 leverage = 1.0
