@@ -1,15 +1,15 @@
-# ============================================================================
-# 4h_Camilla_Signal: Camarilla Pivot Reversal with Daily Volume Spike
-# ============================================================================
-# Hypothesis: Camarilla pivot levels on daily timeframe provide high-probability
-# reversal zones. Price retracing to these levels with volume confirmation offers
-# mean-reversion entries in both bull and bear markets. Uses daily volume spike
-# for confirmation and exits on opposite pivot touch. Target: 20-40 trades/year.
-# ============================================================================
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 12-hour Donchian channel breakout with daily volume confirmation and weekly trend filter
+# Long when price breaks above 12h Donchian upper band with volume spike and weekly bullish trend
+# Short when price breaks below 12h Donchian lower band with volume spike and weekly bearish trend
+# Exit when price crosses the Donchian midline
+# Uses weekly EMA trend filter to avoid counter-trend trades in bear markets
+# Target: 20-50 trades per symbol over 4 years (5-12.5/year) to minimize fee drag
+# This pattern has shown strong test performance for SOL and can work for BTC/ETH with proper filters
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,79 +21,74 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
-    df_daily = get_htf_data(prices, '1d')
+    # Load 12h and weekly data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate Camarilla pivot levels from daily OHLC
-    # Formula: R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4), etc.
-    # S1 = C - ((H-L) * 1.1/6), S2 = C - ((H-L) * 1.1/4), S3 = C - ((H-L) * 1.1/2)
-    daily_close = df_daily['close'].values
-    daily_high = df_daily['high'].values
-    daily_low = df_daily['low'].values
+    # Calculate 12h Donchian channel (20-period lookback for 12h timeframe)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    donchian_upper = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donchian_middle = (donchian_upper + donchian_lower) / 2
     
-    # Calculate pivot levels
-    hl_range = daily_high - daily_low
-    camarilla_s3 = daily_close - (hl_range * 1.1 / 2)   # Strong support
-    camarilla_s2 = daily_close - (hl_range * 1.1 / 4)   # Support
-    camarilla_s1 = daily_close - (hl_range * 1.1 / 6)   # Weak support
-    camarilla_r1 = daily_close + (hl_range * 1.1 / 6)   # Weak resistance
-    camarilla_r2 = daily_close + (hl_range * 1.1 / 4)   # Resistance
-    camarilla_r3 = daily_close + (hl_range * 1.1 / 2)   # Strong resistance
+    # Calculate weekly EMA for trend filter (21-period)
+    close_weekly = df_weekly['close'].values
+    ema_weekly = pd.Series(close_weekly).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Calculate daily volume average (20-period)
-    vol_daily = df_daily['volume'].values
-    vol_ma_daily = pd.Series(vol_daily).rolling(window=20, min_periods=20).mean().values
+    # Calculate 12h volume average (20-period)
+    vol_12h = df_12h['volume'].values
+    vol_ma_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
     
-    # Align Camarilla levels to 4h timeframe
-    s3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_s3)
-    s2_aligned = align_htf_to_ltf(prices, df_daily, camarilla_s2)
-    s1_aligned = align_htf_to_ltf(prices, df_daily, camarilla_s1)
-    r1_aligned = align_htf_to_ltf(prices, df_daily, camarilla_r1)
-    r2_aligned = align_htf_to_ltf(prices, df_daily, camarilla_r2)
-    r3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_r3)
-    vol_ma_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_ma_daily)
+    # Align indicators to 12h timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
+    donchian_middle_aligned = align_htf_to_ltf(prices, df_12h, donchian_middle)
+    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
+    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 40  # for 20-period volume MA
+    start = 40  # for 20-period calculations
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(s3_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(vol_ma_daily_aligned[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(ema_weekly_aligned[i]) or np.isnan(vol_ma_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_current = volume[i]  # Current 4h volume
+        vol_12h_current = volume[i]  # Current 12h volume
         
         if position == 0:
-            # Long setup: price touches S3 with volume spike (strong support bounce)
-            if (price <= s3_aligned[i] * 1.002 and  # Allow small buffer for wicks
-                vol_current > 2.0 * vol_ma_daily_aligned[i]):  # Significant volume spike
+            # Long setup: break above Donchian upper with volume spike and weekly bullish trend
+            if (price > donchian_upper_aligned[i] and 
+                vol_12h_current > 1.8 * vol_ma_12h_aligned[i] and  # Volume spike
+                price > ema_weekly_aligned[i]):                    # Price above weekly EMA for bullish trend
                 position = 1
                 signals[i] = position_size
-            # Short setup: price touches R3 with volume spike (strong resistance rejection)
-            elif (price >= r3_aligned[i] * 0.998 and  # Allow small buffer for wicks
-                  vol_current > 2.0 * vol_ma_daily_aligned[i]):  # Significant volume spike
+            # Short setup: break below Donchian lower with volume spike and weekly bearish trend
+            elif (price < donchian_lower_aligned[i] and 
+                  vol_12h_current > 1.8 * vol_ma_12h_aligned[i] and  # Volume spike
+                  price < ema_weekly_aligned[i]):                    # Price below weekly EMA for bearish trend
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price touches R1 (weak resistance) or stops working
-            if price >= r1_aligned[i] * 0.998:
+            # Exit long: price breaks below Donchian middle
+            if price < donchian_middle_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price touches S1 (weak support) or stops working
-            if price <= s1_aligned[i] * 1.002:
+            # Exit short: price breaks above Donchian middle
+            if price > donchian_middle_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -101,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camilla_Signal"
-timeframe = "4h"
+name = "12h_Donchian_WeeklyTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
