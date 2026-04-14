@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot breakout with daily trend filter and volume confirmation
-# Camarilla levels provide institutional support/resistance. Breakouts with volume and daily EMA trend
-# filter capture institutional flow while avoiding false breakouts in chop.
-# Works in bull/bear by using daily EMA trend filter (long only above EMA, short only below EMA)
-# Target: 50-150 total trades over 4 years (12-37/year)
+# Hypothesis: 4h Bollinger Band breakout with daily RSI filter and volume confirmation
+# Bollinger Bands provide dynamic volatility-based support/resistance. Breakouts with volume
+# and daily RSI filter (RSI > 60 for longs, RSI < 40 for shorts) capture strong momentum
+# while avoiding false breakouts in low volatility. Works in bull/bear by using RSI to
+# filter for momentum direction. Target: 50-150 total trades over 4 years (12-37/year).
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,42 +19,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and trend filter
+    # Get daily data for RSI filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily EMA(50) for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate daily RSI(14) for trend filter
+    def calculate_rsi(prices, period=14):
+        delta = np.diff(prices)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.zeros_like(prices)
+        avg_loss = np.zeros_like(prices)
+        avg_gain[period] = np.mean(gain[:period])
+        avg_loss[period] = np.mean(loss[:period])
+        for i in range(period + 1, len(prices)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    # Calculate previous day's Camarilla levels
-    # Based on previous day's range: H-L
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    rsi_14_1d = calculate_rsi(close_1d, 14)
+    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
     
-    # First day will have NaN due to roll, handle with fill
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
-    
-    range_1d = prev_high - prev_low
-    
-    # Camarilla levels: Close ± (range * multiplier)
-    # Key levels for breakout: R3, R4, S3, S4
-    camarilla_r3 = prev_close + range_1d * 1.1 / 4
-    camarilla_r4 = prev_close + range_1d * 1.1 / 2
-    camarilla_s3 = prev_close - range_1d * 1.1 / 4
-    camarilla_s4 = prev_close - range_1d * 1.1 / 2
-    
-    # Align Camarilla levels to 6h timeframe (no delay needed as they're based on closed daily candle)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    # Calculate Bollinger Bands (20, 2) on 4h
+    bb_period = 20
+    bb_std = 2
+    close_series = pd.Series(close)
+    bb_mid = close_series.rolling(window=bb_period, min_periods=bb_period).mean()
+    bb_std_dev = close_series.rolling(window=bb_period, min_periods=bb_period).std()
+    bb_upper = bb_mid + (bb_std_dev * bb_std)
+    bb_lower = bb_mid - (bb_std_dev * bb_std)
+    bb_mid = bb_mid.values
+    bb_upper = bb_upper.values
+    bb_lower = bb_lower.values
     
     # Volume confirmation: volume > 1.5x average volume (24-period)
     vol_series = pd.Series(volume)
@@ -65,13 +63,12 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 24  # for volume average
+    start = max(bb_period, 24) + 1
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(avg_vol[i])):
+        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or
+            np.isnan(rsi_14_1d_aligned[i]) or np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
         
@@ -79,28 +76,28 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long: price breaks above R4 with volume filter AND above daily EMA50
-            if (price > r4_aligned[i] and price > ema_50_1d_aligned[i] and 
-                vol > 1.5 * avg_vol[i]):
+            # Long: price breaks above upper BB with volume filter AND daily RSI > 60
+            if (price > bb_upper[i] and vol > 1.5 * avg_vol[i] and 
+                rsi_14_1d_aligned[i] > 60):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below S4 with volume filter AND below daily EMA50
-            elif (price < s4_aligned[i] and price < ema_50_1d_aligned[i] and 
-                  vol > 1.5 * avg_vol[i]):
+            # Short: price breaks below lower BB with volume filter AND daily RSI < 40
+            elif (price < bb_lower[i] and vol > 1.5 * avg_vol[i] and 
+                  rsi_14_1d_aligned[i] < 40):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below R3 OR below daily EMA50
-            if price < r3_aligned[i] or price < ema_50_1d_aligned[i]:
+            # Exit long: price breaks below middle BB
+            if price < bb_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above S3 OR above daily EMA50
-            if price > s3_aligned[i] or price > ema_50_1d_aligned[i]:
+            # Exit short: price breaks above middle BB
+            if price > bb_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -108,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_Breakout_EMA_Volume"
-timeframe = "6h"
+name = "4h_Bollinger_Breakout_Daily_RSI_Volume"
+timeframe = "4h"
 leverage = 1.0
