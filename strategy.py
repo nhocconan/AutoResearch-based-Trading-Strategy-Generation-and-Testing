@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Camarilla pivot breakout with 1-day trend filter (EMA50) and volume confirmation
-# Long when price breaks above Camarilla H4 level AND price > daily EMA50 AND volume > 1.5x 20-period average
-# Short when price breaks below Camarilla L4 level AND price < daily EMA50 AND volume > 1.5x 20-period average
-# Exit when price crosses back through Camarilla L3/H3 levels
-# Uses proven Camarilla pivot structure with trend and volume filters to reduce false breakouts
-# Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost
+# Hypothesis: 6-hour Ichimoku Cloud with 1-day trend filter and volume confirmation
+# Long when Tenkan-sen > Kijun-sen, price above Kumo cloud, price > weekly EMA20, and volume > 1.5x 20-period average
+# Short when Tenkan-sen < Kijun-sen, price below Kumo cloud, price < weekly EMA20, and volume > 1.5x 20-period average
+# Exit when Tenkan-sen crosses back below/above Kijun-sen (opposite signal)
+# Ichimoku provides multi-line trend confirmation; weekly EMA filters higher timeframe trend; volume confirms momentum
+# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,36 +20,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for Camarilla calculation and EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop for EMA20 trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate Camarilla pivot levels from daily data
-    # Pivot point = (H + L + C) / 3
-    # H4 = C + (H - L) * 1.1/2
-    # L4 = C - (H - L) * 1.1/2
-    # H3 = C + (H - L) * 1.1/4
-    # L3 = C - (H - L) * 1.1/4
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Ichimoku components on 6h
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (high_9 + low_9) / 2
     
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_hl = high_1d - low_1d
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (high_26 + low_26) / 2
     
-    H4 = close_1d + range_hl * 1.1 / 2.0
-    L4 = close_1d - range_hl * 1.1 / 2.0
-    H3 = close_1d + range_hl * 1.1 / 4.0
-    L3 = close_1d - range_hl * 1.1 / 4.0
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
     
-    # Align Camarilla levels to 4h timeframe
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = (high_52 + low_52) / 2
     
-    # Calculate daily EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate weekly EMA20 for trend filter
+    close_1w = df_1w['close'].values
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
     # Calculate volume average for confirmation (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -58,14 +54,14 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations
-    start = 50  # Need EMA50 period
+    # Start after enough data for calculations (52 for Senkou Span B + buffer)
+    start = 60
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or 
-            np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or 
+            np.isnan(senkou_span_a[i]) or np.isnan(senkou_span_b[i]) or 
+            np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
@@ -73,27 +69,37 @@ def generate_signals(prices):
         vol = volume[i]
         vol_threshold = vol_avg[i] * 1.5
         
+        # Determine cloud top and bottom
+        cloud_top = max(senkou_span_a[i], senkou_span_b[i])
+        cloud_bottom = min(senkou_span_a[i], senkou_span_b[i])
+        
         if position == 0:
-            # Long setup: breakout above H4 + above daily EMA50 + volume confirmation
-            if (price > H4_aligned[i] and price > ema50_1d_aligned[i] and vol > vol_threshold):
+            # Long setup: Tenkan > Kijun, price above cloud, price > weekly EMA20, volume confirmation
+            if (tenkan_sen[i] > kijun_sen[i] and 
+                price > cloud_top and 
+                price > ema20_1w_aligned[i] and 
+                vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: breakdown below L4 + below daily EMA50 + volume confirmation
-            elif (price < L4_aligned[i] and price < ema50_1d_aligned[i] and vol > vol_threshold):
+            # Short setup: Tenkan < Kijun, price below cloud, price < weekly EMA20, volume confirmation
+            elif (tenkan_sen[i] < kijun_sen[i] and 
+                  price < cloud_bottom and 
+                  price < ema20_1w_aligned[i] and 
+                  vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price falls back below L3 (opposite side)
-            if price < L3_aligned[i]:
+            # Exit long: Tenkan crosses back below Kijun (opposite signal)
+            if tenkan_sen[i] < kijun_sen[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price rises back above H3 (opposite side)
-            if price > H3_aligned[i]:
+            # Exit short: Tenkan crosses back above Kijun (opposite signal)
+            if tenkan_sen[i] > kijun_sen[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -101,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_1dEMA50_Volume"
-timeframe = "4h"
+name = "6h_Ichimoku_1wEMA20_Volume"
+timeframe = "6h"
 leverage = 1.0
