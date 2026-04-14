@@ -38,13 +38,20 @@ def generate_signals(prices):
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
+    # Calculate 12h Donchian channels (20-period)
+    donchian_high = np.zeros(n)
+    donchian_low = np.zeros(n)
+    for i in range(20, n):
+        donchian_high[i] = np.max(high[i-20:i])
+        donchian_low[i] = np.min(low[i-20:i])
+    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25
     
     for i in range(50, n):
         # Skip if any critical data is NaN
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(atr_14_aligned[i]):
+        if np.isnan(ema50_1d_aligned[i]) or np.isnan(atr_14_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
             continue
         
         # Get previous day's data (1d index)
@@ -69,27 +76,32 @@ def generate_signals(prices):
             r3_1d = align_htf_to_ltf(prices, df_1d, r3_array)[i]
             
             if position == 0:
-                # Long: Price crosses above S3 with volatility filter
-                if close[i] > s3_1d and close[i-1] <= s3_1d and atr_14_aligned[i] > 0:
+                # Long: Price breaks above R3 with volume and trend confirmation
+                vol_ma = np.mean(volume[i-5:i]) if i >= 5 else volume[i]
+                if (close[i] > r3_1d and close[i-1] <= r3_1d and 
+                    volume[i] > vol_ma * 1.5 and 
+                    close[i] > ema50_1d_aligned[i]):
                     position = 1
                     signals[i] = position_size
-                # Short: Price crosses below R3 with volatility filter
-                elif close[i] < r3_1d and close[i-1] >= r3_1d and atr_14_aligned[i] > 0:
+                # Short: Price breaks below S3 with volume and trend confirmation
+                elif (close[i] < s3_1d and close[i-1] >= s3_1d and 
+                      volume[i] > vol_ma * 1.5 and 
+                      close[i] < ema50_1d_aligned[i]):
                     position = -1
                     signals[i] = -position_size
             elif position == 1:
-                # Exit: Price crosses below S3 or trend reversal (price below EMA50)
+                # Exit: Price breaks below S3 or trend reversal (price below EMA50)
                 if close[i] < s3_1d or close[i] < ema50_1d_aligned[i]:
                     position = 0
                     signals[i] = 0.0
             elif position == -1:
-                # Exit: Price crosses above R3 or trend reversal (price above EMA50)
+                # Exit: Price breaks above R3 or trend reversal (price above EMA50)
                 if close[i] > r3_1d or close[i] > ema50_1d_aligned[i]:
                     position = 0
                     signals[i] = 0.0
     
     return signals
 
-name = "12h_Pivot_S3R3_Cross_EMA50_TrendFilter_v1"
+name = "12h_Pivot_S3R3_Breakout_EMA50_VolumeFilter"
 timeframe = "12h"
 leverage = 1.0
