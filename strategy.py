@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 20:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for price channel (12h timeframe)
+    # Load 1d data for reference levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -23,66 +23,125 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 12-period EMA on 1d close for trend direction
-    close_1d_series = pd.Series(close_1d)
-    ema_12_1d = close_1d_series.ewm(span=12, adjust=False).values
+    # Calculate 1-day VWAP (typical price * volume / cumulative volume)
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3
+    cum_vol = np.cumsum(volume_1d)
+    cum_tpv = np.cumsum(typical_price_1d * volume_1d)
+    vwap_1d = np.where(cum_vol > 0, cum_tpv / cum_vol, np.nan)
     
-    # Calculate ATR on 1d for volatility filter
-    tr = np.maximum(high_1d - low_1d,
-                    np.maximum(np.abs(high_1d - np.roll(high_1d, 1)),
-                               np.abs(low_1d - np.roll(low_1d, 1))))
-    tr[0] = high_1d[0] - low_1d[0]
-    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Align 1d indicators to 12h timeframe
+    # Align 1d levels to 4h timeframe
     high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
     low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
-    ema_12_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_12_1d)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
     
-    # Volume ratio: current 12h volume vs 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
-    vol_ratio = np.where(vol_ma_20 > 0, volume / vol_ma_20, 0)
+    # Calculate ADX on 1d data (Wilder smoothing)
+    if len(high_1d) < 14:
+        return np.zeros(n)
+    
+    plus_dm = np.zeros_like(high_1d)
+    minus_dm = np.zeros_like(high_1d)
+    tr = np.zeros_like(high_1d)
+    
+    for i in range(1, len(high_1d)):
+        if np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(high_1d[i-1]) or np.isnan(low_1d[i-1]):
+            continue
+        high_diff = high_1d[i] - high_1d[i-1]
+        low_diff = low_1d[i-1] - low_1d[i]
+        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
+        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
+        tr[i] = max(high_1d[i] - low_1d[i], 
+                   abs(high_1d[i] - high_1d[i-1]), 
+                   abs(low_1d[i] - low_1d[i-1]))
+    
+    # Wilder smoothing (alpha = 1/14)
+    atr = np.zeros_like(high_1d)
+    plus_di = np.zeros_like(high_1d)
+    minus_di = np.zeros_like(high_1d)
+    dx = np.zeros_like(high_1d)
+    adx = np.full_like(high_1d, np.nan)
+    
+    if len(high_1d) >= 14:
+        # Initial values (first 14 periods)
+        atr[13] = np.nansum(tr[1:14])
+        plus_dm_sum = np.nansum(plus_dm[1:14])
+        minus_dm_sum = np.nansum(minus_dm[1:14])
+        
+        for i in range(14, len(high_1d)):
+            if np.isnan(tr[i]) or np.isnan(plus_dm[i]) or np.isnan(minus_dm[i]):
+                atr[i] = atr[i-1]
+                plus_dm_sum = plus_dm_sum
+                minus_dm_sum = minus_dm_sum
+            else:
+                atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+                plus_dm_sum = (plus_dm_sum * 13 + plus_dm[i]) / 14
+                minus_dm_sum = (minus_dm_sum * 13 + minus_dm[i]) / 14
+            
+            if atr[i] > 0:
+                plus_di[i] = 100 * plus_dm_sum / atr[i]
+                minus_di[i] = 100 * minus_dm_sum / atr[i]
+                if plus_di[i] + minus_di[i] > 0:
+                    dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+        
+        # Calculate ADX as smoothed DX (14-period)
+        if len(high_1d) >= 27:
+            adx[26] = np.nanmean(dx[14:27])
+            for i in range(27, len(high_1d)):
+                if np.isnan(dx[i]):
+                    adx[i] = adx[i-1]
+                else:
+                    adx[i] = (adx[i-1] * 13 + dx[i]) / 14
+    
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position size to limit trades and manage risk
+    position_size = 0.25  # Conservative size to limit trades
     
     for i in range(20, n):
         # Skip if any critical data is NaN
         if (np.isnan(high_1d_aligned[i]) or np.isnan(low_1d_aligned[i]) or
-            np.isnan(ema_12_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or
-            np.isnan(vol_ratio[i])):
+            np.isnan(vwap_1d_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # Volume ratio: current 4h volume vs 20-period average
+        vol_ma_20 = np.full_like(volume, np.nan)
+        for j in range(19, len(volume)):
+            vol_ma_20[j] = np.mean(volume[j-19:j+1])
+        
+        if np.isnan(vol_ma_20[i]) or vol_ma_20[i] <= 0:
+            volume_ratio = 0
+        else:
+            volume_ratio = volume[i] / vol_ma_20[i]
+        
         if position == 0:
-            # Long: price breaks above 1d high + volume surge + uptrend (EMA up)
-            if (close[i] > high_1d_aligned[i] and
-                vol_ratio[i] > 2.0 and
-                ema_12_1d_aligned[i] > ema_12_1d_aligned[i-1]):
+            # Look for long entries: breakout above 1d high with volume surge in strong trend
+            if (close[i] > high_1d_aligned[i] and 
+                volume_ratio > 2.5 and  # Higher threshold to reduce trades
+                adx_aligned[i] > 30):   # Require stronger trend
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below 1d low + volume surge + downtrend (EMA down)
-            elif (close[i] < low_1d_aligned[i] and
-                  vol_ratio[i] > 2.0 and
-                  ema_12_1d_aligned[i] < ema_12_1d_aligned[i-1]):
+            # Look for short entries: breakdown below 1d low with volume surge in strong trend
+            elif (close[i] < low_1d_aligned[i] and 
+                  volume_ratio > 2.5 and
+                  adx_aligned[i] > 30):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price falls below 1d low or trend reverses
-            if (close[i] < low_1d_aligned[i] or
-                ema_12_1d_aligned[i] < ema_12_1d_aligned[i-1]):
+            # Exit long: price crosses below 1d VWAP or ADX falls indicating trend exhaustion
+            if (close[i] < vwap_1d_aligned[i] or
+                adx_aligned[i] < 25):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price rises above 1d high or trend reverses
-            if (close[i] > high_1d_aligned[i] or
-                ema_12_1d_aligned[i] > ema_12_1d_aligned[i-1]):
+            # Exit short: price crosses above 1d VWAP or ADX falls indicating trend exhaustion
+            if (close[i] > vwap_1d_aligned[i] or
+                adx_aligned[i] < 25):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -90,6 +149,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_EMA_Breakout_Volume_Trend_v1"
-timeframe = "12h"
+name = "4h_1d_PriceChannel_Breakout_Volume_Trend_v3"
+timeframe = "4h"
 leverage = 1.0
