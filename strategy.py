@@ -23,7 +23,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate daily ATR (14-period) with proper handling
+    # Calculate daily ATR (14-period)
     high_low = high_1d - low_1d
     high_close = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
     low_close = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
