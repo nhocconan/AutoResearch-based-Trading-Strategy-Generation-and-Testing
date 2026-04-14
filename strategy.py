@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy combining daily Donchian breakouts with weekly EMA trend filter.
-# Long when price breaks above daily Donchian upper with weekly EMA alignment (price > EMA) and volume confirmation.
-# Short when price breaks below daily Donchian lower with weekly EMA alignment (price < EMA) and volume confirmation.
-# Exit when price returns to daily Donchian midpoint or weekly EMA slope changes direction.
-# Uses daily Donchian for structure, weekly EMA for trend filter, volume for confirmation.
-# Target: 25-35 trades/year per symbol (100-140 total over 4 years) to minimize fee drag.
+# Hypothesis: 12h strategy combining 1-day ATR-based volatility breakout with 1-week RSI mean reversion.
+# Long when price breaks above ATR-based upper band AND weekly RSI < 30 (oversold).
+# Short when price breaks below ATR-based lower band AND weekly RSI > 70 (overbought).
+# Exit when price returns to ATR-based middle band or weekly RSI crosses 50.
+# Uses 1-day ATR for volatility-based channels (adapts to volatility regimes),
+# 1-week RSI for mean-reversion filter, aiming to catch reversals in both bull and bear markets.
+# Target: 15-35 trades/year per symbol (60-140 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,93 +19,92 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Load daily data ONCE for Donchian channels
+    # Load daily data ONCE for ATR-based volatility channels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily Donchian channels (20-day)
-    donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_upper + donchian_lower) / 2
+    # Calculate True Range and ATR(14) on daily data
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Load weekly data ONCE for EMA trend filter
+    # Calculate ATR-based channels: middle = close, upper = close + 1.5*ATR, lower = close - 1.5*ATR
+    atr_middle = close_1d
+    atr_upper = close_1d + 1.5 * atr
+    atr_lower = close_1d - 1.5 * atr
+    
+    # Load weekly data ONCE for RSI mean reversion filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 14:
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
     
-    # Calculate weekly EMA(20)
-    ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate weekly RSI(14)
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     # Align indicators to lower timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Volume confirmation: 1.5x average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    atr_upper_aligned = align_htf_to_ltf(prices, df_1d, atr_upper)
+    atr_lower_aligned = align_htf_to_ltf(prices, df_1d, atr_lower)
+    atr_middle_aligned = align_htf_to_ltf(prices, df_1d, atr_middle)
+    rsi_aligned = align_htf_to_ltf(prices, df_1w, rsi)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(20, 20)  # Need Donchian and EMA
+    start = max(14, 14)  # Need ATR and RSI
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_upper_aligned[i]) or 
-            np.isnan(donchian_lower_aligned[i]) or
-            np.isnan(donchian_mid_aligned[i]) or
-            np.isnan(ema_1w_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(atr_upper_aligned[i]) or 
+            np.isnan(atr_lower_aligned[i]) or
+            np.isnan(atr_middle_aligned[i]) or
+            np.isnan(rsi_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
-        
-        # Trend filter: price above/below weekly EMA
-        price_above_ema = close[i] > ema_1w_aligned[i]
-        price_below_ema = close[i] < ema_1w_aligned[i]
-        
         if position == 0:
-            # Look for Donchian breakouts
-            # Long: price breaks above Donchian upper AND price above weekly EMA
-            if (close[i] > donchian_upper_aligned[i] and 
-                price_above_ema and 
-                volume_confirmed):
+            # Look for volatility breakouts with RSI mean reversion filter
+            # Long: price breaks above ATR upper AND weekly RSI < 30 (oversold)
+            if (close[i] > atr_upper_aligned[i] and 
+                rsi_aligned[i] < 30):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below Donchian lower AND price below weekly EMA
-            elif (close[i] < donchian_lower_aligned[i] and 
-                  price_below_ema and 
-                  volume_confirmed):
+            # Short: price breaks below ATR lower AND weekly RSI > 70 (overbought)
+            elif (close[i] < atr_lower_aligned[i] and 
+                  rsi_aligned[i] > 70):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to Donchian midpoint or price crosses below weekly EMA
-            if (close[i] <= donchian_mid_aligned[i] or 
-                close[i] < ema_1w_aligned[i]):
+            # Exit long: price returns to ATR middle or weekly RSI crosses above 50
+            if (close[i] <= atr_middle_aligned[i] or 
+                rsi_aligned[i] > 50):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to Donchian midpoint or price crosses above weekly EMA
-            if (close[i] >= donchian_mid_aligned[i] or 
-                close[i] > ema_1w_aligned[i]):
+            # Exit short: price returns to ATR middle or weekly RSI crosses below 50
+            if (close[i] >= atr_middle_aligned[i] or 
+                rsi_aligned[i] < 50):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -112,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyDonchian_WeeklyEMA_VolumeFilter_v1"
-timeframe = "4h"
+name = "12h_ATRBreakout_WeeklyRSI_MeanRev_v1"
+timeframe = "12h"
 leverage = 1.0
