@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Keltner Channels with volume and ADX filters.
-# Long when price breaks above upper Keltner Channel (EMA20 + 2*ATR10) on 1d timeframe,
-# ADX > 25 (trending), and volume > 1.3x average. Short when price breaks below lower
-# Keltner Channel (EMA20 - 2*ATR10) with same conditions. Exit when price returns to
-# EMA20 middle line or ADX drops below 20. Uses volatility-based channels for breakout
-# signals, ADX for trend strength, and volume for confirmation. Designed to work in
-# both bull and bear markets by only trading in strong trends and avoiding chop.
-# Target: 15-30 trades/year per symbol (60-120 total over 4 years) to minimize fee drag.
+# Hypothesis: 4h strategy using 1-day Williams %R with volume confirmation and ADX trend filter.
+# Long when Williams %R crosses above -80 (oversold reversal) on 1d timeframe, ADX > 20 (trending), and volume > 1.3x average.
+# Short when Williams %R crosses below -20 (overbought reversal) on 1d timeframe, ADX > 20, and volume > 1.3x average.
+# Exit when Williams %R returns to -50 (mean reversion) or ADX drops below 15 (trend weakening).
+# Williams %R identifies overbought/oversold conditions, ADX confirms trend strength, volume validates participation.
+# Designed to work in both bull and bear markets by trading mean reversions within trends.
+# Target: 25-40 trades/year per symbol (100-160 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,28 +21,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for Keltner Channels and ADX
+    # Load 1d data ONCE for Williams %R and ADX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need enough for EMA20, ATR10, ADX14
+    if len(df_1d) < 34:  # Need enough for Williams %R(14) and ADX(14)
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA20 (middle line)
-    ema20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Calculate ATR (10)
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    
-    # Calculate Keltner Channels
-    kc_upper = ema20 + 2 * atr
-    kc_lower = ema20 - 2 * atr
+    # Calculate Williams %R (14)
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     # Calculate ADX (14)
     # True Range
@@ -73,10 +65,8 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Align indicators to 12h timeframe
-    kc_upper_aligned = align_htf_to_ltf(prices, df_1d, kc_upper)
-    kc_lower_aligned = align_htf_to_ltf(prices, df_1d, kc_lower)
-    ema20_aligned = align_htf_to_ltf(prices, df_1d, ema20)
+    # Align indicators to 4h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Volume confirmation: 1.3x average volume (20-period)
@@ -87,13 +77,11 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(34, 20)  # Need ADX and EMA/ATR periods
+    start = max(34, 20)  # Need Williams %R and ADX periods
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(kc_upper_aligned[i]) or 
-            np.isnan(kc_lower_aligned[i]) or
-            np.isnan(ema20_aligned[i]) or
+        if (np.isnan(williams_r_aligned[i]) or 
             np.isnan(adx_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
@@ -102,39 +90,37 @@ def generate_signals(prices):
         # Volume confirmation
         volume_confirmed = volume[i] > 1.3 * vol_ma[i]
         
-        # Trend filter: ADX > 25 indicates strong trend
-        strong_trend = adx_aligned[i] > 25
+        # Trend filter: ADX > 20 indicates trending market
+        trending = adx_aligned[i] > 20
         
-        # Weak trend filter: ADX < 20 indicates trend weakening
-        weak_trend = adx_aligned[i] < 20
+        # Weak trend filter: ADX < 15 indicates trend weakening
+        weak_trend = adx_aligned[i] < 15
         
         if position == 0:
-            # Look for Keltner Channel breakouts in strong trend
-            # Long: price breaks above upper KC AND strong trend AND volume confirmation
-            if (close[i] > kc_upper_aligned[i] and 
-                strong_trend and 
-                volume_confirmed):
+            # Look for Williams %R reversals in trending market
+            # Long: Williams %R crosses above -80 (oversold reversal) AND trending AND volume confirmation
+            if i > start and (williams_r_aligned[i-1] <= -80 and williams_r_aligned[i] > -80 and 
+                trending and volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below lower KC AND strong trend AND volume confirmation
-            elif (close[i] < kc_lower_aligned[i] and 
-                  strong_trend and 
-                  volume_confirmed):
+            # Short: Williams %R crosses below -20 (overbought reversal) AND trending AND volume confirmation
+            elif i > start and (williams_r_aligned[i-1] >= -20 and williams_r_aligned[i] < -20 and 
+                  trending and volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to EMA20 middle or trend weakens
-            if (close[i] <= ema20_aligned[i] or 
+            # Exit long: Williams %R returns to -50 or trend weakens
+            if (williams_r_aligned[i] >= -50 or 
                 weak_trend):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to EMA20 middle or trend weakens
-            if (close[i] >= ema20_aligned[i] or 
+            # Exit short: Williams %R returns to -50 or trend weakens
+            if (williams_r_aligned[i] <= -50 or 
                 weak_trend):
                 position = 0
                 signals[i] = 0.0
@@ -143,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Keltner_Channels_ADX_VolumeFilter_v1"
-timeframe = "12h"
+name = "4h_1d_WilliamsR_ADX_VolumeFilter_v1"
+timeframe = "4h"
 leverage = 1.0
