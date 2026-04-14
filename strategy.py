@@ -3,69 +3,62 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour daily Camarilla pivot with volume confirmation and Choppiness regime filter.
-# Camarilla levels derived from prior daily range provide statistically significant reversal zones.
-# The Choppiness Index (14-period) filters for trending regimes (CHOP < 38.2) to trade with momentum.
-# Volume > 1.5x 20-period average confirms institutional participation.
-# This approach aims for 20-40 trades per year per symbol (80-160 total over 4 years) to minimize fee drag.
-# Works in both bull and bear markets by combining mean-reversion at pivots with trend filter.
+# Hypothesis: 6-hour Ichimoku Cloud with daily trend filter and volume confirmation.
+# Uses Ichimoku (Tenkan-sen/Kijun-sen cross) for entry timing, daily Cloud (Senkou Span A/B) for trend filter,
+# and volume > 1.5x average for confirmation. Works in bull/bear by only trading in direction of daily cloud.
+# Targets 60-120 total trades over 4 years (15-30/year) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE for Camarilla pivot and Choppiness
+    # Load daily data ONCE for Ichimoku components and trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Camarilla pivot levels from previous day
-    if len(df_1d) < 2:
+    # Calculate Ichimoku components on daily data
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period_tenkan = 9
+    if len(df_1d) < period_tenkan:
         return np.zeros(n)
+    tenkan_sen = (pd.Series(df_1d['high']).rolling(window=period_tenkan, min_periods=period_tenkan).max() +
+                  pd.Series(df_1d['low']).rolling(window=period_tenkan, min_periods=period_tenkan).min()) / 2
+    tenkan_sen = tenkan_sen.values
     
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    
-    # Calculate Camarilla levels
-    range_ = prev_high - prev_low
-    camarilla_h5 = prev_close + 1.1 * range_ * 1.1 / 12
-    camarilla_h4 = prev_close + 1.1 * range_ * 1.1 / 6
-    camarilla_h3 = prev_close + 1.1 * range_ * 1.1 / 4
-    camarilla_l3 = prev_close - 1.1 * range_ * 1.1 / 4
-    camarilla_l4 = prev_close - 1.1 * range_ * 1.1 / 6
-    camarilla_l5 = prev_close - 1.1 * range_ * 1.1 / 12
-    
-    # Align Camarilla levels to 4h timeframe
-    h5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h5)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    l5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l5)
-    
-    # Choppiness Index (14-period) on daily
-    if len(df_1d) < 14:
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period_kijun = 26
+    if len(df_1d) < period_kijun:
         return np.zeros(n)
+    kijun_sen = (pd.Series(df_1d['high']).rolling(window=period_kijun, min_periods=period_kijun).max() +
+                 pd.Series(df_1d['low']).rolling(window=period_kijun, min_periods=period_kijun).min()) / 2
+    kijun_sen = kijun_sen.values
     
-    # True Range
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr14 = tr.rolling(window=14, min_periods=14).sum()
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
     
-    # Choppiness: 100 * log10(sum(TR14)/(ATR14*14)) / log10(14)
-    chop = 100 * np.log10(atr14 / (atr14))  # placeholder, will calculate properly
-    # Recalculate correctly:
-    sum_tr14 = tr.rolling(window=14, min_periods=14).sum()
-    chop = 100 * np.log10(sum_tr14 / (atr14 * 14)) / np.log10(14)
-    chop_values = chop.values
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_values)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period_senkou_b = 52
+    if len(df_1d) < period_senkou_b:
+        return np.zeros(n)
+    senkou_span_b = (pd.Series(df_1d['high']).rolling(window=period_senkou_b, min_periods=period_senkou_b).max() +
+                     pd.Series(df_1d['low']).rolling(window=period_senkou_b, min_periods=period_senkou_b).min()) / 2
+    senkou_span_b = senkou_span_b.values
+    
+    # Align Ichimoku components to 6h timeframe (with proper delay for completed daily bars)
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    
+    # Daily trend filter: price above/both spans = bullish, below/both = bearish
+    # Bullish when price > max(Span A, Span B), Bearish when price < min(Span A, Span B)
+    span_a_b = np.maximum(senkou_span_a_aligned, senkou_span_b_aligned)
+    span_b_a = np.minimum(senkou_span_a_aligned, senkou_span_b_aligned)
     
     # Volume confirmation: 1.5x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -75,48 +68,56 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(30, 20)
+    start = max(period_kijun, period_senkou_b, 20)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(h3_aligned[i]) or 
-            np.isnan(l3_aligned[i]) or
-            np.isnan(chop_aligned[i]) or
+        if (np.isnan(tenkan_sen_aligned[i]) or 
+            np.isnan(kijun_sen_aligned[i]) or
+            np.isnan(span_a_b[i]) or
+            np.isnan(span_b_a[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: trending market (Choppiness < 38.2)
-        trending = chop_aligned[i] < 38.2
+        # Ichimoku signal: Tenkan-sen cross above/below Kijun-sen
+        tenkan_above_kijun = tenkan_sen_aligned[i] > kijun_sen_aligned[i]
+        tenkan_below_kijun = tenkan_sen_aligned[i] < kijun_sen_aligned[i]
+        
+        # Trend filter: price relative to Kumo (cloud)
+        price_above_cloud = close[i] > span_a_b[i]
+        price_below_cloud = close[i] < span_b_a[i]
         
         # Volume confirmation
         volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Enter long at L3 with trend filter and volume
-            if (close[i] <= l3_aligned[i] and 
-                trending and 
+            # Enter long: Tenkan crosses above Kijun + price above cloud + volume
+            if (tenkan_above_kijun and 
+                price_above_cloud and 
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Enter short at H3 with trend filter and volume
-            elif (close[i] >= h3_aligned[i] and 
-                  trending and 
+            # Enter short: Tenkan crosses below Kijun + price below cloud + volume
+            elif (tenkan_below_kijun and 
+                  price_below_cloud and 
                   volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price reaches L4 or reverses at H3
-            if close[i] >= l4_aligned[i] or close[i] >= h3_aligned[i]:
+            # Exit long: Tenkan crosses below Kijun or price enters cloud
+            if (tenkan_below_kijun or 
+                not price_above_cloud):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price reaches H4 or reverses at L3
-            if close[i] <= h4_aligned[i] or close[i] <= l3_aligned[i]:
+            # Exit short: Tenkan crosses above Kijun or price enters cloud
+            if (tenkan_above_kijun or 
+                not price_below_cloud):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -124,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_Chop_Volume_v1"
-timeframe = "4h"
+name = "6h_1d_Ichimoku_Cloud_Volume_v2"
+timeframe = "6h"
 leverage = 1.0
