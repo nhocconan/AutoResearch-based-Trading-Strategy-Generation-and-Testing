@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Choppiness Index regime filter with 12-hour EMA trend and volume confirmation
-# Long when: Choppiness Index > 61.8 (ranging market), price crosses above EMA20, volume > 1.5x average
-# Short when: Choppiness Index > 61.8 (ranging market), price crosses below EMA20, volume > 1.5x average
-# Exit when: Choppiness Index < 38.2 (trending market) OR price crosses EMA20 in opposite direction
-# Uses Choppiness Index to identify ranging markets where mean reversion works, EMA for dynamic support/resistance
-# Target: 80-150 total trades over 4 years (20-38/year) to balance opportunity and cost
+# Hypothesis: 1-hour RSI mean reversion with 4-hour trend filter and volume confirmation
+# Long when RSI(14) < 30, price > 4h EMA50 (uptrend), and volume > 1.5x 20-period average
+# Short when RSI(14) > 70, price < 4h EMA50 (downtrend), and volume > 1.5x 20-period average
+# Exit when RSI crosses back to neutral (40 for long exit, 60 for short exit)
+# Uses RSI for mean reversion extremes, 4h EMA for trend alignment, volume for confirmation
+# Target: 60-150 total trades over 4 years (15-37/year) with session filter (08-20 UTC) to reduce noise
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,83 +20,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Calculate RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate EMA20 for dynamic support/resistance
-    close_series = pd.Series(close)
-    ema20 = close_series.ewm(span=20, adjust=False, min_periods=20).values
-    
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Load 4h data ONCE before loop for EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
     # Calculate volume average for confirmation (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate Choppiness Index (14-period)
-    atr_list = []
-    for i in range(n):
-        if i == 0:
-            tr = high[i] - low[i]
-        else:
-            tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        atr_list.append(tr)
-    
-    atr = pd.Series(atr_list).rolling(window=14, min_periods=14).mean().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    # Avoid division by zero
-    chop_raw = 100 * np.log10((highest_high - lowest_low) / (np.sum(atr_list[:14]) if i < 14 else np.sum(atr_list[i-13:i+1])) / 14) / np.log10(14)
-    # Simplified calculation using rolling sum
-    atr_sum = pd.Series(atr_list).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10((highest_high - lowest_low) / atr_sum) / np.log10(14)
-    # Handle cases where highest_high == lowest_low
-    chop = np.where((highest_high - lowest_low) == 0, 50, chop)
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position size
+    position_size = 0.20  # 20% position size
     
-    # Start after enough data for calculations
-    start = 30
+    # Start after enough data for calculations (14 for RSI + buffer)
+    start = 20
     
     for i in range(start, n):
-        # Skip if any critical data is NaN
-        if (np.isnan(ema20[i]) or np.isnan(ema50_12h_aligned[i]) or 
-            np.isnan(vol_avg[i]) or np.isnan(chop[i])):
+        # Skip if any critical data is NaN or outside session
+        if (np.isnan(rsi[i]) or np.isnan(ema50_4h_aligned[i]) or 
+            np.isnan(vol_avg[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
         
+        rsi_val = rsi[i]
         price = close[i]
         vol = volume[i]
         vol_threshold = vol_avg[i] * 1.5
         
         if position == 0:
-            # Long setup: ranging market (CHOP > 61.8), price crosses above EMA20, volume confirmation
-            if (chop[i] > 61.8 and price > ema20[i] and 
-                i > start and close[i-1] <= ema20[i-1] and vol > vol_threshold):
+            # Long setup: RSI < 30 (oversold), price > 4h EMA50 (uptrend), volume confirmation
+            if (rsi_val < 30 and price > ema50_4h_aligned[i] and vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: ranging market (CHOP > 61.8), price crosses below EMA20, volume confirmation
-            elif (chop[i] > 61.8 and price < ema20[i] and 
-                  i > start and close[i-1] >= ema20[i-1] and vol > vol_threshold):
+            # Short setup: RSI > 70 (overbought), price < 4h EMA50 (downtrend), volume confirmation
+            elif (rsi_val > 70 and price < ema50_4h_aligned[i] and vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: trending market (CHOP < 38.2) OR price crosses below EMA20
-            if chop[i] < 38.2 or (price < ema20[i] and close[i-1] >= ema20[i-1]):
+            # Exit long: RSI crosses back to 40 (mean reversion complete)
+            if rsi_val >= 40:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: trending market (CHOP < 38.2) OR price crosses above EMA20
-            if chop[i] < 38.2 or (price > ema20[i] and close[i-1] <= ema20[i-1]):
+            # Exit short: RSI crosses back to 60 (mean reversion complete)
+            if rsi_val <= 60:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -104,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Choppiness_EMA20_Volume"
-timeframe = "4h"
+name = "1h_RSI_MeanReversion_4hEMA50_Volume"
+timeframe = "1h"
 leverage = 1.0
