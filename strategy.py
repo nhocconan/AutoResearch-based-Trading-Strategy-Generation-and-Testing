@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h ADX Trend + 1d Volatility Breakout
-# Use daily True Range expansion (ATR) to detect volatility breakouts
-# Trade only when 6h ADX > 25 (trending market) and daily ATR > 1.5x its 20-day average
-# Enter long/short based on 6h price breaking above/below prior 6h high/low
-# Exit when volatility contracts (ATR < 1.2x average) or trend weakens (ADX < 20)
-# Designed for 6h timeframe to capture multi-day trends with volatility filters
-# Target: 15-30 trades/year per symbol (~60-120 total over 4 years)
+# Hypothesis: 12h KAMA trend with RSI and Choppiness Index filter
+# KAMA adapts to market noise, reducing whipsaws in ranging markets
+# RSI(14) avoids overbought/oversold extremes
+# Choppiness Index > 61.8 indicates ranging market (mean reversion opportunity)
+# Target: 12-30 trades/year per symbol to stay within fee limits
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,13 +19,11 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 6h data for price action (already the primary timeframe, but we need it for calculations)
-    # Actually, prices is already 6h, so we can use it directly
-    
-    # Load 1d data for ATR calculation
+    # Load 1d data ONCE for Choppiness Index
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d ATR (14 periods) - volatility measure
+    # Calculate Choppiness Index (14 periods)
+    chop_len = 14
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -38,107 +34,100 @@ def generate_signals(prices):
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # ATR calculation
-    atr_len = 14
-    atr = pd.Series(tr).rolling(window=atr_len, min_periods=atr_len).mean().values
+    # Sum of true ranges over chop_len periods
+    tr_sum = pd.Series(tr).rolling(window=chop_len, min_periods=chop_len).sum().values
     
-    # ATR average (20 periods) for volatility filter
-    atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
+    # Highest high and lowest low over chop_len periods
+    hh = pd.Series(high_1d).rolling(window=chop_len, min_periods=chop_len).max().values
+    ll = pd.Series(low_1d).rolling(window=chop_len, min_periods=chop_len).min().values
     
-    # Align 1d ATR and ATR_MA to 6h timeframe
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
-    atr_ma_aligned = align_htf_to_ltf(prices, df_1d, atr_ma)
+    # Choppiness Index
+    chop = 100 * np.log10(tr_sum / (hh - ll)) / np.log10(chop_len)
+    chop = np.where((hh - ll) == 0, 50, chop)  # avoid division by zero
     
-    # Calculate 6h ADX for trend strength
-    # Using 6h data directly from prices
-    adx_len = 14
+    # Align Choppiness Index to 12h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # True Range for 6h
-    tr1_6h = high[1:] - low[1:]
-    tr2_6h = np.abs(high[1:] - close[:-1])
-    tr3_6h = np.abs(low[1:] - close[:-1])
-    tr_6h = np.concatenate([[np.nan], np.maximum(tr1_6h, np.maximum(tr2_6h, tr3_6h))])
+    # KAMA (Adaptive Moving Average)
+    er_len = 10
+    fast_sc = 2 / (2 + 1)  # EMA(2)
+    slow_sc = 2 / (30 + 1) # EMA(30)
     
-    # Directional Movement
-    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
-                       np.maximum(high[1:] - high[:-1], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
-                        np.maximum(low[:-1] - low[1:], 0), 0)
-    dm_minus = np.concatenate([[np.nan], dm_minus])
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, n=er_len))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)
+    # Vectorized volatility sum
+    volatility_sum = pd.Series(np.abs(np.diff(close))).rolling(window=er_len, min_periods=1).sum().values
+    er = np.where(volatility_sum > 0, change / volatility_sum, 0)
+    er = np.concatenate([np.zeros(er_len), er])  # align length
     
-    # Smoothed values
-    tr_sum = pd.Series(tr_6h).rolling(window=adx_len, min_periods=adx_len).sum().values
-    dm_plus_sum = pd.Series(dm_plus).rolling(window=adx_len, min_periods=adx_len).sum().values
-    dm_minus_sum = pd.Series(dm_minus).rolling(window=adx_len, min_periods=adx_len).sum().values
+    # Smoothing Constant
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # Directional Indicators
-    plus_di = 100 * dm_plus_sum / tr_sum
-    minus_di = 100 * dm_minus_sum / tr_sum
+    # KAMA calculation
+    kama = np.full_like(close, np.nan)
+    kama[er_len] = close[er_len]  # seed
+    for i in range(er_len + 1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=adx_len, min_periods=adx_len).mean().values
+    # RSI (14 periods)
+    rsi_len = 14
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Volatility breakout condition: current ATR > 1.5x ATR average
-    vol_expansion = atr_aligned > 1.5 * atr_ma_aligned
+    avg_gain = pd.Series(gain).rolling(window=rsi_len, min_periods=rsi_len).mean().values
+    avg_loss = pd.Series(loss).rolling(window=rsi_len, min_periods=rsi_len).mean().values
     
-    # Trend filters
-    strong_trend = adx > 25
-    weak_trend = adx < 20  # for exit
-    
-    # Price channels for breakout detection
-    # Use 6-period lookback for breakout sensitivity
-    lookback = 6
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=1).max().shift(1).values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=1).min().shift(1).values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.concatenate([np.full(rsi_len, np.nan), rsi])
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(50, atr_len, 20, adx_len, lookback)
+    start = max(100, er_len, rsi_len)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(atr_aligned[i]) or 
-            np.isnan(atr_ma_aligned[i]) or
-            np.isnan(adx[i]) or
-            np.isnan(highest_high[i]) or
-            np.isnan(lowest_low[i])):
+        if (np.isnan(kama[i]) or 
+            np.isnan(rsi[i]) or 
+            np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # Range filter: Choppiness > 61.8 indicates ranging market
+        ranging = chop_aligned[i] > 61.8
+        
         if position == 0:
-            # Enter long: price breaks above recent high + volatility expansion + strong trend
-            if (close[i] > highest_high[i] and 
-                vol_expansion[i] and 
-                strong_trend[i]):
+            # Enter long: price > KAMA + RSI < 40 (oversold) + ranging
+            if (close[i] > kama[i] and 
+                rsi[i] < 40 and 
+                ranging):
                 position = 1
                 signals[i] = position_size
-            # Enter short: price breaks below recent low + volatility expansion + strong trend
-            elif (close[i] < lowest_low[i] and 
-                  vol_expansion[i] and 
-                  strong_trend[i]):
+            # Enter short: price < KAMA + RSI > 60 (overbought) + ranging
+            elif (close[i] < kama[i] and 
+                  rsi[i] > 60 and 
+                  ranging):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: volatility contraction OR trend weakness OR price returns to recent low
-            if (not vol_expansion[i] or  # volatility contraction
-                weak_trend[i] or         # trend weakening
-                close[i] < lowest_low[i]):  # mean reversion
+            # Exit long: price < KAMA OR RSI > 60 (overbought)
+            if (close[i] < kama[i] or 
+                rsi[i] > 60):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: volatility contraction OR trend weakness OR price returns to recent high
-            if (not vol_expansion[i] or  # volatility contraction
-                weak_trend[i] or         # trend weakening
-                close[i] > highest_high[i]):  # mean reversion
+            # Exit short: price > KAMA OR RSI < 40 (oversold)
+            if (close[i] > kama[i] or 
+                rsi[i] < 40):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -146,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ADX_Volatility_Breakout_v1"
-timeframe = "6h"
+name = "12h_KAMA_RSI_Chop_v1"
+timeframe = "12h"
 leverage = 1.0
