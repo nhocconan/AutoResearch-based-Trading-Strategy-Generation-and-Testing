@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Bollinger Breakout with volume confirmation and ADX trend filter
-# Bollinger Band breakouts capture volatility expansion and trend continuation
-# Volume > 1.5x average confirms breakout strength
-# ADX > 25 ensures we only trade in trending markets (works in bull and bear)
-# Exit when price returns to middle band (mean reversion within trend)
-# Target: 20-40 trades/year per symbol to avoid fee drag
+# Hypothesis: Daily KAMA with weekly trend filter and volume confirmation
+# KAMA adapts to market noise, reducing false signals in choppy markets
+# Weekly trend filter ensures we only trade in the direction of higher timeframe momentum
+# Volume confirmation adds conviction to signals
+# Target: 15-25 trades/year per symbol to minimize fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,52 +19,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1h data ONCE for ADX (more responsive than 4h for trend)
-    df_1h = get_htf_data(prices, '1h')
+    # Load weekly data ONCE for trend filter
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate 1h ADX (14 periods)
-    adx_len = 14
-    high_1h = df_1h['high'].values
-    low_1h = df_1h['low'].values
-    close_1h = df_1h['close'].values
+    # Calculate weekly EMA(34) for trend direction
+    close_weekly = df_weekly['close'].values
+    ema_weekly = pd.Series(close_weekly).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
     
-    # True Range
-    tr1 = high_1h[1:] - low_1h[1:]
-    tr2 = np.abs(high_1h[1:] - close_1h[:-1])
-    tr3 = np.abs(low_1h[1:] - close_1h[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate KAMA on daily data
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)
+    er = np.zeros_like(close)
+    er[10:] = change[10:] / volatility[10:]
+    er[volatility == 0] = 0
     
-    # Directional Movement
-    dm_plus = np.where((high_1h[1:] - high_1h[:-1]) > (low_1h[:-1] - low_1h[1:]), 
-                       np.maximum(high_1h[1:] - high_1h[:-1], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.where((low_1h[:-1] - low_1h[1:]) > (high_1h[1:] - high_1h[:-1]), 
-                        np.maximum(low_1h[:-1] - low_1h[1:], 0), 0)
-    dm_minus = np.concatenate([[np.nan], dm_minus])
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)  # EMA(2)
+    slow_sc = 2 / (30 + 1) # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # Smoothed values
-    tr_sum = pd.Series(tr).rolling(window=adx_len, min_periods=adx_len).sum().values
-    dm_plus_sum = pd.Series(dm_plus).rolling(window=adx_len, min_periods=adx_len).sum().values
-    dm_minus_sum = pd.Series(dm_minus).rolling(window=adx_len, min_periods=adx_len).sum().values
-    
-    # Directional Indicators
-    plus_di = 100 * dm_plus_sum / tr_sum
-    minus_di = 100 * dm_minus_sum / tr_sum
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=adx_len, min_periods=adx_len).mean().values
-    
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1h, adx)
-    
-    # Bollinger Bands (20, 2)
-    bb_len = 20
-    bb_std = 2
-    sma = pd.Series(close).rolling(window=bb_len, min_periods=bb_len).mean().values
-    std = pd.Series(close).rolling(window=bb_len, min_periods=bb_len).std().values
-    upper_band = sma + (std * bb_std)
-    lower_band = sma - (std * bb_std)
+    # Calculate KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
     # Volume average (20 periods)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -75,49 +54,48 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(50, bb_len, 20)
+    start = max(50, 34, 20)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(adx_aligned[i]) or 
-            np.isnan(sma[i]) or 
-            np.isnan(upper_band[i]) or
-            np.isnan(lower_band[i]) or
+        if (np.isnan(ema_weekly_aligned[i]) or 
+            np.isnan(kama[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: ADX > 25 indicates trending market
-        trending = adx_aligned[i] > 25
+        # Weekly trend filter: price above/below weekly EMA
+        uptrend = close[i] > ema_weekly_aligned[i]
+        downtrend = close[i] < ema_weekly_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x average
-        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: current volume > 1.3x average
+        volume_confirmed = volume[i] > 1.3 * vol_ma[i]
         
         if position == 0:
-            # Enter long: price breaks above upper BB + volume + trend
-            if (close[i] > upper_band[i-1] and 
-                volume_confirmed and 
-                trending):
+            # Enter long: price above KAMA + uptrend + volume
+            if (close[i] > kama[i] and 
+                uptrend and 
+                volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Enter short: price breaks below lower BB + volume + trend
-            elif (close[i] < lower_band[i-1] and 
-                  volume_confirmed and 
-                  trending):
+            # Enter short: price below KAMA + downtrend + volume
+            elif (close[i] < kama[i] and 
+                  downtrend and 
+                  volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to middle band (mean reversion)
-            if close[i] < sma[i]:
+            # Exit long: price crosses below KAMA
+            if close[i] < kama[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to middle band (mean reversion)
-            if close[i] > sma[i]:
+            # Exit short: price crosses above KAMA
+            if close[i] > kama[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -125,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Bollinger_Breakout_Volume_ADX_v1"
-timeframe = "4h"
+name = "daily_kama_weekly_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
