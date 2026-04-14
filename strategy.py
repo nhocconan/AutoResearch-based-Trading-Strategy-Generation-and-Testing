@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -41,7 +41,7 @@ def generate_signals(prices):
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 12h Donchian channels (20-period) - breakout levels
+    # Calculate 6h Donchian channels (20-period) - breakout levels
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_high = high_series.rolling(window=20, min_periods=20).max().shift(1).values
@@ -86,39 +86,39 @@ def generate_signals(prices):
             s1 = pivot - range_
             r1 = pivot + range_
             
-            # Align S1/R1 levels to 12h timeframe
+            # Align S1/R1 levels to 6h timeframe
             s1_array = np.full(len(df_1d), s1)
             r1_array = np.full(len(df_1d), r1)
             
-            s1_12h = align_htf_to_ltf(prices, df_1d, s1_array)[i]
-            r1_12h = align_htf_to_ltf(prices, df_1d, r1_array)[i]
+            s1_6h = align_htf_to_ltf(prices, df_1d, s1_array)[i]
+            r1_6h = align_htf_to_ltf(prices, df_1d, r1_array)[i]
             
             if position == 0:
                 # Long: Price breaks above R1 with volume and in volatile/trending regime
-                if (close[i] > r1_12h and close[i-1] <= r1_12h and 
+                if (close[i] > r1_6h and close[i-1] <= r1_6h and 
                     volume[i] > vol_ma[i] * 1.5 and 
                     volatility_filter[i] and adx_filter[i]):
                     position = 1
                     signals[i] = position_size
                 # Short: Price breaks below S1 with volume and in volatile/trending regime
-                elif (close[i] < s1_12h and close[i-1] >= s1_12h and 
+                elif (close[i] < s1_6h and close[i-1] >= s1_6h and 
                       volume[i] > vol_ma[i] * 1.5 and 
                       volatility_filter[i] and adx_filter[i]):
                     position = -1
                     signals[i] = -position_size
             elif position == 1:
                 # Exit: Price breaks below S1 (reversal) or drops below Donchian low
-                if close[i] < s1_12h or close[i] < donchian_low[i]:
+                if close[i] < s1_6h or close[i] < donchian_low[i]:
                     position = 0
                     signals[i] = 0.0
             elif position == -1:
                 # Exit: Price breaks above S1 (reversal) or rises above Donchian high
-                if close[i] > s1_12h or close[i] > donchian_high[i]:
+                if close[i] > s1_6h or close[i] > donchian_high[i]:
                     position = 0
                     signals[i] = 0.0
     
     return signals
 
-name = "12h_1d_S1R1_Breakout_Vol_VolatilityTrendFilter_v1"
-timeframe = "12h"
+name = "6h_1d_S1R1_Breakout_Vol_VolatilityTrendFilter_v1"
+timeframe = "6h"
 leverage = 1.0
