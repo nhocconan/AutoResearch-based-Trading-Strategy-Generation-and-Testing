@@ -1,18 +1,17 @@
+# Hypothetical: 4h Donchian(20) breakout with 1d ADX filter and volume confirmation.
+# Entry: Price breaks Donchian channel in direction of 1d trend (ADX>25) with volume >1.5x 20-period average.
+# Exit: Price returns to Donchian midpoint or trend weakens (ADX<20).
+# Position size: 0.25 to limit drawdown. Target: ~20-25 trades/year per symbol.
+# Works in bull/bear by using 1d trend filter to avoid counter-trend trades.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1-day Parabolic SAR with 1-day ADX filter and volume confirmation.
-# Parabolic SAR provides trend-following signals with built-in stop/reverse mechanism.
-# 1-day ADX > 25 filters for trending markets to avoid whipsaws in ranging conditions.
-# Volume confirmation (>1.5x 20-period average) reduces false signals.
-# Designed to work in both bull and bear markets by using 1d trend filter to avoid counter-trend trades.
-# Target: 15-25 trades/year per symbol (60-100 total over 4 years) to minimize fee drag.
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,57 +19,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for PSAR and ADX calculation
+    # Load 1d data ONCE for ADX calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Parabolic SAR on 1d data
+    # Calculate ADX on 1d data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Initialize SAR
-    psar = np.zeros_like(high_1d)
-    bull = True  # Start assuming uptrend
-    af = 0.02    # Acceleration factor
-    max_af = 0.2
-    ep = high_1d[0] if bull else low_1d[0]  # Extreme point
-    psar[0] = low_1d[0] if bull else high_1d[0]
-    
-    for i in range(1, len(high_1d)):
-        if bull:
-            psar[i] = psar[i-1] + af * (ep - psar[i-1])
-            # Ensure SAR stays within prior period's range
-            psar[i] = min(psar[i], min(high_1d[i-1], low_1d[i-1]))
-            # Reverse conditions
-            if low_1d[i] < psar[i]:
-                bull = False
-                psar[i] = ep
-                ep = low_1d[i]
-                af = 0.02
-        else:
-            psar[i] = psar[i-1] + af * (ep - psar[i-1])
-            # Ensure SAR stays within prior period's range
-            psar[i] = max(psar[i], max(high_1d[i-1], low_1d[i-1]))
-            # Reverse conditions
-            if high_1d[i] > psar[i]:
-                bull = True
-                psar[i] = ep
-                ep = high_1d[i]
-                af = 0.02
-        
-        # Update extreme point and acceleration factor
-        if bull:
-            if high_1d[i] > ep:
-                ep = high_1d[i]
-                af = min(af + 0.02, max_af)
-        else:
-            if low_1d[i] < ep:
-                ep = low_1d[i]
-                af = min(af + 0.02, max_af)
-    
-    # Calculate ADX on 1d data
     # True Range
     tr1 = np.abs(high_1d[1:] - low_1d[1:])
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
@@ -100,9 +58,25 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
     adx = pd.Series(dx).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
     
-    # Align indicators to 12h timeframe
-    psar_aligned = align_htf_to_ltf(prices, df_1d, psar)
+    # Load 4h data ONCE for Donchian channel
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    # Calculate Donchian Channel on 4h data
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    
+    dc_period = 20
+    upper_channel = pd.Series(high_4h).rolling(window=dc_period, min_periods=dc_period).max().values
+    lower_channel = pd.Series(low_4h).rolling(window=dc_period, min_periods=dc_period).min().values
+    middle_channel = (upper_channel + lower_channel) / 2
+    
+    # Align indicators to 4h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    upper_channel_aligned = align_htf_to_ltf(prices, df_4h, upper_channel)
+    lower_channel_aligned = align_htf_to_ltf(prices, df_4h, lower_channel)
+    middle_channel_aligned = align_htf_to_ltf(prices, df_4h, middle_channel)
     
     # Volume confirmation: 1.5x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -112,12 +86,14 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 30  # Need enough data for PSAR and ADX
+    start = max(20, 20)  # Need Donchian and volume MA
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(psar_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or
+        if (np.isnan(adx_aligned[i]) or 
+            np.isnan(upper_channel_aligned[i]) or
+            np.isnan(lower_channel_aligned[i]) or
+            np.isnan(middle_channel_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -129,17 +105,17 @@ def generate_signals(prices):
         trending = adx_aligned[i] > 25
         
         if position == 0:
-            # Look for PSAR signals
+            # Look for Donchian channel breakouts
             # Only trade in trending markets
             
-            # Long: price above PSAR AND trending market
-            if (close[i] > psar_aligned[i] and 
+            # Long: price breaks above upper Donchian channel AND trending market
+            if (close[i] > upper_channel_aligned[i] and 
                 trending and 
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: price below PSAR AND trending market
-            elif (close[i] < psar_aligned[i] and 
+            # Short: price breaks below lower Donchian channel AND trending market
+            elif (close[i] < lower_channel_aligned[i] and 
                   trending and 
                   volume_confirmed):
                 position = -1
@@ -147,16 +123,16 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below PSAR (SAR flip) or trend weakens
-            if (close[i] < psar_aligned[i] or 
+            # Exit long: price returns to middle Donchian channel or trend weakens
+            if (close[i] <= middle_channel_aligned[i] or 
                 adx_aligned[i] < 20):  # Trend weakening
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above PSAR (SAR flip) or trend weakens
-            if (close[i] > psar_aligned[i] or 
+            # Exit short: price returns to middle Donchian channel or trend weakens
+            if (close[i] >= middle_channel_aligned[i] or 
                 adx_aligned[i] < 20):  # Trend weakening
                 position = 0
                 signals[i] = 0.0
@@ -165,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1dPSAR_1dADX_VolumeFilter_v1"
-timeframe = "12h"
+name = "4h_1dADX_4hDC_Breakout_VolumeFilter_v1"
+timeframe = "4h"
 leverage = 1.0
