@@ -3,139 +3,108 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1-day pivot points with range-bound and breakout conditions.
-# Long when price breaks above R3 with volume and price > 1-day VWAP (bullish continuation).
-# Short when price breaks below S3 with volume and price < 1-day VWAP (bearish continuation).
-# Fade trades: long at S1 with price < VWAP and RSI < 30, short at R1 with price > VWAP and RSI > 70.
-# Uses 1-day pivot levels (classic formula) for structure, VWAP for intraday bias, and volume for confirmation.
-# Designed to work in both trending and ranging markets by adapting to price action relative to pivot levels.
+# Hypothesis: 12h strategy using daily Donchian breakout with 1w ATR volatility filter.
+# Long when price breaks above 1d Donchian high (20) with 1w ATR > 1w ATR MA (high volatility regime).
+# Short when price breaks below 1d Donchian low (20) with 1w ATR > 1w ATR MA.
+# Exit when price returns to 1d Donchian midpoint or volatility drops.
+# Designed to capture breakouts in volatile regimes while avoiding choppy low-volatility periods.
 # Target: 15-25 trades/year per symbol (60-100 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Load 1d data ONCE for pivot levels and VWAP
+    # Load 1d data ONCE for Donchian channels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 1-day VWAP
-    vwap_1d = (close_1d * volume_1d).cumsum() / volume_1d.cumsum()
-    vwap_1d[volume_1d.cumsum() == 0] = np.nan
+    # Calculate 1d Donchian channels (20-period)
+    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high + donch_low) / 2
     
-    # Calculate classic pivot points: P = (H + L + C)/3
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    # Support and resistance levels
-    s1 = 2 * pivot - high_1d
-    s2 = pivot - (high_1d - low_1d)
-    s3 = low_1d - 2 * (high_1d - pivot)
-    r1 = 2 * pivot - low_1d
-    r2 = pivot + (high_1d - low_1d)
-    r3 = high_1d + 2 * (pivot - low_1d)
+    # Load 1w data ONCE for ATR volatility filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
     
-    # Load 1d RSI for fade filter confirmation
-    delta = np.diff(close_1d, prepend=np.nan)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / avg_loss
-    rs = np.where(avg_loss == 0, 100, rs)
-    rsi_1d = 100 - (100 / (1 + rs))
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Align all indicators to 6h timeframe
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Calculate True Range and ATR on 1w
+    tr1 = np.abs(high_1w[1:] - low_1w[1:])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
-    # Volume confirmation: 1.5x average volume (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    atr_period = 14
+    atr_1w = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    atr_ma_1w = pd.Series(atr_1w).rolling(window=20, min_periods=20).mean().values
+    
+    # Align indicators to lower timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    donch_mid_aligned = align_htf_to_ltf(prices, df_1d, donch_mid)
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    atr_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_ma_1w)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(20, 14)  # Need VWAP and RSI
+    start = max(20, 30)  # Need Donchian and ATR
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(vwap_1d_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or
-            np.isnan(r3_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
-            np.isnan(r1_aligned[i]) or
-            np.isnan(rsi_1d_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(donch_high_aligned[i]) or 
+            np.isnan(donch_low_aligned[i]) or
+            np.isnan(donch_mid_aligned[i]) or
+            np.isnan(atr_1w_aligned[i]) or
+            np.isnan(atr_ma_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
-        
-        # Price relative to VWAP for bias
-        price_above_vwap = close[i] > vwap_1d_aligned[i]
-        price_below_vwap = close[i] < vwap_1d_aligned[i]
+        # Volatility filter: only trade when ATR > MA (high volatility regime)
+        high_volatility = atr_1w_aligned[i] > atr_ma_1w_aligned[i]
         
         if position == 0:
-            # Breakout continuation trades
-            # Long: break above R3 with volume and price > VWAP
-            if (close[i] > r3_aligned[i] and 
-                volume_confirmed and 
-                price_above_vwap):
+            # Look for Donchian breakouts in high volatility regime
+            # Long: price breaks above Donchian high AND high volatility
+            if (close[i] > donch_high_aligned[i] and 
+                high_volatility):
                 position = 1
                 signals[i] = position_size
-            # Short: break below S3 with volume and price < VWAP
-            elif (close[i] < s3_aligned[i] and 
-                  volume_confirmed and 
-                  price_below_vwap):
-                position = -1
-                signals[i] = -position_size
-            # Fade trades at S1/R1
-            # Long: at S1 with price < VWAP and oversold RSI
-            elif (close[i] <= s1_aligned[i] and 
-                  price_below_vwap and 
-                  rsi_1d_aligned[i] < 30):
-                position = 1
-                signals[i] = position_size
-            # Short: at R1 with price > VWAP and overbought RSI
-            elif (close[i] >= r1_aligned[i] and 
-                  price_above_vwap and 
-                  rsi_1d_aligned[i] > 70):
+            # Short: price breaks below Donchian low AND high volatility
+            elif (close[i] < donch_low_aligned[i] and 
+                  high_volatility):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to pivot or RSI > 70 (overbought)
-            if (close[i] <= pivot_aligned[i] or 
-                rsi_1d_aligned[i] >= 70):
+            # Exit long: price returns to Donchian midpoint or volatility drops
+            if (close[i] <= donch_mid_aligned[i] or 
+                not high_volatility):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to pivot or RSI < 30 (oversold)
-            if (close[i] >= pivot_aligned[i] or 
-                rsi_1d_aligned[i] <= 30):
+            # Exit short: price returns to Donchian midpoint or volatility drops
+            if (close[i] >= donch_mid_aligned[i] or 
+                not high_volatility):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -143,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1dPivot_RangeBreakout_Fade_v1"
-timeframe = "6h"
+name = "12h_DonchianBreakout_1wATRFilter_v1"
+timeframe = "12h"
 leverage = 1.0
