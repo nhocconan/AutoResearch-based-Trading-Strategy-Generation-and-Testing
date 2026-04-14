@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Camarilla pivot reversal with 1-day volume confirmation and choppiness filter
-# Long when price touches Camarilla L3 level AND volume > 1.5x 20-period average AND daily choppiness > 61.8 (range)
-# Short when price touches Camarilla H3 level AND volume > 1.5x 20-period average AND daily choppiness > 61.8 (range)
-# Exit when price reaches opposite Camarilla level (L3 for shorts, H3 for longs) or reverses 50% from entry
-# Uses Camarilla pivots for intraday support/resistance, volume for confirmation, choppiness to avoid trending markets
+# Hypothesis: 4-hour Bollinger Band breakout with 1-day RSI filter and volume confirmation
+# Long when price breaks above upper Bollinger Band (20,2) AND RSI(14) > 50 on 1d AND volume > 1.5x 20-period average volume
+# Short when price breaks below lower Bollinger Band (20,2) AND RSI(14) < 50 on 1d AND volume > 1.5x 20-period average volume
+# Exit when price crosses back inside the Bollinger Bands (middle band)
+# Uses Bollinger Bands for volatility-based breakouts, RSI for trend filter on higher timeframe, volume for confirmation
 # Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,109 +20,74 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for pivot and choppiness calculation
+    # Load 1d data ONCE before loop for RSI filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla levels on 12h using previous 12h bar's range
-    # Camarilla uses previous period's high, low, close
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    # First values: use current
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
+    # Calculate Bollinger Bands on 4h (20-period, 2 std dev)
+    close_series = pd.Series(close)
+    sma_20 = close_series.rolling(window=20, min_periods=20).mean()
+    std_20 = close_series.rolling(window=20, min_periods=20).std()
+    upper_bb = (sma_20 + 2 * std_20).values
+    lower_bb = (sma_20 - 2 * std_20).values
+    middle_bb = sma_20.values  # For exit condition
     
-    # Camarilla multipliers
-    range_val = prev_high - prev_low
-    camarilla_H3 = prev_close + range_val * 1.1 / 6
-    camarilla_L3 = prev_close - range_val * 1.1 / 6
-    camarilla_H4 = prev_close + range_val * 1.1 / 2
-    camarilla_L4 = prev_close - range_val * 1.1 / 2
+    # Calculate RSI on 1d (14-period)
+    close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean()
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)  # Avoid division by zero
+    rsi_1d = (100 - (100 / (1 + rs))).values
     
     # Calculate volume average for confirmation (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate choppiness on 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # ATR(14)
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Sum of True Range over 14 periods
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    
-    # Choppiness: 100 * log10(sum(TR14)/(ATR14*14)) / log10(14)
-    chop_value = 100 * np.log10(tr_sum / (atr_14 * 14)) / np.log10(14)
-    
-    # Align 1d data to 12h
-    camarilla_H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3)
-    camarilla_L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3)
-    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
-    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_value)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations
-    start = 20
+    # Start after enough data for calculations (20 for BB + buffer)
+    start = 30
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(camarilla_H3_aligned[i]) or np.isnan(camarilla_L3_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]) or np.isnan(middle_bb[i]) or 
+            np.isnan(rsi_1d[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        rsi_current = rsi_1d[i]
         vol = volume[i]
         vol_threshold = vol_avg[i] * 1.5
-        chop_value = chop_aligned[i]
+        
+        # Get RSI values aligned to 4h timeframe
+        rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+        rsi_current_aligned = rsi_1d_aligned[i]
         
         if position == 0:
-            # Long setup: price touches L3 AND volume confirmation AND choppy market (range)
-            if (price <= camarilla_L3_aligned[i] * 1.001 and price >= camarilla_L3_aligned[i] * 0.999 and 
-                vol > vol_threshold and chop_value > 61.8):
+            # Long setup: price breaks above upper BB + RSI > 50 (bullish) + volume confirmation
+            if (price > upper_bb[i] and rsi_current_aligned > 50 and vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: price touches H3 AND volume confirmation AND choppy market (range)
-            elif (price >= camarilla_H3_aligned[i] * 0.999 and price <= camarilla_H3_aligned[i] * 1.001 and 
-                  vol > vol_threshold and chop_value > 61.8):
+            # Short setup: price breaks below lower BB + RSI < 50 (bearish) + volume confirmation
+            elif (price < lower_bb[i] and rsi_current_aligned < 50 and vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price reaches H3 (profit target) or reverses 50% from entry toward H4
-            entry_price = camarilla_L3_aligned[i]  # approximate entry near L3
-            mid_point = (entry_price + camarilla_H3_aligned[i]) / 2
-            if price >= camarilla_H3_aligned[i] * 0.999:  # reached H3
-                position = 0
-                signals[i] = 0.0
-            elif price <= mid_point:  # reversed 50%
+            # Exit long: price crosses back inside Bollinger Bands (below middle band)
+            if price < middle_bb[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price reaches L3 (profit target) or reverses 50% from entry toward L3
-            entry_price = camarilla_H3_aligned[i]  # approximate entry near H3
-            mid_point = (entry_price + camarilla_L3_aligned[i]) / 2
-            if price <= camarilla_L3_aligned[i] * 1.001:  # reached L3
-                position = 0
-                signals[i] = 0.0
-            elif price >= mid_point:  # reversed 50%
+            # Exit short: price crosses back inside Bollinger Bands (above middle band)
+            if price > middle_bb[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -130,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_1dVolume_Chop"
-timeframe = "12h"
+name = "4h_Bollinger_1dRSI_Volume"
+timeframe = "4h"
 leverage = 1.0
