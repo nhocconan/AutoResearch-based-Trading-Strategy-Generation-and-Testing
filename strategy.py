@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour strategy using 1-week Bollinger Bands with 1-day volume confirmation.
-# Long when price touches lower BB on 1w with high volume (mean reversion).
-# Short when price touches upper BB on 1w with high volume (mean reversion).
-# Exit when price returns to 1w middle band (SMA).
-# Uses 1-week timeframe for structural levels and 1-day for volume confirmation to reduce noise.
-# Designed to work in both bull and bear markets by capturing mean reversion at extremes.
-# Target: 20-40 trades/year per symbol (80-160 total over 4 years) to minimize fee drag.
+# Hypothesis: Daily KAMA + RSI + Chop filter strategy
+# Uses 1-day KAMA to establish trend direction (bullish when price > KAMA)
+# Combines with RSI(14) for entry timing (oversold in uptrend, overbought in downtrend)
+# Uses weekly Choppiness Index to filter ranging markets (avoid trading when CHOP > 61.8)
+# Designed to work in both bull and bear markets by using adaptive trend filter
+# Target: 10-25 trades/year per symbol to minimize fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,81 +20,131 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE for structural levels (Bollinger Bands)
+    # Load weekly data ONCE for chop filter
     df_1w = get_htf_data(prices, '1w')
     
-    # Load 1d data ONCE for volume confirmation
-    df_1d = get_htf_data(prices, '1d')
+    # Calculate weekly Choppiness Index
+    chop_len = 14
+    if len(df_1w) >= chop_len:
+        high_1w = df_1w['high'].values
+        low_1w = df_1w['low'].values
+        close_1w = df_1w['close'].values
+        
+        # True Range
+        tr1 = high_1w[1:] - low_1w[1:]
+        tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+        tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[np.nan], tr])
+        
+        # ATR
+        atr_1w = pd.Series(tr).ewm(span=chop_len, adjust=False, min_periods=chop_len).mean().values
+        
+        # Highest high and lowest low over chop_len periods
+        highest_high = pd.Series(high_1w).rolling(window=chop_len, min_periods=chop_len).max().values
+        lowest_low = pd.Series(low_1w).rolling(window=chop_len, min_periods=chop_len).min().values
+        
+        # Chop calculation
+        sum_tr = pd.Series(tr).rolling(window=chop_len, min_periods=chop_len).sum().values
+        chop = 100 * np.log10(sum_tr / (highest_high - lowest_low)) / np.log10(chop_len)
+        chop[highest_high == lowest_low] = 100  # Avoid division by zero
+        chop_align = align_htf_to_ltf(prices, df_1w, chop)
+    else:
+        chop_align = np.full(n, np.nan)
     
-    # 1w Bollinger Bands (20, 2)
-    bb_len = 20
-    bb_std = 2
-    if len(df_1w) < bb_len:
-        return np.zeros(n)
+    # Daily KAMA calculation
+    kama_len = 10
+    fast_sc = 2 / (2 + 1)
+    slow_sc = 2 / (30 + 1)
     
-    close_1w = df_1w['close'].values
-    sma_1w = pd.Series(close_1w).rolling(window=bb_len, min_periods=bb_len).mean().values
-    std_1w = pd.Series(close_1w).rolling(window=bb_len, min_periods=bb_len).std().values
-    bb_upper_1w = sma_1w + bb_std * std_1w
-    bb_lower_1w = sma_1w - bb_std * std_1w
+    if len(close) >= kama_len:
+        # Efficiency Ratio
+        change = np.abs(np.diff(close, kama_len))
+        change = np.concatenate([np.full(kama_len, np.nan), change])
+        
+        volatility = np.sum(np.abs(np.diff(close)), axis=0)
+        volatility = pd.Series(volatility).rolling(window=kama_len, min_periods=kama_len).sum().values
+        
+        er = np.where(volatility != 0, change / volatility, 0)
+        
+        # Smoothing Constant
+        sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+        
+        # KAMA
+        kama = np.full_like(close, np.nan)
+        kama[kama_len] = close[kama_len]
+        
+        for i in range(kama_len + 1, len(close)):
+            if not np.isnan(sc[i]):
+                kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+            else:
+                kama[i] = kama[i-1]
+    else:
+        kama = np.full(n, np.nan)
     
-    # Align 1w Bollinger Bands to 12h timeframe
-    bb_upper_1w_aligned = align_htf_to_ltf(prices, df_1w, bb_upper_1w)
-    bb_lower_1w_aligned = align_htf_to_ltf(prices, df_1w, bb_lower_1w)
-    sma_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_1w)
-    
-    # 1-day volume confirmation (20-period average)
-    vol_ma_len = 20
-    if len(df_1d) < vol_ma_len:
-        return np.zeros(n)
-    
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=vol_ma_len, min_periods=vol_ma_len).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Daily RSI
+    rsi_len = 14
+    if len(close) >= rsi_len:
+        delta = np.diff(close)
+        delta = np.concatenate([[np.nan], delta])
+        
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = pd.Series(gain).ewm(alpha=1/rsi_len, adjust=False, min_periods=rsi_len).mean().values
+        avg_loss = pd.Series(loss).ewm(alpha=1/rsi_len, adjust=False, min_periods=rsi_len).mean().values
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+    else:
+        rsi = np.full(n, np.nan)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(bb_len, vol_ma_len)
+    start = max(kama_len*2, rsi_len, chop_len)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(bb_upper_1w_aligned[i]) or 
-            np.isnan(bb_lower_1w_aligned[i]) or
-            np.isnan(sma_1w_aligned[i]) or
-            np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(kama[i]) or 
+            np.isnan(rsi[i]) or
+            np.isnan(chop_align[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x 1d average volume
-        # Convert 1d volume average to 12h equivalent (approximate)
-        volume_confirmed = volume[i] > 1.5 * vol_ma_1d_aligned[i]
+        # Chop filter: only trade when market is not too choppy (trending)
+        # CHOP > 61.8 indicates ranging market, avoid trading
+        not_choppy = chop_align[i] <= 61.8
         
         if position == 0:
-            # Long: price touches or crosses below lower Bollinger Band with volume confirmation
-            if (close[i] <= bb_lower_1w_aligned[i] and 
-                volume_confirmed):
+            # Long signal: price above KAMA (uptrend) and RSI oversold
+            if (close[i] > kama[i] and 
+                rsi[i] < 30 and 
+                not_choppy):
                 position = 1
                 signals[i] = position_size
-            # Short: price touches or crosses above upper Bollinger Band with volume confirmation
-            elif (close[i] >= bb_upper_1w_aligned[i] and 
-                  volume_confirmed):
+            # Short signal: price below KAMA (downtrend) and RSI overbought
+            elif (close[i] < kama[i] and 
+                  rsi[i] > 70 and 
+                  not_choppy):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to or above the 1w middle band (SMA)
-            if close[i] >= sma_1w_aligned[i]:
+            # Exit long: price crosses below KAMA or RSI overbought
+            if (close[i] < kama[i] or 
+                rsi[i] > 70):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to or below the 1w middle band (SMA)
-            if close[i] <= sma_1w_aligned[i]:
+            # Exit short: price crosses above KAMA or RSI oversold
+            if (close[i] > kama[i] or 
+                rsi[i] < 30):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -103,6 +152,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1wBB_1dVol_MeanRev_v1"
-timeframe = "12h"
+name = "daily_kama_rsi_chop_filter_v1"
+timeframe = "1d"
 leverage = 1.0
