@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Camarilla pivot (L3) bounce with 1-day trend filter and volume confirmation
-# Long when price bounces off Camarilla L3 level (1d) with volume >1.5x 20-period average and price above 1d EMA200
-# Short when price rejects at Camarilla H3 level (1d) with volume >1.5x 20-period average and price below 1d EMA200
-# Exit when price reaches Camarilla H4 (for longs) or L4 (for shorts) or closes beyond midpoint
-# 1-day EMA200 acts as trend filter to avoid counter-trend trades
-# Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and fee drag
+# Hypothesis: 6-hour Williams %R with 1-day EMA trend filter and volume confirmation
+# Williams %R (14-period) measures overbought/oversold levels: above -20 = overbought, below -80 = oversold
+# Long when Williams %R crosses above -80 from below (exit oversold) with volume > 1.5x average and price above 1-day EMA50
+# Short when Williams %R crosses below -20 from above (enter overbought) with volume > 1.5x average and price below 1-day EMA50
+# Exit when Williams %R crosses the opposite threshold (-20 for longs, -80 for shorts)
+# 1-day EMA50 acts as trend filter to avoid counter-trend trades
+# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,86 +21,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h and 1d data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Load 1-day data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 4h OHLC from 4h data
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Calculate Williams %R (14-period) on 6h data
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Calculate 1d OHLC from 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1-day EMA50
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Calculate Camarilla levels from 1d data (previous day's close)
-    camarilla_H4 = 1.1 * close_1d - 0.1 * high_1d
-    camarilla_H3 = 1.1 * close_1d - 0.1 * low_1d
-    camarilla_L3 = 1.1 * close_1d - 0.1 * high_1d
-    camarilla_L4 = 1.1 * close_1d - 0.1 * low_1d
-    camarilla_mid = (camarilla_H3 + camarilla_L3) / 2
+    # Calculate 6h volume average (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1d EMA200
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, min_periods=200, adjust=False).mean().values
-    
-    # Calculate 4h volume average (20-period)
-    vol_4h = df_4h['volume'].values
-    vol_ma_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
-    
-    # Align indicators to 4h timeframe
-    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
-    camarilla_H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3)
-    camarilla_L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3)
-    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
-    camarilla_mid_aligned = align_htf_to_ltf(prices, df_1d, camarilla_mid)
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
+    # Align indicators to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)  # Williams %R is calculated on 6h but aligned for safety
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)  # Volume MA aligned for consistency
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 200  # for 200-period EMA
+    start = 50  # for 14-period Williams %R, 20-period volume MA, and EMA50
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(camarilla_H3_aligned[i]) or np.isnan(camarilla_L3_aligned[i]) or 
-            np.isnan(camarilla_mid_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or 
-            np.isnan(vol_ma_4h_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_4h_current = volume[i]
+        williams_r_current = williams_r_aligned[i]
+        vol_current = volume[i]
         
         if position == 0:
-            # Long setup: bounce off L3 with volume confirmation and price above 1d EMA200
-            if (price >= camarilla_L3_aligned[i] * 0.999 and price <= camarilla_L3_aligned[i] * 1.001 and  # Near L3
-                vol_4h_current > 1.5 * vol_ma_4h_aligned[i] and  # Volume confirmation
-                price > ema_200_1d_aligned[i]):                 # Price above 1d EMA200 for bullish bias
+            # Long setup: Williams %R crosses above -80 from below (exit oversold) with volume confirmation and price above 1-day EMA50
+            williams_r_prev = williams_r_aligned[i-1] if i > 0 else -50
+            if (williams_r_current > -80 and williams_r_prev <= -80 and  # Crossed above -80
+                vol_current > 1.5 * vol_ma_aligned[i] and               # Volume confirmation
+                price > ema_50_1d_aligned[i]):                          # Price above 1-day EMA50 for bullish bias
                 position = 1
                 signals[i] = position_size
-            # Short setup: rejection at H3 with volume confirmation and price below 1d EMA200
-            elif (price >= camarilla_H3_aligned[i] * 0.999 and price <= camarilla_H3_aligned[i] * 1.001 and  # Near H3
-                  vol_4h_current > 1.5 * vol_ma_4h_aligned[i] and  # Volume confirmation
-                  price < ema_200_1d_aligned[i]):                 # Price below 1d EMA200 for bearish bias
+            # Short setup: Williams %R crosses below -20 from above (enter overbought) with volume confirmation and price below 1-day EMA50
+            elif (williams_r_current < -20 and williams_r_prev >= -20 and  # Crossed below -20
+                  vol_current > 1.5 * vol_ma_aligned[i] and               # Volume confirmation
+                  price < ema_50_1d_aligned[i]):                          # Price below 1-day EMA50 for bearish bias
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price reaches H4 or closes below midpoint
-            if price >= camarilla_H4_aligned[i] * 0.999 or price < camarilla_mid_aligned[i]:
+            # Exit long: Williams %R crosses below -20 (enter overbought territory)
+            williams_r_prev = williams_r_aligned[i-1] if i > 0 else -50
+            if williams_r_current < -20 and williams_r_prev >= -20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price reaches L4 or closes above midpoint
-            if price <= camarilla_L4_aligned[i] * 1.001 or price > camarilla_mid_aligned[i]:
+            # Exit short: Williams %R crosses above -80 (exit oversold territory)
+            williams_r_prev = williams_r_aligned[i-1] if i > 0 else -50
+            if williams_r_current > -80 and williams_r_prev <= -80:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -107,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_L3H3_Bounce_1dEMA200"
-timeframe = "4h"
+name = "6h_WilliamsR_1dEMA50_Volume"
+timeframe = "6h"
 leverage = 1.0
