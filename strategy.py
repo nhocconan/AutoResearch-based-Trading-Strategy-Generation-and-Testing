@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -37,7 +37,7 @@ def generate_signals(prices):
     position = 0
     position_size = 0.28
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any critical data is NaN
         if np.isnan(ema20_1d_aligned[i]) or np.isnan(volume_ma_1d_aligned[i]):
             continue
