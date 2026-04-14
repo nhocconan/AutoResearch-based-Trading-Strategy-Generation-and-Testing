@@ -1,17 +1,13 @@
-#!/usr/bin/env python3
+# 2025-01-20: Strategy for 4h BTC/ETH/SOL - RSI Divergence with Volume Confirmation
+# Hypothesis: RSI divergence (bullish/bearish) combined with volume spikes captures 
+# turning points in both bull and bear markets. Volume confirms institutional participation 
+# at reversal points. RSI divergence identifies exhaustion moves before price reverses.
+# Timeframe: 4h balances signal quality and trade frequency. Uses 14-period RSI.
+# Expects 20-35 trades/year per symbol (80-140 total over 4 years), within optimal range.
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 4-hour 1-day Donchian breakout with volume confirmation and volatility filter.
-# Uses the previous day's Donchian channel (20-period) as a key support/resistance level.
-# Long when price breaks above prior day's Donchian high with volume > 1.5x average.
-# Short when price breaks below prior day's Donchian low with volume > 1.5x average.
-# Exits when price returns to the prior day's Donchian midpoint.
-# The 1-day timeframe avoids intraday noise while capturing multi-day trends.
-# Volume confirmation ensures institutional participation.
-# Position size: 0.25 (25%) to balance return and drawdown.
-# Target: ~25-40 trades per year per symbol (100-160 total over 4 years).
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,68 +19,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for Donchian levels
-    df_1d = get_htf_data(prices, '1d')
+    # RSI calculation (14 periods)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
     
-    # 1d Donchian channel (20 periods) - using prior completed day
-    dc_len = 20
-    if len(df_1d) < dc_len:
-        return np.zeros(n)
+    # Wilder's smoothing (equivalent to RMA)
+    alpha = 1.0 / 14
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14])  # First average of first 14 gains
+    avg_loss[13] = np.mean(loss[1:14])  # First average of first 14 losses
     
-    dc_high_1d = pd.Series(df_1d['high']).rolling(window=dc_len, min_periods=dc_len).max().values
-    dc_low_1d = pd.Series(df_1d['low']).rolling(window=dc_len, min_periods=dc_len).min().values
-    dc_mid_1d = (dc_high_1d + dc_low_1d) / 2.0
+    for i in range(14, len(gain)):
+        avg_gain[i] = alpha * gain[i] + (1 - alpha) * avg_gain[i-1]
+        avg_loss[i] = alpha * loss[i] + (1 - alpha) * avg_loss[i-1]
     
-    # Align to 4h timeframe (values available after 1d bar closes)
-    dc_high_1d_aligned = align_htf_to_ltf(prices, df_1d, dc_high_1d)
-    dc_low_1d_aligned = align_htf_to_ltf(prices, df_1d, dc_low_1d)
-    dc_mid_1d_aligned = align_htf_to_ltf(prices, df_1d, dc_mid_1d)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[:13] = np.nan  # Not enough data for first 13 periods
     
-    # Volume confirmation: 1.5x average volume
+    # Volume confirmation: 2.0x average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations
-    start = max(30, dc_len, 20)
+    # Start after enough data for RSI and volume MA
+    start = max(20, 14)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(dc_high_1d_aligned[i]) or 
-            np.isnan(dc_low_1d_aligned[i]) or
-            np.isnan(dc_mid_1d_aligned[i]) or
+        if (np.isnan(rsi[i]) or 
+            np.isnan(rsi[i-1]) or
+            np.isnan(rsi[i-2]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x average
-        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: current volume > 2.0x average
+        volume_confirmed = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Enter long: break above prior day's Donchian high + volume
-            if (close[i] > dc_high_1d_aligned[i] and 
-                volume_confirmed):
+            # Bullish RSI divergence: price makes lower low, RSI makes higher low
+            bullish_div = (low[i] < low[i-1] and low[i-1] < low[i-2] and 
+                          rsi[i] > rsi[i-1] and rsi[i-1] > rsi[i-2])
+            # Bearish RSI divergence: price makes higher high, RSI makes lower high
+            bearish_div = (high[i] > high[i-1] and high[i-1] > high[i-2] and 
+                          rsi[i] < rsi[i-1] and rsi[i-1] < rsi[i-2])
+            
+            if bullish_div and volume_confirmed:
                 position = 1
                 signals[i] = position_size
-            # Enter short: break below prior day's Donchian low + volume
-            elif (close[i] < dc_low_1d_aligned[i] and 
-                  volume_confirmed):
+            elif bearish_div and volume_confirmed:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: return to prior day's Donchian midpoint
-            if close[i] < dc_mid_1d_aligned[i]:
+            # Exit long: RSI becomes overbought (>70) or bearish divergence
+            exit_signal = (rsi[i] > 70 or 
+                          (high[i] > high[i-1] and high[i-1] > high[i-2] and 
+                           rsi[i] < rsi[i-1] and rsi[i-1] < rsi[i-2]))
+            if exit_signal:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: return to prior day's Donchian midpoint
-            if close[i] > dc_mid_1d_aligned[i]:
+            # Exit short: RSI becomes oversold (<30) or bullish divergence
+            exit_signal = (rsi[i] < 30 or 
+                          (low[i] < low[i-1] and low[i-1] < low[i-2] and 
+                           rsi[i] > rsi[i-1] and rsi[i-1] > rsi[i-2]))
+            if exit_signal:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -92,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Donchian_Volume_Midpoint_v1"
+name = "4h_RSI_Divergence_Volume_v1"
 timeframe = "4h"
 leverage = 1.0
