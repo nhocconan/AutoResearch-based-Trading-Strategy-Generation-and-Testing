@@ -13,39 +13,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load 12h data once before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate 6h ATR for volatility filter (14-period)
-    high_low = high - low
-    high_close = np.abs(high - np.roll(close, 1))
-    low_close = np.abs(low - np.roll(close, 1))
+    # Calculate 12h ATR for volatility filter (14-period)
+    high_low = high_12h - low_12h
+    high_close = np.abs(high_12h - np.roll(close_12h, 1))
+    low_close = np.abs(low_12h - np.roll(close_12h, 1))
     high_close[0] = high_low[0]
     low_close[0] = high_low[0]
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    tr_series = pd.Series(tr)
-    atr = tr_series.rolling(window=14, min_periods=14).mean().values
+    tr_12h = np.maximum(high_low, np.maximum(high_close, low_close))
+    tr_12h_series = pd.Series(tr_12h)
+    atr_12h = tr_12h_series.rolling(window=14, min_periods=14).mean().values
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
     
-    # Calculate 6-hour Donchian channels (20-period) - breakout levels
+    # Calculate 12h EMA50 for trend filter
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    
+    # Calculate 4h Donchian channels (20-period) - breakout levels
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_high = high_series.rolling(window=20, min_periods=20).max().shift(1).values
     donchian_low = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Calculate 1-day 14-period RSI for trend filter
-    delta = np.diff(close_1d, prepend=close_1d[0])
+    # Calculate 12h RSI (14-period) for momentum filter
+    delta = np.diff(close_12h, prepend=close_12h[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     gain_ma = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     loss_ma = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     rs = gain_ma / (loss_ma + 1e-10)
-    rsi_14 = 100 - (100 / (1 + rs))
+    rsi_14_12h = 100 - (100 / (1 + rs))
+    rsi_14_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_14_12h)
     
     signals = np.zeros(n)
     position = 0
@@ -53,78 +59,49 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any critical data is NaN
-        if np.isnan(atr[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(rsi_14[i]):
+        if np.isnan(atr_12h_aligned[i]) or np.isnan(ema50_12h_aligned[i]) or np.isnan(rsi_14_12h_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
             continue
         
-        # Get previous day's data (1d index)
-        if i >= 1:
-            prev_close = close_1d[i-1]
-            prev_high = high_1d[i-1]
-            prev_low = low_1d[i-1]
-            
-            # Calculate Camarilla pivot levels (previous day)
-            range_ = prev_high - prev_low
-            c = prev_close
-            # Camarilla levels
-            s1 = c - (range_ * 1.1 / 12)
-            s2 = c - (range_ * 1.1 / 6)
-            s3 = c - (range_ * 1.1 / 4)
-            s4 = c - (range_ * 1.1 / 2)
-            r1 = c + (range_ * 1.1 / 12)
-            r2 = c + (range_ * 1.1 / 6)
-            r3 = c + (range_ * 1.1 / 4)
-            r4 = c + (range_ * 1.1 / 2)
-            
-            # Align Camarilla levels to daily timeframe (constant values for the day)
-            s3_array = np.full(len(df_1d), s3)
-            s4_array = np.full(len(df_1d), s4)
-            r3_array = np.full(len(df_1d), r3)
-            r4_array = np.full(len(df_1d), r4)
-            s3_1d = align_htf_to_ltf(prices, df_1d, s3_array)[i]
-            s4_1d = align_htf_to_ltf(prices, df_1d, s4_array)[i]
-            r3_1d = align_htf_to_ltf(prices, df_1d, r3_array)[i]
-            r4_1d = align_htf_to_ltf(prices, df_1d, r4_array)[i]
-            
-            # Volume filter: current volume > 1.3x 5-period average
-            vol_ma = np.mean(volume[max(0, i-5):i]) if i >= 5 else volume[i]
-            
-            # Volatility filter: current ATR > 25th percentile of last 50 periods
-            vol_filter = True
-            if i >= 50:
-                vol_percentile = np.percentile(tr[max(0, i-50):i+1], 25)
-                vol_filter = atr[i] > vol_percentile
-            
-            # Trend filter: daily RSI between 40 and 60 (avoid extremes)
-            rsi_filter = (rsi_14[i] >= 40) & (rsi_14[i] <= 60)
-            
-            if position == 0:
-                # Long: Price breaks above R3 with volume, volatility, and RSI filter
-                if (close[i] > r3_1d and close[i-1] <= r3_1d and 
-                    volume[i] > vol_ma * 1.3 and 
-                    close[i] > donchian_high[i] and  # Breakout confirmation
-                    vol_filter and rsi_filter):
-                    position = 1
-                    signals[i] = position_size
-                # Short: Price breaks below S3 with volume, volatility, and RSI filter
-                elif (close[i] < s3_1d and close[i-1] >= s3_1d and 
-                      volume[i] > vol_ma * 1.3 and 
-                      close[i] < donchian_low[i] and  # Breakdown confirmation
-                      vol_filter and rsi_filter):
-                    position = -1
-                    signals[i] = -position_size
-            elif position == 1:
-                # Exit: Price breaks below S4 (strong reversal) or drops below Donchian low
-                if close[i] < s4_1d or close[i] < donchian_low[i]:
-                    position = 0
-                    signals[i] = 0.0
-            elif position == -1:
-                # Exit: Price breaks above R4 (strong reversal) or rises above Donchian high
-                if close[i] > r4_1d or close[i] > donchian_high[i]:
-                    position = 0
-                    signals[i] = 0.0
+        # Trend filter: 12h EMA50 slope (rising/falling)
+        ema_slope = ema50_12h_aligned[i] - ema50_12h_aligned[i-1] if i > 0 else 0
+        
+        # Momentum filter: 12h RSI not extreme
+        rsi_momentum = (rsi_14_12h_aligned[i] > 30) and (rsi_14_12h_aligned[i] < 70)
+        
+        # Volatility filter: current 12h ATR > 30-day average ATR
+        vol_filter = True
+        if i >= 240:  # 30 days of 12h bars
+            atr_avg = np.mean(atr_12h_aligned[max(0, i-240):i])
+            vol_filter = atr_12h_aligned[i] > atr_avg * 0.8
+        
+        if position == 0:
+            # Long: Price breaks above 4h Donchian high with 12h trend up and momentum
+            if (close[i] > donchian_high[i] and 
+                ema_slope > 0 and 
+                rsi_momentum and 
+                vol_filter):
+                position = 1
+                signals[i] = position_size
+            # Short: Price breaks below 4h Donchian low with 12h trend down and momentum
+            elif (close[i] < donchian_low[i] and 
+                  ema_slope < 0 and 
+                  rsi_momentum and 
+                  vol_filter):
+                position = -1
+                signals[i] = -position_size
+        elif position == 1:
+            # Exit: Price breaks below 4h Donchian low or 12h trend turns down
+            if close[i] < donchian_low[i] or ema_slope < 0:
+                position = 0
+                signals[i] = 0.0
+        elif position == -1:
+            # Exit: Price breaks above 4h Donchian high or 12h trend turns up
+            if close[i] > donchian_high[i] or ema_slope > 0:
+                position = 0
+                signals[i] = 0.0
     
     return signals
 
-name = "6h_Camarilla_R3S3_Donchian_Volume_RSI_Filter"
-timeframe = "6h"
+name = "4h_12h_EMA50_RSI_Donchian_Breakout"
+timeframe = "4h"
 leverage = 1.0
