@@ -3,97 +3,91 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h 4h/1d Trend-Following with Volume Confirmation
-# Uses 4h EMA crossover as primary trend signal, confirmed by 1d RSI extreme rejection
-# Volume spike filter ensures momentum validity
-# Target: 20-30 trades/year (80-120 total over 4 years) to minimize fee drag
-# Works in bull/bear by following trend with momentum confirmation
+# Hypothesis: 1d Williams Alligator with 1w Trend Filter
+# Uses Williams Alligator (3 SMAs: Jaw=13, Teeth=8, Lips=5) to detect trend direction
+# 1w EMA (50) provides higher timeframe trend filter to avoid counter-trend trades
+# Alligator works in both bull/bear markets by identifying when trends are sleeping or awakening
+# Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop for trend filter
-    df_4h = get_htf_data(prices, '4h')
+    # Load 1w data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h EMA (21) for trend direction
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate 1w EMA (50) for trend direction
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Load 1d data ONCE before loop for RSI filter
-    df_1d = get_htf_data(prices, '1d')
+    # Calculate Williams Alligator on 1d data
+    # Jaw (blue line): 13-period SMMA smoothed 8 periods ahead
+    # Teeth (red line): 8-period SMMA smoothed 5 periods ahead  
+    # Lips (green line): 5-period SMMA smoothed 3 periods ahead
+    # Using SMA as approximation for SMMA for computational efficiency
     
-    # Calculate 1d RSI (14) for overbought/oversold conditions
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / np.where(avg_loss == 0, np.nan, avg_loss)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # Volume spike filter (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma == 0, np.nan, vol_ma)
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().rolling(window=8, min_periods=8).mean().values
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().rolling(window=5, min_periods=5).mean().values
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().rolling(window=3, min_periods=3).mean().values
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    
-    # Start after enough data for calculations
-    start = 50  # for EMA and RSI
+    # Start after enough data for calculations (max of all periods)
+    start = 20  # covers all rolling windows
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Session filter: only trade 08-20 UTC
-        if not (8 <= hours[i] <= 20):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
+        # Trend filter: only trade in direction of 1w EMA
+        above_ema = price > ema_1w_aligned[i]
+        
+        # Alligator signals: 
+        # Awakening (trend starting): Lips > Teeth > Jaw (bullish) or Lips < Teeth < Jaw (bearish)
+        # Sleeping (no trend): lines are intertwined
+        
+        lips_above_teeth = lips[i] > teeth[i]
+        teeth_above_jaw = teeth[i] > jaw[i]
+        bullish_alignment = lips_above_teeth and teeth_above_jaw
+        
+        lips_below_teeth = lips[i] < teeth[i]
+        teeth_below_jaw = teeth[i] < jaw[i]
+        bearish_alignment = lips_below_teeth and teeth_below_jaw
+        
         if position == 0:
-            # Long: price above 4h EMA (uptrend) + RSI not overbought + volume spike
-            if (price > ema_4h_aligned[i] and 
-                rsi_1d_aligned[i] < 70 and 
-                vol_ratio[i] > 1.5):
+            # Long: bullish alignment with uptrend filter
+            if bullish_alignment and above_ema:
                 position = 1
                 signals[i] = position_size
-            # Short: price below 4h EMA (downtrend) + RSI not oversold + volume spike
-            elif (price < ema_4h_aligned[i] and 
-                  rsi_1d_aligned[i] > 30 and 
-                  vol_ratio[i] > 1.5):
+            # Short: bearish alignment with downtrend filter
+            elif bearish_alignment and not above_ema:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below 4h EMA or RSI overbought
-            if price < ema_4h_aligned[i] or rsi_1d_aligned[i] > 70:
+            # Exit long: bearish alignment or trend changes
+            if bearish_alignment or not above_ema:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above 4h EMA or RSI oversold
-            if price > ema_4h_aligned[i] or rsi_1d_aligned[i] < 30:
+            # Exit short: bullish alignment or trend changes
+            if bullish_alignment or above_ema:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -101,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4h1d_Trend_Volume_Filter"
-timeframe = "1h"
+name = "1d_Williams_Alligator_1wEMA_Trend"
+timeframe = "1d"
 leverage = 1.0
