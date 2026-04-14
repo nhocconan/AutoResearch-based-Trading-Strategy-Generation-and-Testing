@@ -3,118 +3,91 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-hour timeframe with 4-hour trend filter and 1-day momentum filter.
-# Uses 4h Supertrend for trend direction, 1d RSI for momentum confirmation, and 1h price action for entry timing.
-# Long when: 4h Supertrend = uptrend AND 1d RSI > 50 AND 1h close > 1h open (bullish candle)
-# Short when: 4h Supertrend = downtrend AND 1d RSI < 50 AND 1h close < 1h open (bearish candle)
-# Exit when trend changes or momentum fails.
-# Designed for 60-150 total trades over 4 years (15-37/year) with session filter (08-20 UTC) to reduce noise.
-# Uses discrete position sizes (0.20) to minimize churn and focuses on high-probability setups.
+# Hypothesis: 6-hour Ichimoku Cloud strategy with 1-week trend filter
+# Long when price crosses above Kumo (cloud) AND Tenkan > Kijun AND weekly EMA200 trend up
+# Short when price crosses below Kumo AND Tenkan < Kijun AND weekly EMA200 trend down
+# Exit when Tenkan crosses back opposite Kijun or price exits cloud in opposite direction
+# Uses Ichimoku for momentum and support/resistance, weekly EMA for trend filter
+# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    open_price = prices['open'].values
     
-    # Calculate hour filter once (08-20 UTC)
-    hours = prices.index.hour
+    # Load weekly data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Load 4h data ONCE before loop for Supertrend
-    df_4h = get_htf_data(prices, '4h')
+    # Calculate Ichimoku components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
     
-    # Calculate 4h Supertrend (ATR=10, multiplier=3.0)
-    hl2 = (df_4h['high'] + df_4h['low']) / 2
-    atr = pd.Series(df_4h['high'] - df_4h['low']).rolling(window=10, min_periods=10).mean()
-    upper_band = hl2 + 3.0 * atr
-    lower_band = hl2 - 3.0 * atr
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
     
-    supertrend = np.full(len(df_4h), True)  # True = uptrend, False = downtrend
-    for i in range(1, len(df_4h)):
-        if df_4h['close'].iloc[i] > upper_band.iloc[i-1]:
-            supertrend[i] = True
-        elif df_4h['close'].iloc[i] < lower_band.iloc[i-1]:
-            supertrend[i] = False
-        else:
-            supertrend[i] = supertrend[i-1]
-            if supertrend[i] and lower_band.iloc[i] < lower_band.iloc[i-1]:
-                lower_band.iloc[i] = lower_band.iloc[i-1]
-            if not supertrend[i] and upper_band.iloc[i] > upper_band.iloc[i-1]:
-                upper_band.iloc[i] = upper_band.iloc[i-1]
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
     
-    supertrend_4h = supertrend
-    supertrend_4h_aligned = align_htf_to_ltf(prices, df_4h, supertrend_4h.astype(float))
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = (period52_high + period52_low) / 2
     
-    # Load 1d data ONCE before loop for RSI
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate 1d RSI(14)
-    close_1d = df_1d['close']
-    delta = close_1d.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_values = rsi_1d.fillna(50).values  # Fill NaN with 50 (neutral)
-    
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d_values)
+    # Weekly EMA200 for trend filter
+    close_1w = df_1w['close'].values
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations
-    start = 20
+    # Start after enough data for calculations (52 for Senkou B)
+    start = 52
     
     for i in range(start, n):
-        # Apply session filter: 08-20 UTC
-        if not (8 <= hours[i] <= 20):
-            signals[i] = 0.0
-            continue
-        
         # Skip if any critical data is NaN
-        if (np.isnan(supertrend_4h_aligned[i]) or 
-            np.isnan(rsi_1d_aligned[i])):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
+            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or 
+            np.isnan(ema200_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # 1h price action
-        is_bullish_candle = close[i] > open_price[i]
-        is_bearish_candle = close[i] < open_price[i]
+        price = close[i]
+        
+        # Determine cloud boundaries (Senkou Span A and B)
+        upper_cloud = max(senkou_a[i], senkou_b[i])
+        lower_cloud = min(senkou_a[i], senkou_b[i])
         
         if position == 0:
-            # Long setup: 4h uptrend + 1d bullish momentum + 1h bullish candle
-            if (supertrend_4h_aligned[i] > 0.5 and  # Uptrend
-                rsi_1d_aligned[i] > 50 and          # Bullish momentum
-                is_bullish_candle):                 # Bullish price action
+            # Long setup: price above cloud AND Tenkan > Kijun AND weekly trend up
+            if (price > upper_cloud and tenkan[i] > kijun[i] and price > ema200_1w_aligned[i]):
                 position = 1
                 signals[i] = position_size
-            # Short setup: 4h downtrend + 1d bearish momentum + 1h bearish candle
-            elif (supertrend_4h_aligned[i] < 0.5 and  # Downtrend
-                  rsi_1d_aligned[i] < 50 and          # Bearish momentum
-                  is_bearish_candle):                 # Bearish price action
+            # Short setup: price below cloud AND Tenkan < Kijun AND weekly trend down
+            elif (price < lower_cloud and tenkan[i] < kijun[i] and price < ema200_1w_aligned[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: trend turns down OR momentum turns bearish
-            if (supertrend_4h_aligned[i] < 0.5 or  # Trend change
-                rsi_1d_aligned[i] < 50):           # Momentum failure
+            # Exit long: Tenkan crosses below Kijun OR price drops below cloud
+            if tenkan[i] < kijun[i] or price < lower_cloud:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: trend turns up OR momentum turns bullish
-            if (supertrend_4h_aligned[i] > 0.5 or  # Trend change
-                rsi_1d_aligned[i] > 50):           # Momentum failure
+            # Exit short: Tenkan crosses above Kijun OR price rises above cloud
+            if tenkan[i] > kijun[i] or price > upper_cloud:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -122,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4hSupertrend_1dRSI_PriceAction"
-timeframe = "1h"
+name = "6h_Ichimoku_WeeklyEMA200_Trend"
+timeframe = "6h"
 leverage = 1.0
