@@ -3,18 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Williams Alligator with 12-hour EMA trend filter and volume confirmation.
-# The Williams Alligator uses three SMAs (jaw, teeth, lips) to detect trends.
-# We use the 12-hour EMA(50) as a higher-timeframe trend filter to avoid counter-trend trades.
-# Entry occurs when the Alligator lines are aligned (lips > teeth > jaw for long, opposite for short)
-# AND price confirms in the direction of the 12-hour EMA trend.
-# Volume > 1.3x the 20-period average confirms participation.
-# Exit when the Alligator lines become misaligned (trend weakness) or price crosses the 8-period EMA.
-# Designed for 20-35 trades per year per symbol (80-140 total over 4 years) to minimize fee drag.
+# Hypothesis: 1-hour strategy using 4-hour ADX(14) trend strength and 1-hour Bollinger Band(20,2) mean reversion.
+# In trending markets (ADX > 25), trade breakouts in direction of 4h trend.
+# In ranging markets (ADX <= 25), trade reversals at Bollinger Bands.
+# This adapts to both bull and bear markets by using trend strength filter.
+# Volume > 1.3x 20-period average confirms momentum.
+# Target: 15-30 trades/year per symbol (60-120 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,114 +20,135 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE for trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Load 4h data ONCE for trend filter
+    df_4h = get_htf_data(prices, '4h')
     
-    # 12h EMA(50) for trend filter
-    ema_len = 50
-    if len(df_12h) < ema_len:
+    # 4h ADX(14) for trend strength
+    adx_len = 14
+    if len(df_4h) < adx_len:
         return np.zeros(n)
     
-    ema_12h = pd.Series(df_12h['close']).ewm(span=ema_len, adjust=False, min_periods=ema_len).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate ADX components
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Williams Alligator components (13, 8, 5 SMAs with future shifts)
-    # Jaw: 13-period SMMA, shifted 8 bars forward
-    # Teeth: 8-period SMMA, shifted 5 bars forward  
-    # Lips: 5-period SMMA, shifted 3 bars forward
-    jaw_period = 13
-    teeth_period = 8
-    lips_period = 5
-    jaw_shift = 8
-    teeth_shift = 5
-    lips_shift = 3
+    # True Range
+    tr1 = high_4h[1:] - low_4h[1:]
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
-    # Calculate SMMA (smoothed moving average) - equivalent to RMA/Wilder's smoothing
-    def smma(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        result = np.full_like(arr, np.nan, dtype=float)
-        # First value is simple SMA
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: SMMA = (prev_SMMA * (period-1) + current_price) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # Directional Movement
+    dm_plus = np.where((high_4h[1:] - high_4h[:-1]) > (low_4h[:-1] - low_4h[1:]), 
+                       np.maximum(high_4h[1:] - high_4h[:-1], 0), 0)
+    dm_minus = np.where((low_4h[:-1] - low_4h[1:]) > (high_4h[1:] - high_4h[:-1]), 
+                        np.maximum(low_4h[:-1] - low_4h[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    jaw = smma(high, jaw_period)  # Using high for jaw as per original Alligator
-    teeth = smma(low, teeth_period)  # Using low for teeth
-    lips = smma(close, lips_period)  # Using close for lips
+    # Smoothed values
+    atr = pd.Series(tr).ewm(span=adx_len, adjust=False, min_periods=adx_len).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(span=adx_len, adjust=False, min_periods=adx_len).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(span=adx_len, adjust=False, min_periods=adx_len).mean().values
     
-    # Apply shifts (shift forward means we use future data, so we need to lag)
-    jaw_shifted = np.roll(jaw, -jaw_shift)
-    teeth_shifted = np.roll(teeth, -teeth_shift)
-    lips_shifted = np.roll(lips, -lips_shift)
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
     
-    # Set shifted values to NaN where they would look ahead
-    jaw_shifted[-jaw_shift:] = np.nan
-    teeth_shifted[-teeth_shift:] = np.nan
-    lips_shifted[-lips_shift:] = np.nan
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(span=adx_len, adjust=False, min_periods=adx_len).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
+    
+    # Bollinger Bands (20, 2) on 1h
+    bb_len = 20
+    bb_std = 2
+    sma = pd.Series(close).rolling(window=bb_len, min_periods=bb_len).mean().values
+    std = pd.Series(close).rolling(window=bb_len, min_periods=bb_len).std().values
+    bb_upper = sma + bb_std * std
+    bb_lower = sma - bb_std * std
     
     # Volume confirmation: 1.3x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # 8-period EMA for exit signal
-    ema8 = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
-    
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position size
+    position_size = 0.20  # 20% position size
     
     # Start after enough data for calculations
-    start = max(jaw_period + jaw_shift, teeth_period + teeth_shift, lips_period + lips_shift, 50, 20)
+    start = max(adx_len*2, bb_len, 20)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(jaw_shifted[i]) or 
-            np.isnan(teeth_shifted[i]) or
-            np.isnan(lips_shifted[i]) or
-            np.isnan(ema_12h_aligned[i]) or
-            np.isnan(vol_ma[i]) or
-            np.isnan(ema8[i])):
+        if (np.isnan(adx_aligned[i]) or 
+            np.isnan(sma[i]) or
+            np.isnan(std[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Alligator alignment: lips > teeth > jaw = bullish, lips < teeth < jaw = bearish
-        lips = lips_shifted[i]
-        teeth = teeth_shifted[i]
-        jaw = jaw_shifted[i]
+        # Trend regime: ADX > 25 = trending, ADX <= 25 = ranging
+        trending = adx_aligned[i] > 25
         
-        bullish_aligned = (lips > teeth) and (teeth > jaw)
-        bearish_aligned = (lips < teeth) and (teeth < jaw)
-        
-        # Trend filter: price relative to 12h EMA50
-        above_ema = close[i] > ema_12h_aligned[i]
-        below_ema = close[i] < ema_12h_aligned[i]
-        
-        # Volume confirmation: current volume > 1.3x average
+        # Volume confirmation
         volume_confirmed = volume[i] > 1.3 * vol_ma[i]
         
         if position == 0:
-            # Enter long: Alligator bullish + above 12h EMA + volume
-            if bullish_aligned and above_ema and volume_confirmed:
-                position = 1
-                signals[i] = position_size
-            # Enter short: Alligator bearish + below 12h EMA + volume
-            elif bearish_aligned and below_ema and volume_confirmed:
-                position = -1
-                signals[i] = -position_size
+            if trending:
+                # In trending market: trade breakouts in direction of 4h trend
+                # Need 4h trend direction - use price vs 4h EMA20 as proxy
+                if len(df_4h) >= 20:
+                    ema_4h = pd.Series(df_4h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+                    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+                    if not np.isnan(ema_4h_aligned[i]):
+                        bullish_4h = close[i] > ema_4h_aligned[i]
+                        bearish_4h = close[i] < ema_4h_aligned[i]
+                        
+                        # Breakout above upper band in bullish 4h trend
+                        if (close[i] > bb_upper[i] and 
+                            bullish_4h and 
+                            volume_confirmed):
+                            position = 1
+                            signals[i] = position_size
+                        # Breakdown below lower band in bearish 4h trend
+                        elif (close[i] < bb_lower[i] and 
+                              bearish_4h and 
+                              volume_confirmed):
+                            position = -1
+                            signals[i] = -position_size
+                        else:
+                            signals[i] = 0.0
+                    else:
+                        signals[i] = 0.0
+                else:
+                    signals[i] = 0.0
             else:
-                signals[i] = 0.0
+                # In ranging market: trade reversals at Bollinger Bands
+                # Long at lower band, short at upper band
+                if (close[i] < bb_lower[i] and 
+                    volume_confirmed):
+                    position = 1
+                    signals[i] = position_size
+                elif (close[i] > bb_upper[i] and 
+                      volume_confirmed):
+                    position = -1
+                    signals[i] = -position_size
+                else:
+                    signals[i] = 0.0
         elif position == 1:
-            # Exit long: Alligator loses alignment OR price crosses below 8 EMA
-            if not bullish_aligned or close[i] < ema8[i]:
+            # Exit long: price returns to middle (SMA) or breaks below lower band with volume
+            if (close[i] > sma[i] or 
+                (close[i] < bb_lower[i] and volume[i] < vol_ma[i] * 0.5)):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Alligator loses alignment OR price crosses above 8 EMA
-            if not bearish_aligned or close[i] > ema8[i]:
+            # Exit short: price returns to middle (SMA) or breaks above upper band with low volume
+            if (close[i] < sma[i] or 
+                (close[i] > bb_upper[i] and volume[i] < vol_ma[i] * 0.5)):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -137,6 +156,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_EMA50_Alligator_Volume_v1"
-timeframe = "4h"
+name = "1h_ADX_BB_MeanRev_TrendAdapt_v1"
+timeframe = "1h"
 leverage = 1.0
