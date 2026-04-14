@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-day Exponential Moving Average (EMA) crossover with weekly trend filter and volume confirmation
-# Uses EMA(20) and EMA(50) crossovers on 1d for entry signals
-# Weekly EMA(20) as trend filter (only long when weekly close > weekly EMA20, short when weekly close < weekly EMA20)
-# Volume confirmation > 1.5x 20-period EMA on 1d to reduce false signals
-# Designed for 15-30 trades/year with clear momentum logic
-# Works in bull markets via bullish crossover + uptrend and in bear markets via bearish crossover + downtrend
+# Hypothesis: 12h Williams Alligator with 1-day trend filter and volume confirmation
+# Uses Williams Alligator (Jaw: SMA13, Teeth: SMA8, Lips: SMA5) on 12h for trend direction
+# Long when Lips > Teeth > Jaw and price above Lips; Short when Lips < Teeth < Jaw and price below Lips
+# Daily close > daily EMA50 as trend filter (only long in daily uptrend, short in daily downtrend)
+# Volume confirmation > 1.3x 20-period EMA on 12h to reduce false signals
+# Designed for ~15-25 trades/year with clear trend-following logic
+# Works in bull markets via bullish alignment + uptrend and in bear markets via bearish alignment + downtrend
 # Position size: 0.25 to balance return and drawdown
 
 def generate_signals(prices):
@@ -21,20 +22,21 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate EMA(20) and EMA(50) for 1d
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Williams Alligator for 12h (SMA5, SMA8, SMA13)
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values  # SMA5
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values  # SMA8
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values  # SMA13
     
-    # Load weekly data once for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load daily data once for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA(20) for trend filter
-    close_1w = df_1w['close'].values
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate daily EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume moving average for confirmation (20-period EMA)
+    # Volume moving average for confirmation (20-period EMA on 12h)
     vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -42,38 +44,48 @@ def generate_signals(prices):
     position_size = 0.25
     
     for i in range(50, n):
-        # Get aligned weekly EMA20
-        ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)[i]
+        # Get aligned daily EMA50
+        ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)[i]
         
-        if np.isnan(ema20_1w_aligned) or np.isnan(vol_ma[i]) or np.isnan(ema20[i]) or np.isnan(ema50[i]):
+        if np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or np.isnan(ema50_1d_aligned) or np.isnan(vol_ma[i]):
             continue
         
-        # Trend filter: only long in uptrend, only short in downtrend
-        uptrend = close_1w[-1] > ema20_1w_aligned if len(close_1w) > 0 else False  # Use last known weekly close
-        downtrend = close_1w[-1] < ema20_1w_aligned if len(close_1w) > 0 else False
+        # Daily trend filter: only long in uptrend, only short in downtrend
+        # Need to get the last known daily close for comparison
+        # Find the index of the last completed daily bar up to current 12h bar
+        # Since we can't easily compute this without datetime math, we'll use a simplification:
+        # Use the daily EMA50 value as proxy - if price > EMA50, consider uptrend
+        # This is not perfect but avoids look-ahead and uses available data
+        price_vs_ema = close[i] > ema50_1d_aligned  # Simple price vs EMA comparison
         
-        # Volume confirmation (1.5x average)
-        volume_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Williams Alligator signals
+        bullish_alignment = (lips[i] > teeth[i]) and (teeth[i] > jaw[i])  # Lips > Teeth > Jaw
+        bearish_alignment = (lips[i] < teeth[i]) and (teeth[i] < jaw[i])  # Lips < Teeth < Jaw
+        price_above_lips = close[i] > lips[i]
+        price_below_lips = close[i] < lips[i]
         
-        # Golden Cross: EMA20 crosses above EMA50 + uptrend + volume confirmation
-        if position == 0 and ema20[i] > ema50[i] and ema20[i-1] <= ema50[i-1] and uptrend and volume_confirm:
+        # Volume confirmation (1.3x average)
+        volume_confirm = volume[i] > 1.3 * vol_ma[i]
+        
+        # Long signal: bullish alignment + price above lips + daily uptrend + volume
+        if position == 0 and bullish_alignment and price_above_lips and price_vs_ema and volume_confirm:
             position = 1
             signals[i] = position_size
-        # Death Cross: EMA20 crosses below EMA50 + downtrend + volume confirmation
-        elif position == 0 and ema20[i] < ema50[i] and ema20[i-1] >= ema50[i-1] and downtrend and volume_confirm:
+        # Short signal: bearish alignment + price below lips + daily downtrend + volume
+        elif position == 0 and bearish_alignment and price_below_lips and not price_vs_ema and volume_confirm:
             position = -1
             signals[i] = -position_size
-        # Exit: Opposite crossover or loss of trend
+        # Exit: loss of alignment or price crosses lips in opposite direction
         elif position != 0:
-            if position == 1 and (ema20[i] < ema50[i] or not uptrend):
+            if position == 1 and (not bullish_alignment or close[i] < lips[i]):
                 position = 0
                 signals[i] = 0.0
-            elif position == -1 and (ema20[i] > ema50[i] or not downtrend):
+            elif position == -1 and (not bearish_alignment or close[i] > lips[i]):
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "1d_EMA_Crossover_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "12h_WilliamsAlligator_1dTrend_Filter_Volume"
+timeframe = "12h"
 leverage = 1.0
