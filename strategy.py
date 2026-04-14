@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Power (Bull/Bear) with 1d ADX filter and volume confirmation
-# Elder Ray measures bull/bear power relative to EMA13 - filters weak moves
-# ADX > 25 ensures trending market to avoid whipsaws
-# Volume > 1.5x average confirms institutional participation
-# Works in bull/bear as Elder Ray adapts to trend strength
-# Target: 12-25 trades/year per symbol (48-100 total over 4 years)
+# Hypothesis: 12h Donchian breakout with 1d daily pivot context and volume confirmation
+# Daily pivot levels provide institutional support/resistance
+# Donchian breakout captures momentum in direction of pivot bias
+# Volume > 2x average confirms institutional participation
+# Works in bull/bear as pivot bias adapts to trend
+# Target: 12-37 trades/year per symbol (48-148 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,95 +20,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for ADX filter
+    # Load 1d data ONCE for daily pivot and trend context
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate ADX (14) on 1d
-    if len(df_1d) < 14:
+    # Calculate daily pivot points from prior day (using 1d data)
+    lookback = 1
+    if len(df_1d) < lookback:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get prior day's OHLC (excluding current incomplete day)
+    prev_day_high = pd.Series(df_1d['high']).rolling(window=lookback, min_periods=lookback).max().shift(1).values
+    prev_day_low = pd.Series(df_1d['low']).rolling(window=lookback, min_periods=lookback).min().shift(1).values
+    prev_day_close = pd.Series(df_1d['close']).rolling(window=lookback, min_periods=lookback).last().shift(1).values
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align to same length
+    # Daily pivot calculation (standard floor trader pivot)
+    daily_pivot = (prev_day_high + prev_day_low + prev_day_close) / 3
+    daily_r1 = 2 * daily_pivot - prev_day_low
+    daily_s1 = 2 * daily_pivot - prev_day_high
+    daily_r2 = daily_pivot + (prev_day_high - prev_day_low)
+    daily_s2 = daily_pivot - (prev_day_high - prev_day_low)
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
+    # Align daily pivot levels to 12h timeframe
+    daily_pivot_aligned = align_htf_to_ltf(prices, df_1d, daily_pivot)
+    daily_r1_aligned = align_htf_to_ltf(prices, df_1d, daily_r1)
+    daily_s1_aligned = align_htf_to_ltf(prices, df_1d, daily_s1)
+    daily_r2_aligned = align_htf_to_ltf(prices, df_1d, daily_r2)
+    daily_s2_aligned = align_htf_to_ltf(prices, df_1d, daily_s2)
     
-    # Smoothed values
-    tr14 = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
-    dm_plus_14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False).mean().values
-    dm_minus_14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False).mean().values
+    # Donchian channel (20 periods) on 12h
+    dc_len = 20
+    dc_upper = pd.Series(high).rolling(window=dc_len, min_periods=dc_len).max().shift(1).values
+    dc_lower = pd.Series(low).rolling(window=dc_len, min_periods=dc_len).min().shift(1).values
     
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_14 / tr14
-    di_minus = 100 * dm_minus_14 / tr14
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # Align ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # EMA13 for Elder Ray on 6h
-    ema13 = pd.Series(close).ewm(span=13, adjust=False).mean().values
-    
-    # Elder Ray Power
-    bull_power = high - ema13  # Bull Power = High - EMA13
-    bear_power = low - ema13   # Bear Power = Low - EMA13
+    # Volume confirmation: 2x average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(50, 14)
+    start = max(100, dc_len, 20)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema13[i]) or 
-            np.isnan(bull_power[i]) or
-            np.isnan(bear_power[i]) or
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(dc_upper[i]) or 
+            np.isnan(dc_lower[i]) or
+            np.isnan(daily_pivot_aligned[i]) or
+            np.isnan(daily_r1_aligned[i]) or
+            np.isnan(daily_s1_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # ADX filter: trending market (ADX > 25)
-        trending = adx_aligned[i] > 25
+        # Pivot bias: price relative to daily pivot
+        above_pivot = close[i] > daily_pivot_aligned[i]
+        below_pivot = close[i] < daily_pivot_aligned[i]
+        
+        # Volume confirmation: current volume > 2x average
+        volume_confirmed = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Enter long: Bull Power > 0 AND Bear Power < 0 (bullish bias) AND trending
-            if bull_power[i] > 0 and bear_power[i] < 0 and trending:
+            # Enter long: Donchian breakout above + above daily pivot + volume
+            if (close[i] > dc_upper[i] and 
+                above_pivot and 
+                volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Enter short: Bear Power < 0 AND Bull Power > 0 (bearish bias) AND trending
-            elif bear_power[i] < 0 and bull_power[i] > 0 and trending:
+            # Enter short: Donchian breakdown below + below daily pivot + volume
+            elif (close[i] < dc_lower[i] and 
+                  below_pivot and 
+                  volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Bear Power becomes positive (loss of bullish bias)
-            if bear_power[i] >= 0:
+            # Exit long: price returns to daily pivot or breaks below S1
+            if close[i] < daily_pivot_aligned[i] or close[i] < daily_s1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Bull Power becomes negative (loss of bearish bias)
-            if bull_power[i] <= 0:
+            # Exit short: price returns to daily pivot or breaks above R1
+            if close[i] > daily_pivot_aligned[i] or close[i] > daily_r1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -116,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_Power_1dADXFilter_v2"
-timeframe = "6h"
+name = "12h_1d_DailyPivot_Donchian_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
