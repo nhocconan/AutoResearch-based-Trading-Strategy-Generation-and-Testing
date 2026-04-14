@@ -3,48 +3,26 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy combining 1d Williams %R for mean reversion signals and 1w ADX for trend strength
-# Williams %R < -80 indicates oversold, > -20 indicates overbought
-# ADX > 25 confirms trending conditions to avoid counter-trend trades
-# Williams %R cross above -50 from below signals long entry in uptrend
-# Williams %R cross below -50 from above signals short entry in downtrend
-# Uses weekly ADX for regime filter and daily Williams %R for entry timing - balances signal frequency
-# Designed for 12h timeframe to target 12-37 trades per year (50-150 total over 4 years)
+# Hypothesis: 1d strategy with 1w ATR-based regime filter and Donchian breakout
+# ATR(14) percentile over 1 year identifies low volatility regimes (breakout prone)
+# Donchian(20) breakout captures momentum in low volatility environments
+# Works in both bull and bear markets: volatility regime filter adapts to changing market conditions
+# Uses 1w ATR percentile for regime detection and daily Donchian for entry timing - avoids overtrading
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     
-    # Load 1d data ONCE for Williams %R
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate 1d Williams %R (14 periods)
-    wr_len = 14
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Highest High and Lowest Low over lookback period
-    highest_high = pd.Series(high_1d).rolling(window=wr_len, min_periods=wr_len).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=wr_len, min_periods=wr_len).min().values
-    
-    # Williams %R formula: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    wr = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
-    wr = np.where((highest_high - lowest_low) == 0, -50, wr)  # Avoid division by zero
-    
-    # Align Williams %R to 12h timeframe
-    wr_aligned = align_htf_to_ltf(prices, df_1d, wr)
-    
-    # Load 1w data ONCE for ADX
+    # Load 1w data ONCE for ATR percentile
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1w ADX (14 periods)
-    adx_len = 14
+    # Calculate 1w ATR (14 periods)
+    atr_len = 14
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
@@ -55,72 +33,67 @@ def generate_signals(prices):
     tr3 = np.abs(low_1w[1:] - close_1w[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Directional Movement
-    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
-                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
-                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
-    dm_minus = np.concatenate([[np.nan], dm_minus])
+    # ATR calculation
+    atr = pd.Series(tr).rolling(window=atr_len, min_periods=atr_len).mean().values
     
-    # Smoothed values
-    tr_sum = pd.Series(tr).rolling(window=adx_len, min_periods=adx_len).sum().values
-    dm_plus_sum = pd.Series(dm_plus).rolling(window=adx_len, min_periods=adx_len).sum().values
-    dm_minus_sum = pd.Series(dm_minus).rolling(window=adx_len, min_periods=adx_len).sum().values
+    # ATR percentile over 1 year (52 weeks)
+    lookback = 52
+    atr_series = pd.Series(atr)
+    atr_percentile = atr_series.rolling(window=lookback, min_periods=lookback).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
     
-    # Directional Indicators
-    plus_di = 100 * dm_plus_sum / tr_sum
-    minus_di = 100 * dm_minus_sum / tr_sum
+    # Align ATR percentile to 1d timeframe
+    atr_percentile_aligned = align_htf_to_ltf(prices, df_1w, atr_percentile)
     
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=adx_len, min_periods=adx_len).mean().values
-    
-    # Align ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    # Calculate Donchian channels (20 periods) on daily data
+    donch_len = 20
+    highest = pd.Series(high).rolling(window=donch_len, min_periods=donch_len).max().values
+    lowest = pd.Series(low).rolling(window=donch_len, min_periods=donch_len).min().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(50, wr_len + adx_len)
+    start = max(100, atr_len + lookback + donch_len)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(wr_aligned[i]) or 
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(atr_percentile_aligned[i]) or 
+            np.isnan(highest[i]) or 
+            np.isnan(lowest[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: ADX > 25 indicates trending market
-        trending = adx_aligned[i] > 25
+        price = close[i]
         
-        # Williams %R signals
-        oversold = wr_aligned[i] < -80
-        overbought = wr_aligned[i] > -20
+        # Regime filter: low volatility environment (ATR percentile < 30)
+        low_vol_regime = atr_percentile_aligned[i] < 30
         
         if position == 0:
-            # Enter long: Williams %R crosses above -50 from below in trending market
-            if i > start and wr_aligned[i-1] < -50 <= wr_aligned[i] and trending:
+            # Enter long: low volatility + Donchian breakout above upper band
+            if low_vol_regime and price > highest[i]:
                 position = 1
                 signals[i] = position_size
-            # Enter short: Williams %R crosses below -50 from above in trending market
-            elif i > start and wr_aligned[i-1] > -50 >= wr_aligned[i] and trending:
+            # Enter short: low volatility + Donchian breakdown below lower band
+            elif low_vol_regime and price < lowest[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Williams %R crosses above -20 (overbought) or ADX weakens
-            if wr_aligned[i] > -20 or adx_aligned[i] < 20:
+            # Exit long: price crosses below Donchian midpoint OR volatility increases
+            midpoint = (highest[i] + lowest[i]) / 2
+            if price < midpoint or atr_percentile_aligned[i] > 70:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Williams %R crosses below -80 (oversold) or ADX weakens
-            if wr_aligned[i] < -80 or adx_aligned[i] < 20:
+            # Exit short: price crosses above Donchian midpoint OR volatility increases
+            midpoint = (highest[i] + lowest[i]) / 2
+            if price > midpoint or atr_percentile_aligned[i] > 70:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -128,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1dWR_1wADX_Trend_Momentum_v1"
-timeframe = "12h"
+name = "1d_1wATR_Percentile_Donchian_Breakout_v1"
+timeframe = "1d"
 leverage = 1.0
