@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h 12h EMA alignment with volume confirmation
-# Uses EMA(9) and EMA(21) on 4h and 12h timeframes for trend alignment
-# Long when both timeframes show bullish alignment (EMA9 > EMA21)
-# Short when both timeframes show bearish alignment (EMA9 < EMA21)
-# Volume > 1.5x 20-period EMA confirms momentum
-# Target: 20-30 trades/year with trend-following logic
-# Stops via EMA crossover in opposite direction
+# Hypothesis: 4h Donchian breakout with 1d ADX trend filter and volume confirmation
+# Breakouts above Donchian(20) high or below Donchian(20) low capture momentum
+# 1d ADX(14) > 25 filters for trending markets where breakouts are more reliable
+# Volume > 1.5x 20-period EMA confirms institutional participation
+# Target: 20-30 trades/year with trend-following logic suited for 2025 bear/range conditions
+# Stops via opposite Donchian band touch to avoid whipsaws
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,70 +20,84 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 4h EMA(9) and EMA(21)
-    close_series = pd.Series(close)
-    ema9_4h = close_series.ewm(span=9, adjust=False, min_periods=9).values
-    ema21_4h = close_series.ewm(span=21, adjust=False, min_periods=21).values
+    # Calculate Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 12h EMA(9) and EMA(21)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Calculate 1d ADX (14-period) for trend filter (high ADX = trending)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    close_12h_series = pd.Series(close_12h)
-    ema9_12h = close_12h_series.ewm(span=9, adjust=False, min_periods=9).values
-    ema21_12h = close_12h_series.ewm(span=21, adjust=False, min_periods=21).values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align 12h EMAs to 4h timeframe
-    ema9_12h_aligned = align_htf_to_ltf(prices, df_12h, ema9_12h)
-    ema21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema21_12h)
+    # True Range for ADX
+    tr1_1d = high_1d - low_1d
+    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2_1d[0] = 0
+    tr3_1d[0] = 0
+    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
+    
+    # Directional Movement
+    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
+    
+    # Smoothed values
+    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_di_1d = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1d
+    minus_di_1d = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1d
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
+    adx_1d = pd.Series(dx_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     # Volume moving average for confirmation (20-period EMA)
-    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).values
+    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25
     
     for i in range(20, n):
-        # Check for NaN values
-        if np.isnan(ema9_4h[i]) or np.isnan(ema21_4h[i]) or \
-           np.isnan(ema9_12h_aligned[i]) or np.isnan(ema21_12h_aligned[i]) or \
-           np.isnan(vol_ma[i]):
+        # Get aligned 1d ADX
+        adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)[i]
+        
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
+           np.isnan(adx_1d_aligned) or np.isnan(vol_ma[i]):
             continue
         
         # Volume confirmation (1.5x average)
         volume_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Trend filter: ADX > 25 indicates trending market (better for breakouts)
+        trending = adx_1d_aligned > 25
         
-        # Check EMA alignment on both timeframes
-        bullish_4h = ema9_4h[i] > ema21_4h[i]
-        bearish_4h = ema9_4h[i] < ema21_4h[i]
-        bullish_12h = ema9_12h_aligned[i] > ema21_12h_aligned[i]
-        bearish_12h = ema9_12h_aligned[i] < ema21_12h_aligned[i]
-        
-        if position == 0:  # No position - look for trend entries
-            # Long when both timeframes show bullish alignment with volume
-            if bullish_4h and bullish_12h and volume_confirm:
+        if position == 0:  # No position - look for breakout entries
+            # Long breakout: price breaks above Donchian high with volume in trending market
+            if close[i] > donchian_high[i] and volume_confirm and trending:
                 position = 1
                 signals[i] = position_size
-            # Short when both timeframes show bearish alignment with volume
-            elif bearish_4h and bearish_12h and volume_confirm:
+            # Short breakout: price breaks below Donchian low with volume in trending market
+            elif close[i] < donchian_low[i] and volume_confirm and trending:
                 position = -1
                 signals[i] = -position_size
-        elif position == 1:  # Long position - exit on bearish alignment
-            # Exit if either timeframe shows bearish alignment
-            if bearish_4h or bearish_12h:
+        elif position == 1:  # Long position - exit at opposite Donchian band
+            # Exit if price breaks below Donchian low (failed breakout)
+            if close[i] < donchian_low[i]:
                 position = 0
                 signals[i] = 0.0
-        elif position == -1:  # Short position - exit on bullish alignment
-            # Exit if either timeframe shows bullish alignment
-            if bullish_4h or bullish_12h:
+        elif position == -1:  # Short position - exit at opposite Donchian band
+            # Exit if price breaks above Donchian high (failed breakout)
+            if close[i] > donchian_high[i]:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_12h_EMA_Alignment_Volume"
+name = "4h_Donchian_1dADX_TrendBreak"
 timeframe = "4h"
 leverage = 1.0
