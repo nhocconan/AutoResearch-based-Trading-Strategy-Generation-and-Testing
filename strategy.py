@@ -3,129 +3,119 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h CRSI + Volume Spike + Choppiness Regime Filter
-# Long when CRSI < 15 + volume > 1.5x 20-period average + CHOP > 61.8 (range)
-# Short when CRSI > 85 + volume > 1.5x 20-period average + CHOP > 61.8 (range)
-# Exit when CRSI crosses back above 50 (long) or below 50 (short)
-# Designed for mean reversion in ranging markets with volume confirmation
-# Target: 20-50 trades per symbol over 4 years (5-12.5/year)
+# Hypothesis: 1d Weekly Donchian Breakout with Volume Confirmation and ADX Trend Filter
+# Takes long when price breaks above weekly Donchian upper band with daily volume spike and ADX > 20
+# Takes short when price breaks below weekly Donchian lower band with daily volume spike and ADX > 20
+# Exits when price crosses back below/above the weekly Donchian midline or volume drops
+# Designed to capture strong trends with volume confirmation, avoiding choppy markets
+# Weekly timeframe reduces trade frequency, daily confirmation improves timing
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data for CRSI and CHOP calculations
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly and daily data ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
+    df_daily = get_htf_data(prices, '1d')
     
-    # Calculate daily RSI(3) for CRSI
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate weekly Donchian channels (20-period)
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    donchian_high = pd.Series(high_weekly).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_weekly).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # RSI(3)
-    gain_ma = pd.Series(gain).ewm(span=3, adjust=False).mean().values
-    loss_ma = pd.Series(loss).ewm(span=3, adjust=False).mean().values
-    rs = gain_ma / (loss_ma + 1e-10)
-    rsi_3 = 100 - (100 / (1 + rs))
+    # Calculate daily ADX for trend strength
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    close_daily = df_daily['close'].values
     
-    # Calculate RSI streak (2-period)
-    up_days = np.where(close_1d[1:] > close_1d[:-1], 1, 0)
-    down_days = np.where(close_1d[1:] < close_1d[:-1], 1, 0)
-    up_streak = np.where(up_days, np.concatenate([[0], np.cumsum(up_days) * up_days]), 0)
-    down_streak = np.where(down_days, np.concatenate([[0], np.cumsum(down_days) * down_days]), 0)
-    rsi_streak = 100 * up_streak / (up_streak + down_streak + 1e-10)
+    # True Range
+    tr1 = high_daily[1:] - low_daily[1:]
+    tr2 = np.abs(high_daily[1:] - close_daily[:-1])
+    tr3 = np.abs(low_daily[1:] - close_daily[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Percentile rank of current RSI(14) over 100 periods
-    def rolling_percentile(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i < window - 1:
-                result[i] = np.nan
-            else:
-                window_data = arr[i-window+1:i+1]
-                rank = np.sum(window_data <= arr[i]) / window * 100
-                result[i] = rank
-        return result
+    # Directional Movement
+    dm_plus = np.where((high_daily[1:] - high_daily[:-1]) > (low_daily[:-1] - low_daily[1:]), 
+                       np.maximum(high_daily[1:] - high_daily[:-1], 0), 0)
+    dm_minus = np.where((low_daily[:-1] - low_daily[1:]) > (high_daily[1:] - high_daily[:-1]), 
+                        np.maximum(low_daily[:-1] - low_daily[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
     
-    # RSI(14) for percentile calculation
-    gain_14 = pd.Series(gain).ewm(span=14, adjust=False).mean().values
-    loss_14 = pd.Series(loss).ewm(span=14, adjust=False).mean().values
-    rs_14 = gain_14 / (loss_14 + 1e-10)
-    rsi_14 = 100 - (100 / (1 + rs_14))
+    # Smoothed values
+    tr_14 = pd.Series(tr).ewm(span=14, adjust=False).mean().values
+    dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False).mean().values
+    dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False).mean().values
     
-    percent_rank = rolling_percentile(rsi_14, 100)
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
     
-    # CRSI = (RSI(3) + RSI_streak + PercentRank) / 3
-    crsi = (rsi_3 + rsi_streak + percent_rank) / 3
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(span=14, adjust=False).mean().values
     
-    # Calculate Choppiness Index (14-period)
-    atr_1 = np.maximum(high[1:] - low[1:], 
-                       np.maximum(np.abs(high[1:] - low[:-1]), 
-                                  np.abs(low[1:] - high[:-1])))
-    atr_1 = np.concatenate([[np.nan], atr_1])
+    # Calculate daily volume average (20-period)
+    vol_daily = df_daily['volume'].values
+    vol_ma_daily = pd.Series(vol_daily).rolling(window=20, min_periods=20).mean().values
     
-    atr_sum = pd.Series(atr_1).rolling(window=14, min_periods=14).sum().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
-    
-    # Calculate 1d volume average (20-period)
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align indicators to main timeframe
-    crsi_aligned = align_htf_to_ltf(prices, df_1d, crsi)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Align indicators to daily timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_weekly, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_weekly, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_weekly, donchian_mid)
+    adx_aligned = align_htf_to_ltf(prices, df_daily, adx)
+    vol_ma_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_ma_daily)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 100  # for CRSI and CHOP calculations
+    start = 60  # for Donchian and ADX calculations
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(crsi_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_daily_aligned[i])):
             signals[i] = 0.0
             continue
         
-        vol_1d_current = vol_1d[i] if i < len(vol_1d) else vol_1d[-1]
+        price = close[i]
+        vol_daily_current = volume[i]  # Use current daily volume
         
         if position == 0:
-            # Long setup: CRSI oversold + volume spike + ranging market
-            if (crsi_aligned[i] < 15 and 
-                vol_1d_current > 1.5 * vol_ma_1d_aligned[i] and  # Volume spike
-                chop_aligned[i] > 61.8):                        # Range market
+            # Long setup: break above weekly Donchian high with volume spike and trend
+            if (price > donchian_high_aligned[i] and 
+                vol_daily_current > 1.5 * vol_ma_daily_aligned[i] and  # Volume spike
+                adx_aligned[i] > 20):                              # Trend filter
                 position = 1
                 signals[i] = position_size
-            # Short setup: CRSI overbought + volume spike + ranging market
-            elif (crsi_aligned[i] > 85 and 
-                  vol_1d_current > 1.5 * vol_ma_1d_aligned[i] and  # Volume spike
-                  chop_aligned[i] > 61.8):                        # Range market
+            # Short setup: break below weekly Donchian low with volume spike and trend
+            elif (price < donchian_low_aligned[i] and 
+                  vol_daily_current > 1.5 * vol_ma_daily_aligned[i] and  # Volume spike
+                  adx_aligned[i] > 20):                              # Trend filter
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: CRSI crosses back above 50
-            if crsi_aligned[i] > 50:
+            # Exit long: price breaks below weekly Donchian mid or volume drops
+            if price < donchian_mid_aligned[i] or vol_daily_current < vol_ma_daily_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: CRSI crosses back below 50
-            if crsi_aligned[i] < 50:
+            # Exit short: price breaks above weekly Donchian mid or volume drops
+            if price > donchian_mid_aligned[i] or vol_daily_current < vol_ma_daily_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -133,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_CRSI_Volume_Chop_MeanReversion"
-timeframe = "4h"
+name = "1d_WeeklyDonchian_Breakout_DailyVolume_ADX"
+timeframe = "1d"
 leverage = 1.0
