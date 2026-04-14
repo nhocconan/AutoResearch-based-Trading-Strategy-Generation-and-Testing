@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,103 +13,121 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data (HTF) once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    # Load weekly data (HTF) once before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # Calculate daily EMA200 for trend filter (1d)
-    ema200_1d = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 200:
-        ema200_1d[199] = np.mean(close_1d[:200])
-        for i in range(200, len(df_1d)):
-            ema200_1d[i] = (close_1d[i] * 2 + ema200_1d[i-1] * 198) / 200
+    # Calculate weekly RSI (14-period)
+    def calculate_rsi(close_prices, period=14):
+        delta = np.diff(close_prices)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.full_like(close_prices, np.nan)
+        avg_loss = np.full_like(close_prices, np.nan)
+        
+        if len(close_prices) >= period + 1:
+            avg_gain[period] = np.mean(gain[:period])
+            avg_loss[period] = np.mean(loss[:period])
+            
+            for i in range(period + 1, len(close_prices)):
+                avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+                avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+        
+        rsi = np.full_like(close_prices, np.nan)
+        for i in range(period, len(close_prices)):
+            if avg_loss[i] != 0:
+                rs = avg_gain[i] / avg_loss[i]
+                rsi[i] = 100 - (100 / (1 + rs))
+            else:
+                rsi[i] = 100
+        return rsi
     
-    ema200_12h = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    rsi_1w = calculate_rsi(close_1w, 14)
+    rsi_1d = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
-    # Calculate daily ATR for volatility filter (14-period)
-    tr = np.zeros(len(df_1d))
-    tr[0] = high_1d[0] - low_1d[0]
-    for i in range(1, len(df_1d)):
+    # Calculate weekly Bollinger Bands (20-period, 2 std)
+    def calculate_bollinger(close_prices, period=20, std_dev=2):
+        sma = np.full_like(close_prices, np.nan)
+        std = np.full_like(close_prices, np.nan)
+        upper = np.full_like(close_prices, np.nan)
+        lower = np.full_like(close_prices, np.nan)
+        
+        if len(close_prices) >= period:
+            for i in range(period-1, len(close_prices)):
+                sma[i] = np.mean(close_prices[i-period+1:i+1])
+                std[i] = np.std(close_prices[i-period+1:i+1])
+                upper[i] = sma[i] + (std[i] * std_dev)
+                lower[i] = sma[i] - (std[i] * std_dev)
+        return upper, lower
+    
+    bb_upper_1w, bb_lower_1w = calculate_bollinger(close_1w, 20, 2)
+    bb_upper_1d = align_htf_to_ltf(prices, df_1w, bb_upper_1w)
+    bb_lower_1d = align_htf_to_ltf(prices, df_1w, bb_lower_1w)
+    
+    # Calculate daily ATR (14-period)
+    tr = np.zeros(len(prices))
+    tr[0] = high[0] - low[0]
+    for i in range(1, len(prices)):
         tr[i] = max(
-            high_1d[i] - low_1d[i],
-            abs(high_1d[i] - close_1d[i-1]),
-            abs(low_1d[i] - close_1d[i-1])
+            high[i] - low[i],
+            abs(high[i] - close[i-1]),
+            abs(low[i] - close[i-1])
         )
     
-    atr_1d = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 14:
-        atr_1d[13] = np.mean(tr[:14])
-        for i in range(14, len(df_1d)):
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
-    
-    atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # Calculate 12-hour Donchian channels (20-period) for entry signals
-    donch_high = np.full(n, np.nan)
-    donch_low = np.full(n, np.nan)
-    if n >= 20:
-        for i in range(19, n):
-            donch_high[i] = np.max(high[i-19:i+1])
-            donch_low[i] = np.min(low[i-19:i+1])
+    atr = np.full(len(prices), np.nan)
+    if len(prices) >= 14:
+        atr[13] = np.mean(tr[:14])
+        for i in range(14, len(prices)):
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    for i in range(200, n):
+    for i in range(50, n):
         # Skip if any critical data is NaN
-        if (np.isnan(atr_12h[i]) or
-            np.isnan(ema200_12h[i]) or
-            np.isnan(donch_high[i]) or
-            np.isnan(donch_low[i])):
+        if (np.isnan(rsi_1d[i]) or
+            np.isnan(bb_upper_1d[i]) or
+            np.isnan(bb_lower_1d[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
-        # Skip low volatility periods (ATR < 0.3% of price)
-        if atr_12h[i] < 0.003 * close[i]:
+        # Avoid extremely low volatility
+        if atr[i] < 0.001 * close[i]:
             signals[i] = 0.0
             continue
-        
-        # Calculate daily pivot levels based on previous day's range
-        prev_high = high_1d[i-1] if i > 0 else high_1d[0]
-        prev_low = low_1d[i-1] if i > 0 else low_1d[0]
-        prev_close = close_1d[i-1] if i > 0 else close_1d[0]
-        prev_range = prev_high - prev_low
-        
-        # Camarilla-style pivot levels (R4/S4)
-        r4 = prev_close + (prev_range * 1.1 / 2)
-        s4 = prev_close - (prev_range * 1.1 / 2)
-        
-        # Align to 12h timeframe (no extra delay needed for daily pivot)
-        r4_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r4))[i]
-        s4_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s4))[i]
         
         if position == 0:
-            # Long: Price breaks above 12h Donchian high with above daily EMA200
-            if close[i] > donch_high[i] and close[i] > ema200_12h[i]:
+            # Long: Price touches or breaks below weekly BB lower AND weekly RSI < 30 (oversold)
+            if close[i] <= bb_lower_1d[i] and rsi_1d[i] < 30:
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below 12h Donchian low with below daily EMA200
-            elif close[i] < donch_low[i] and close[i] < ema200_12h[i]:
+            # Short: Price touches or breaks above weekly BB upper AND weekly RSI > 70 (overbought)
+            elif close[i] >= bb_upper_1d[i] and rsi_1d[i] > 70:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below 12h Donchian low OR below daily EMA200
-            if close[i] < donch_low[i] or close[i] < ema200_12h[i]:
+            # Exit: Price returns to weekly BB middle (mean reversion complete) OR RSI > 50
+            bb_middle = (bb_upper_1d[i] + bb_lower_1d[i]) / 2
+            if close[i] >= bb_middle or rsi_1d[i] > 50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above 12h Donchian high OR above daily EMA200
-            if close[i] > donch_high[i] or close[i] > ema200_12h[i]:
+            # Exit: Price returns to weekly BB middle OR RSI < 50
+            bb_middle = (bb_upper_1d[i] + bb_lower_1d[i]) / 2
+            if close[i] <= bb_middle or rsi_1d[i] < 50:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -117,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Donchian_EMA200"
-timeframe = "12h"
+name = "1d_1w_Bollinger_RSI_MeanReversion"
+timeframe = "1d"
 leverage = 1.0
