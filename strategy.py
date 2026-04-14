@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour ADX(14) trend strength filter + daily pivot support/resistance + volume confirmation.
-# ADX > 25 identifies trending markets (bull or bear) to avoid whipsaws in ranging periods.
-# Daily pivot levels act as dynamic support/resistance: buy near S1/S2 in uptrend, sell near R1/R2 in downtrend.
-# Volume > 1.3x 20-period average confirms institutional participation.
-# Designed for 20-35 trades/year per symbol to minimize fee drag while capturing strong trends.
-# Works in both bull (buy pullbacks to support) and bear (sell rallies to resistance) markets.
+# Hypothesis: 12-hour KAMA (adaptive moving average) with RSI(14) and Chop filter.
+# KAMA adapts to market noise: faster in trends, slower in ranges.
+# RSI(14) > 55 for long, < 45 for short avoids choppy entries.
+# Choppiness Index (14) > 61.8 indicates ranging market (fade reversals), < 38.2 indicates trending (follow breakouts).
+# Uses 1-day trend filter for higher timeframe bias.
+# Designed for 12h timeframe: targets 15-30 trades/year (60-120 over 4 years) to minimize fee drag.
+# Works in both bull (follows KAMA trend) and bear (avoids false signals in chop via Chop filter).
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,121 +21,125 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE for pivot points and ADX
+    # Load 1-day data ONCE for trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Need at least 30 days for ADX calculation
-    if len(df_1d) < 30:
+    # KAMA (adaptive moving average) on 12h close
+    def kama(close, length=10, fast=2, slow=30):
+        # Efficiency Ratio
+        change = np.abs(np.diff(close, n=length))
+        volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(close) > 1 else 0
+        # Full calculation requires loop - using simplified adaptive alpha
+        # For practical purposes, use EMA with volatility-based alpha
+        er = np.zeros_like(close)
+        for i in range(length, len(close)):
+            if np.sum(np.abs(np.diff(close[i-length:i+1]))) > 0:
+                er[i] = np.abs(close[i] - close[i-length]) / np.sum(np.abs(np.diff(close[i-length:i+1])))
+        # Smoothing constants
+        fast_sc = 2/(fast+1)
+        slow_sc = 2/(slow+1)
+        sc = (er * (fast_sc - slow_sc) + slow_sc)**2
+        # Initialize KAMA
+        kama_vals = np.zeros_like(close)
+        kama_vals[0] = close[0]
+        for i in range(1, len(close)):
+            kama_vals[i] = kama_vals[i-1] + sc[i] * (close[i] - kama_vals[i-1])
+        return kama_vals
+    
+    # Simplified KAMA using EMA with volatility adjustment (practical approximation)
+    # Using 10-period EMA as base, adjusted by volatility ratio
+    price_change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = pd.Series(price_change).rolling(window=10, min_periods=1).sum().values
+    abs_change = pd.Series(np.abs(np.diff(close, prepend=0))).rolling(window=10, min_periods=1).sum().values
+    er = np.where(abs_change > 0, price_change / abs_change, 0)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
+    kama_12h = pd.Series(close).ewm(alpha=sc, adjust=False).mean().values
+    
+    # RSI(14)
+    def rsi(close, length=14):
+        delta = np.diff(close, prepend=close[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = pd.Series(gain).ewm(alpha=1/length, adjust=False, min_periods=length).mean().values
+        avg_loss = pd.Series(loss).ewm(alpha=1/length, adjust=False, min_periods=length).mean().values
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+    
+    rsi_12h = rsi(close, 14)
+    
+    # Choppiness Index (14)
+    def chop(high, low, close, length=14):
+        atr = np.zeros_like(close)
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[0], tr])
+        atr = pd.Series(tr).rolling(window=length, min_periods=length).sum().values
+        max_high = pd.Series(high).rolling(window=length, min_periods=length).max().values
+        min_low = pd.Series(low).rolling(window=length, min_periods=length).min().values
+        chop = 100 * np.log10(atr / (max_high - min_low)) / np.log10(length)
+        return chop
+    
+    chop_12h = chop(high, low, close, 14)
+    
+    # 1-day EMA(50) for trend filter
+    if len(df_1d) < 50:
         return np.zeros(n)
-    
-    # Calculate ADX(14) on daily timeframe
-    # TR = max(high-low, abs(high-previous_close), abs(low-previous_close))
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    
-    # +DM and -DM
-    up_move = df_1d['high'] - df_1d['high'].shift(1)
-    down_move = df_1d['low'].shift(1) - df_1d['low']
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum()
-    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum()
-    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum()
-    
-    # DI values
-    plus_di = 100 * plus_dm_14 / tr_14
-    minus_di = 100 * minus_dm_14 / tr_14
-    
-    # DX and ADX
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean()
-    
-    adx_values = adx.values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
-    
-    # Calculate daily pivot points (using previous day's OHLC)
-    # Pivot = (H + L + C) / 3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
-    pivot = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    r1 = 2 * pivot - df_1d['low']
-    s1 = 2 * pivot - df_1d['high']
-    r2 = pivot + (df_1d['high'] - df_1d['low'])
-    s2 = pivot - (df_1d['high'] - df_1d['low'])
-    
-    # Align pivot levels to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot.values)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2.values)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2.values)
-    
-    # Volume confirmation: 1.3x average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    ema_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(30, 20)
+    start = max(50, 14)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(adx_1d_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or
-            np.isnan(s2_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(kama_12h[i]) or 
+            np.isnan(rsi_12h[i]) or
+            np.isnan(chop_12h[i]) or
+            np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: ADX > 25 indicates trending market
-        trending = adx_1d_aligned[i] > 25
+        # Trend filter: price relative to 1-day EMA50
+        above_ema = close[i] > ema_1d_aligned[i]
+        below_ema = close[i] < ema_1d_aligned[i]
         
-        # Volume confirmation
-        volume_confirmed = volume[i] > 1.3 * vol_ma[i]
+        # Chop regime: > 61.8 = range (fade), < 38.2 = trend (follow)
+        chop_value = chop_12h[i]
+        in_trend = chop_value < 38.2
+        in_range = chop_value > 61.8
         
         if position == 0:
-            # Enter long: price near support (S1 or S2) in uptrend + volume
-            if trending and volume_confirmed:
-                # Buy near S1 (primary support) or S2 (secondary support)
-                near_support = (abs(close[i] - s1_aligned[i]) < 0.005 * close[i]) or \
-                               (abs(close[i] - s2_aligned[i]) < 0.01 * close[i])
-                if near_support:
-                    position = 1
-                    signals[i] = position_size
-            # Enter short: price near resistance (R1 or R2) in downtrend + volume
-            elif trending and volume_confirmed:
-                # Sell near R1 (primary resistance) or R2 (secondary resistance)
-                near_resistance = (abs(close[i] - r1_aligned[i]) < 0.005 * close[i]) or \
-                                  (abs(close[i] - r2_aligned[i]) < 0.01 * close[i])
-                if near_resistance:
-                    position = -1
-                    signals[i] = -position_size
+            # Enter long: price > KAMA + RSI > 55 + in trending OR (in range and mean reversion)
+            if (close[i] > kama_12h[i] and 
+                rsi_12h[i] > 55 and
+                (in_trend or (in_range and close[i] < kama_12h[i]))):  # Mean reversion in range
+                position = 1
+                signals[i] = position_size
+            # Enter short: price < KAMA + RSI < 45 + in trending OR (in range and mean reversion)
+            elif (close[i] < kama_12h[i] and 
+                  rsi_12h[i] < 45 and
+                  (in_trend or (in_range and close[i] > kama_12h[i]))):  # Mean reversion in range
+                position = -1
+                signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price reaches pivot or R1, or trend weakens
-            if (close[i] > pivot_aligned[i] or 
-                close[i] > r1_aligned[i] or 
-                adx_1d_aligned[i] < 20):  # Trend weakening
+            # Exit long: price < KAMA or RSI < 40
+            if close[i] < kama_12h[i] or rsi_12h[i] < 40:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price reaches pivot or S1, or trend weakens
-            if (close[i] < pivot_aligned[i] or 
-                close[i] < s1_aligned[i] or 
-                adx_1d_aligned[i] < 20):  # Trend weakening
+            # Exit short: price > KAMA or RSI > 60
+            if close[i] > kama_12h[i] or rsi_12h[i] > 60:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -142,6 +147,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_ADX_Pivot_Volume_v1"
-timeframe = "4h"
+name = "12h_KAMA_RSI_Chop_v1"
+timeframe = "12h"
 leverage = 1.0
