@@ -67,6 +67,27 @@ def generate_signals(prices):
     upper_bb_1d_aligned = sma20_1d_aligned + 2 * std20_1d_aligned
     lower_bb_1d_aligned = sma20_1d_aligned - 2 * std20_1d_aligned
     
+    # Calculate RSI(14) on 4h closes for momentum confirmation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.full_like(close, np.nan)
+    avg_loss = np.full_like(close, np.nan)
+    
+    # First average
+    if len(gain) >= 14:
+        avg_gain[13] = np.mean(gain[1:14])
+        avg_loss[13] = np.mean(loss[1:14])
+    
+    # Wilder smoothing
+    for i in range(14, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(close, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # Conservative size to limit trades
@@ -77,7 +98,8 @@ def generate_signals(prices):
             np.isnan(sma20_1d_aligned[i]) or 
             np.isnan(std20_1d_aligned[i]) or
             np.isnan(upper_bb_1d_aligned[i]) or
-            np.isnan(lower_bb_1d_aligned[i])):
+            np.isnan(lower_bb_1d_aligned[i]) or
+            np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
@@ -92,30 +114,34 @@ def generate_signals(prices):
             volume_ratio = volume[i] / vol_ma_20[i]
         
         if position == 0:
-            # Long: price touches lower Bollinger Band with volume surge
+            # Long: price touches lower Bollinger Band with volume surge and RSI oversold
             if (close[i] <= lower_bb_1d_aligned[i] and 
-                volume_ratio > 2.0):
+                volume_ratio > 2.0 and
+                rsi[i] < 30):
                 position = 1
                 signals[i] = position_size
-            # Short: price touches upper Bollinger Band with volume surge
+            # Short: price touches upper Bollinger Band with volume surge and RSI overbought
             elif (close[i] >= upper_bb_1d_aligned[i] and 
-                  volume_ratio > 2.0):
+                  volume_ratio > 2.0 and
+                  rsi[i] > 70):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses above SMA(20) or volume dries up
+            # Exit long: price crosses above SMA(20) or volume dries up or RSI overbought
             if (close[i] > sma20_1d_aligned[i] or
-                volume_ratio < 0.5):
+                volume_ratio < 0.5 or
+                rsi[i] > 70):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses below SMA(20) or volume dries up
+            # Exit short: price crosses below SMA(20) or volume dries up or RSI oversold
             if (close[i] < sma20_1d_aligned[i] or
-                volume_ratio < 0.5):
+                volume_ratio < 0.5 or
+                rsi[i] < 30):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -123,6 +149,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Bollinger_Touch_Volume"
+name = "4h_1d_Bollinger_Touch_Volume_RSI"
 timeframe = "4h"
 leverage = 1.0
