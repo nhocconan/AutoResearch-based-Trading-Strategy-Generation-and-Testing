@@ -1,9 +1,3 @@
-# Hypothetical: 6h_1wVWAP1dRSI_Pullback
-# Hypothesis: In BTC/ETH, weekly VWAP acts as institutional support/resistance. Price often pulls back to weekly VWAP before continuing trend.
-# Use 1d RSI(14) to confirm momentum alignment during pullback: RSI>50 for longs near VWAP, RSI<50 for shorts.
-# Enter on pullback to weekly VWAP with aligned 1d momentum. Exit when price deviates >1.5*ATR from VWAP or RSI diverges.
-# Works in bull (buy dips to VWAP) and bear (sell rallies to VWAP). Low frequency: expects 1-2 touches per week per side.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -19,33 +13,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate weekly VWAP: cumulative (price * volume) / cumulative volume
-    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
-    pv = (typical_price * df_1w['volume']).cumsum()
-    vol_cum = df_1w['volume'].cumsum()
-    vwap = pv / vol_cum
-    vwap = vwap.replace([np.inf, -np.inf], np.nan).ffill().bfill().values
-    
-    # Align weekly VWAP to 6s timeframe (no additional delay - VWAP is known within the week)
-    vwap_aligned = align_htf_to_ltf(prices, df_1w, vwap)
-    
-    # Load daily data for RSI and ATR
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily RSI(14)
-    delta = pd.Series(df_1d['close']).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_1d = (100 - (100 / (1 + rs))).values
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Calculate 1d EMA(20) for trend filter
+    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # Calculate daily ATR(14) for exit condition
+    # Calculate 1d ATR(14) for volatility filter
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     close_series = pd.Series(close)
@@ -54,6 +29,24 @@ def generate_signals(prices):
     tr3 = abs(low_series - close_series.shift(1))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate 1d Bollinger Bands (20, 2) for volatility regime
+    sma_20_1d = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).mean().values
+    std_20_1d = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).std().values
+    upper_bb_1d = sma_20_1d + (2 * std_20_1d)
+    lower_bb_1d = sma_20_1d - (2 * std_20_1d)
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_1d)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_1d)
+    
+    # Calculate 1d RSI(14) for momentum filter
+    delta = pd.Series(df_1d['close']).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = (100 - (100 / (1 + rs))).values
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     signals = np.zeros(n)
     position = 0
@@ -64,41 +57,53 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(vwap_aligned[i]) or 
-            np.isnan(rsi_1d_aligned[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(ema_20_1d_aligned[i]) or 
+            np.isnan(atr[i]) or 
+            np.isnan(upper_bb_aligned[i]) or 
+            np.isnan(lower_bb_aligned[i]) or
+            np.isnan(rsi_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vwap = vwap_aligned[i]
-        rsi = rsi_1d_aligned[i]
-        atr_val = atr[i]
+        vol = volume[i]
         
-        # Distance from VWAP in ATR units
-        dist_from_vwap = abs(price - vwap) / atr_val if atr_val > 0 else 0
+        # ATR-based volatility filter: avoid extremely low volatility periods
+        atr_ratio = atr[i] / price if price > 0 else 0
+        vol_filter = atr_ratio > 0.003  # Minimum 0.3% ATR relative to price
+        
+        # Bollinger Band squeeze detection: bandwidth < 5% of price
+        bb_width = (upper_bb_aligned[i] - lower_bb_aligned[i]) / price if price > 0 else 0
+        bb_squeeze = bb_width < 0.05
+        
+        # Trend filter: price > 1d EMA20 for long, price < 1d EMA20 for short
+        trend_filter_long = price > ema_20_1d_aligned[i]
+        trend_filter_short = price < ema_20_1d_aligned[i]
+        
+        # Momentum filter: RSI between 30 and 70 to avoid extremes
+        rsi_filter = (rsi_1d_aligned[i] > 30) & (rsi_1d_aligned[i] < 70)
         
         if position == 0:
-            # Long setup: price near weekly VWAP (within 1 ATR) AND bullish momentum (RSI>50)
-            if dist_from_vwap <= 1.0 and rsi > 50:
+            # Long setup: price above 1d EMA20 + volatility filter + not in squeeze + momentum filter
+            if (trend_filter_long and vol_filter and not bb_squeeze and rsi_filter):
                 position = 1
                 signals[i] = position_size
-            # Short setup: price near weekly VWAP (within 1 ATR) AND bearish momentum (RSI<50)
-            elif dist_from_vwap <= 1.0 and rsi < 50:
+            # Short setup: price below 1d EMA20 + volatility filter + not in squeeze + momentum filter
+            elif (trend_filter_short and vol_filter and not bb_squeeze and rsi_filter):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price moves >1.5*ATR away from VWAP OR momentum turns bearish (RSI<40)
-            if dist_from_vwap > 1.5 or rsi < 40:
+            # Exit long: price crosses below 1d EMA20
+            if price < ema_20_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price moves >1.5*ATR away from VWAP OR momentum turns bullish (RSI>60)
-            if dist_from_vwap > 1.5 or rsi > 60:
+            # Exit short: price crosses above 1d EMA20
+            if price > ema_20_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -106,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1wVWAP1dRSI_Pullback"
-timeframe = "6h"
+name = "1d_EMA20_BBWidth_RSI_Filter"
+timeframe = "1d"
 leverage = 1.0
