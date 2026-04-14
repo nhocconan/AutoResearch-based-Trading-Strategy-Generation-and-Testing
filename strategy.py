@@ -22,22 +22,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels (more precise than standard pivots)
-    # Formula: R4 = Close + ((High - Low) * 1.1/2), R3 = Close + ((High - Low) * 1.1/4)
-    #          S3 = Close - ((High - Low) * 1.1/4), S4 = Close - ((High - Low) * 1.1/2)
-    range_1d = high_1d - low_1d
-    r3 = close_1d + (range_1d * 1.1 / 4)
-    s3 = close_1d - (range_1d * 1.1 / 4)
-    r4 = close_1d + (range_1d * 1.1 / 2)
-    s4 = close_1d - (range_1d * 1.1 / 2)
-    
-    # Align Camarilla levels to 4h timeframe
-    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
-    r4_4h = align_htf_to_ltf(prices, df_1d, r4)
-    s4_4h = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Calculate daily ATR for volatility filter (14-period)
+    # Calculate 1d ATR (14-period)
     tr = np.zeros(len(df_1d))
     tr[0] = high_1d[0] - low_1d[0]
     for i in range(1, len(df_1d)):
@@ -53,7 +38,25 @@ def generate_signals(prices):
         for i in range(14, len(df_1d)):
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
+    # Calculate 1d EMA (21-period) for trend
+    ema_1d = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 21:
+        multiplier = 2 / (21 + 1)
+        ema_1d[20] = np.mean(close_1d[:21])
+        for i in range(21, len(df_1d)):
+            ema_1d[i] = (close_1d[i] * multiplier) + (ema_1d[i-1] * (1 - multiplier))
+    
+    # Align 1d indicators to 4h timeframe
     atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    ema_1d_4h = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Calculate 4h Donchian channels (20-period)
+    donch_high = np.full(n, np.nan)
+    donch_low = np.full(n, np.nan)
+    if n >= 20:
+        for i in range(19, n):
+            donch_high[i] = np.max(high[i-19:i+1])
+            donch_low[i] = np.min(low[i-19:i+1])
     
     # Volume spike detection (20-period average on 4h)
     vol_ma_20 = np.full_like(volume, np.nan)
@@ -67,11 +70,10 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r3_4h[i]) or 
-            np.isnan(s3_4h[i]) or
-            np.isnan(r4_4h[i]) or
-            np.isnan(s4_4h[i]) or
+        if (np.isnan(donch_high[i]) or 
+            np.isnan(donch_low[i]) or
             np.isnan(atr_4h[i]) or
+            np.isnan(ema_1d_4h[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -91,26 +93,30 @@ def generate_signals(prices):
         vol_threshold = 2.5
         
         if position == 0:
-            # Long: Price breaks above R4 with volume confirmation
-            if (close[i] > r4_4h[i] and volume_ratio > vol_threshold):
+            # Long: Price breaks above Donchian high + volume + price above 1d EMA
+            if (close[i] > donch_high[i] and 
+                volume_ratio > vol_threshold and 
+                close[i] > ema_1d_4h[i]):
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below S4 with volume confirmation
-            elif (close[i] < s4_4h[i] and volume_ratio > vol_threshold):
+            # Short: Price breaks below Donchian low + volume + price below 1d EMA
+            elif (close[i] < donch_low[i] and 
+                  volume_ratio > vol_threshold and 
+                  close[i] < ema_1d_4h[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below S3 (more sensitive exit)
-            if close[i] < s3_4h[i]:
+            # Exit: Price falls back below Donchian low
+            if close[i] < donch_low[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above R3 (more sensitive exit)
-            if close[i] > r3_4h[i]:
+            # Exit: Price rises back above Donchian high
+            if close[i] > donch_high[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -118,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_R4S4_Breakout_Volume"
+name = "4h_Donchian_Breakout_1dEMA_Volume_Filter"
 timeframe = "4h"
 leverage = 1.0
