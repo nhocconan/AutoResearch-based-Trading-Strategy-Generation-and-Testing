@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-day Donchian(20) breakout with weekly RSI(14) trend filter and volume confirmation.
-# The weekly RSI(14) identifies strong trends (>60 for bullish, <40 for bearish) across market regimes.
-# The 1-day Donchian(20) breakout captures momentum in the direction of the weekly trend.
-# Volume > 1.3x the 20-day average confirms institutional participation.
-# Exit occurs when price crosses the 20-day EMA or breaks the opposite Donchian band.
-# Designed for low trade frequency (~15-25 trades/year) to minimize fee drag on 1d timeframe.
+# Hypothesis: 4-hour RSI(14) mean reversion with 1-day Bollinger Bands filter and volume confirmation.
+# In bear markets (2025+), RSI extremes often precede mean-reversion bounces rather than continuation.
+# The 1-day Bollinger Bands (20,2) define the medium-term range; trades fade extremes toward the mean.
+# Volume > 1.3x average confirms participation at turning points.
+# Exit when RSI returns to neutral (40-60) or price touches the opposite Bollinger Band.
+# This strategy targets 20-30 trades per year per symbol (80-120 total over 4 years), well within limits.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,31 +20,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE for Bollinger Bands filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly RSI(14) for trend filter
-    rsi_len = 14
-    if len(df_1w) < rsi_len:
+    # 1d Bollinger Bands (20,2)
+    bb_len = 20
+    bb_std = 2
+    if len(df_1d) < bb_len:
         return np.zeros(n)
     
-    # Calculate RSI on weekly close
-    delta = pd.Series(df_1w['close']).diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=rsi_len, min_periods=rsi_len).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=rsi_len, min_periods=rsi_len).mean()
-    rs = gain / loss
-    rsi_1w = 100 - (100 / (1 + rs))
-    rsi_1w = rsi_1w.fillna(50).values  # Neutral when undefined
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    close_1d = df_1d['close'].values
+    basis = pd.Series(close_1d).rolling(window=bb_len, min_periods=bb_len).mean().values
+    dev = bb_std * pd.Series(close_1d).rolling(window=bb_len, min_periods=bb_len).std().values
+    upper_bb = basis + dev
+    lower_bb = basis - dev
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
     
-    # 1-day EMA(20) for exit signal
-    ema_len = 20
-    ema_1d = pd.Series(close).ewm(span=ema_len, adjust=False, min_periods=ema_len).mean().values
+    # RSI(14) on 4h
+    rsi_len = 14
+    if n < rsi_len + 1:
+        return np.zeros(n)
     
-    # Donchian channel (20 periods) on 1d
-    dc_len = 20
-    dc_upper = pd.Series(high).rolling(window=dc_len, min_periods=dc_len).max().shift(1).values
-    dc_lower = pd.Series(low).rolling(window=dc_len, min_periods=dc_len).min().shift(1).values
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_len, min_periods=rsi_len, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_len, min_periods=rsi_len, adjust=False).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
     # Volume confirmation: 1.3x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,50 +58,45 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(30, dc_len, 20)
+    start = max(rsi_len + 1, bb_len, 20)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(dc_upper[i]) or 
-            np.isnan(dc_lower[i]) or
-            np.isnan(rsi_1w_aligned[i]) or
-            np.isnan(ema_1d[i]) or
+        if (np.isnan(rsi[i]) or 
+            np.isnan(upper_bb_aligned[i]) or
+            np.isnan(lower_bb_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
-        
-        # Trend filter: weekly RSI > 60 for bullish, < 40 for bearish
-        bullish_trend = rsi_1w_aligned[i] > 60
-        bearish_trend = rsi_1w_aligned[i] < 40
         
         # Volume confirmation: current volume > 1.3x average
         volume_confirmed = volume[i] > 1.3 * vol_ma[i]
         
         if position == 0:
-            # Enter long: Donchian breakout above + bullish weekly trend + volume
-            if (close[i] > dc_upper[i] and 
-                bullish_trend and 
+            # Enter long: RSI oversold (<30) + price near lower BB + volume
+            if (rsi[i] < 30 and 
+                close[i] <= lower_bb_aligned[i] * 1.02 and  # within 2% of lower BB
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Enter short: Donchian breakdown below + bearish weekly trend + volume
-            elif (close[i] < dc_lower[i] and 
-                  bearish_trend and 
+            # Enter short: RSI overbought (>70) + price near upper BB + volume
+            elif (rsi[i] > 70 and 
+                  close[i] >= upper_bb_aligned[i] * 0.98 and  # within 2% of upper BB
                   volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below 20-day EMA or breaks below Donchian lower
-            if close[i] < ema_1d[i] or close[i] < dc_lower[i]:
+            # Exit long: RSI returns to neutral (40-60) or price touches upper BB
+            if (rsi[i] >= 40 and rsi[i] <= 60) or close[i] >= upper_bb_aligned[i] * 0.98:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above 20-day EMA or breaks above Donchian upper
-            if close[i] > ema_1d[i] or close[i] > dc_upper[i]:
+            # Exit short: RSI returns to neutral (40-60) or price touches lower BB
+            if (rsi[i] >= 40 and rsi[i] <= 60) or close[i] <= lower_bb_aligned[i] * 1.02:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -105,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_RSI14_Donchian_Volume_v1"
-timeframe = "1d"
+name = "4h_1d_RSI_BB_Volume_MeanRev_v1"
+timeframe = "4h"
 leverage = 1.0
