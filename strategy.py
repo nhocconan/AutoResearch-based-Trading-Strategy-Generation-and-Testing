@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -71,11 +71,11 @@ def generate_signals(prices):
         for i in range(27, len(df_1d)):
             adx_14[i] = (adx_14[i-1] * 13 + dx_14[i]) / 14
     
-    # Align indicators to 6h timeframe
-    atr_6h = align_htf_to_ltf(prices, df_1d, atr_1d)
-    adx_6h = align_htf_to_ltf(prices, df_1d, adx_14)
+    # Align indicators to 1h timeframe
+    atr_1h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    adx_1h = align_htf_to_ltf(prices, df_1d, adx_14)
     
-    # Calculate 6-hour Donchian channels (20-period)
+    # Calculate 1-hour Donchian channels (20-period)
     donch_high = np.full(n, np.nan)
     donch_low = np.full(n, np.nan)
     if n >= 20:
@@ -83,7 +83,7 @@ def generate_signals(prices):
             donch_high[i] = np.max(high[i-19:i+1])
             donch_low[i] = np.min(low[i-19:i+1])
     
-    # Calculate 6-hour volume moving average (20-period)
+    # Calculate 1-hour volume moving average (20-period)
     volume_ma = np.full(n, np.nan)
     if n >= 20:
         for i in range(19, n):
@@ -91,20 +91,20 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # Reduced position size to 25% to control drawdown
+    position_size = 0.20
     
     for i in range(20, n):
         # Skip if any critical data is NaN
-        if (np.isnan(atr_6h[i]) or
+        if (np.isnan(atr_1h[i]) or
             np.isnan(donch_high[i]) or
             np.isnan(donch_low[i]) or
-            np.isnan(adx_6h[i]) or
+            np.isnan(adx_1h[i]) or
             np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         # Skip low volatility periods (ATR < 0.5% of price)
-        if atr_6h[i] / close[i] < 0.005:
+        if atr_1h[i] / close[i] < 0.005:
             signals[i] = 0.0
             continue
         
@@ -114,7 +114,7 @@ def generate_signals(prices):
             continue
         
         # Skip low trend strength (ADX < 28)
-        if adx_6h[i] < 28:
+        if adx_1h[i] < 28:
             signals[i] = 0.0
             continue
         
@@ -125,38 +125,38 @@ def generate_signals(prices):
         prev_range = prev_high - prev_low
         
         # Pivot levels for reversal at extremes
-        r3 = prev_close + (prev_range * 1.1 / 4)  # Resistance 3
         s3 = prev_close - (prev_range * 1.1 / 4)  # Support 3
-        r4 = prev_close + (prev_range * 1.1 / 2)  # Resistance 4
-        s4 = prev_close - (prev_range * 1.1 / 2)  # Support 4
+        r3 = prev_close + (prev_range * 1.1 / 4)  # Resistance 3
         
-        # Align to 6h timeframe
-        r3_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r3))[i]
-        s3_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i]
-        r4_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r4))[i]
-        s4_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s4))[i]
+        # Align to 1h timeframe
+        s3_1h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i]
+        r3_1h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r3))[i]
         
         if position == 0:
-            # Long: Price breaks above 6h Donchian high AND above S3 (support hold) AND volume > 1.6x MA
-            if close[i] > donch_high[i] and close[i] > s3_6h and volume[i] > 1.6 * volume_ma[i]:
+            # Long: Price breaks above 1h Donchian high AND above S3 (support hold) AND volume > 1.6x MA
+            if close[i] > donch_high[i] and close[i] > s3_1h and volume[i] > 1.6 * volume_ma[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below 6h Donchian low AND below R3 (resistance hold) AND volume > 1.6x MA
-            elif close[i] < donch_low[i] and close[i] < r3_6h and volume[i] > 1.6 * volume_ma[i]:
+            # Short: Price breaks below 1h Donchian low AND below R3 (resistance hold) AND volume > 1.6x MA
+            elif close[i] < donch_low[i] and close[i] < r3_1h and volume[i] > 1.6 * volume_ma[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below 6h Donchian low OR below S4
-            if close[i] < donch_low[i] or close[i] < s4_6h:
+            # Exit: Price falls back below 1h Donchian low OR below S4 (S3 - 0.5*range)
+            s4 = s3 - 0.5 * prev_range
+            s4_1h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s4))[i]
+            if close[i] < donch_low[i] or close[i] < s4_1h:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above 6h Donchian high OR above R4
-            if close[i] > donch_high[i] or close[i] > r4_6h:
+            # Exit: Price rises back above 1h Donchian high OR above R4 (R3 + 0.5*range)
+            r4 = r3 + 0.5 * prev_range
+            r4_1h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r4))[i]
+            if close[i] > donch_high[i] or close[i] > r4_1h:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -164,6 +164,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Pivot_S3R3_Donchian20_Volume_Filter_v4"
-timeframe = "6h"
+name = "1h_1d_Pivot_S3R3_Donchian20_Volume_Filter_v1"
+timeframe = "1h"
 leverage = 1.0
