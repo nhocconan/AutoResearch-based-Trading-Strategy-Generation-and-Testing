@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Load 1d data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
@@ -38,9 +38,9 @@ def generate_signals(prices):
     donchian_high = high_series.rolling(window=20, min_periods=20).max().shift(1).values
     donchian_low = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Calculate 4h volume filter: current volume > 1.3x 15-period average
+    # Calculate 4h volume filter: current volume > 1.3x 20-period average
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=15, min_periods=15).mean().values
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     
     # Calculate 1d volatility regime: ATR > 60th percentile of past 30 days
     atr_series_1d = pd.Series(atr_1d)
