@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,74 +13,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data once for pivot levels
+    # Load daily data once for ATR and trend
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily pivot points
+    # Calculate daily ATR(14) for volatility regime
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1d = np.concatenate([[np.nan], tr_1d])
+    atr_1d = np.full(len(tr_1d), np.nan)
+    
+    for i in range(14, len(tr_1d)):
+        atr_1d[i] = np.nanmean(tr_1d[i-13:i+1])
+    
+    # Calculate daily EMA(50) for trend
+    close_1d_series = pd.Series(close_1d)
+    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Create arrays for alignment
-    pivot_arr = pivot
-    r1_arr = r1
-    s1_arr = s1
-    r2_arr = r2
-    s2_arr = s2
+    atr_1d_arr = atr_1d
+    ema_50_1d_arr = ema_50_1d
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.20
+    position_size = 0.25
     
-    # Pre-compute session filter: 08:00-20:00 UTC
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    for i in range(2, n):
-        if not in_session[i]:
+    for i in range(50, n):
+        # Get aligned daily data
+        atr_1d_i = align_htf_to_ltf(prices, df_1d, atr_1d_arr)[i]
+        ema_50_1d_i = align_htf_to_ltf(prices, df_1d, ema_50_1d_arr)[i]
+        
+        if np.isnan(atr_1d_i) or np.isnan(ema_50_1d_i):
             continue
         
-        # Get aligned daily data
-        pivot_d = align_htf_to_ltf(prices, df_1d, pivot_arr)[i]
-        r1_d = align_htf_to_ltf(prices, df_1d, r1_arr)[i]
-        s1_d = align_htf_to_ltf(prices, df_1d, s1_arr)[i]
-        r2_d = align_htf_to_ltf(prices, df_1d, r2_arr)[i]
-        s2_d = align_htf_to_ltf(prices, df_1d, s2_arr)[i]
-        
-        if np.isnan(pivot_d) or np.isnan(r1_d) or np.isnan(s1_d) or np.isnan(r2_d) or np.isnan(s2_d):
+        # Volatility regime: only trade when ATR is above median (avoid chop)
+        if atr_1d_i < np.nanmedian(atr_1d):
             continue
         
         if position == 0:
-            # Long: Price rejects S1 (daily support) with close above S1
-            if close[i] > s1_d and low[i] <= s1_d * 1.002:
+            # Long: price above daily EMA50 + volume spike
+            if close[i] > ema_50_1d_i and volume[i] > 1.5 * np.nanmedian(volume[max(0, i-20):i]):
                 position = 1
                 signals[i] = position_size
-            # Short: Price rejects R1 (daily resistance) with close below R1
-            elif close[i] < r1_d and high[i] >= r1_d * 0.998:
+            # Short: price below daily EMA50 + volume spike
+            elif close[i] < ema_50_1d_i and volume[i] > 1.5 * np.nanmedian(volume[max(0, i-20):i]):
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
-            # Exit: Price reaches R2 (daily resistance target) or reverses at R1
-            if close[i] >= r2_d or (close[i] < r1_d and high[i] >= r1_d * 0.998):
+            # Exit: price crosses below EMA50
+            if close[i] < ema_50_1d_i:
                 position = 0
                 signals[i] = 0.0
         elif position == -1:
-            # Exit: Price reaches S2 (daily support target) or reverses at S1
-            if close[i] <= s2_d or (close[i] > s1_d and low[i] <= s1_d * 1.002):
+            # Exit: price crosses above EMA50
+            if close[i] > ema_50_1d_i:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "1h_DailyPivot_Rejection_v1"
-timeframe = "1h"
+name = "4h_DailyEMA50_VolumeSpike_Regime_v1"
+timeframe = "4h"
 leverage = 1.0
