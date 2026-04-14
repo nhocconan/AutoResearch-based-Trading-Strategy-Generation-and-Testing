@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -16,83 +16,82 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
+    # Calculate 1d Donchian channels (20-period high/low)
+    high_series = pd.Series(df_1d['high'])
+    low_series = pd.Series(df_1d['low'])
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    
     # Calculate 1d ATR(14) for volatility filter
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    close_series = pd.Series(close)
     tr1 = high_series - low_series
-    tr2 = abs(high_series - close_series.shift(1))
-    tr3 = abs(low_series - close_series.shift(1))
+    tr2 = abs(high_series - close_series.shift(1)) if 'close_series' in locals() else abs(high_series - pd.Series(close).shift(1))
+    tr3 = abs(low_series - close_series.shift(1)) if 'close_series' in locals() else abs(low_series - pd.Series(close).shift(1))
+    if 'close_series' not in locals():
+        close_series = pd.Series(close)
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
+    atr_1d = tr.rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate 1d Bollinger Band width for squeeze detection
-    sma_20_1d = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).mean().values
-    std_20_1d = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).std().values
-    upper_bb_1d = sma_20_1d + (2 * std_20_1d)
-    lower_bb_1d = sma_20_1d - (2 * std_20_1d)
-    bb_width_1d = (upper_bb_1d - lower_bb_1d) / sma_20_1d
-    bb_width_1d_aligned = align_htf_to_ltf(prices, df_1d, bb_width_1d)
-    
-    # Calculate 1d RSI(14) for momentum filter
-    delta = pd.Series(df_1d['close']).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_1d = (100 - (100 / (1 + rs))).values
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Calculate 1d ADX(14) for trend strength
+    plus_dm = high_series.diff()
+    minus_dm = low_series.diff()
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0)
+    tr_14 = tr.rolling(window=14, min_periods=14).sum()
+    plus_di_14 = 100 * (plus_dm.rolling(window=14, min_periods=14).sum() / tr_14)
+    minus_di_14 = 100 * (minus_dm.rolling(window=14, min_periods=14).sum() / tr_14)
+    dx = (abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)) * 100
+    adx_1d = dx.rolling(window=14, min_periods=14).mean().values
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 50
+    start = 100
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(atr[i]) or 
-            np.isnan(rsi_1d_aligned[i]) or
-            np.isnan(bb_width_1d_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(atr_1d_aligned[i]) or
+            np.isnan(adx_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         
-        # ATR-based volatility filter: avoid extremely low volatility periods
-        atr_ratio = atr[i] / price if price > 0 else 0
-        vol_filter = atr_ratio > 0.003  # Minimum 0.3% ATR relative to price
+        # Volatility filter: ATR > 0.5% of price
+        vol_filter = (atr_1d_aligned[i] / price) > 0.005 if price > 0 else False
         
-        # Bollinger Band squeeze detection: bandwidth < 5%
-        bb_squeeze = bb_width_1d_aligned[i] < 0.05
-        
-        # Momentum filter: RSI between 30 and 70 to avoid extremes
-        rsi_filter = (rsi_1d_aligned[i] > 30) & (rsi_1d_aligned[i] < 70)
+        # Trend strength filter: ADX > 25
+        trend_filter = adx_1d_aligned[i] > 25
         
         if position == 0:
-            # Long setup: volatility filter + not in squeeze + momentum filter (no trend filter - let price action decide)
-            if (vol_filter and not bb_squeeze and rsi_filter):
+            # Long breakout: price breaks above 1d Donchian high
+            if price > donchian_high_aligned[i] and vol_filter and trend_filter:
                 position = 1
                 signals[i] = position_size
-            # Short setup: volatility filter + not in squeeze + momentum filter
-            elif (vol_filter and not bb_squeeze and rsi_filter):
+            # Short breakdown: price breaks below 1d Donchian low
+            elif price < donchian_low_aligned[i] and vol_filter and trend_filter:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: volatility drops or enters squeeze
-            if (not vol_filter) or bb_squeeze:
+            # Exit long: price crosses below 1d Donchian low
+            if price < donchian_low_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: volatility drops or enters squeeze
-            if (not vol_filter) or bb_squeeze:
+            # Exit short: price crosses above 1d Donchian high
+            if price > donchian_high_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -100,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dATR_Vol_BBWidth_RSI_Filter_v1"
-timeframe = "4h"
+name = "6h_1dDonchian20_ADX25_VolumeFilter_v1"
+timeframe = "6h"
 leverage = 1.0
