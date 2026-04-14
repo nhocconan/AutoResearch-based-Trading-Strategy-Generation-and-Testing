@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12-hour price breaking above/below 1-week Bollinger Bands (20,2) with volume above 2.0x 24-period average and 1-day ADX > 20.
-Trades in direction of 1-week trend to avoid counter-trend whipsaws. Designed for low frequency (~15-30 trades/year).
+Hypothesis: 12-hour price breaking above/below 1-week Donchian Channel (20) with volume above 1.5x 24-period average and 1-day ADX > 25.
+Trades in direction of 1-week trend to avoid counter-trend whipsaws. Uses tight entry conditions to limit trades (~20-40/year).
 """
 
 import numpy as np
@@ -18,19 +18,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1-week Bollinger Bands (20,2)
+    # Calculate 1-week Donchian Channel (20-period)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 20:
         return np.zeros(n)
     
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    sma_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
     
-    # Calculate 1-week trend (SMA 50)
-    sma_50 = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
+    # Upper and lower bands
+    upper_dc = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    lower_dc = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    
+    # Middle line for trend
+    mid_dc = (upper_dc + lower_dc) / 2
     
     # Calculate 1-day ADX (14-period)
     df_1d = get_htf_data(prices, '1d')
@@ -77,45 +79,45 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Get aligned indicators
-        upper_bb_aligned = align_htf_to_ltf(prices, df_1w, upper_bb)[i]
-        lower_bb_aligned = align_htf_to_ltf(prices, df_1w, lower_bb)[i]
-        sma_50_aligned = align_htf_to_ltf(prices, df_1w, sma_50)[i]
+        upper_dc_aligned = align_htf_to_ltf(prices, df_1w, upper_dc)[i]
+        lower_dc_aligned = align_htf_to_ltf(prices, df_1w, lower_dc)[i]
+        mid_dc_aligned = align_htf_to_ltf(prices, df_1w, mid_dc)[i]
         adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)[i]
         vol_ma_24_aligned = vol_ma_24[i]  # already LTF
         
         # Check for NaN values
-        if (np.isnan(upper_bb_aligned) or np.isnan(lower_bb_aligned) or 
-            np.isnan(sma_50_aligned) or np.isnan(adx_1d_aligned) or 
+        if (np.isnan(upper_dc_aligned) or np.isnan(lower_dc_aligned) or 
+            np.isnan(mid_dc_aligned) or np.isnan(adx_1d_aligned) or 
             np.isnan(vol_ma_24_aligned)):
             continue
         
-        # Volume confirmation (> 2.0x average)
-        volume_confirm = volume[i] > 2.0 * vol_ma_24_aligned
+        # Volume confirmation (> 1.5x average)
+        volume_confirm = volume[i] > 1.5 * vol_ma_24_aligned
         
-        # ADX trend filter (> 20)
-        trend_filter = adx_1d_aligned > 20
+        # ADX trend filter (> 25)
+        trend_filter = adx_1d_aligned > 25
         
         if position == 0:  # No position - look for entries
             if volume_confirm and trend_filter:
-                # Long: price breaks above upper BB and trend is up
-                if close[i] > upper_bb_aligned and close[i-1] <= upper_bb_aligned and close[i] > sma_50_aligned:
+                # Long: price breaks above upper DC and trend is up (above mid)
+                if close[i] > upper_dc_aligned and close[i-1] <= upper_dc_aligned and close[i] > mid_dc_aligned:
                     position = 1
                     signals[i] = position_size
-                # Short: price breaks below lower BB and trend is down
-                elif close[i] < lower_bb_aligned and close[i-1] >= lower_bb_aligned and close[i] < sma_50_aligned:
+                # Short: price breaks below lower DC and trend is down (below mid)
+                elif close[i] < lower_dc_aligned and close[i-1] >= lower_dc_aligned and close[i] < mid_dc_aligned:
                     position = -1
                     signals[i] = -position_size
-        elif position == 1:  # Long position - exit when price breaks below lower BB
-            if close[i] < lower_bb_aligned and close[i-1] >= lower_bb_aligned:
+        elif position == 1:  # Long position - exit when price breaks below lower DC
+            if close[i] < lower_dc_aligned and close[i-1] >= lower_dc_aligned:
                 position = 0
                 signals[i] = 0.0
-        elif position == -1:  # Short position - exit when price breaks above upper BB
-            if close[i] > upper_bb_aligned and close[i-1] <= upper_bb_aligned:
+        elif position == -1:  # Short position - exit when price breaks above upper DC
+            if close[i] > upper_dc_aligned and close[i-1] <= upper_dc_aligned:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_BB_1wTrend_1dADX_Volume"
+name = "12h_DC_1wTrend_1dADX_Volume"
 timeframe = "12h"
 leverage = 1.0
