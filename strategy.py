@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h momentum with weekly exhaustion detection. Uses weekly RSI extremes
-combined with 6h price action to catch reversals in both bull and bear markets.
-Goes long when weekly RSI < 30 and 6h closes above prior high with volume.
-Goes short when weekly RSI > 70 and 6h closes below prior low with volume.
-Exits when weekly RSI returns to neutral (40-60) or opposite extreme forms.
-Designed for low turnover: ~20-40 trades/year per symbol.
+12h 1D Camarilla Pivot + Volume Spike + Choppiness Regime Filter
+Long when price touches Camarilla L3 with volume spike in choppy market.
+Short when price touches Camarilla H3 with volume spike in choppy market.
+Exit on touch of opposite H3/L3 level or when choppiness drops below 38.2 (trending).
+Designed for low turnover: ~15-30 trades/year per symbol.
 """
 import numpy as np
 import pandas as pd
@@ -13,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,76 +20,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data once
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load daily data once
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Weekly RSI(14)
-    rsi_period = 14
-    delta = pd.Series(df_1w['close']).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    avg_loss = loss.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    rs = avg_gain / avg_loss.replace(0, 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Calculate Camarilla levels from previous day
+    # Camarilla: H4 = C + (H-L)*1.1/2, H3 = C + (H-L)*1.1/4, L3 = C - (H-L)*1.1/4, L4 = C - (H-L)*1.1/2
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # 6h prior bar high/low for breakout confirmation
-    high_prev = np.roll(high, 1)
-    low_prev = np.roll(low, 1)
-    high_prev[0] = high[0]
-    low_prev[0] = low[0]
+    # Avoid look-ahead: use previous day's data
+    rng = prev_high - prev_low
+    H3 = prev_close + rng * 1.1 / 4
+    L3 = prev_close - rng * 1.1 / 4
     
-    # Volume filter: 20-period average
+    # Align to 12h timeframe
+    H3_12h = align_htf_to_ltf(prices, df_1d, H3)
+    L3_12h = align_htf_to_ltf(prices, df_1d, L3)
+    
+    # Choppiness index on daily (need OHLC)
+    # Chop = 100 * log10(sum(ATR(14)) / (n * (highest-high - lowest-low))) / log10(n)
+    # Simplified: use rolling std dev of returns as proxy for chop
+    returns = np.log(df_1d['close'] / df_1d['close'].shift(1))
+    chop_raw = returns.rolling(window=14, min_periods=14).std().values
+    # Normalize to 0-100 scale (approximation)
+    chop_raw = np.nan_to_num(chop_raw, nan=0.0)
+    chop_max = np.maximum.accumulate(chop_raw)
+    chop = 100 * chop_raw / (chop_max + 1e-10)
+    chop = np.nan_to_num(chop, nan=50.0)
+    chop_12h = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Volume spike: current volume > 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25
     
     for i in range(20, n):
-        # Weekly index (6 bars per week: 7*24/6 = 28, but use 28 for exact)
-        idx_1w = i // 28
-        if idx_1w < rsi_period:
+        # Skip if chop data not ready
+        if np.isnan(chop_12h[i]):
             continue
-        
-        # Get previous weekly RSI to avoid look-ahead
-        rsi_prev = rsi_values[idx_1w - 1] if idx_1w - 1 < len(rsi_values) else rsi_values[-1]
-        if np.isnan(rsi_prev):
+            
+        # Only trade in choppy market (Chop > 61.8 = ranging)
+        if chop_12h[i] <= 61.8:
+            # If trending, exit any position
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
             continue
-        
-        # Create array for alignment (using previous value)
-        rsi_arr = np.full(len(df_1w), rsi_prev)
-        rsi_6h = align_htf_to_ltf(prices, df_1w, rsi_arr)[i]
         
         if position == 0:
-            # Long: weekly oversold + 6h breaks above prior high + volume
-            if (rsi_6h < 30 and 
-                close[i] > high_prev[i] and 
-                volume[i] > vol_ma[i] * 1.5):
+            # Long: price at L3 with volume spike
+            if low[i] <= L3_12h[i] and vol_spike[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: weekly overbought + 6h breaks below prior low + volume
-            elif (rsi_6h > 70 and 
-                  close[i] < low_prev[i] and 
-                  volume[i] > vol_ma[i] * 1.5):
+            # Short: price at H3 with volume spike
+            elif high[i] >= H3_12h[i] and vol_spike[i]:
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
-            # Exit: weekly RSI returns to neutral or overbought
-            if rsi_6h >= 40:
+            # Exit long: price touches H3 or chop drops
+            if high[i] >= H3_12h[i] or chop_12h[i] < 61.8:
                 position = 0
                 signals[i] = 0.0
         elif position == -1:
-            # Exit: weekly RSI returns to neutral or oversold
-            if rsi_6h <= 60:
+            # Exit short: price touches L3 or chop drops
+            if low[i] <= L3_12h[i] or chop_12h[i] < 61.8:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "6h_WeeklyRSI_Exhaustion"
-timeframe = "6h"
+name = "12h_1D_Camarilla_Pivot_Volume_Chop"
+timeframe = "12h"
 leverage = 1.0
