@@ -22,7 +22,7 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Calculate daily True Range and ATR (14-period)
+    # Calculate 1d ATR (14-period) for regime filter
     high_low_1d = high_1d - low_1d
     high_close_1d = np.abs(high_1d - np.roll(close_1d, 1))
     low_close_1d = np.abs(low_1d - np.roll(close_1d, 1))
@@ -38,13 +38,23 @@ def generate_signals(prices):
     donchian_high = high_series.rolling(window=20, min_periods=20).max().shift(1).values
     donchian_low = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
+    # Calculate 4h volume filter: current volume > 1.5x 10-period average
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=10, min_periods=10).mean().values
+    
+    # Calculate 1d volatility regime: ATR > 50th percentile of past 50 days
+    atr_series_1d = pd.Series(atr_1d)
+    atr_percentile = atr_series_1d.rolling(window=50, min_periods=50).quantile(0.5).values
+    volatility_filter = atr_1d > atr_percentile
+    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25
     
     for i in range(100, n):
         # Skip if any critical data is NaN
-        if np.isnan(atr_1d[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
+        if np.isnan(atr_1d[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
+           np.isnan(vol_ma[i]) or np.isnan(volatility_filter[i]):
             continue
         
         # Get previous day's data for pivot calculation
@@ -68,25 +78,17 @@ def generate_signals(prices):
             s2_4h = align_htf_to_ltf(prices, df_1d, s2_array)[i]
             r2_4h = align_htf_to_ltf(prices, df_1d, r2_array)[i]
             
-            # Volume filter: current volume > 1.5x 10-period average
-            vol_ma = np.mean(volume[max(0, i-10):i]) if i >= 10 else volume[i]
-            
-            # Volatility filter: current ATR > 50th percentile of past 50 days
-            # This acts as regime filter - only trade in volatile (trending) markets
-            atr_percentile = pd.Series(atr_1d).rolling(window=50, min_periods=50).quantile(0.5).values
-            volatility_filter = atr_1d[i] > atr_percentile[i]
-            
             if position == 0:
                 # Long: Price breaks above R2 with volume and in volatile regime
                 if (close[i] > r2_4h and close[i-1] <= r2_4h and 
-                    volume[i] > vol_ma * 1.5 and 
-                    volatility_filter):
+                    volume[i] > vol_ma[i] * 1.5 and 
+                    volatility_filter[i]):
                     position = 1
                     signals[i] = position_size
                 # Short: Price breaks below S2 with volume and in volatile regime
                 elif (close[i] < s2_4h and close[i-1] >= s2_4h and 
-                      volume[i] > vol_ma * 1.5 and 
-                      volatility_filter):
+                      volume[i] > vol_ma[i] * 1.5 and 
+                      volatility_filter[i]):
                     position = -1
                     signals[i] = -position_size
             elif position == 1:
