@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R mean reversion with 1d trend filter and volume confirmation
-# Williams %R (14) identifies overbought/oversold conditions: > -20 = overbought, < -80 = oversold
-# In trending markets (price > 1d EMA50): fade extremes (sell at > -20, buy at < -80)
-# In ranging markets (price near 1d EMA50): mean revert at Bollinger Bands (20, 2)
-# Volume confirmation: require volume > 1.5x 20-period EMA to avoid false signals
-# Designed for 12-25 trades/year with proper risk control in both bull and bear markets
+# Hypothesis: 4h Donchian breakout with 1d trend filter and volume confirmation
+# Donchian(20) breakout identifies breakouts in both directions
+# 1d EMA50 filter ensures we trade with the higher timeframe trend
+# Volume confirmation requires volume > 1.5x 20-period EMA to filter false breakouts
+# ATR-based stoploss (exit when price moves against position by 2*ATR)
+# Designed for 20-40 trades/year with controlled risk in both bull and bear markets
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,18 +20,21 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Williams %R (14-period)
+    # Calculate Donchian channels (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    close_series = pd.Series(close)
     
-    # Highest high and lowest low over 14 periods
-    highest_high = high_series.rolling(window=14, min_periods=14).max()
-    lowest_low = low_series.rolling(window=14, min_periods=14).min()
+    donchian_high = high_series.rolling(window=20, min_periods=20).max()
+    donchian_low = low_series.rolling(window=20, min_periods=20).min()
     
-    # Williams %R: -100 * (highest_high - close) / (highest_high - lowest_low)
-    willr = -100 * (highest_high - close_series) / (highest_high - lowest_low)
-    willr = willr.replace([np.inf, -np.inf], np.nan).fillna(-50).values  # Handle division by zero
+    # Calculate ATR (14-period) for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     # Calculate 1d EMA (50-period) for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -40,12 +43,6 @@ def generate_signals(prices):
     
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Bollinger Bands (20, 2) on 12h for ranging market entries
-    sma_20 = close_series.rolling(window=20, min_periods=20).mean()
-    std_20 = close_series.rolling(window=20, min_periods=20).std()
-    bb_upper = sma_20 + 2 * std_20
-    bb_lower = sma_20 - 2 * std_20
     
     # Volume moving average for confirmation (20-period EMA)
     vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -58,48 +55,43 @@ def generate_signals(prices):
         # Get aligned 1d EMA
         ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)[i]
         
-        if np.isnan(willr[i]) or np.isnan(ema_1d_aligned) or np.isnan(vol_ma[i]) or \
-           np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(ema_1d_aligned) or \
+           np.isnan(atr[i]) or np.isnan(vol_ma[i]):
             continue
         
         # Volume confirmation (1.5x average)
         volume_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Market regime: trending if price > 1d EMA50, ranging if near EMA50
-        price_vs_ema = (close[i] - ema_1d_aligned) / ema_1d_aligned
-        is_trending = abs(price_vs_ema) > 0.02  # >2% deviation from EMA = trending
-        is_ranging = abs(price_vs_ema) <= 0.02   # Within 2% of EMA = ranging
-        
-        if is_trending:  # Trending market - fade Williams %R extremes
-            if position == 0 and willr[i] < -80 and volume_confirm:  # Oversold -> buy
+        if position == 0:  # No position - look for breakout entries
+            # Long breakout: price breaks above Donchian high with volume and uptrend
+            if close[i] > donchian_high[i] and volume_confirm and close[i] > ema_1d_aligned:
                 position = 1
                 signals[i] = position_size
-            elif position == 0 and willr[i] > -20 and volume_confirm:  # Overbought -> sell
+            # Short breakout: price breaks below Donchian low with volume and downtrend
+            elif close[i] < donchian_low[i] and volume_confirm and close[i] < ema_1d_aligned:
                 position = -1
                 signals[i] = -position_size
-            elif position == 1 and willr[i] > -50:  # Exit on mean reversion
+        elif position == 1:  # Long position - exit on reversal or stoploss
+            # Exit if price breaks below Donchian low (reversal signal)
+            if close[i] < donchian_low[i]:
                 position = 0
                 signals[i] = 0.0
-            elif position == -1 and willr[i] < -50:  # Exit on mean reversion
+            # Stoploss: exit if price moves against position by 2*ATR
+            elif close[i] < close[i-1] - 2.0 * atr[i]:
                 position = 0
                 signals[i] = 0.0
-        elif is_ranging:  # Ranging market - mean revert at Bollinger Bands
-            if position == 0 and close[i] < bb_lower[i] and volume_confirm:
-                position = 1
-                signals[i] = position_size
-            elif position == 0 and close[i] > bb_upper[i] and volume_confirm:
-                position = -1
-                signals[i] = -position_size
-            elif position == 1 and close[i] > sma_20[i]:  # Exit at mean
+        elif position == -1:  # Short position - exit on reversal or stoploss
+            # Exit if price breaks above Donchian high (reversal signal)
+            if close[i] > donchian_high[i]:
                 position = 0
                 signals[i] = 0.0
-            elif position == -1 and close[i] < sma_20[i]:  # Exit at mean
+            # Stoploss: exit if price moves against position by 2*ATR
+            elif close[i] > close[i-1] + 2.0 * atr[i]:
                 position = 0
                 signals[i] = 0.0
-        # In between: no clear regime, no action
     
     return signals
 
-name = "12h_WilliamsR_1dTrend_BB_Volume"
-timeframe = "12h"
+name = "4h_Donchian_1dTrend_Volume_ATR"
+timeframe = "4h"
 leverage = 1.0
