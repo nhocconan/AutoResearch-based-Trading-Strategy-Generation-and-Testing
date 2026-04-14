@@ -1,16 +1,14 @@
-# 12h_1d_Camarilla_Pivot_Breakout_Volume
-# Hypothesis: 12-hour Camarilla pivot breakout with 1-day trend filter and volume confirmation.
-# Long when price breaks above H3 with price above 1-day EMA50 and volume > 1.5x average.
-# Short when price breaks below L3 with price below 1-day EMA50 and volume > 1.5x average.
-# Exit when price returns to the pivot level (central tendency reversion).
-# Camarilla levels provide institutional support/resistance, EMA50 filters trend, volume confirms breakout strength.
-# Designed for 12h timeframe to capture multi-day moves with lower frequency to minimize fee drag.
-# Target: 50-150 total trades over 4 years (12-37/year) for optimal balance of opportunity and cost.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 4-hour ATR-based breakout with daily trend filter and volume confirmation
+# Long when price closes above ATR(14) upper band AND daily EMA50 trend is up AND volume > 1.5x 20-period average
+# Short when price closes below ATR(14) lower band AND daily EMA50 trend is down AND volume > 1.5x 20-period average
+# Exit when price crosses back inside the ATR bands (opposite band)
+# Uses ATR to capture volatility expansions, daily EMA for trend alignment, volume for confirmation
+# Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,46 +20,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla pivot calculation and EMA50 trend filter
+    # Load daily data ONCE before loop for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1-day OHLC for Camarilla pivots (using previous day's close for current day's levels)
-    # For each 12h bar, we use the previous completed 1-day candle's OHLC
-    day_high = df_1d['high'].values
-    day_low = df_1d['low'].values
-    day_close = df_1d['close'].values
+    # Calculate ATR(14) for volatility bands
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Camarilla pivot levels based on previous day's range
-    # H4 = close + 1.5*(high-low), H3 = close + 1.0*(high-low), L3 = close - 1.0*(high-low), L4 = close - 1.5*(high-low)
-    # Pivot = (high + low + close)/3
-    range_hl = day_high - day_low
-    camarilla_h3 = day_close + 1.0 * range_hl
-    camarilla_l3 = day_close - 1.0 * range_hl
-    camarilla_pivot = (day_high + day_low + day_close) / 3.0
+    # Calculate ATR-based bands (upper and lower)
+    atr_mult = 1.5
+    upper_atr = close + atr_mult * atr14
+    lower_atr = close - atr_mult * atr14
     
-    # Align Camarilla levels to 12h timeframe (using previous day's levels for current 12h bar)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    
-    # Calculate 1-day EMA50 for trend filter
-    ema50_1d = pd.Series(day_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate daily EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate volume average for confirmation (20-period on 12h)
+    # Calculate volume average for confirmation (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations (need 50 for EMA + buffer)
-    start = 60
+    # Start after enough data for calculations (14 for ATR + buffer)
+    start = 20
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
+        if (np.isnan(atr14[i]) or np.isnan(ema50_1d_aligned[i]) or 
             np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
@@ -71,26 +63,26 @@ def generate_signals(prices):
         vol_threshold = vol_avg[i] * 1.5
         
         if position == 0:
-            # Long setup: price breaks above H3 + above 1-day EMA50 + volume confirmation
-            if (price > camarilla_h3_aligned[i] and price > ema50_1d_aligned[i] and vol > vol_threshold):
+            # Long setup: close above ATR upper band AND daily EMA50 up AND volume confirmation
+            if (price > upper_atr[i] and price > ema50_1d_aligned[i] and vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: price breaks below L3 + below 1-day EMA50 + volume confirmation
-            elif (price < camarilla_l3_aligned[i] and price < ema50_1d_aligned[i] and vol > vol_threshold):
+            # Short setup: close below ATR lower band AND daily EMA50 down AND volume confirmation
+            elif (price < lower_atr[i] and price < ema50_1d_aligned[i] and vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to pivot level (mean reversion to fair value)
-            if price < camarilla_pivot_aligned[i]:
+            # Exit long: price closes back inside ATR bands (below upper band)
+            if price < upper_atr[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to pivot level (mean reversion to fair value)
-            if price > camarilla_pivot_aligned[i]:
+            # Exit short: price closes back inside ATR bands (above lower band)
+            if price > lower_atr[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -98,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_Pivot_Breakout_Volume"
-timeframe = "12h"
+name = "4h_ATR_Breakout_DailyEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
