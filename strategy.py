@@ -67,6 +67,12 @@ def generate_signals(prices):
             donch_high[i] = np.max(high[i-19:i+1])
             donch_low[i] = np.min(low[i-19:i+1])
     
+    # Calculate 4-hour volume moving average (20-period)
+    volume_ma = np.full(n, np.nan)
+    if n >= 20:
+        for i in range(19, n):
+            volume_ma[i] = np.mean(volume[i-19:i+1])
+    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
@@ -77,12 +83,18 @@ def generate_signals(prices):
             np.isnan(donch_high[i]) or
             np.isnan(donch_low[i]) or
             np.isnan(ema_20_4h[i]) or
-            np.isnan(rsi_4h[i])):
+            np.isnan(rsi_4h[i]) or
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         # Skip low volatility periods (ATR < 0.5% of price)
         if atr_4h[i] / close[i] < 0.005:
+            signals[i] = 0.0
+            continue
+        
+        # Skip low volume periods (volume < 80% of 20-period MA)
+        if volume[i] < 0.8 * volume_ma[i]:
             signals[i] = 0.0
             continue
         
@@ -128,6 +140,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_R4S4_RSI50_Filter"
+name = "4h_1d_Camarilla_R4S4_RSI50_Filter_Volume"
 timeframe = "4h"
 leverage = 1.0
