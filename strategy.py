@@ -13,64 +13,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for ATR-based volatility filter
+    # Load 1d data for indicators
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate True Range and ATR(14) on 1d
-    tr = np.zeros(len(df_1d))
-    tr[0] = high_1d[0] - low_1d[0]
-    for i in range(1, len(df_1d)):
-        tr[i] = max(
-            high_1d[i] - low_1d[i],
-            abs(high_1d[i] - close_1d[i-1]),
-            abs(low_1d[i] - close_1d[i-1])
-        )
+    # Calculate 1d RSI(14) - mean reversion signal
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    atr_1d = np.zeros(len(df_1d))
-    atr_1d[:13] = np.nan
-    if len(df_1d) >= 14:
-        atr_1d[13] = np.mean(tr[:14])
-        for i in range(14, len(df_1d)):
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
+    avg_gain = np.zeros_like(close_1d)
+    avg_loss = np.zeros_like(close_1d)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
     
-    # Align 1d ATR to 4h timeframe
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    for i in range(14, len(close_1d)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Load 1d data for pivot points
-    pivot_point = np.full_like(close_1d, np.nan)
-    resistance1 = np.full_like(close_1d, np.nan)
-    support1 = np.full_like(close_1d, np.nan)
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d[:13] = np.nan
     
-    if len(close_1d) >= 2:
-        for i in range(1, len(close_1d)):
-            ph = high_1d[i-1]
-            pl = low_1d[i-1]
-            pc = close_1d[i-1]
-            
-            pp = (ph + pl + pc) / 3.0
-            r1 = 2 * pp - pl
-            s1 = 2 * pp - ph
-            
-            pivot_point[i] = pp
-            resistance1[i] = r1
-            support1[i] = s1
+    # Calculate 1d Bollinger Bands
+    sma_20 = np.full_like(close_1d, np.nan)
+    std_20 = np.full_like(close_1d, np.nan)
+    
+    if len(close_1d) >= 20:
+        for i in range(19, len(close_1d)):
+            sma_20[i] = np.mean(close_1d[i-19:i+1])
+            std_20[i] = np.std(close_1d[i-19:i+1])
+    
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
+    
+    # Calculate 1d volume ratio (current vs 20-period average)
+    vol_ma_20_1d = np.full_like(volume_1d, np.nan)
+    if len(volume_1d) >= 20:
+        for i in range(19, len(volume_1d)):
+            vol_ma_20_1d[i] = np.mean(volume_1d[i-19:i+1])
+    
+    vol_ratio_1d = np.divide(volume_1d, vol_ma_20_1d, out=np.full_like(volume_1d, np.nan), where=vol_ma_20_1d!=0)
     
     # Align 1d indicators to 4h timeframe
-    pivot_point_4h = align_htf_to_ltf(prices, df_1d, pivot_point)
-    resistance1_4h = align_htf_to_ltf(prices, df_1d, resistance1)
-    support1_4h = align_htf_to_ltf(prices, df_1d, support1)
-    
-    # Volume spike detection (20-period average)
-    vol_ma_20 = np.full_like(volume, np.nan)
-    if len(volume) >= 20:
-        for i in range(19, len(volume)):
-            vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
     signals = np.zeros(n)
     position = 0
@@ -78,51 +73,38 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical data is NaN
-        if (np.isnan(pivot_point_4h[i]) or 
-            np.isnan(resistance1_4h[i]) or
-            np.isnan(support1_4h[i]) or
-            np.isnan(vol_ma_20[i]) or
-            np.isnan(atr_1d_aligned[i])):
+        if (np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(upper_bb_aligned[i]) or
+            np.isnan(lower_bb_aligned[i]) or
+            np.isnan(vol_ratio_1d_aligned[i])):
             signals[i] = 0.0
             continue
-        
-        # Skip low volatility periods (ATR < 0.5% of price)
-        if atr_1d_aligned[i] < 0.005 * close[i]:
-            signals[i] = 0.0
-            continue
-        
-        # Volume ratio: current 4h volume vs 20-period average
-        if vol_ma_20[i] <= 0:
-            volume_ratio = 0
-        else:
-            volume_ratio = volume[i] / vol_ma_20[i]
-        
-        # Volume threshold: require significant spike
-        vol_threshold = 2.0
         
         if position == 0:
-            # Long: Price breaks above R1 with volume spike and adequate volatility
-            if (close[i] > resistance1_4h[i] and 
-                volume_ratio > vol_threshold):
+            # Long: RSI oversold (<30) + price near lower BB + volume spike
+            if (rsi_1d_aligned[i] < 30 and 
+                close[i] <= lower_bb_aligned[i] * 1.02 and  # near lower BB
+                vol_ratio_1d_aligned[i] > 1.5):
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below S1 with volume spike and adequate volatility
-            elif (close[i] < support1_4h[i] and 
-                  volume_ratio > vol_threshold):
+            # Short: RSI overbought (>70) + price near upper BB + volume spike
+            elif (rsi_1d_aligned[i] > 70 and 
+                  close[i] >= upper_bb_aligned[i] * 0.98 and  # near upper BB
+                  vol_ratio_1d_aligned[i] > 1.5):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price closes below pivot point (mean reversion)
-            if close[i] < pivot_point_4h[i]:
+            # Exit: RSI returns to neutral (50) or price reaches middle
+            if rsi_1d_aligned[i] >= 50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price closes above pivot point (mean reversion)
-            if close[i] > pivot_point_4h[i]:
+            # Exit: RSI returns to neutral (50) or price reaches middle
+            if rsi_1d_aligned[i] <= 50:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -130,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dATR_Vol_Filter_Pivot_Breakout"
+name = "4h_1dRSI_BB_Volume_MeanReversion"
 timeframe = "4h"
 leverage = 1.0
