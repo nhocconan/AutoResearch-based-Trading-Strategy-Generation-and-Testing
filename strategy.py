@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,103 +13,92 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for calculations (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
+    # Calculate 10-period weekly EMA for trend
+    close_1w = df_1w['close'].values
+    ema_1w = np.full(len(df_1w), np.nan)
+    if len(close_1w) >= 10:
+        alpha = 2.0 / (10 + 1)
+        ema_1w[0] = close_1w[0]
+        for i in range(1, len(close_1w)):
+            ema_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_1w[i-1]
+    
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # Load daily data for price channels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # Calculate 20-day Donchian channels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 10-period EMA for trend on daily
-    if len(close_1d) < 10:
-        return np.zeros(n)
-    ema_10 = np.full(len(close_1d), np.nan)
-    close_series = pd.Series(close_1d)
-    ema_10 = close_series.ewm(span=10, adjust=False, min_periods=10).values
+    donchian_high = np.full(len(df_1d), np.nan)
+    donchian_low = np.full(len(df_1d), np.nan)
     
-    # Calculate 5-period EMA for signal on daily
-    if len(close_1d) < 5:
-        return np.zeros(n)
-    ema_5 = pd.Series(close_1d).ewm(span=5, adjust=False, min_periods=5).values
+    if len(high_1d) >= 20:
+        for i in range(19, len(df_1d)):
+            donchian_high[i] = np.max(high_1d[i-19:i+1])
+            donchian_low[i] = np.min(low_1d[i-19:i+1])
     
-    # Calculate daily ATR for volatility filter
-    tr = np.zeros(len(df_1d))
-    tr[0] = high_1d[0] - low_1d[0]
-    for i in range(1, len(df_1d)):
-        tr[i] = max(
-            high_1d[i] - low_1d[i],
-            abs(high_1d[i] - close_1d[i-1]),
-            abs(low_1d[i] - close_1d[i-1])
-        )
+    dh_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    dl_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    atr_1d = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 14:
-        atr_1d[13] = np.mean(tr[:14])
-        for i in range(14, len(df_1d)):
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
-    
-    # Align daily indicators to 6h timeframe
-    ema_10_6h = align_htf_to_ltf(prices, df_1d, ema_10)
-    ema_5_6h = align_htf_to_ltf(prices, df_1d, ema_5)
-    atr_1d_6h = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # Calculate 60-period volume moving average on 6h for volume filter
-    vol_ma_60 = np.full_like(volume, np.nan)
-    if len(volume) >= 60:
-        vol_series = pd.Series(volume)
-        vol_ma_60 = vol_series.rolling(window=60, min_periods=60).mean().values
+    # Volume spike detection (20-day average)
+    vol_ma_20 = np.full_like(volume, np.nan)
+    if len(volume) >= 20:
+        for i in range(19, len(volume)):
+            vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position size
+    position_size = 0.25  # Conservative position size
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_10_6h[i]) or 
-            np.isnan(ema_5_6h[i]) or
-            np.isnan(atr_1d_6h[i]) or
-            np.isnan(vol_ma_60[i])):
+        if (np.isnan(dh_aligned[i]) or 
+            np.isnan(dl_aligned[i]) or
+            np.isnan(ema_1w_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Skip low volatility periods (ATR < 0.5% of price)
-        if atr_1d_6h[i] < 0.005 * close[i]:
-            signals[i] = 0.0
-            continue
-        
-        # Volume ratio: current 6h volume vs 60-period average
-        if vol_ma_60[i] <= 0:
+        # Volume filter: require significant spike
+        if vol_ma_20[i] <= 0:
             volume_ratio = 0
         else:
-            volume_ratio = volume[i] / vol_ma_60[i]
+            volume_ratio = volume[i] / vol_ma_20[i]
         
-        # Volume threshold: require significant spike
-        vol_threshold = 2.5
+        if volume_ratio < 1.5:  # Require at least 1.5x average volume
+            signals[i] = 0.0
+            continue
         
         if position == 0:
-            # Long: EMA 5 crosses above EMA 10 with volume confirmation
-            if (ema_5_6h[i] > ema_10_6h[i] and ema_5_6h[i-1] <= ema_10_6h[i-1] and volume_ratio > vol_threshold):
+            # Long: Price breaks above 20-day high with weekly uptrend
+            if close[i] > dh_aligned[i] and close[i] > ema_1w_aligned[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: EMA 5 crosses below EMA 10 with volume confirmation
-            elif (ema_5_6h[i] < ema_10_6h[i] and ema_5_6h[i-1] >= ema_10_6h[i-1] and volume_ratio > vol_threshold):
+            # Short: Price breaks below 20-day low with weekly downtrend
+            elif close[i] < dl_aligned[i] and close[i] < ema_1w_aligned[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: EMA 5 crosses below EMA 10
-            if ema_5_6h[i] < ema_10_6h[i]:
+            # Exit: Price falls back below 20-day low or weekly trend turns down
+            if close[i] < dl_aligned[i] or close[i] < ema_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: EMA 5 crosses above EMA 10
-            if ema_5_6h[i] > ema_10_6h[i]:
+            # Exit: Price rises back above 20-day high or weekly trend turns up
+            if close[i] > dh_aligned[i] or close[i] > ema_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -117,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_EMA_Crossover_Volume_Filter"
-timeframe = "6h"
+name = "1d_Donchian20_WeeklyEMA10_Volume"
+timeframe = "1d"
 leverage = 1.0
