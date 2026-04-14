@@ -21,6 +21,7 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
     # Calculate daily ATR (14-period)
     tr = np.zeros(len(df_1d))
@@ -39,14 +40,6 @@ def generate_signals(prices):
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
     atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # Calculate 12-hour Donchian channels (20-period)
-    donch_high = np.full(n, np.nan)
-    donch_low = np.full(n, np.nan)
-    if n >= 20:
-        for i in range(19, n):
-            donch_high[i] = np.max(high[i-19:i+1])
-            donch_low[i] = np.min(low[i-19:i+1])
     
     # Calculate daily ADX (14-period)
     plus_dm = np.zeros(len(df_1d))
@@ -90,14 +83,27 @@ def generate_signals(prices):
     
     adx_12h = align_htf_to_ltf(prices, df_1d, adx_14)
     
-    # Calculate daily volatility filter (ATR > 1.5% of price)
+    # Calculate daily volume filter (volume > 1.5x 20-period average)
+    vol_ma_20 = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 20:
+        for i in range(19, len(df_1d)):
+            vol_ma_20[i] = np.mean(volume_1d[i-19:i+1])
+    
     vol_filter_1d = np.zeros(len(df_1d))
     for i in range(len(df_1d)):
-        if not np.isnan(atr_1d[i]) and close_1d[i] > 0:
-            vol_filter_1d[i] = atr_1d[i] / close_1d[i] > 0.015
+        if not np.isnan(vol_ma_20[i]) and vol_ma_20[i] > 0:
+            vol_filter_1d[i] = volume_1d[i] > (vol_ma_20[i] * 1.5)
         else:
             vol_filter_1d[i] = False
     vol_filter_12h = align_htf_to_ltf(prices, df_1d, vol_filter_1d.astype(float))
+    
+    # Calculate 12-hour Donchian channels (20-period)
+    donch_high = np.full(n, np.nan)
+    donch_low = np.full(n, np.nan)
+    if n >= 20:
+        for i in range(19, n):
+            donch_high[i] = np.max(high[i-19:i+1])
+            donch_low[i] = np.min(low[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0
@@ -112,7 +118,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Skip low volatility periods (ATR < 1.5% of price)
+        # Skip low volume periods
         if vol_filter_12h[i] < 0.5:
             signals[i] = 0.0
             continue
@@ -137,12 +143,12 @@ def generate_signals(prices):
         s3_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i]
         
         if position == 0:
-            # Long: Price breaks above 12h Donchian high AND above S3 AND +DI > -DI (bullish bias)
-            if close[i] > donch_high[i] and close[i] > s3_12h and plus_di_14[i-1] > minus_di_14[i-1]:
+            # Long: Price breaks above 12h Donchian high AND above S3 AND volume filter
+            if close[i] > donch_high[i] and close[i] > s3_12h:
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below 12h Donchian low AND below R3 AND -DI > +DI (bearish bias)
-            elif close[i] < donch_low[i] and close[i] < r3_12h and minus_di_14[i-1] > plus_di_14[i-1]:
+            # Short: Price breaks below 12h Donchian low AND below R3 AND volume filter
+            elif close[i] < donch_low[i] and close[i] < r3_12h:
                 position = -1
                 signals[i] = -position_size
             else:
