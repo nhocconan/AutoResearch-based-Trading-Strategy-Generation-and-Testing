@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h timeframe with 12h Williams %R and 1d RSI filter
-# Williams %R identifies overbought/oversold conditions on 12h timeframe
-# RSI on 1d provides trend filter: only take Williams %R signals when 1d RSI > 50 (bullish bias) or < 50 (bearish bias)
-# Works in both bull and bear markets as it adapts to the higher timeframe trend
-# Low frequency: Williams %R signals are infrequent, reducing overtrading
+# Hypothesis: 4h timeframe with 1d Williams %R for mean reversion and 1d volume confirmation
+# Williams %R identifies overbought/oversold conditions; reversals from extremes tend to work in both bull and bear markets
+# Volume confirmation ensures moves have conviction; combined with mean reversion at extremes reduces false signals
+# Uses 1d Williams %R (14 period) and 1d volume SMA (20 period) for regime filter
+# Designed to generate ~20-40 trades/year to avoid fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,87 +17,88 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load 12h data ONCE for Williams %R
-    df_12h = get_htf_data(prices, '12h')
-    
-    # Calculate 12h Williams %R (14 periods)
-    willr_length = 14
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Highest high and lowest low over willr_length
-    highest_high = pd.Series(high_12h).rolling(window=willr_length, min_periods=willr_length).max().values
-    lowest_low = pd.Series(low_12h).rolling(window=willr_length, min_periods=willr_length).min().values
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    willr = (highest_high - close_12h) / (highest_high - lowest_low) * -100
-    willr = np.where((highest_high - lowest_low) == 0, -50, willr)  # Handle division by zero
-    
-    # Align Williams %R to 6h timeframe
-    willr_aligned = align_htf_to_ltf(prices, df_12h, willr)
-    
-    # Load 1d data ONCE for RSI
+    # Load 1d data ONCE for Williams %R and volume
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d RSI (14 periods)
-    rsi_length = 14
+    # Calculate 1d Williams %R (14 period)
+    williams_length = 14
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # RSI calculation
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    highest_high = pd.Series(high_1d).rolling(window=williams_length, min_periods=williams_length).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=williams_length, min_periods=williams_length).min().values
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # Avoid division by zero
     
-    avg_gain = pd.Series(gain).rolling(window=rsi_length, min_periods=rsi_length).mean().values
-    avg_loss = pd.Series(loss).rolling(window=rsi_length, min_periods=rsi_length).mean().values
+    # Calculate 1d volume SMA (20 period) for volume confirmation
+    vol_sma_length = 20
+    vol_1d = df_1d['volume'].values
+    vol_sma = pd.Series(vol_1d).rolling(window=vol_sma_length, min_periods=vol_sma_length).mean().values
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.where(avg_loss == 0, 100, rsi)  # When no losses, RSI = 100
-    rsi = np.where(avg_gain == 0, 0, rsi)    # When no gains, RSI = 0
+    # Align indicators to 4h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    vol_sma_aligned = align_htf_to_ltf(prices, df_1d, vol_sma)
     
-    # Align RSI to 6h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Current volume (use current bar's volume for comparison)
+    # Note: We compare current 4h volume against the aligned 1d volume SMA
+    # This requires estimating how much volume corresponds to the current 4h bar
+    # Since we don't have intraday volume breakdown, we use the current bar's volume directly
+    # and compare it to the 1d average scaled appropriately (1d has ~26 4h bars in 24h)
+    # Simplified: use current volume > 1.5 * (1d vol_sma / 26) as proxy for above-average volume
+    vol_threshold = vol_sma_aligned / 26.0 * 1.5  # Approximate threshold for significant volume
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(30, 14)  # Need enough for Williams %R and RSI
+    start = max(50, williams_length, vol_sma_length)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(willr_aligned[i]) or 
-            np.isnan(rsi_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(vol_sma_aligned[i]) or 
+            np.isnan(vol_threshold[i])):
             signals[i] = 0.0
             continue
         
-        willr_val = willr_aligned[i]
-        rsi_val = rsi_aligned[i]
+        williams_r_val = williams_r_aligned[i]
+        vol_ratio = volume[i] / vol_threshold[i] if vol_threshold[i] > 0 else 0
+        
+        # Mean reversion signals from Williams %R extremes
+        # Oversold: Williams %R < -80 (potential long)
+        # Overbought: Williams %R > -20 (potential short)
+        oversold = williams_r_val < -80
+        overbought = williams_r_val > -20
+        high_volume = vol_ratio > 1.0  # Volume above threshold
         
         if position == 0:
-            # Enter long: Williams %R oversold (< -80) AND 1d RSI > 50 (bullish bias)
-            if willr_val < -80 and rsi_val > 50:
+            # Enter long: oversold + high volume
+            if oversold and high_volume:
                 position = 1
                 signals[i] = position_size
-            # Enter short: Williams %R overbought (> -20) AND 1d RSI < 50 (bearish bias)
-            elif willr_val > -20 and rsi_val < 50:
+            # Enter short: overbought + high volume
+            elif overbought and high_volume:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Williams %R becomes overbought (> -20) OR 1d RSI < 40 (loss of bullish momentum)
-            if willr_val > -20 or rsi_val < 40:
+            # Exit long: Williams %R crosses above -50 (middle) OR low volume
+            exit_signal = williams_r_val > -50 or vol_ratio < 0.5
+            if exit_signal:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Williams %R becomes oversold (< -80) OR 1d RSI > 60 (loss of bearish momentum)
-            if willr_val < -80 or rsi_val > 60:
+            # Exit short: Williams %R crosses below -50 (middle) OR low volume
+            exit_signal = williams_r_val < -50 or vol_ratio < 0.5
+            if exit_signal:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -105,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12hWilliamsR_1dRSI_TrendFilter_v1"
-timeframe = "6h"
+name = "4h_1dWilliamsR_Volume_MeanReversion_v1"
+timeframe = "4h"
 leverage = 1.0
