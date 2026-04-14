@@ -3,12 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian Breakout with 1d Volume Confirmation and Chop Filter
-# Uses Donchian(20) breakout for trend capture - proven to work in both bull/bear markets
-# 1d Volume spike (volume > 1.5x 20-period average) confirms breakout strength
-# 1d Choppiness Index filter: only trade when CHOP > 61.8 (ranging) for mean reversion or
-# CHOP < 38.2 (trending) for trend continuation - avoids whipsaws in chop
-# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag
+# Hypothesis: 6h Daily Pivot Point with Volume Confirmation and Trend Filter
+# Uses daily pivot levels (R1/S1, R2/S2, R3/S3) from previous day as support/resistance
+# Long when price bounces from S1/S2 with volume confirmation and uptrend filter
+# Short when price is rejected from R1/R2 with volume confirmation and downtrend filter
+# Volume filter requires current volume > 1.5x 20-period average to confirm institutional interest
+# Trend filter uses 12h EMA(50) to align with higher timeframe momentum
+# Designed to work in both bull and bear markets by fading extremes with institutional validation
+# Target: 20-30 trades/year (80-120 total over 4 years) to minimize fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,83 +22,91 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for volume and chop filters
+    # Load daily data ONCE before loop for pivot points and trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d volume average (20-period)
-    vol_1d = df_1d['volume'].values
-    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Calculate daily pivot points (using previous day's OHLC)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d Choppiness Index (14-period)
-    # CHOP = 100 * log10(sum(ATR) / (HHV - LLV)) / log10(period)
-    tr_1d = np.maximum(
-        df_1d['high'].values - df_1d['low'].values,
-        np.maximum(
-            abs(df_1d['high'].values - np.concatenate([[df_1d['close'].values[0]], df_1d['close'].values[:-1]])),
-            abs(df_1d['low'].values - np.concatenate([[df_1d['close'].values[0]], df_1d['close'].values[:-1]]))
-        )
-    )
-    atr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    hh_14 = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min().values
-    sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
-    hh_ll_diff = hh_14 - ll_14
-    chop_raw = 100 * np.log10(sum_atr_14 / hh_ll_diff) / np.log10(14)
-    chop = np.where(hh_ll_diff > 0, chop_raw, 50)  # avoid division by zero
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
+    r2 = pivot + (high_1d - low_1d)
+    s2 = pivot - (high_1d - low_1d)
+    r3 = high_1d + 2 * (pivot - low_1d)
+    s3 = low_1d - 2 * (high_1d - pivot)
     
-    # Calculate Donchian channels (20-period) on 4h data
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align pivot levels to 6h timeframe (use previous day's levels)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Calculate 12h EMA (50) for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 20
+    start = 20  # for volume MA
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
-            np.isnan(vol_ma_20_aligned[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(ema_12h_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        vol_ok = volume_filter[i]
         
-        # Volume confirmation: current 4h volume > 1.5x 1d average volume
-        vol_spike = volume[i] > 1.5 * vol_ma_20_aligned[i]
-        
-        # Chop regime: CHOP < 38.2 (trending) or CHOP > 61.8 (ranging)
-        chop_val = chop_aligned[i]
-        is_trending = chop_val < 38.2
-        is_ranging = chop_val > 61.8
+        # Trend filter: only trade in direction of 12h EMA
+        above_ema = price > ema_12h_aligned[i]
         
         if position == 0:
-            # Long: price breaks above upper Donchian with volume confirmation
-            if price > highest_20[i] and vol_spike and (is_trending or is_ranging):
-                position = 1
-                signals[i] = position_size
-            # Short: price breaks below lower Donchian with volume confirmation
-            elif price < lowest_20[i] and vol_spike and (is_trending or is_ranging):
-                position = -1
-                signals[i] = -position_size
+            # Long: price bounces from S1/S2 with volume and uptrend
+            if vol_ok and above_ema:
+                if price <= s1_aligned[i] * 1.002 and price >= s1_aligned[i] * 0.998:
+                    position = 1
+                    signals[i] = position_size
+                elif price <= s2_aligned[i] * 1.002 and price >= s2_aligned[i] * 0.998:
+                    position = 1
+                    signals[i] = position_size
+            # Short: price rejected from R1/R2 with volume and downtrend
+            elif vol_ok and not above_ema:
+                if price >= r1_aligned[i] * 0.998 and price <= r1_aligned[i] * 1.002:
+                    position = -1
+                    signals[i] = -position_size
+                elif price >= r2_aligned[i] * 0.998 and price <= r2_aligned[i] * 1.002:
+                    position = -1
+                    signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to middle of Donchian channel or opposite breakout
-            middle = (highest_20[i] + lowest_20[i]) / 2
-            if price < middle or price < lowest_20[i]:
+            # Exit long: price reaches pivot or trend changes
+            if price >= pivot_aligned[i] or price < ema_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to middle of Donchian channel or opposite breakout
-            middle = (highest_20[i] + lowest_20[i]) / 2
-            if price > middle or price > highest_20[i]:
+            # Exit short: price reaches pivot or trend changes
+            if price <= pivot_aligned[i] or price > ema_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -104,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_1dVolume_ChopFilter"
-timeframe = "4h"
+name = "6h_DailyPivot_Volume_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
