@@ -13,43 +13,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for pivot calculation
+    # Load weekly data for context and daily data for pivots
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    
+    if len(df_1w) < 20 or len(df_1d) < 20:
         return np.zeros(n)
     
+    # Weekly trend: price above/below 20-period EMA
+    close_1w = df_1w['close'].values
+    ema_20_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 20:
+        ema_20_1w[19] = np.mean(close_1w[:20])
+        for i in range(20, len(close_1w)):
+            ema_20_1w[i] = (close_1w[i] * 2 + ema_20_1w[i-1] * 18) / 20
+    weekly_trend = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # Daily pivot points (standard formula)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels (more precise for intraday)
-    # Camarilla formula: based on previous day's range
-    range_1d = high_1d - low_1d
-    close_prev = close_1d  # Using same day close for calculation (will be aligned properly)
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
+    r2 = pivot + (high_1d - low_1d)
+    s2 = pivot - (high_1d - low_1d)
     
-    # Camarilla levels
-    # Resistance levels
-    r1 = close_prev + (range_1d * 1.1 / 12)
-    r2 = close_prev + (range_1d * 1.1 / 6)
-    r3 = close_prev + (range_1d * 1.1 / 4)
-    r4 = close_prev + (range_1d * 1.1 / 2)
-    # Support levels
-    s1 = close_prev - (range_1d * 1.1 / 12)
-    s2 = close_prev - (range_1d * 1.1 / 6)
-    s3 = close_prev - (range_1d * 1.1 / 4)
-    s4 = close_prev - (range_1d * 1.1 / 2)
+    # Align pivot levels to daily timeframe
+    pivot_d = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_d = align_htf_to_ltf(prices, df_1d, r1)
+    s1_d = align_htf_to_ltf(prices, df_1d, s1)
+    r2_d = align_htf_to_ltf(prices, df_1d, r2)
+    s2_d = align_htf_to_ltf(prices, df_1d, s2)
     
-    # Align Camarilla levels to 4h timeframe
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    r2_4h = align_htf_to_ltf(prices, df_1d, r2)
-    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
-    r4_4h = align_htf_to_ltf(prices, df_1d, r4)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    s2_4h = align_htf_to_ltf(prices, df_1d, s2)
-    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
-    s4_4h = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Calculate 10-period daily ATR for volatility filter
+    # Daily ATR for volatility filter (14-period)
     tr = np.zeros(len(df_1d))
     tr[0] = high_1d[0] - low_1d[0]
     for i in range(1, len(df_1d)):
@@ -60,66 +58,74 @@ def generate_signals(prices):
         )
     
     atr_1d = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 10:
-        atr_1d[9] = np.mean(tr[:10])
-        for i in range(10, len(df_1d)):
-            atr_1d[i] = (atr_1d[i-1] * 9 + tr[i]) / 10
+    if len(df_1d) >= 14:
+        atr_1d[13] = np.mean(tr[:14])
+        for i in range(14, len(df_1d)):
+            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
+    atr_d = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # Volume spike detection (15-period average on 4h)
-    vol_ma_15 = np.full_like(volume, np.nan)
-    if len(volume) >= 15:
-        for i in range(14, len(volume)):
-            vol_ma_15[i] = np.mean(volume[i-14:i+1])
+    # Volume spike detection (20-period average on daily)
+    vol_ma_20 = np.full_like(volume, np.nan)
+    if len(volume) >= 20:
+        for i in range(19, len(volume)):
+            vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # Conservative size to manage drawdown
+    position_size = 0.25  # 25% position size to manage drawdown
     
     for i in range(50, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r1_4h[i]) or np.isnan(r2_4h[i]) or np.isnan(r3_4h[i]) or np.isnan(r4_4h[i]) or
-            np.isnan(s1_4h[i]) or np.isnan(s2_4h[i]) or np.isnan(s3_4h[i]) or np.isnan(s4_4h[i]) or
-            np.isnan(atr_4h[i]) or np.isnan(vol_ma_15[i])):
+        if (np.isnan(weekly_trend[i]) or 
+            np.isnan(pivot_d[i]) or
+            np.isnan(r1_d[i]) or
+            np.isnan(s1_d[i]) or
+            np.isnan(r2_d[i]) or
+            np.isnan(s2_d[i]) or
+            np.isnan(atr_d[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Skip low volatility periods (ATR < 0.6% of price)
-        if atr_4h[i] < 0.006 * close[i]:
+        # Skip low volatility periods (ATR < 0.5% of price)
+        if atr_d[i] < 0.005 * close[i]:
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 4h volume vs 15-period average
-        if vol_ma_15[i] <= 0:
+        # Volume ratio: current daily volume vs 20-period average
+        if vol_ma_20[i] <= 0:
             volume_ratio = 0
         else:
-            volume_ratio = volume[i] / vol_ma_15[i]
+            volume_ratio = volume[i] / vol_ma_20[i]
         
         # Volume threshold: require significant spike
-        vol_threshold = 1.8
+        vol_threshold = 2.0
         
         if position == 0:
-            # Long: Price breaks above R3 with volume confirmation
-            if (close[i] > r3_4h[i] and volume_ratio > vol_threshold):
+            # Long: Price above weekly EMA20 AND breaks above R2 with volume confirmation
+            if (close[i] > weekly_trend[i] and 
+                close[i] > r2_d[i] and 
+                volume_ratio > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below S3 with volume confirmation
-            elif (close[i] < s3_4h[i] and volume_ratio > vol_threshold):
+            # Short: Price below weekly EMA20 AND breaks below S2 with volume confirmation
+            elif (close[i] < weekly_trend[i] and 
+                  close[i] < s2_d[i] and 
+                  volume_ratio > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below S2 (tighter stop)
-            if close[i] < s2_4h[i]:
+            # Exit: Price falls back below S1 OR closes below weekly EMA20
+            if close[i] < s1_d[i] or close[i] < weekly_trend[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above R2 (tighter stop)
-            if close[i] > r2_4h[i]:
+            # Exit: Price rises back above R1 OR closes above weekly EMA20
+            if close[i] > r1_d[i] or close[i] > weekly_trend[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -127,6 +133,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_R3S3_Breakout_Volume"
-timeframe = "4h"
+name = "1d_WeeklyTrend_Pivot_R2S2_Breakout_Volume"
+timeframe = "1d"
 leverage = 1.0
