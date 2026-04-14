@@ -22,7 +22,7 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Calculate daily True Range and ATR
+    # Calculate daily True Range and ATR (14-period)
     high_low_1d = high_1d - low_1d
     high_close_1d = np.abs(high_1d - np.roll(close_1d, 1))
     low_close_1d = np.abs(low_1d - np.roll(close_1d, 1))
