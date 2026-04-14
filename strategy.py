@@ -3,12 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Weekly pivot-based breakout on daily timeframe
-# Long when price breaks above weekly resistance 3 (R3) and weekly pivot > weekly EMA50
-# Short when price breaks below weekly support 3 (S3) and weekly pivot < weekly EMA50
-# Exit when price returns to weekly pivot level
-# Uses weekly structure for trend bias with daily precision entries
-# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag
+# Hypothesis: 12-hour Camarilla pivot bounce with 1-day trend filter (EMA50) and volume confirmation
+# Long when price touches Camarilla L3 support AND price > daily EMA50 AND volume > 1.5x 20-period average
+# Short when price touches Camarilla H3 resistance AND price < daily EMA50 AND volume > 1.5x 20-period average
+# Exit when price reaches opposite Camarilla level (L3 for shorts, H3 for longs) or reverses at opposite H3/L3
+# Camarilla levels provide precise intraday support/resistance, effective in ranging markets
+# EMA50 filter ensures alignment with daily trend to avoid counter-trend trades
+# Volume confirmation filters weak breakouts
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,31 +22,39 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for pivot levels and trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot points (standard formula)
-    # Pivot = (H + L + C)/3
-    # R3 = H + 2*(Pivot - L)
-    # S3 = L - 2*(H - Pivot)
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # Calculate Camarilla levels for 12h using previous 12h OHLC
+    # Camarilla formulas: 
+    # H4 = close + 1.5 * (high - low)
+    # H3 = close + 1.1 * (high - low)
+    # L3 = close - 1.1 * (high - low)
+    # L4 = close - 1.5 * (high - low)
+    # We use H3/L3 as entry levels and H4/L4 as stop levels
     
-    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    r3 = weekly_high + 2 * (pivot - weekly_low)
-    s3 = weekly_low - 2 * (weekly_high - pivot)
+    # Calculate rolling window for previous 12h bar (need high, low, close of previous bar)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    # Set first value to NaN since no previous bar
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Calculate weekly EMA50 for trend filter
-    ema50_1w = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Camarilla levels
+    diff = prev_high - prev_low
+    H3 = prev_close + 1.1 * diff
+    L3 = prev_close - 1.1 * diff
+    H4 = prev_close + 1.5 * diff
+    L4 = prev_close - 1.5 * diff
     
-    # Align weekly data to daily timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate daily EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Volume confirmation: 20-day average
+    # Calculate volume average for confirmation (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -52,13 +62,12 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 50
+    start = 20
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(H3[i]) or np.isnan(L3[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
@@ -67,26 +76,26 @@ def generate_signals(prices):
         vol_threshold = vol_avg[i] * 1.5
         
         if position == 0:
-            # Long setup: break above weekly R3 + above weekly EMA50 + volume confirmation
-            if (price > r3_aligned[i] and price > ema50_1w_aligned[i] and vol > vol_threshold):
+            # Long setup: price touches L3 support AND price > daily EMA50 AND volume confirmation
+            if (price <= L3[i] and price > ema50_1d_aligned[i] and vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: break below weekly S3 + below weekly EMA50 + volume confirmation
-            elif (price < s3_aligned[i] and price < ema50_1w_aligned[i] and vol > vol_threshold):
+            # Short setup: price touches H3 resistance AND price < daily EMA50 AND volume confirmation
+            elif (price >= H3[i] and price < ema50_1d_aligned[i] and vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to weekly pivot (mean reversion to center)
-            if price <= pivot_aligned[i]:
+            # Exit long: price reaches H3 resistance (opposite level) or shows rejection at H4
+            if price >= H3[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to weekly pivot (mean reversion to center)
-            if price >= pivot_aligned[i]:
+            # Exit short: price reaches L3 support (opposite level) or shows rejection at L4
+            if price <= L3[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -94,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyPivot_R3S3_Breakout"
-timeframe = "1d"
+name = "12h_Camarilla_L3H3_EMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
