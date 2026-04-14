@@ -18,7 +18,7 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d RSI (14-period)
+    # Calculate 14-period RSI on 1d
     close_1d = df_1d['close'].values
     delta = np.diff(close_1d, prepend=close_1d[0])
     gain = np.where(delta > 0, delta, 0)
@@ -31,27 +31,38 @@ def generate_signals(prices):
     rs = avg_gain / (avg_loss + 1e-10)
     rsi_1d = 100 - (100 / (1 + rs))
     
-    # Calculate 6-period average volume (4h periods in a day for 6h TF)
+    # Calculate 1d ATR (14-period) for volatility filter
+    tr1 = df_1d['high'].values - df_1d['low'].values
+    tr2 = np.abs(df_1d['high'].values - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr3 = np.abs(df_1d['low'].values - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Calculate 4-period volume moving average (4h periods in a day)
     vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25
+    position_size = 0.25  # 25% position size
     
     for i in range(100, n):
         # Get aligned indicators
         rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)[i]
+        atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)[i]
         vol_ma_4_val = vol_ma_4[i]  # already LTF
         
         # Check for NaN values
-        if np.isnan(rsi_1d_aligned) or np.isnan(vol_ma_4_val):
+        if np.isnan(rsi_1d_aligned) or np.isnan(atr_1d_aligned) or np.isnan(vol_ma_4_val):
             continue
         
         # Volume confirmation (> 1.2x average)
         volume_confirm = volume[i] > 1.2 * vol_ma_4_val
         
+        # Volatility filter: only trade when 1d ATR > 0.5% of price
+        volatility_filter = atr_1d_aligned > 0.005 * close[i]
+        
         if position == 0:  # No position - look for entries
-            if volume_confirm:
+            if volume_confirm and volatility_filter:
                 # Long: Oversold (RSI < 30)
                 if rsi_1d_aligned < 30:
                     position = 1
@@ -71,6 +82,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_RSI30_70_Volume1.2x_v1"
+name = "6h_RSI30_70_Volume1.2x_VolatilityFilter_v1"
 timeframe = "6h"
 leverage = 1.0
