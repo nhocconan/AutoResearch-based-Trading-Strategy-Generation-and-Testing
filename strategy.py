@@ -15,14 +15,14 @@ def generate_signals(prices):
     
     # Load daily data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Calculate daily True Range for ATR
+    # 14-day ATR for volatility measurement
     high_low = high_1d - low_1d
     high_close = np.abs(high_1d - np.roll(close_1d, 1))
     low_close = np.abs(low_1d - np.roll(close_1d, 1))
@@ -30,11 +30,10 @@ def generate_signals(prices):
     low_close[0] = high_low[0]
     tr = np.maximum(high_low, np.maximum(high_close, low_close))
     
-    # 14-day ATR for volatility measurement
     tr_series = pd.Series(tr)
     atr_14d = tr_series.rolling(window=14, min_periods=14).mean().values
     
-    # 12h volume filter: current volume > 1.3x 24-period average (1 day)
+    # 12h volume filter: current volume > 1.5x 24-period average (1 day)
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=24, min_periods=24).mean().values
     
@@ -47,8 +46,8 @@ def generate_signals(prices):
     # Calculate daily volatility as ATR normalized by price
     daily_volatility = atr_14d / close_1d
     daily_vol_series = pd.Series(daily_volatility)
-    # Use 70th percentile of daily volatility over 10 days as threshold (more selective)
-    vol_threshold = daily_vol_series.rolling(window=10, min_periods=10).quantile(0.70).values
+    # Use 80th percentile of daily volatility over 10 days as threshold (more selective)
+    vol_threshold = daily_vol_series.rolling(window=10, min_periods=10).quantile(0.80).values
     # Align volatility threshold to 12h timeframe
     vol_threshold_12h = align_htf_to_ltf(prices, df_1d, vol_threshold)
     
@@ -66,8 +65,8 @@ def generate_signals(prices):
         prev_close = close_1d[i-1]
         prev_atr = atr_14d[i-1]  # Previous day's ATR
         
-        # Calculate volatility-adjusted threshold (0.3 * ATR) - balanced for signal frequency
-        threshold = prev_atr * 0.30
+        # Calculate volatility-adjusted threshold (0.35 * ATR) - balanced for signal frequency
+        threshold = prev_atr * 0.35
         
         # Calculate dynamic S1/R1 levels based on volatility
         s1 = prev_close - threshold
@@ -83,13 +82,13 @@ def generate_signals(prices):
         if position == 0:
             # Long: Price breaks above r1 with volume and high volatility regime
             if (close[i] > r1_12h and close[i-1] <= r1_12h and 
-                volume[i] > vol_ma[i] * 1.3 and 
+                volume[i] > vol_ma[i] * 1.5 and 
                 daily_volatility[i] > vol_threshold_12h[i]):
                 position = 1
                 signals[i] = position_size
             # Short: Price breaks below s1 with volume and high volatility regime
             elif (close[i] < s1_12h and close[i-1] >= s1_12h and 
-                  volume[i] > vol_ma[i] * 1.3 and 
+                  volume[i] > vol_ma[i] * 1.5 and 
                   daily_volatility[i] > vol_threshold_12h[i]):
                 position = -1
                 signals[i] = -position_size
@@ -106,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_VolatilityAdjusted_S1R1_Breakout_Volume_v3"
+name = "12h_1d_VolatilityAdjusted_S1R1_Breakout_Volume_v4"
 timeframe = "12h"
 leverage = 1.0
