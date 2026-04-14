@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour price breaking above/below 1-week Donchian Channel (10) with volume above 1.5x 12-period average and 1-day ADX > 20.
-Trades in direction of 1-week trend to avoid counter-trend whipsaws. Uses tighter Donchian period (10) and lower ADX threshold (20) to increase signal frequency while maintaining quality.
-Target: 30-60 trades/year per symbol.
+Hypothesis: 1-day price breaking above/below 1-week Donchian Channel (14) with volume above 1.5x 12-period average and 1-day ADX > 20.
+Trades in direction of 1-week trend to avoid counter-trend whipsaws. Uses Donchian period (14) and ADX threshold (20) for balanced signal frequency.
+Target: 15-25 trades/year per symbol (60-100 total over 4 years).
 """
 
 import numpy as np
@@ -19,9 +19,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1-week Donchian Channel (10-period) for more frequent signals
+    # Calculate 1-week Donchian Channel (14-period)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    if len(df_1w) < 14:
         return np.zeros(n)
     
     high_1w = df_1w['high'].values
@@ -29,8 +29,8 @@ def generate_signals(prices):
     close_1w = df_1w['close'].values
     
     # Upper and lower bands
-    upper_dc = pd.Series(high_1w).rolling(window=10, min_periods=10).max().values
-    lower_dc = pd.Series(low_1w).rolling(window=10, min_periods=10).min().values
+    upper_dc = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
+    lower_dc = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
     
     # Middle line for trend
     mid_dc = (upper_dc + lower_dc) / 2
@@ -71,7 +71,7 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
     adx_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 12-period average volume (12*4h = 2 days)
+    # Calculate 12-period average volume (12 periods of 1d = 12 days)
     vol_ma_12 = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
     
     signals = np.zeros(n)
@@ -119,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1wDC10_1dADX20_Volume"
-timeframe = "4h"
+name = "1d_1wDC14_1dADX20_Volume"
+timeframe = "1d"
 leverage = 1.0
