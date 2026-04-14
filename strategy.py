@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index with 12h trend filter and volume confirmation
-# Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
-# Long when Bull Power > 0 AND Bear Power rising AND 12h EMA(21) rising AND volume > 1.5x average
-# Short when Bear Power < 0 AND Bull Power falling AND 12h EMA(21) falling AND volume > 1.5x average
-# Exit when Bull Power < 0 (for long) or Bear Power > 0 (for short) OR opposite signal
-# Uses 13-period EMA for Elder Ray calculation, 12h EMA for trend filter, volume for confirmation
-# Designed to capture institutional buying/selling pressure with trend alignment
-# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation
+# Long when price breaks above Donchian(20) upper band AND 1d EMA(50) rising AND volume > 1.5x average
+# Short when price breaks below Donchian(20) lower band AND 1d EMA(50) falling AND volume > 1.5x average
+# Exit when price crosses Donchian(20) midline OR opposite signal
+# Uses Donchian for price channel breakouts, EMA for trend filter, volume for confirmation
+# Designed to capture breakouts in trending markets with institutional volume support
+# Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,18 +21,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Load 1d data ONCE before loop for trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 13-period EMA for Elder Ray
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean()
+    # Calculate Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max()
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min()
+    donchian_mid = (high_20 + low_20) / 2
     
-    # Calculate Elder Ray components
-    bull_power = high - ema_13
-    bear_power = low - ema_13
-    
-    # Calculate EMA on 12h (21-period) for trend filter
-    ema_21_12h = pd.Series(df_12h['close']).ewm(span=21, adjust=False, min_periods=21).mean()
+    # Calculate EMA on 1d (50-period) for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean()
     
     # Calculate volume average for confirmation (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -43,51 +40,52 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 50
+    start = 60
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or 
+        if (np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or 
+            np.isnan(donchian_mid[i]) or 
             np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
-        # Get EMA values aligned to 6h timeframe
-        ema_21_aligned = align_htf_to_ltf(prices, df_12h, ema_21_12h.values)
-        ema_val = ema_21_aligned[i]
-        ema_prev = ema_21_aligned[i-1]
+        # Get EMA values aligned to 4h timeframe
+        ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d.values)
+        ema_val = ema_50_aligned[i]
+        ema_prev = ema_50_aligned[i-1]
         
-        bull_val = bull_power[i]
-        bear_val = bear_power[i]
-        bull_prev = bull_power[i-1]
-        bear_prev = bear_power[i-1]
+        donchian_upper = high_20[i]
+        donchian_lower = low_20[i]
+        donchian_mid_val = donchian_mid[i]
+        price = close[i]
         vol = volume[i]
         vol_threshold = vol_avg[i] * 1.5
         
         if position == 0:
-            # Long setup: Bull Power > 0 AND Bear Power rising AND 12h EMA rising AND volume confirmation
-            if (bull_val > 0 and bear_val > bear_prev and ema_val > ema_prev and vol > vol_threshold):
+            # Long setup: Price breaks above Donchian upper AND 1d EMA rising AND volume confirmation
+            if (price > donchian_upper and ema_val > ema_prev and vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: Bear Power < 0 AND Bull Power falling AND 12h EMA falling AND volume confirmation
-            elif (bear_val < 0 and bull_val < bull_prev and ema_val < ema_prev and vol > vol_threshold):
+            # Short setup: Price breaks below Donchian lower AND 1d EMA falling AND volume confirmation
+            elif (price < donchian_lower and ema_val < ema_prev and vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Bull Power < 0 OR opposite signal
-            if (bull_val < 0 or 
-                (bear_val < 0 and bull_val < bull_prev and ema_val < ema_prev and vol > vol_threshold)):
+            # Exit long: Price crosses below Donchian midline OR opposite signal
+            if (price < donchian_mid_val or 
+                (price < donchian_lower and ema_val < ema_prev and vol > vol_threshold)):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Bear Power > 0 OR opposite signal
-            if (bear_val > 0 or 
-                (bull_val > 0 and bear_val > bear_prev and ema_val > ema_prev and vol > vol_threshold)):
+            # Exit short: Price crosses above Donchian midline OR opposite signal
+            if (price > donchian_mid_val or 
+                (price > donchian_upper and ema_val > ema_prev and vol > vol_threshold)):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -95,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_12hEMA_Volume"
-timeframe = "6h"
+name = "4h_Donchian_1dEMA_Volume"
+timeframe = "4h"
 leverage = 1.0
