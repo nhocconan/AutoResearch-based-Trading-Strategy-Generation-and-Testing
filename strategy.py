@@ -3,120 +3,137 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ADX filter and volume confirmation
-# Trend from 1d ADX (14) > 20 filters for trending markets to avoid chop
-# 4h Donchian breakout captures momentum in trending regimes
-# Volume > 1.3x average confirms institutional participation
-# Works in bull/bear as ADX adapts to trend strength
-# Target: 20-40 trades/year per symbol (80-160 total over 4 years)
+# Hypothesis: 6h Ichimoku Cloud with 1d weekly pivot confirmation
+# - Uses 1d Ichimoku cloud (Senkou Span A/B) as primary trend filter
+# - 6h Tenkan-Kijun cross for entry timing
+# - Weekly pivot levels (from 1d data) act as strong support/resistance
+# - Price must be above/below weekly pivot to confirm bias
+# - Works in all regimes: cloud filters false breaks, pivots provide structure
+# - Target: 15-25 trades/year per symbol (60-100 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Load 1d data ONCE for ADX filter
+    # Load 1d data ONCE for Ichimoku and weekly pivot
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d ADX(14) for trend strength filter
-    adx_len = 14
-    if len(df_1d) < adx_len:
+    # Calculate Ichimoku components on 1d
+    # Tenkan-sen (Conversion Line): (9-period high + low)/2
+    period9_high = pd.Series(df_1d['high']).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(df_1d['low']).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + low)/2
+    period26_high = pd.Series(df_1d['high']).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(df_1d['low']).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan_sen + kijun_sen) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
+    period52_high = pd.Series(df_1d['high']).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(df_1d['low']).rolling(window=52, min_periods=52).min().values
+    senkou_b = ((period52_high + period52_low) / 2)
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
+    
+    # Calculate weekly pivot points from 1d data (using prior week)
+    # Need at least 5 days for prior week
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    # Calculate ADX components
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate pivot for each day based on prior week's OHLC
+    weekly_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().values
+    weekly_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().values
+    weekly_close = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).mean().values  # approx
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with 1d index
+    # Standard pivot point: (H + L + C)/3
+    pivot_point = (weekly_high + weekly_low + weekly_close) / 3
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # Support and resistance levels
+    s1 = (2 * pivot_point) - weekly_high
+    r1 = (2 * pivot_point) - weekly_low
+    s2 = pivot_point - (weekly_high - weekly_low)
+    r2 = pivot_point + (weekly_high - weekly_low)
     
-    # Smoothed values
-    atr = pd.Series(tr).ewm(span=adx_len, adjust=False, min_periods=adx_len).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(span=adx_len, adjust=False, min_periods=adx_len).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(span=adx_len, adjust=False, min_periods=adx_len).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / atr
-    di_minus = 100 * dm_minus_smooth / atr
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(span=adx_len, adjust=False, min_periods=adx_len).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Donchian channel (20 periods) on 4h
-    dc_len = 20
-    dc_upper = pd.Series(high).rolling(window=dc_len, min_periods=dc_len).max().shift(1).values
-    dc_lower = pd.Series(low).rolling(window=dc_len, min_periods=dc_len).min().shift(1).values
-    
-    # Volume confirmation: 1.3x average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align weekly pivot levels to 6h
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_point)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations
-    start = max(adx_len*2, dc_len, 20)
+    # Start after enough data for all calculations
+    start = max(52, 26, 9, 5)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(dc_upper[i]) or 
-            np.isnan(dc_lower[i]) or
-            np.isnan(adx_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(tenkan_sen_aligned[i]) or 
+            np.isnan(kijun_sen_aligned[i]) or
+            np.isnan(senkou_a_aligned[i]) or
+            np.isnan(senkou_b_aligned[i]) or
+            np.isnan(pivot_aligned[i]) or
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: ADX > 20 indicates trending market
-        trending = adx_aligned[i] > 20
+        # Determine Ichimoku trend: price above/both cloud lines = bullish
+        cloud_top = max(senkou_a_aligned[i], senkou_b_aligned[i])
+        cloud_bottom = min(senkou_a_aligned[i], senkou_b_aligned[i])
+        price_above_cloud = close[i] > cloud_top
+        price_below_cloud = close[i] < cloud_bottom
         
-        # Volume confirmation: current volume > 1.3x average
-        volume_confirmed = volume[i] > 1.3 * vol_ma[i]
+        # TK cross signals
+        tk_cross_bull = tenkan_sen_aligned[i] > kijun_sen_aligned[i]
+        tk_cross_bear = tenkan_sen_aligned[i] < kijun_sen_aligned[i]
+        
+        # Weekly pivot bias: price above/below pivot
+        price_above_pivot = close[i] > pivot_aligned[i]
+        price_below_pivot = close[i] < pivot_aligned[i]
         
         if position == 0:
-            # Enter long: Donchian breakout above + trending + volume
-            if (close[i] > dc_upper[i] and 
-                trending and 
-                volume_confirmed):
+            # Enter long: price above cloud + TK bullish cross + above weekly pivot
+            if (price_above_cloud and 
+                tk_cross_bull and 
+                price_above_pivot):
                 position = 1
                 signals[i] = position_size
-            # Enter short: Donchian breakdown below + trending + volume
-            elif (close[i] < dc_lower[i] and 
-                  trending and 
-                  volume_confirmed):
+            # Enter short: price below cloud + TK bearish cross + below weekly pivot
+            elif (price_below_cloud and 
+                  tk_cross_bear and 
+                  price_below_pivot):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below Donchian lower or ADX weakens
-            if close[i] < dc_lower[i] or adx_aligned[i] < 20:
+            # Exit long: price breaks below cloud OR TK bearish cross
+            if (close[i] < cloud_bottom or 
+                tk_cross_bear):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above Donchian upper or ADX weakens
-            if close[i] > dc_upper[i] or adx_aligned[i] < 20:
+            # Exit short: price breaks above cloud OR TK bullish cross
+            if (close[i] > cloud_top or 
+                tk_cross_bull):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -124,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_ADX20_Donchian_Volume_v1"
-timeframe = "4h"
+name = "6h_1d_Ichimoku_WeeklyPivot_v1"
+timeframe = "6h"
 leverage = 1.0
