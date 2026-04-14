@@ -92,7 +92,7 @@ def generate_signals(prices):
     # Align EMA to 12h timeframe
     ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
-    # Calculate 12-period RSI for momentum (daily)
+    # Calculate 14-period RSI for momentum (daily)
     if len(close_1d) < 14:
         return np.zeros(n)
     
