@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Load daily data (HTF) once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -23,7 +23,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate daily range and ATR (14-period) for volatility filter
+    # Calculate daily ATR (14-period) for volatility filter
     tr = np.zeros(len(df_1d))
     tr[0] = high_1d[0] - low_1d[0]
     for i in range(1, len(df_1d)):
@@ -41,6 +41,14 @@ def generate_signals(prices):
     
     atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
     
+    # Calculate daily volume SMA (20-period)
+    vol_sma_1d = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 20:
+        for i in range(19, len(df_1d)):
+            vol_sma_1d[i] = np.mean(volume_1d[i-19:i+1])
+    
+    vol_sma_4h = align_htf_to_ltf(prices, df_1d, vol_sma_1d)
+    
     # Calculate 4-hour Donchian channels (20-period)
     donch_high = np.full(n, np.nan)
     donch_low = np.full(n, np.nan)
@@ -48,17 +56,6 @@ def generate_signals(prices):
         for i in range(19, n):
             donch_high[i] = np.max(high[i-19:i+1])
             donch_low[i] = np.min(low[i-19:i+1])
-    
-    # Calculate daily volume average (20-period)
-    vol_avg_1d = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 20:
-        vol_sum = np.sum(volume_1d[:20])
-        vol_avg_1d[19] = vol_sum / 20
-        for i in range(20, len(df_1d)):
-            vol_sum = vol_sum - volume_1d[i-20] + volume_1d[i]
-            vol_avg_1d[i] = vol_sum / 20
-    
-    vol_avg_4h = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
     signals = np.zeros(n)
     position = 0
@@ -69,7 +66,7 @@ def generate_signals(prices):
         if (np.isnan(atr_4h[i]) or
             np.isnan(donch_high[i]) or
             np.isnan(donch_low[i]) or
-            np.isnan(vol_avg_4h[i])):
+            np.isnan(vol_sma_4h[i])):
             signals[i] = 0.0
             continue
         
@@ -78,8 +75,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Skip low volume periods (volume < 50% of 20-day average)
-        if volume[i] < 0.5 * vol_avg_4h[i]:
+        # Skip low volume periods (volume < 50% of daily average)
+        if volume[i] < 0.5 * vol_sma_4h[i]:
             signals[i] = 0.0
             continue
         
