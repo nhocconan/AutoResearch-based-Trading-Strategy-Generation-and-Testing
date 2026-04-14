@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian Breakout with 1d Trend Filter and Volume Confirmation
-# Uses Donchian Channel (20-period) breakout from 4h for entry signals
-# 1d EMA (50) provides trend direction filter to avoid counter-trend trades
+# Hypothesis: 4-hour Donchian Channel Breakout with 1-day Trend Filter and Volume Confirmation
+# Uses Donchian breakout (20-period high/low) from 4h for entry signals
+# 1-day EMA (50) provides trend direction filter to avoid counter-trend trades
 # Volume confirmation (>1.5x average) ensures institutional participation
 # Designed to work in both bull and bear markets by trading breakouts in direction of 1d trend
-# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag
+# Target: 20-30 trades/year (80-120 total over 4 years) to minimize fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -28,7 +28,7 @@ def generate_signals(prices):
     ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate Donchian Channel (20-period) on 4h data
+    # Calculate Donchian Channels (20-period) on 4h data
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     upper_channel = high_series.rolling(window=20, min_periods=20).max().values
@@ -43,7 +43,7 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 20  # for Donchian Channel
+    start = 20  # for Donchian Channels
     
     for i in range(start, n):
         # Skip if any critical data is NaN
