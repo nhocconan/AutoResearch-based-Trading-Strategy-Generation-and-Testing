@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Williams %R with 1-day ADX trend filter and volume confirmation
-# Long when Williams %R crosses above -80 (oversold) AND daily ADX > 25 (trending) AND volume > 1.5x 20-period average
-# Short when Williams %R crosses below -20 (overbought) AND daily ADX > 25 (trending) AND volume > 1.5x 20-period average
-# Exit when opposite Williams %R threshold is crossed
-# Williams %R identifies mean reversion, ADX confirms trend strength, volume validates momentum
+# Hypothesis: 4h Donchian breakout with 1-day ADX trend filter and volume confirmation
+# Long when price breaks above Donchian(20) high AND daily ADX > 25 (trending) AND volume > 1.5x 20-period average
+# Short when price breaks below Donchian(20) low AND daily ADX > 25 (trending) AND volume > 1.5x 20-period average
+# Exit when price crosses Donchian midline (10-period average of high/low) in opposite direction
+# Donchian channels identify breakouts, ADX confirms trend strength, volume validates momentum
 # Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost
 
 def generate_signals(prices):
@@ -23,10 +23,10 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Williams %R on 4h (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
-    willr = -100 * ((highest_high - close) / (highest_high - lowest_low + 1e-10))
+    # Calculate Donchian channels on 4h (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max()
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min()
+    donchian_mid = (highest_high + lowest_low) / 2
     
     # Calculate ADX on 1d (14-period)
     high_1d = df_1d['high'].values
@@ -66,12 +66,13 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations (max of 14 for Williams %R/ADX + buffer)
-    start = 30
+    # Start after enough data for calculations (max of 20 for Donchian/ADX + buffer)
+    start = 40
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(willr[i]) or np.isnan(adx[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(adx[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
@@ -79,33 +80,36 @@ def generate_signals(prices):
         adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
         adx_current = adx_aligned[i]
         
-        willr_current = willr[i]
+        close_current = close[i]
+        donchian_high = highest_high[i]
+        donchian_low = lowest_low[i]
+        donchian_mid_val = donchian_mid[i]
         vol = volume[i]
         vol_threshold = vol_avg[i] * 1.5
         
         if position == 0:
-            # Long setup: Williams %R crosses above -80 (oversold) + ADX > 25 (trending) + volume confirmation
-            if (willr_current > -80 and willr[i-1] <= -80 and 
+            # Long setup: price breaks above Donchian high + ADX > 25 (trending) + volume confirmation
+            if (close_current > donchian_high and 
                 adx_current > 25 and vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: Williams %R crosses below -20 (overbought) + ADX > 25 (trending) + volume confirmation
-            elif (willr_current < -20 and willr[i-1] >= -20 and 
+            # Short setup: price breaks below Donchian low + ADX > 25 (trending) + volume confirmation
+            elif (close_current < donchian_low and 
                   adx_current > 25 and vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Williams %R crosses below -20 (overbought)
-            if willr_current < -20 and willr[i-1] >= -20:
+            # Exit long: price crosses below Donchian midline
+            if close_current < donchian_mid_val:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Williams %R crosses above -80 (oversold)
-            if willr_current > -80 and willr[i-1] <= -80:
+            # Exit short: price crosses above Donchian midline
+            if close_current > donchian_mid_val:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -113,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_1dADX_Trend_Volume"
+name = "4h_Donchian_1dADX_Trend_Volume"
 timeframe = "4h"
 leverage = 1.0
