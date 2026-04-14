@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 6h Donchian breakout with 12h volatility regime and volume confirmation.
-Long when price breaks above 6h Donchian high (20) during low volatility (12h ATR < 12h ATR MA) with volume surge.
-Short when price breaks below 6h Donchian low (20) during low volatility with volume surge.
-Exits when price crosses 6h EMA(20) in opposite direction or volatility expands.
-Designed for low turnover: ~15-30 trades/year per symbol.
+Hypothesis: 4h Donchian breakout (20) with 1d volume confirmation and 1w trend filter.
+Long when price breaks above 4h Donchian high (20) during 1w uptrend (price > 1w EMA200) with volume surge (>1.5x 1d volume MA).
+Short when price breaks below 4h Donchian low (20) during 1w downtrend (price < 1w EMA200) with volume surge.
+Exit when price crosses 4h EMA(40) in opposite direction.
+Designed for low turnover: ~20-40 trades/year per symbol.
 """
 import numpy as np
 import pandas as pd
@@ -20,84 +20,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data once
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Load 1d data once
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 12h ATR(14) for volatility regime
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr1[0] = high_12h[0] - low_12h[0]
-    tr2[0] = np.abs(high_12h[0] - close_12h[0])
-    tr3[0] = np.abs(low_12h[0] - close_12h[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma_12h = pd.Series(atr_12h).rolling(window=20, min_periods=20).mean().values
+    # Load 1w data once
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # 6h Donchian channels (20)
+    # 1d volume MA(20)
+    vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    
+    # 1w EMA(200) for trend filter
+    close_1w = df_1w['close'].values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # 4h Donchian channels (20)
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 6h EMA(20) for exit
+    # 4h EMA(40) for exit
     close_series = pd.Series(close)
-    ema_20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_40 = close_series.ewm(span=40, adjust=False, min_periods=40).mean().values
     
-    # Volume filter: 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align 1d volume MA to 4h
+    vol_ma_1d_4h = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # Align 1w EMA200 to 4h
+    ema_200_1w_4h = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25
     
-    for i in range(20, n):
-        # 12h index (2 bars per day: 24/12 = 2)
-        idx_12h = i // 2
-        if idx_12h < 20:  # need enough for ATR MA
-            continue
-        
-        # Get previous 12h ATR and MA to avoid look-ahead
-        atr_prev = atr_12h[idx_12h - 1] if idx_12h - 1 < len(atr_12h) else atr_12h[-1]
-        atr_ma_prev = atr_ma_12h[idx_12h - 1] if idx_12h - 1 < len(atr_ma_12h) else atr_ma_12h[-1]
-        if np.isnan(atr_prev) or np.isnan(atr_ma_prev):
-            continue
-        
-        # Create arrays for alignment (using previous values)
-        atr_arr = np.full(len(df_12h), atr_prev)
-        atr_ma_arr = np.full(len(df_12h), atr_ma_prev)
-        atr_12h_6h = align_htf_to_ltf(prices, df_12h, atr_arr)[i]
-        atr_ma_12h_6h = align_htf_to_ltf(prices, df_12h, atr_ma_arr)[i]
-        
+    for i in range(200, n):  # wait for 1w EMA200 warmup
         if position == 0:
-            # Long: Donchian breakout + low volatility + volume surge
+            # Long: Donchian breakout + 1w uptrend + volume surge
             if (close[i] > donch_high[i] and 
-                atr_12h_6h < atr_ma_12h_6h and 
-                volume[i] > vol_ma[i] * 1.5):
+                close[i] > ema_200_1w_4h[i] and 
+                volume[i] > vol_ma_1d_4h[i] * 1.5):
                 position = 1
                 signals[i] = position_size
-            # Short: Donchian breakdown + low volatility + volume surge
+            # Short: Donchian breakdown + 1w downtrend + volume surge
             elif (close[i] < donch_low[i] and 
-                  atr_12h_6h < atr_ma_12h_6h and 
-                  volume[i] > vol_ma[i] * 1.5):
+                  close[i] < ema_200_1w_4h[i] and 
+                  volume[i] > vol_ma_1d_4h[i] * 1.5):
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
-            # Exit: price below EMA(20) or volatility expansion
-            if close[i] < ema_20[i] or atr_12h_6h > atr_ma_12h_6h * 1.5:
+            # Exit: price below EMA(40)
+            if close[i] < ema_40[i]:
                 position = 0
                 signals[i] = 0.0
         elif position == -1:
-            # Exit: price above EMA(20) or volatility expansion
-            if close[i] > ema_20[i] or atr_12h_6h > atr_ma_12h_6h * 1.5:
+            # Exit: price above EMA(40)
+            if close[i] > ema_40[i]:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "6h_Donchian_VolRegime_Volume"
-timeframe = "6h"
+name = "4h_Donchian_1dVol_1wTrend"
+timeframe = "4h"
 leverage = 1.0
