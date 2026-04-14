@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Williams %R with 12-hour trend filter and volume confirmation
-# Long when Williams %R < -80 (oversold) AND price > 12h EMA200 AND volume > 1.5x 20-period average
-# Short when Williams %R > -20 (overbought) AND price < 12h EMA200 AND volume > 1.5x 20-period average
-# Exit when Williams %R crosses back above -50 (for longs) or below -50 (for shorts)
-# Williams %R identifies overextended moves likely to reverse, EMA200 ensures trend alignment,
-# volume confirmation avoids false signals. Designed for mean reversion in both bull and bear markets.
+# Hypothesis: 1-hour RSI with 4-hour trend filter and volume confirmation
+# Long when RSI(14) > 55, price > 4h EMA200, and volume > 1.5x 20-period average
+# Short when RSI(14) < 45, price < 4h EMA200, and volume > 1.5x 20-period average
+# Exit when RSI crosses back to neutral (45-55) or volume drops
+# Uses 4h for trend direction, 1h for entry timing, volume for confirmation
+# Target: 80-150 total trades over 4 years (20-38/year) with strict entry conditions
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,64 +20,66 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for EMA200 trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Load 4-hour data ONCE before loop for trend filter
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate Williams %R (14-period) on 4h
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate RSI on 1h (14-period)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    # Calculate 12h EMA200 for trend filter
-    close_12h = df_12h['close'].values
-    ema200_12h = pd.Series(close_12h).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_12h_aligned = align_htf_to_ltf(prices, df_12h, ema200_12h)
+    # Calculate 4h EMA200 for trend filter
+    close_4h = df_4h['close'].values
+    ema200_4h = pd.Series(close_4h).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
     
     # Calculate volume average for confirmation (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position size
+    position_size = 0.20  # 20% position size
     
-    # Start after enough data for calculations (14 for Williams %R + buffer)
-    start = 30
+    # Start after enough data for calculations
+    start = 200  # Wait for 4h EMA200
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(williams_r[i]) or np.isnan(ema200_12h_aligned[i]) or 
+        if (np.isnan(rsi[i]) or np.isnan(ema200_4h_aligned[i]) or 
             np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
-        wr = williams_r[i]
         price = close[i]
         vol = volume[i]
         vol_threshold = vol_avg[i] * 1.5
         
         if position == 0:
-            # Long setup: Williams %R oversold (< -80) + above 12h EMA200 + volume confirmation
-            if (wr < -80 and price > ema200_12h_aligned[i] and vol > vol_threshold):
+            # Long setup: RSI > 55, price > 4h EMA200, volume confirmation
+            if (rsi[i] > 55 and price > ema200_4h_aligned[i] and vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: Williams %R overbought (> -20) + below 12h EMA200 + volume confirmation
-            elif (wr > -20 and price < ema200_12h_aligned[i] and vol > vol_threshold):
+            # Short setup: RSI < 45, price < 4h EMA200, volume confirmation
+            elif (rsi[i] < 45 and price < ema200_4h_aligned[i] and vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Williams %R crosses back above -50
-            if wr > -50:
+            # Exit long: RSI drops below 50 or volume drops
+            if rsi[i] < 50 or vol < vol_avg[i] * 0.8:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Williams %R crosses back below -50
-            if wr < -50:
+            # Exit short: RSI rises above 50 or volume drops
+            if rsi[i] > 50 or vol < vol_avg[i] * 0.8:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -85,6 +87,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_12hEMA200_Volume"
-timeframe = "4h"
+name = "1h_RSI_4hEMA200_Volume"
+timeframe = "1h"
 leverage = 1.0
