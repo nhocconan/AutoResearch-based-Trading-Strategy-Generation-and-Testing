@@ -3,9 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 6h Williams Fractal breakout with daily trend filter and volume confirmation
+# In trending markets, fractal breaks signal acceleration; in ranging markets, filters reduce false signals
+# Works in bull/bear by using daily EMA trend filter and requiring volume confirmation
+# Target: 50-150 total trades over 4 years (12-37/year)
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -13,60 +18,64 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points and ATR
+    # Get daily data for trend filter and fractals
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily ATR(14) for volatility filter
-    high_1d_series = pd.Series(high_1d)
-    low_1d_series = pd.Series(low_1d)
+    # Calculate daily EMA(50) for trend filter
     close_1d_series = pd.Series(close_1d)
-    tr1 = high_1d_series - low_1d_series
-    tr2 = abs(high_1d_series - close_1d_series.shift(1))
-    tr3 = abs(low_1d_series - close_1d_series.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14_1d = tr.rolling(window=14, min_periods=14).mean().values
+    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate daily pivot points (using prior day's OHLC)
-    prev_day_high = np.roll(high_1d, 1)
-    prev_day_low = np.roll(low_1d, 1)
-    prev_day_close = np.roll(close_1d, 1)
-    prev_day_high[0] = np.nan
-    prev_day_low[0] = np.nan
-    prev_day_close[0] = np.nan
+    # Calculate Williams Fractals on daily data
+    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n] > high[n+1] and high[n] > high[n+2]
+    # Bullish fractal: low[n-2] > low[n-1] < low[n] and low[n] < low[n+1] and low[n] < low[n+2]
+    n_1d = len(high_1d)
+    bearish_fractal = np.zeros(n_1d, dtype=bool)
+    bullish_fractal = np.zeros(n_1d, dtype=bool)
     
-    # Daily pivot point
-    pp = (prev_day_high + prev_day_low + prev_day_close) / 3
-    # Daily resistance and support levels
-    r1 = 2 * pp - prev_day_low
-    s1 = 2 * pp - prev_day_high
-    r2 = pp + (prev_day_high - prev_day_low)
-    s2 = pp - (prev_day_high - prev_day_low)
+    for i in range(2, n_1d - 2):
+        if (high_1d[i-2] < high_1d[i-1] and 
+            high_1d[i] > high_1d[i-1] and 
+            high_1d[i] > high_1d[i+1] and 
+            high_1d[i] > high_1d[i+2]):
+            bearish_fractal[i] = True
+            
+        if (low_1d[i-2] > low_1d[i-1] and 
+            low_1d[i] < low_1d[i-1] and 
+            low_1d[i] < low_1d[i+1] and 
+            low_1d[i] < low_1d[i+2]):
+            bullish_fractal[i] = True
     
-    # Align daily pivot levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Convert to price levels (use the fractal high/low as breakout level)
+    bearish_fractal_level = np.where(bearish_fractal, high_1d, np.nan)
+    bullish_fractal_level = np.where(bullish_fractal, low_1d, np.nan)
     
-    # Volume confirmation: volume > 1.5x average volume (20-period)
+    # Forward fill to get the most recent fractal level
+    bearish_fractal_level = pd.Series(bearish_fractal_level).ffill().values
+    bullish_fractal_level = pd.Series(bullish_fractal_level).ffill().values
+    
+    # Align fractal levels to 6h timeframe with 2-bar delay for confirmation
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal_level, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal_level, additional_delay_bars=2)
+    
+    # Volume confirmation: volume > 1.3x average volume (30-period)
     vol_series = pd.Series(volume)
-    avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
+    avg_vol = vol_series.rolling(window=30, min_periods=30).mean().shift(1).values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(20, 14)  # for 20-period volume average and 14-period ATR
+    start = max(50, 30)  # for 50-period EMA and 30-period volume average
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(atr_14_aligned[i]) or np.isnan(avg_vol[i])):
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
         
@@ -74,28 +83,28 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long: price breaks above daily R2 with volume and volatility filter
-            if (price > r2_aligned[i] and 
-                vol > 1.5 * avg_vol[i] and atr_14_aligned[i] > 0):
+            # Long: price breaks above bullish fractal level AND above daily EMA50 with volume filter
+            if (price > bullish_fractal_aligned[i] and price > ema_50_1d_aligned[i] and 
+                vol > 1.3 * avg_vol[i]):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below daily S2 with volume and volatility filter
-            elif (price < s2_aligned[i] and 
-                  vol > 1.5 * avg_vol[i] and atr_14_aligned[i] > 0):
+            # Short: price breaks below bearish fractal level AND below daily EMA50 with volume filter
+            elif (price < bearish_fractal_aligned[i] and price < ema_50_1d_aligned[i] and 
+                  vol > 1.3 * avg_vol[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below daily S1
-            if price < s1_aligned[i]:
+            # Exit long: price breaks below bullish fractal level OR below daily EMA50
+            if price < bullish_fractal_aligned[i] or price < ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above daily R1
-            if price > r1_aligned[i]:
+            # Exit short: price breaks above bearish fractal level OR above daily EMA50
+            if price > bearish_fractal_aligned[i] or price > ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -103,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Pivot_R2_S2_Volume"
-timeframe = "4h"
+name = "6h_Williams_Fractal_Breakout_EMA_Volume"
+timeframe = "6h"
 leverage = 1.0
