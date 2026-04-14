@@ -39,7 +39,7 @@ def generate_signals(prices):
     r3 = prev_week_high + 2 * (pp - prev_week_low)
     s3 = prev_week_low - 2 * (prev_week_high - pp)
     
-    # Align weekly pivot levels to 6h timeframe
+    # Align weekly pivot levels to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
@@ -105,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_1d_Weekly_Pivot_EMA_Volume"
-timeframe = "6h"
+name = "12h_1d_1w_Pivot_EMA_Volume"
+timeframe = "12h"
 leverage = 1.0
