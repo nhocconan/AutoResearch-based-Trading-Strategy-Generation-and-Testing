@@ -3,19 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1d Trend Filter
-# Uses Williams Alligator (Jaw/Teeth/Lips) on 12h timeframe to identify trend direction
-# Filters trades using 1d EMA200 to ensure alignment with higher timeframe trend
-# Williams Alligator consists of three smoothed moving averages:
-#   Jaw (13-period, shifted 8 bars forward) - Blue line
-#   Teeth (8-period, shifted 5 bars forward) - Red line  
-#   Lips (5-period, shifted 3 bars forward) - Green line
-# Entry signals:
-#   Long: Lips > Teeth > Jaw (bullish alignment) and price above 1d EMA200
-#   Short: Lips < Teeth < Jaw (bearish alignment) and price below 1d EMA200
-# Exit: When Alligator lines intertwine (Lips crosses Teeth) indicating trend weakness
-# Designed for low frequency (~15-25 trades/year) to minimize fee drag
-# Works in both bull and bear markets by following the dominant trend
+# Hypothesis: 1d Williams %R with 1-week trend filter
+# Uses Williams %R (%R) for mean reversion signals on daily timeframe
+# In oversold (%R < -80) go long, overbought (%R > -20) go short
+# Weekly EMA50 acts as trend filter: only take long when price > weekly EMA50, short when price < weekly EMA50
+# Works in both bull/bear by combining mean reversion with trend alignment
+# Target: 30-100 total trades over 4 years (7-25/year)
 
 def generate_signals(prices):
     n = len(prices)
@@ -26,71 +19,54 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     
-    # Load 1d data ONCE before loop for EMA200 filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    # Calculate 1d EMA200
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Williams %R (14-period) on daily data
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Avoid division by zero
+    hh_ll = highest_high - lowest_low
+    williams_r = np.where(hh_ll != 0, -100 * (highest_high - close) / hh_ll, -50)
     
-    # Williams Alligator components on 12h data
-    # Jaw: 13-period SMMA, shifted 8 bars
-    jaw = pd.Series(high).rolling(window=13, min_periods=13).mean().shift(8).values
-    # Teeth: 8-period SMMA, shifted 5 bars
-    teeth = pd.Series(low).rolling(window=8, min_periods=8).mean().shift(5).values
-    # Lips: 5-period SMMA, shifted 3 bars
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Weekly EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations (max shift is 8)
-    start = 200  # for 1d EMA200 calculation
+    # Start after enough data for calculations
+    start = 50
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(ema_200_1d_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # Check Alligator alignment
-        lips_above_teeth = lips[i] > teeth[i]
-        teeth_above_jaw = teeth[i] > jaw[i]
-        bullish_alignment = lips_above_teeth and teeth_above_jaw
-        
-        lips_below_teeth = lips[i] < teeth[i]
-        teeth_below_jaw = teeth[i] < jaw[i]
-        bearish_alignment = lips_below_teeth and teeth_below_jaw
-        
-        # Check 1d EMA200 filter
-        price_above_ema200 = price > ema_200_1d_aligned[i]
-        price_below_ema200 = price < ema_200_1d_aligned[i]
-        
         if position == 0:
-            # Long entry: bullish Alligator alignment + price above 1d EMA200
-            if bullish_alignment and price_above_ema200:
+            # Long: oversold (%R < -80) and price above weekly EMA50 (uptrend)
+            if williams_r[i] < -80 and price > ema_50_1w_aligned[i]:
                 position = 1
                 signals[i] = position_size
-            # Short entry: bearish Alligator alignment + price below 1d EMA200
-            elif bearish_alignment and price_below_ema200:
+            # Short: overbought (%R > -20) and price below weekly EMA50 (downtrend)
+            elif williams_r[i] > -20 and price < ema_50_1w_aligned[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: When Alligator lines intertwine (Lips crosses below Teeth)
-            if lips[i] < teeth[i]:  # Lips crossed below Teeth
+            # Exit long: either overbought (%R > -20) or price breaks below weekly EMA50
+            if williams_r[i] > -20 or price < ema_50_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: When Alligator lines intertwine (Lips crosses above Teeth)
-            if lips[i] > teeth[i]:  # Lips crossed above Teeth
+            # Exit short: either oversold (%R < -80) or price breaks above weekly EMA50
+            if williams_r[i] < -80 or price > ema_50_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -98,6 +74,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Williams_Alligator_1dEMA200_Filter"
-timeframe = "12h"
+name = "1d_WilliamsR_WeeklyEMA_Filter"
+timeframe = "1d"
 leverage = 1.0
