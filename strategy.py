@@ -1,3 +1,9 @@
+#2025-05-26: Strategy for 6h timeframe using 1d timeframe for pivot levels and RSI
+#Hypothesis: In ranging markets, price tends to revert to the daily pivot point. In trending markets,
+#breaks above R1 or below S1 with momentum (RSI > 55 for long, < 45 for short) and volume confirmation
+#can capture the start of a move. This combines mean reversion and momentum to work in both bull and bear markets.
+#Uses daily pivot, RSI, and volume ratio to filter entries. Exits when price returns to pivot or momentum fades.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,9 +19,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data (HTF)
+    # Load daily data (HTF) ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -23,68 +29,58 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate weekly data (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
-    
     # Calculate daily pivot points (classic)
-    if len(high_1d) < 1:
-        return np.zeros(n)
-    
     pivot = (high_1d + low_1d + close_1d) / 3.0
     r1 = 2 * pivot - low_1d
     s1 = 2 * pivot - high_1d
+    r2 = pivot + (high_1d - low_1d)
+    s2 = pivot - (high_1d - low_1d)
+    r3 = high_1d + 2 * (pivot - low_1d)
+    s3 = low_1d - 2 * (high_1d - pivot)
     
-    # Calculate weekly pivot points (classic)
-    if len(high_1w) < 1:
-        return np.zeros(n)
-    
-    pivot_w = (high_1w + low_1w + close_1w) / 3.0
-    r1_w = 2 * pivot_w - low_1w
-    s1_w = 2 * pivot_w - high_1w
-    
-    # Align daily pivots
+    # Align to 6h timeframe (waits for daily close)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Align weekly pivots
-    pivot_w_aligned = align_htf_to_ltf(prices, df_1w, pivot_w)
-    r1_w_aligned = align_htf_to_ltf(prices, df_1w, r1_w)
-    s1_w_aligned = align_htf_to_ltf(prices, df_1w, s1_w)
-    
-    # Calculate 50-period EMA for trend filter (daily)
-    if len(close_1d) < 50:
+    # Calculate 14-day RSI for momentum (daily)
+    if len(close_1d) < 14:
         return np.zeros(n)
     
-    ema50_1d = np.full_like(close_1d, np.nan)
-    ema50_1d[49] = np.mean(close_1d[:50])
-    for i in range(50, len(close_1d)):
-        ema50_1d[i] = close_1d[i] * 0.0392 + ema50_1d[i-1] * 0.9608  # alpha = 2/(50+1)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    avg_gain = np.full_like(close_1d, np.nan)
+    avg_loss = np.full_like(close_1d, np.nan)
     
-    # Calculate 20-period EMA for trend filter (weekly)
-    if len(close_1w) < 20:
-        return np.zeros(n)
+    # Wilder's smoothing
+    if len(close_1d) >= 14:
+        avg_gain[13] = np.mean(gain[1:14])
+        avg_loss[13] = np.mean(loss[1:14])
+        for i in range(14, len(close_1d)):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    ema20_1w = np.full_like(close_1w, np.nan)
-    ema20_1w[19] = np.mean(close_1w[:20])
-    for i in range(20, len(close_1w)):
-        ema20_1w[i] = close_1w[i] * 0.0952 + ema20_1w[i-1] * 0.9048  # alpha = 2/(20+1)
+    rs = np.full_like(close_1d, np.nan)
+    rsi14 = np.full_like(close_1d, np.nan)
+    for i in range(13, len(close_1d)):
+        if avg_loss[i] > 0:
+            rs[i] = avg_gain[i] / avg_loss[i]
+            rsi14[i] = 100 - (100 / (1 + rs[i]))
+        else:
+            rsi14[i] = 100 if avg_gain[i] > 0 else 0
     
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    rsi14_aligned = align_htf_to_ltf(prices, df_1d, rsi14)
     
-    # Calculate volume ratio (current 4h volume vs 20-period average)
+    # Precompute 20-period volume moving average for 6h
     vol_ma_20 = np.full_like(volume, np.nan)
-    for j in range(19, len(volume)):
-        vol_ma_20[j] = np.mean(volume[j-19:j+1])
+    for i in range(19, len(volume)):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0
@@ -95,55 +91,45 @@ def generate_signals(prices):
         if (np.isnan(pivot_aligned[i]) or 
             np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or 
-            np.isnan(pivot_w_aligned[i]) or 
-            np.isnan(r1_w_aligned[i]) or 
-            np.isnan(s1_w_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(ema20_1w_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+            np.isnan(r2_aligned[i]) or 
+            np.isnan(s2_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or 
+            np.isnan(rsi14_aligned[i]) or 
+            np.isnan(vol_ma_20[i]) or 
+            vol_ma_20[i] <= 0):
             signals[i] = 0.0
             continue
         
-        if np.isnan(vol_ma_20[i]) or vol_ma_20[i] <= 0:
-            volume_ratio = 0
-        else:
-            volume_ratio = volume[i] / vol_ma_20[i]
+        volume_ratio = volume[i] / vol_ma_20[i]
         
         if position == 0:
-            # Long: Price above both daily and weekly S1 + price above both EMAs + volume surge
+            # Long: Price above S1 + RSI > 55 + volume surge
             if (close[i] > s1_aligned[i] and
-                close[i] > s1_w_aligned[i] and
-                close[i] > ema50_1d_aligned[i] and
-                close[i] > ema20_1w_aligned[i] and
+                rsi14_aligned[i] > 55 and
                 volume_ratio > 2.0):
                 position = 1
                 signals[i] = position_size
-            # Short: Price below both daily and weekly R1 + price below both EMAs + volume surge
+            # Short: Price below R1 + RSI < 45 + volume surge
             elif (close[i] < r1_aligned[i] and
-                  close[i] < r1_w_aligned[i] and
-                  close[i] < ema50_1d_aligned[i] and
-                  close[i] < ema20_1w_aligned[i] and
+                  rsi14_aligned[i] < 45 and
                   volume_ratio > 2.0):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price below either daily or weekly S1 OR price below either EMA
-            if (close[i] < s1_aligned[i] or 
-                close[i] < s1_w_aligned[i] or
-                close[i] < ema50_1d_aligned[i] or
-                close[i] < ema20_1w_aligned[i]):
+            # Exit: Price returns to pivot (mean reversion) OR RSI < 40 (momentum fade)
+            if (close[i] < pivot_aligned[i] or 
+                rsi14_aligned[i] < 40):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price above either daily or weekly R1 OR price above either EMA
-            if (close[i] > r1_aligned[i] or 
-                close[i] > r1_w_aligned[i] or
-                close[i] > ema50_1d_aligned[i] or
-                close[i] > ema20_1w_aligned[i]):
+            # Exit: Price returns to pivot OR RSI > 60
+            if (close[i] > pivot_aligned[i] or 
+                rsi14_aligned[i] > 60):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -151,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_1w_Pivot_S1S1_EMA50EMA20_Volume"
-timeframe = "4h"
+name = "6h_1d_Pivot_R1S1_RSI14_Volume"
+timeframe = "6h"
 leverage = 1.0
