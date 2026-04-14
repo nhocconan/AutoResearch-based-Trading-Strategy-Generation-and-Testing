@@ -32,9 +32,6 @@ def generate_signals(prices):
     tr_series_1d = pd.Series(tr_1d)
     atr_1d = tr_series_1d.rolling(window=14, min_periods=14).mean().values
     
-    # Calculate daily ATR percentile for regime filter (trending vs ranging)
-    atr_percentile = pd.Series(atr_1d).rolling(window=50, min_periods=50).quantile(0.5).values
-    
     # Calculate 4h Donchian channels (20-period) - breakout levels
     high_series = pd.Series(high)
     low_series = pd.Series(low)
@@ -47,7 +44,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any critical data is NaN
-        if np.isnan(atr_1d[i]) or np.isnan(atr_percentile[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
+        if np.isnan(atr_1d[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
             continue
         
         # Get previous day's data for pivot calculation
@@ -60,66 +57,51 @@ def generate_signals(prices):
             pivot = (prev_high + prev_low + prev_close) / 3.0
             range_ = prev_high - prev_low
             
-            # Support and resistance levels
-            s1 = (2 * pivot) - prev_high
-            r1 = (2 * pivot) - prev_low
+            # Support and resistance levels (focus on S2/R2 for breakout)
             s2 = pivot - range_
             r2 = pivot + range_
-            s3 = prev_low - 2 * (prev_high - pivot)
-            r3 = prev_high + 2 * (pivot - prev_low)
             
-            # Align pivot levels to 4h timeframe
-            pivot_array = np.full(len(df_1d), pivot)
-            s1_array = np.full(len(df_1d), s1)
-            r1_array = np.full(len(df_1d), r1)
+            # Align S2/R2 levels to 4h timeframe
             s2_array = np.full(len(df_1d), s2)
             r2_array = np.full(len(df_1d), r2)
-            s3_array = np.full(len(df_1d), s3)
-            r3_array = np.full(len(df_1d), r3)
             
-            pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_array)[i]
-            s1_4h = align_htf_to_ltf(prices, df_1d, s1_array)[i]
-            r1_4h = align_htf_to_ltf(prices, df_1d, r1_array)[i]
             s2_4h = align_htf_to_ltf(prices, df_1d, s2_array)[i]
             r2_4h = align_htf_to_ltf(prices, df_1d, r2_array)[i]
-            s3_4h = align_htf_to_ltf(prices, df_1d, s3_array)[i]
-            r3_4h = align_htf_to_ltf(prices, df_1d, r3_array)[i]
             
             # Volume filter: current volume > 1.5x 10-period average
             vol_ma = np.mean(volume[max(0, i-10):i]) if i >= 10 else volume[i]
             
-            # Regime filter: use daily ATR percentile to detect trending markets
-            # Only trade in trending regimes (above median ATR)
-            regime_filter = atr_1d[i] > atr_percentile[i]
+            # Volatility filter: current ATR > 50th percentile of past 50 days
+            # This acts as regime filter - only trade in volatile (trending) markets
+            atr_percentile = pd.Series(atr_1d).rolling(window=50, min_periods=50).quantile(0.5).values
+            volatility_filter = atr_1d[i] > atr_percentile[i]
             
             if position == 0:
-                # Long: Price breaks above R2 with volume and in trending regime
+                # Long: Price breaks above R2 with volume and in volatile regime
                 if (close[i] > r2_4h and close[i-1] <= r2_4h and 
                     volume[i] > vol_ma * 1.5 and 
-                    close[i] > donchian_high[i] and  # Breakout confirmation
-                    regime_filter):
+                    volatility_filter):
                     position = 1
                     signals[i] = position_size
-                # Short: Price breaks below S2 with volume and in trending regime
+                # Short: Price breaks below S2 with volume and in volatile regime
                 elif (close[i] < s2_4h and close[i-1] >= s2_4h and 
                       volume[i] > vol_ma * 1.5 and 
-                      close[i] < donchian_low[i] and  # Breakdown confirmation
-                      regime_filter):
+                      volatility_filter):
                     position = -1
                     signals[i] = -position_size
             elif position == 1:
-                # Exit: Price breaks below S1 (reversal) or drops below Donchian low
-                if close[i] < s1_4h or close[i] < donchian_low[i]:
+                # Exit: Price breaks below S2 (reversal) or drops below Donchian low
+                if close[i] < s2_4h or close[i] < donchian_low[i]:
                     position = 0
                     signals[i] = 0.0
             elif position == -1:
-                # Exit: Price breaks above R1 (reversal) or rises above Donchian high
-                if close[i] > r1_4h or close[i] > donchian_high[i]:
+                # Exit: Price breaks above S2 (reversal) or rises above Donchian high
+                if close[i] > s2_4h or close[i] > donchian_high[i]:
                     position = 0
                     signals[i] = 0.0
     
     return signals
 
-name = "4h_Pivot_R2_R1_Volume_Breakout_Regime"
+name = "4h_S2R2_Breakout_Vol_VolatilityFilter"
 timeframe = "4h"
 leverage = 1.0
