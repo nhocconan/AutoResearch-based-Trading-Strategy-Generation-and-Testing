@@ -3,12 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Camarilla pivot reversal with weekly trend filter and volume confirmation
-# Long when price touches Camarilla L3 (support) AND price > weekly EMA50 AND volume > 1.5x 20-period average
-# Short when price touches Camarilla H3 (resistance) AND price < weekly EMA50 AND volume > 1.5x 20-period average
-# Exit when price crosses opposite H3/L3 level or reverses to Camarilla pivot point
-# This captures mean-reversion bounces at strong intraday levels with trend alignment
-# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
+# Hypothesis: 4-hour Camarilla pivot levels with daily trend filter and volume confirmation
+# Long when price breaks above Camarilla R4 (bullish breakout) AND price > daily EMA200 AND volume > 1.5x 20-period average
+# Short when price breaks below Camarilla S4 (bearish breakdown) AND price < daily EMA200 AND volume > 1.5x 20-period average
+# Exit when price crosses back to the Camarilla Pivot point (mean reversion to equilibrium)
+# Camarilla levels provide precise intraday support/resistance based on prior day's range
+# EMA200 filter ensures trading with the higher timeframe trend
+# Volume confirmation avoids false breakouts
+# Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,13 +22,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop for Camarilla calculation and EMA200
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate Camarilla levels from previous day's range
+    # R4 = Close + 1.5 * (High - Low)
+    # S4 = Close - 1.5 * (High - Low)
+    # Pivot = (High + Low + Close) / 3
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    camarilla_r4 = close_1d + 1.5 * (high_1d - low_1d)
+    camarilla_s4 = close_1d - 1.5 * (high_1d - low_1d)
+    camarilla_pivot = (high_1d + low_1d + close_1d) / 3
+    
+    # Align Camarilla levels to 4h timeframe (available after daily candle closes)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    
+    # Calculate daily EMA200 for trend filter
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
     # Calculate volume average for confirmation (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -35,12 +53,14 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations
-    start = 50
+    # Start after enough data for calculations (200 for EMA + buffer)
+    start = 220
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or 
+            np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
@@ -48,59 +68,27 @@ def generate_signals(prices):
         vol = volume[i]
         vol_threshold = vol_avg[i] * 1.5
         
-        # Calculate Camarilla levels using previous day's OHLC
-        # Need daily OHLC for Camarilla calculation
-        if i < 1:  # Need at least one day of data
-            signals[i] = 0.0
-            continue
-            
-        # Get previous day's OHLC (assuming 12h timeframe, 2 bars per day)
-        prev_day_idx = i - 2
-        if prev_day_idx < 0:
-            signals[i] = 0.0
-            continue
-            
-        # Calculate Camarilla levels for current day based on previous day
-        ph = high[prev_day_idx]  # Previous day high
-        pl = low[prev_day_idx]   # Previous day low
-        pc = close[prev_day_idx] # Previous day close
-        
-        # Camarilla levels
-        range_val = ph - pl
-        if range_val <= 0:
-            signals[i] = 0.0
-            continue
-            
-        # Resistance levels
-        h3 = pc + (range_val * 1.1 / 4)  # H3 = C + 1.1*(H-L)/4
-        h4 = pc + (range_val * 1.1 / 2)  # H4 = C + 1.1*(H-L)/2
-        # Support levels
-        l3 = pc - (range_val * 1.1 / 4)  # L3 = C - 1.1*(H-L)/4
-        l4 = pc - (range_val * 1.1 / 2)  # L4 = C - 1.1*(H-L)/2
-        # Pivot point
-        pp = (ph + pl + pc) / 3
-        
         if position == 0:
-            # Long setup: price touches L3 support AND above weekly EMA50 AND volume confirmation
-            if (abs(price - l3) < 0.001 * price and price > ema50_1w_aligned[i] and vol > vol_threshold):
+            # Long setup: breakout above Camarilla R4 + above daily EMA200 + volume confirmation
+            if (price > r4_aligned[i] and price > ema200_1d_aligned[i] and vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: price touches H3 resistance AND below weekly EMA50 AND volume confirmation
-            elif (abs(price - h3) < 0.001 * price and price < ema50_1w_aligned[i] and vol > vol_threshold):
+            # Short setup: breakdown below Camarilla S4 + below daily EMA200 + volume confirmation
+            elif (price < s4_aligned[i] and price < ema200_1d_aligned[i] and vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses above H3 or returns to pivot point
-            if price > h3 or abs(price - pp) < 0.0005 * price:
+            # Exit long: price returns to Camarilla Pivot (mean reversion)
+            if price <= pivot_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses below L3 or returns to pivot point
-            if price < l3 or abs(price - pp) < 0.0005 * price:
+            # Exit short: price returns to Camarilla Pivot (mean reversion)
+            if price >= pivot_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -108,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_1wEMA50_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_1dEMA200_Volume"
+timeframe = "4h"
 leverage = 1.0
