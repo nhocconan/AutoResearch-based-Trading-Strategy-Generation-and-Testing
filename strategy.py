@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w ADX for trend strength and 1d Donchian channel breakout for entry.
-# 1w ADX > 25 filters for trending markets on weekly timeframe to avoid whipsaws in ranging conditions.
-# Donchian breakout from 1d provides entry with price channel structure.
-# Volume confirmation (>1.5x 20-period average) reduces false breakouts.
-# ATR-based exit manages risk (exit when price moves against position by 2*ATR).
-# Designed to work in both bull and bear markets by using 1w trend filter to avoid counter-trend trades.
+# Hypothesis: 6h strategy using 12h Williams %R for momentum extremes and 1d ADX for trend strength.
+# Williams %R < -80 indicates oversold conditions for long entries, > -20 indicates overbought for shorts.
+# 1d ADX > 25 filters for trending markets to avoid whipsaws in ranging conditions.
+# Volume confirmation (>1.5x 20-period average) reduces false signals.
+# Designed to work in both bull and bear markets by using 1d trend filter to avoid counter-trend trades.
 # Target: 15-25 trades/year per symbol (60-100 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
@@ -21,28 +20,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE for ADX calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 1d data ONCE for ADX calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate ADX on 1w data
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate ADX on 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # True Range
-    tr1 = np.abs(high_1w[1:] - low_1w[1:])
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     
     # Directional Movement
-    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
-                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
-                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
     dm_plus = np.concatenate([[0], dm_plus])
     dm_minus = np.concatenate([[0], dm_minus])
     
@@ -60,50 +59,41 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
     adx = pd.Series(dx).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
     
-    # Load 1d data ONCE for Donchian channels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load 12h data ONCE for Williams %R
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 14:
         return np.zeros(n)
     
-    # Calculate Donchian Channels on 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate Williams %R on 12h data
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    donch_period = 20
-    upper_channel = pd.Series(high_1d).rolling(window=donch_period, min_periods=donch_period).max().values
-    lower_channel = pd.Series(low_1d).rolling(window=donch_period, min_periods=donch_period).min().values
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_12h) / (highest_high - lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # Avoid division by zero
     
-    # Align indicators to daily timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    upper_channel_aligned = align_htf_to_ltf(prices, df_1d, upper_channel)
-    lower_channel_aligned = align_htf_to_ltf(prices, df_1d, lower_channel)
+    # Align indicators to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r)
     
     # Volume confirmation: 1.5x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR for stop loss (using 1d ATR)
-    tr_1d1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr_1d2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr_1d3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.maximum(tr_1d1, np.maximum(tr_1d2, tr_1d3))
-    tr_1d = np.concatenate([[np.nan], tr_1d])
-    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(20, 20, 14)  # Need Donchian, volume MA, and ATR
+    start = max(20, 14)  # Need volume MA and Williams %R
     
     for i in range(start, n):
         # Skip if any critical data is NaN
         if (np.isnan(adx_aligned[i]) or 
-            np.isnan(upper_channel_aligned[i]) or
-            np.isnan(lower_channel_aligned[i]) or
-            np.isnan(vol_ma[i]) or
-            np.isnan(atr_1d_aligned[i])):
+            np.isnan(williams_r_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -114,17 +104,17 @@ def generate_signals(prices):
         trending = adx_aligned[i] > 25
         
         if position == 0:
-            # Look for Donchian channel breakouts
+            # Look for Williams %R extremes
             # Only trade in trending markets
             
-            # Long: price breaks above upper Donchian channel AND trending market
-            if (close[i] > upper_channel_aligned[i] and 
+            # Long: Williams %R < -80 (oversold) AND trending market
+            if (williams_r_aligned[i] < -80 and 
                 trending and 
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below lower Donchian channel AND trending market
-            elif (close[i] < lower_channel_aligned[i] and 
+            # Short: Williams %R > -20 (overbought) AND trending market
+            elif (williams_r_aligned[i] > -20 and 
                   trending and 
                   volume_confirmed):
                 position = -1
@@ -132,16 +122,16 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price moves against position by 2*ATR or trend weakens
-            if (close[i] <= close[i-1] - 2 * atr_1d_aligned[i] or 
+            # Exit long: Williams %R returns to -50 (neutral) or trend weakens
+            if (williams_r_aligned[i] >= -50 or 
                 adx_aligned[i] < 20):  # Trend weakening
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price moves against position by 2*ATR or trend weakens
-            if (close[i] >= close[i-1] + 2 * atr_1d_aligned[i] or 
+            # Exit short: Williams %R returns to -50 (neutral) or trend weakens
+            if (williams_r_aligned[i] <= -50 or 
                 adx_aligned[i] < 20):  # Trend weakening
                 position = 0
                 signals[i] = 0.0
@@ -150,6 +140,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1wADX_1dDonchian_Breakout_VolumeFilter_v1"
-timeframe = "1d"
+name = "6h_12hWilliamsR_1dADX_VolumeFilter_v1"
+timeframe = "6h"
 leverage = 1.0
