@@ -1,9 +1,4 @@
-# 4h_1d_S1R1_Breakout_Vol_VolatilityFilter_v3
-# Hypothesis: Price breaking S1/R1 pivot levels from prior day with volume confirmation and volatility filter
-# captures breakout moves in both bull and bear markets. Low trade frequency due to strict conditions
-# (breakout + volume + volatility) reduces fee drag. Volatility filter ensures trades occur during
-# high-momentum periods, avoiding chop.
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -20,14 +15,14 @@ def generate_signals(prices):
     
     # Load 1d data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Calculate 1d ATR (14-period) for volatility regime filter
+    # Calculate 1d ATR (14-period) for volatility filter
     high_low_1d = high_1d - low_1d
     high_close_1d = np.abs(high_1d - np.roll(close_1d, 1))
     low_close_1d = np.abs(low_1d - np.roll(close_1d, 1))
@@ -37,14 +32,14 @@ def generate_signals(prices):
     tr_series_1d = pd.Series(tr_1d)
     atr_1d = tr_series_1d.rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1d ATR percentile (70th) over 50 days for volatility filter
+    # Calculate 1d ATR percentile (60th) over 30 days for volatility filter
     atr_series_1d = pd.Series(atr_1d)
-    atr_percentile = atr_series_1d.rolling(window=50, min_periods=50).quantile(0.7).values
+    atr_percentile = atr_series_1d.rolling(window=30, min_periods=30).quantile(0.6).values
     volatility_filter = atr_1d > atr_percentile
     
-    # Calculate 4h volume filter: current volume > 1.5x 30-period average
+    # Calculate 4h volume filter: current volume > 1.3x 20-period average
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=30, min_periods=30).mean().values
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     
     # Calculate 4h Donchian channels (20-period) - breakout levels
     high_series = pd.Series(high)
@@ -56,7 +51,7 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25
     
-    for i in range(100, n):
+    for i in range(60, n):
         # Skip if any critical data is NaN
         if np.isnan(atr_1d[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
            np.isnan(vol_ma[i]) or np.isnan(volatility_filter[i]):
@@ -86,13 +81,13 @@ def generate_signals(prices):
             if position == 0:
                 # Long: Price breaks above R1 with volume and in volatile regime
                 if (close[i] > r1_12h and close[i-1] <= r1_12h and 
-                    volume[i] > vol_ma[i] * 1.5 and 
+                    volume[i] > vol_ma[i] * 1.3 and 
                     volatility_filter[i]):
                     position = 1
                     signals[i] = position_size
                 # Short: Price breaks below S1 with volume and in volatile regime
                 elif (close[i] < s1_12h and close[i-1] >= s1_12h and 
-                      volume[i] > vol_ma[i] * 1.5 and 
+                      volume[i] > vol_ma[i] * 1.3 and 
                       volatility_filter[i]):
                     position = -1
                     signals[i] = -position_size
@@ -109,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_S1R1_Breakout_Vol_VolatilityFilter_v3"
+name = "4h_1d_S1R1_Breakout_Vol_VolatilityFilter_v4"
 timeframe = "4h"
 leverage = 1.0
