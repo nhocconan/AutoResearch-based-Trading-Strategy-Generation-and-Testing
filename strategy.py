@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Bollinger Band width expansion + 1-day trend + volume confirmation
-# Uses Bollinger Band width (BBW) on 12h to detect volatility expansion
-# Long when BBW increases and price > upper band; Short when BBW increases and price < lower band
-# Daily close > daily EMA50 as trend filter (only long in daily uptrend, short in daily downtrend)
-# Volume confirmation > 1.3x 20-period EMA on 12h to reduce false signals
-# Designed for ~15-25 trades/year with clear volatility-based logic
-# Works in bull markets via uptrend + expansion and in bear markets via downtrend + expansion
+# Hypothesis: 4h Donchian breakout with 12h ATR filter and volume confirmation
+# Uses Donchian channel breakouts (20-period) on 4h for trend following
+# Confirmed by 12h ATR expansion (volatility filter) and volume spike (>1.5x average)
+# Long when price breaks above upper Donchian + 12h ATR expanding + volume confirmation
+# Short when price breaks below lower Donchian + 12h ATR expanding + volume confirmation
+# Designed for ~20-30 trades/year with strong trend-following edge
+# Works in bull markets via upward breakouts and in bear markets via downward breakdowns
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,27 +21,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Bollinger Bands (20-period, 2 std dev) for 12h
-    close_series = pd.Series(close)
-    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_width = bb_upper - bb_lower
+    # Calculate Donchian Channel (20-period) on 4h
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_middle = (donchian_upper + donchian_lower) / 2
     
-    # Calculate BBW change (current - previous)
-    bb_width_change = np.diff(bb_width, prepend=bb_width[0])
-    
-    # Load daily data once for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Calculate ATR (14-period) on 12h for volatility filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate daily EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Volume moving average for confirmation (20-period EMA on 12h)
+    # True Range calculation
+    tr1 = np.abs(high_12h[1:] - low_12h[:-1])
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    
+    atr_12h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Calculate ATR expansion (current > previous)
+    atr_expansion = np.concatenate([[False], atr_12h[1:] > atr_12h[:-1]])
+    
+    # Volume moving average for confirmation (20-period EMA)
     vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -49,42 +57,35 @@ def generate_signals(prices):
     position_size = 0.25
     
     for i in range(20, n):
-        # Get aligned daily EMA50
-        ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)[i]
+        # Get aligned 12h indicators
+        atr_expansion_aligned = align_htf_to_ltf(prices, df_12h, atr_expansion)[i]
+        atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)[i]
         
-        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(bb_width_change[i]) or np.isnan(ema50_1d_aligned) or np.isnan(vol_ma[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(atr_expansion_aligned) or np.isnan(atr_12h_aligned) or np.isnan(vol_ma[i]):
             continue
         
-        # Daily trend filter: only long in uptrend, only short in downtrend
-        price_vs_ema = close[i] > ema50_1d_aligned  # Simple price vs EMA comparison
+        # Volume confirmation (1.5x average)
+        volume_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Bollinger Band signals
-        bb_expansion = bb_width_change[i] > 0  # BB width increasing
-        price_above_upper = close[i] > bb_upper[i]
-        price_below_lower = close[i] < bb_lower[i]
-        
-        # Volume confirmation (1.3x average)
-        volume_confirm = volume[i] > 1.3 * vol_ma[i]
-        
-        # Long signal: BB expansion + price above upper band + daily uptrend + volume
-        if position == 0 and bb_expansion and price_above_upper and price_vs_ema and volume_confirm:
+        # Long signal: price breaks above upper Donchian + ATR expansion + volume
+        if position == 0 and close[i] > donchian_upper[i] and atr_expansion_aligned and volume_confirm:
             position = 1
             signals[i] = position_size
-        # Short signal: BB expansion + price below lower band + daily downtrend + volume
-        elif position == 0 and bb_expansion and price_below_lower and not price_vs_ema and volume_confirm:
+        # Short signal: price breaks below lower Donchian + ATR expansion + volume
+        elif position == 0 and close[i] < donchian_lower[i] and atr_expansion_aligned and volume_confirm:
             position = -1
             signals[i] = -position_size
-        # Exit: BB contraction or price crosses middle band
+        # Exit: price crosses middle Donchian or ATR contraction
         elif position != 0:
-            if position == 1 and (not bb_expansion or close[i] < bb_middle[i]):
+            if position == 1 and close[i] < donchian_middle[i]:
                 position = 0
                 signals[i] = 0.0
-            elif position == -1 and (not bb_expansion or close[i] > bb_middle[i]):
+            elif position == -1 and close[i] > donchian_middle[i]:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_BollingerWidth_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Donchian_12hATR_Volume"
+timeframe = "4h"
 leverage = 1.0
