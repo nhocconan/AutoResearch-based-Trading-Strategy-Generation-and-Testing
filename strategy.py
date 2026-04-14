@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation
 # Long when price breaks above Donchian upper channel AND 1d EMA(50) rising AND volume > 1.5x average
 # Short when price breaks below Donchian lower channel AND 1d EMA(50) falling AND volume > 1.5x average
 # Exit when price crosses 10-period SMA OR Donchian middle line
 # Donchian captures breakouts, 1d EMA filters higher timeframe trend, volume confirms institutional participation
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Target: 50-150 total trades over 4 years (12-37/year) for 4h timeframe
 
 def generate_signals(prices):
     n = len(prices)
@@ -53,7 +53,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Get EMA values aligned to 12h timeframe
+        # Get EMA values aligned to 4h timeframe
         ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d.values)
         ema_val = ema_50_aligned[i]
         ema_prev = ema_50_aligned[i-1]
@@ -90,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_1dEMA_Volume"
-timeframe = "12h"
+name = "4h_Donchian_1dEMA_Volume"
+timeframe = "4h"
 leverage = 1.0
