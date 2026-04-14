@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 12h Bollinger Bands with volume confirmation and ADX trend filter.
-# Long when price breaks above upper Bollinger Band on 12h timeframe, ADX > 25 (trending), and volume > 1.5x average.
-# Short when price breaks below lower Bollinger Band on 12h timeframe, ADX > 25, and volume > 1.5x average.
-# Exit when price returns to Bollinger middle band or ADX drops below 20 (trend weakening).
-# Uses Bollinger Bands for volatility-based breakout signals, ADX for trend strength confirmation,
-# and volume for institutional participation confirmation. Designed to work in both bull and bear markets
-# by only trading in trending conditions (ADX > 25) and avoiding choppy markets.
-# Target: 20-35 trades/year per symbol (80-140 total over 4 years) to minimize fee drag.
+# Hypothesis: 1d strategy using 1w Relative Strength Index (RSI) with volume confirmation and volatility filter.
+# Long when weekly RSI < 30 (oversold) and price > 1d EMA200 (trend filter) and volume > 1.5x average.
+# Short when weekly RSI > 70 (overbought) and price < 1d EMA200 (trend filter) and volume > 1.5x average.
+# Exit when RSI returns to neutral zone (40-60) or volatility expands (ATR ratio > 2.0).
+# Uses weekly RSI for extreme sentiment reversal, daily EMA200 for trend filter, and volume for confirmation.
+# Designed to work in both bull and bear markets by fading extremes only in alignment with higher timeframe trend.
+# Target: 15-25 trades/year per symbol (60-100 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,54 +21,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE for Bollinger Bands and ADX
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:  # Need enough for BB(20,2) and ADX(14)
+    # Load 1w data ONCE for RSI
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:  # Need enough for RSI(14)
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Bollinger Bands (20, 2)
-    bb_middle = pd.Series(close_12h).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close_12h).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
+    # Calculate RSI (14) on weekly close
+    delta = np.diff(close_1w)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate ADX (14)
-    # True Range
-    tr1 = high_12h[1:] - low_12h[1:]
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    # First average gain/loss
+    avg_gain = np.concatenate([np.full(14, np.nan), 
+                               [np.mean(gain[:14])] if len(gain) >= 14 else [np.nan]])
+    avg_loss = np.concatenate([np.full(14, np.nan), 
+                               [np.mean(loss[:14])] if len(loss) >= 14 else [np.nan]])
+    
+    # Wilder smoothing
+    for i in range(15, len(gain)+1):
+        if i-1 < len(gain):
+            avg_gain = np.append(avg_gain, (avg_gain[-1] * 13 + gain[i-1]) / 14)
+            avg_loss = np.append(avg_loss, (avg_loss[-1] * 13 + loss[i-1]) / 14)
+    
+    # Ensure arrays match length
+    if len(avg_gain) < len(close_1w):
+        avg_gain = np.concatenate([np.full(len(close_1w) - len(avg_gain), np.nan), avg_gain])
+    if len(avg_loss) < len(close_1w):
+        avg_loss = np.concatenate([np.full(len(close_1w) - len(avg_loss), np.nan), avg_loss])
+    
+    # Trim to match close_1w length
+    avg_gain = avg_gain[-len(close_1w):]
+    avg_loss = avg_loss[-len(close_1w):]
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.where(avg_loss == 0, 100, rsi)  # Handle no loss case
+    rsi = np.where(avg_gain == 0, 0, rsi)    # Handle no gain case
+    
+    # Calculate 1d EMA200 for trend filter
+    close_s = pd.Series(close)
+    ema200 = close_s.ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Calculate ATR(14) for volatility filter
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
     
-    # Directional Movement
-    dm_plus = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
-                       np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
-    dm_minus = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
-                        np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smoothed values
-    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
-    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align indicators to 4h timeframe
-    bb_upper_aligned = align_htf_to_ltf(prices, df_12h, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_12h, bb_lower)
-    bb_middle_aligned = align_htf_to_ltf(prices, df_12h, bb_middle)
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    # Align indicators to 1d timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1w, rsi)
+    ema200_aligned = align_htf_to_ltf(prices, df_1w, ema200)  # EMA200 is already 1d but aligned for safety
     
     # Volume confirmation: 1.5x average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -79,55 +84,51 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(34, 20)  # Need ADX and BB periods
+    start = max(200, 50)  # Need EMA200 and sufficient lookback
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(bb_upper_aligned[i]) or 
-            np.isnan(bb_lower_aligned[i]) or
-            np.isnan(bb_middle_aligned[i]) or
-            np.isnan(adx_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(rsi_aligned[i]) or 
+            np.isnan(ema200_aligned[i]) or
+            np.isnan(vol_ma[i]) or
+            np.isnan(atr_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
         volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
-        # Trend filter: ADX > 25 indicates strong trend
-        strong_trend = adx_aligned[i] > 25
-        
-        # Weak trend filter: ADX < 20 indicates trend weakening
-        weak_trend = adx_aligned[i] < 20
+        # Volatility filter: avoid extremely high volatility (ATR > 2x MA)
+        vol_filter = atr[i] < 2.0 * atr_ma[i]
         
         if position == 0:
-            # Look for Bollinger Band breakouts in strong trend
-            # Long: price breaks above upper BB AND strong trend AND volume confirmation
-            if (close[i] > bb_upper_aligned[i] and 
-                strong_trend and 
-                volume_confirmed):
+            # Look for RSI extremes in alignment with trend
+            # Long: RSI oversold (<30) AND price > EMA200 (uptrend) AND volume confirmation AND vol filter
+            if (rsi_aligned[i] < 30 and 
+                close[i] > ema200_aligned[i] and 
+                volume_confirmed and 
+                vol_filter):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below lower BB AND strong trend AND volume confirmation
-            elif (close[i] < bb_lower_aligned[i] and 
-                  strong_trend and 
-                  volume_confirmed):
+            # Short: RSI overbought (>70) AND price < EMA200 (downtrend) AND volume confirmation AND vol filter
+            elif (rsi_aligned[i] > 70 and 
+                  close[i] < ema200_aligned[i] and 
+                  volume_confirmed and 
+                  vol_filter):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to middle BB or trend weakens
-            if (close[i] <= bb_middle_aligned[i] or 
-                weak_trend):
+            # Exit long: RSI returns to neutral (40-60) or volatility expands
+            if (rsi_aligned[i] >= 40 and rsi_aligned[i] <= 60) or not vol_filter:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to middle BB or trend weakens
-            if (close[i] >= bb_middle_aligned[i] or 
-                weak_trend):
+            # Exit short: RSI returns to neutral (40-60) or volatility expands
+            if (rsi_aligned[i] >= 40 and rsi_aligned[i] <= 60) or not vol_filter:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -135,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_Bollinger_Bands_ADX_VolumeFilter_v1"
-timeframe = "4h"
+name = "1d_WeeklyRSI_EMA200_VolumeVolFilter_v1"
+timeframe = "1d"
 leverage = 1.0
