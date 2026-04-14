@@ -50,7 +50,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.30  # 30% position size
+    position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
     start = 40  # for 20-period calculations
@@ -81,14 +81,14 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below Donchian middle
+            # Exit long: price breaks below Donchian middle
             if price < donchian_middle_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above Donchian middle
+            # Exit short: price breaks above Donchian middle
             if price > donchian_middle_aligned[i]:
                 position = 0
                 signals[i] = 0.0
@@ -97,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_DailyPivot_Volume_v2"
+name = "4h_Donchian_DailyPivot_Volume_v3"
 timeframe = "4h"
 leverage = 1.0
