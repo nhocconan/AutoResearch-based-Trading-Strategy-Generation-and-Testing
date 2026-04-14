@@ -13,43 +13,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data (HTF) once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Calculate weekly RSI (14-period)
-    delta = np.diff(df_1w['close'].values, prepend=df_1w['close'].values[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.full(len(df_1w), np.nan)
-    avg_loss = np.full(len(df_1w), np.nan)
-    if len(df_1w) >= 14:
-        avg_gain[13] = np.mean(gain[1:15])
-        avg_loss[13] = np.mean(loss[1:15])
-        for i in range(14, len(df_1w)):
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi_1w = 100 - (100 / (1 + rs))
-    
-    # Align weekly RSI to 12h timeframe (wait for weekly close)
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
-    
-    # Load daily data for additional context
+    # Load daily data (HTF) once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate daily ATR (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    high_low = high_1d - low_1d
-    high_close = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    low_close = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    # Calculate daily EMA(34) - using pandas EWMA for efficiency
+    close_1d_series = pd.Series(df_1d['close'].values)
+    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Calculate daily ATR(14) - Wilder's smoothing
+    high_low = df_1d['high'].values - df_1d['low'].values
+    high_close = np.abs(df_1d['high'].values - np.concatenate([[df_1d['close'].values[0]], df_1d['close'].values[:-1]]))
+    low_close = np.abs(df_1d['low'].values - np.concatenate([[df_1d['close'].values[0]], df_1d['close'].values[:-1]]))
     tr = np.maximum(high_low, np.maximum(high_close, low_close))
     
     atr_1d = np.full(len(df_1d), np.nan)
@@ -58,10 +34,11 @@ def generate_signals(prices):
         for i in range(14, len(df_1d)):
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # Align daily ATR to 12h timeframe
-    atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Align indicators to 6h timeframe
+    ema_34_6h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    atr_6h = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate 12-hour Donchian channels (20-period)
+    # Calculate 6-hour Donchian channels (20-period)
     donch_high = np.full(n, np.nan)
     donch_low = np.full(n, np.nan)
     if n >= 20:
@@ -69,7 +46,7 @@ def generate_signals(prices):
             donch_high[i] = np.max(high[i-19:i+1])
             donch_low[i] = np.min(low[i-19:i+1])
     
-    # Calculate 12-hour volume moving average (20-period)
+    # Calculate 6-hour volume moving average (20-period)
     volume_ma = np.full(n, np.nan)
     if n >= 20:
         for i in range(19, n):
@@ -77,20 +54,20 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position size
+    position_size = 0.25
     
     for i in range(50, n):
         # Skip if any critical data is NaN
-        if (np.isnan(rsi_1w_aligned[i]) or
-            np.isnan(atr_12h[i]) or
+        if (np.isnan(ema_34_6h[i]) or
+            np.isnan(atr_6h[i]) or
             np.isnan(donch_high[i]) or
             np.isnan(donch_low[i]) or
             np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Skip low volatility periods (ATR < 0.2% of price)
-        if atr_12h[i] / close[i] < 0.002:
+        # Skip low volatility periods (ATR < 0.25% of price)
+        if atr_6h[i] / close[i] < 0.0025:
             signals[i] = 0.0
             continue
         
@@ -99,32 +76,28 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Weekly RSI regime filter: avoid extreme overbought/oversold
-        if rsi_1w_aligned[i] < 20 or rsi_1w_aligned[i] > 80:
-            signals[i] = 0.0
-            continue
-        
+        # Trend filter: price above EMA34 for long, below for short
         if position == 0:
-            # Long: Price breaks above 12h Donchian high AND weekly RSI > 50 (bullish bias)
-            if close[i] > donch_high[i] and rsi_1w_aligned[i] > 50:
+            # Long: Price breaks above 6h Donchian high AND above EMA34 AND volume > 1.3x MA
+            if close[i] > donch_high[i] and close[i] > ema_34_6h[i] and volume[i] > 1.3 * volume_ma[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below 12h Donchian low AND weekly RSI < 50 (bearish bias)
-            elif close[i] < donch_low[i] and rsi_1w_aligned[i] < 50:
+            # Short: Price breaks below 6h Donchian low AND below EMA34 AND volume > 1.3x MA
+            elif close[i] < donch_low[i] and close[i] < ema_34_6h[i] and volume[i] > 1.3 * volume_ma[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below 12h Donchian low
-            if close[i] < donch_low[i]:
+            # Exit: Price falls back below 6h Donchian low OR below EMA34
+            if close[i] < donch_low[i] or close[i] < ema_34_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above 12h Donchian high
-            if close[i] > donch_high[i]:
+            # Exit: Price rises back above 6h Donchian high OR above EMA34
+            if close[i] > donch_high[i] or close[i] > ema_34_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -132,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1w_RSI50_Donchian20_Volume_Filter"
-timeframe = "12h"
+name = "6h_1d_EMA34_Donchian20_Volume_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
