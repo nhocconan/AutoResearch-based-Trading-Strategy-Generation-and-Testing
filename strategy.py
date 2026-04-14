@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_1W_Pivot_Trend_v1
-Hypothesis: On 6h timeframe, use weekly pivot points (PP, R1, S1) from the previous week for trend-following breakouts with volume confirmation.
-Buy when price breaks above weekly R1 with volume > 1.5x 20-period average.
-Sell when price breaks below weekly S1 with volume > 1.5x 20-period average.
-Exit when price returns to weekly PP (mean reversion) or opposite breakout occurs.
-Uses weekly timeframe for structure, 6f for execution - avoids whipsaws in ranging markets while capturing trends.
-Works in bull markets (breakouts continuation) and bear markets (breakdown continuations).
+4h_1d_PriceChannel_Breakout_Volume_Trend_v1
+Hypothesis: On 4h timeframe, use 1d price channel breakout with volume confirmation and ADX trend filter.
+Breakout above 1d high or below 1d low with volume > 2x 20-period average and ADX > 25 indicates strong trend.
+Go long on breakout above 1d high, short on breakout below 1d low.
+Exit when price crosses 1d VWAP or ADX falls below 20 indicating trend exhaustion.
+Designed to capture strong trends in both bull and bear markets while avoiding false breakouts in low-volume, low-volatility environments.
 """
 
 import numpy as np
@@ -23,79 +22,137 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data for pivot points
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 2:
+    # Load 1d data for price channel and VWAP
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_w = df_w['high'].values
-    low_w = df_w['low'].values
-    close_w = df_w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate weekly pivot points: PP = (H+L+C)/3, R1 = 2*PP - L, S1 = 2*PP - H
-    pivot_w = np.full_like(close_w, np.nan)
-    r1_w = np.full_like(close_w, np.nan)
-    s1_w = np.full_like(close_w, np.nan)
+    # Calculate 1d VWAP (typical price * volume / cumulative volume)
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3
+    vwap_1d = np.full_like(close_1d, np.nan)
+    cum_vol = np.cumsum(volume_1d)
+    cum_tpv = np.cumsum(typical_price_1d * volume_1d)
+    vwap_1d = np.where(cum_vol > 0, cum_tpv / cum_vol, np.nan)
     
-    for i in range(1, len(close_w)):  # Start from 1 to use previous week
-        if np.isnan(high_w[i-1]) or np.isnan(low_w[i-1]) or np.isnan(close_w[i-1]):
+    # Align 1d high, low, and VWAP to 4h timeframe
+    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
+    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    
+    # Calculate ADX on 1d data
+    if len(high_1d) < 14:
+        return np.zeros(n)
+    
+    plus_dm = np.zeros_like(high_1d)
+    minus_dm = np.zeros_like(high_1d)
+    tr = np.zeros_like(high_1d)
+    
+    for i in range(1, len(high_1d)):
+        if np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(high_1d[i-1]) or np.isnan(low_1d[i-1]):
             continue
-        phigh = high_w[i-1]
-        plow = low_w[i-1]
-        pclose = close_w[i-1]
-        pivot_w[i] = (phigh + plow + pclose) / 3
-        r1_w[i] = 2 * pivot_w[i] - plow
-        s1_w[i] = 2 * pivot_w[i] - phigh
+        high_diff = high_1d[i] - high_1d[i-1]
+        low_diff = low_1d[i-1] - low_1d[i]
+        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
+        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
+        tr[i] = max(high_1d[i] - low_1d[i], 
+                   abs(high_1d[i] - high_1d[i-1]), 
+                   abs(low_1d[i] - low_1d[i-1]))
     
-    # Align weekly pivot points to 6h timeframe
-    pivot_w_aligned = align_htf_to_ltf(prices, df_w, pivot_w)
-    r1_w_aligned = align_htf_to_ltf(prices, df_w, r1_w)
-    s1_w_aligned = align_htf_to_ltf(prices, df_w, s1_w)
+    # Smooth TR, +DM, -DM with Wilder's smoothing (alpha = 1/14)
+    atr = np.zeros_like(high_1d)
+    plus_di = np.zeros_like(high_1d)
+    minus_di = np.zeros_like(high_1d)
+    dx = np.zeros_like(high_1d)
+    adx = np.full_like(high_1d, np.nan)
     
-    # Volume average (20-period)
-    vol_ma_20 = np.full_like(volume, np.nan)
-    for i in range(19, len(volume)):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    if len(high_1d) >= 14:
+        # Initial values
+        atr[13] = np.nansum(tr[1:14])
+        plus_dm_sum = np.nansum(plus_dm[1:14])
+        minus_dm_sum = np.nansum(minus_dm[1:14])
+        
+        for i in range(14, len(high_1d)):
+            if np.isnan(tr[i]) or np.isnan(plus_dm[i]) or np.isnan(minus_dm[i]):
+                atr[i] = atr[i-1]
+                plus_dm_sum = plus_dm_sum
+                minus_dm_sum = minus_dm_sum
+            else:
+                atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+                plus_dm_sum = (plus_dm_sum * 13 + plus_dm[i]) / 14
+                minus_dm_sum = (minus_dm_sum * 13 + minus_dm[i]) / 14
+            
+            if atr[i] > 0:
+                plus_di[i] = 100 * plus_dm_sum / atr[i]
+                minus_di[i] = 100 * minus_dm_sum / atr[i]
+                if plus_di[i] + minus_di[i] > 0:
+                    dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+        
+        # Calculate ADX as smoothed DX
+        if len(high_1d) >= 27:
+            adx[26] = np.nanmean(dx[14:27])
+            for i in range(27, len(high_1d)):
+                if np.isnan(dx[i]):
+                    adx[i] = adx[i-1]
+                else:
+                    adx[i] = (adx[i-1] * 13 + dx[i]) / 14
+    
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    for i in range(20, n):  # Start after enough data for volume MA
+    for i in range(20, n):  # Start after enough data for alignment
         # Skip if any critical data is NaN
-        if (np.isnan(pivot_w_aligned[i]) or np.isnan(r1_w_aligned[i]) or 
-            np.isnan(s1_w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(high_1d_aligned[i]) or np.isnan(low_1d_aligned[i]) or
+            np.isnan(vwap_1d_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
-        if vol_ma_20[i] <= 0:
+        # Volume ratio: current 4h volume vs 20-period average
+        vol_ma_20 = np.full_like(volume, np.nan)
+        for j in range(19, len(volume)):
+            vol_ma_20[j] = np.mean(volume[j-19:j+1])
+        vol_ma_20_aligned = vol_ma_20  # Already on 4h timeframe
+        
+        if np.isnan(vol_ma_20_aligned[i]) or vol_ma_20_aligned[i] <= 0:
             volume_ratio = 0
         else:
-            volume_ratio = volume[i] / vol_ma_20[i]
+            volume_ratio = volume[i] / vol_ma_20_aligned[i]
         
         if position == 0:
-            # Look for long breakout: price breaks above R1 with volume confirmation
-            if (close[i] > r1_w_aligned[i] and volume_ratio > 1.5):
+            # Look for long entries: breakout above 1d high with volume surge in strong trend
+            if (close[i] > high_1d_aligned[i] and 
+                volume_ratio > 2.0 and
+                adx_aligned[i] > 25):
                 position = 1
                 signals[i] = position_size
-            # Look for short breakdown: price breaks below S1 with volume confirmation
-            elif (close[i] < s1_w_aligned[i] and volume_ratio > 1.5):
+            # Look for short entries: breakdown below 1d low with volume surge in strong trend
+            elif (close[i] < low_1d_aligned[i] and 
+                  volume_ratio > 2.0 and
+                  adx_aligned[i] > 25):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to pivot point or breakdown occurs
-            if (close[i] <= pivot_w_aligned[i] or 
-                (close[i] < s1_w_aligned[i] and volume_ratio > 1.5)):
+            # Exit long: price crosses below 1d VWAP or ADX falls indicating trend exhaustion
+            if (close[i] < vwap_1d_aligned[i] or
+                adx_aligned[i] < 20):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to pivot point or breakout occurs
-            if (close[i] >= pivot_w_aligned[i] or 
-                (close[i] > r1_w_aligned[i] and volume_ratio > 1.5)):
+            # Exit short: price crosses above 1d VWAP or ADX falls indicating trend exhaustion
+            if (close[i] > vwap_1d_aligned[i] or
+                adx_aligned[i] < 20):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -103,6 +160,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1W_Pivot_Trend_v1"
-timeframe = "6h"
+name = "4h_1d_PriceChannel_Breakout_Volume_Trend_v1"
+timeframe = "4h"
 leverage = 1.0
