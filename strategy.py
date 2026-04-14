@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
+"""
+1d_Wide_Range_Breakout
+Hypothesis: On the daily timeframe, breakouts from wide daily ranges (high-low > 1.5x ATR) 
+with volume confirmation and weekly trend filter capture strong momentum moves. 
+Wide range indicates institutional participation; breakouts in trend direction have higher 
+follow-through. Works in bull (upside breakouts) and bear (downside breakouts) via symmetry.
+Target: 20-50 trades over 4 years (5-12/year) to minimize fee drag.
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,82 +22,107 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data once before loop
+    # Load daily data once before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Load 1w data once before loop
+    # Load weekly data once before loop
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate daily pivot points (R2, S2)
+    # Calculate daily true range and ATR(14)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
+    # True range components
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period has no previous close
     
-    # Calculate 1-week EMA for trend filter
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate daily range (high - low)
+    daily_range = high_1d - low_1d
+    
+    # Wide range condition: daily range > 1.5 * ATR(14)
+    wide_range = daily_range > (1.5 * atr_14)
+    
+    # Weekly trend filter: EMA(21)
     close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21 = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Volume filter: 30-period average
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=30, min_periods=30).mean().values
-    
-    # Pre-calculate constant values for alignment (using previous day's data)
-    r2_prev = np.append([np.nan], r2[:-1])
-    s2_prev = np.append([np.nan], s2[:-1])
-    pivot_prev = np.append([np.nan], pivot[:-1])
-    ema_prev = np.append([np.nan], ema_1w[:-1])
-    
-    # Align to 12h timeframe
-    r2_12h = align_htf_to_ltf(prices, df_1d, r2_prev)
-    s2_12h = align_htf_to_ltf(prices, df_1d, s2_prev)
-    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot_prev)
-    ema_12h = align_htf_to_ltf(prices, df_1w, ema_prev)
+    # Daily volume average
+    vol_1d = df_1d['volume'].values
+    vol_ma = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.25
+    position_size = 0.25  # 25% position size
     
-    for i in range(100, n):
+    for i in range(30, n):
         # Skip if any critical data is NaN
-        if np.isnan(vol_ma[i]) or np.isnan(r2_12h[i]) or np.isnan(s2_12h[i]) or np.isnan(pivot_12h[i]) or np.isnan(ema_12h[i]):
+        if np.isnan(atr_14[i]) or np.isnan(ema_21[i]) or np.isnan(vol_ma[i]):
             continue
         
+        # Get daily index for current daily bar
+        idx_1d = i  # Since we're on 1d timeframe, indices match
+        
+        # Get weekly index for current daily bar (approx: 1d = 1/7 * 1w)
+        idx_1w = i // 7
+        if idx_1w < 21:  # Need sufficient weekly data for EMA
+            continue
+        
+        # Previous values to avoid look-ahead (use completed daily bar)
+        wide_range_prev = wide_range[idx_1d-1]
+        ema_prev = ema_21[idx_1w-1]
+        vol_ma_prev = vol_ma[idx_1d-1]
+        
+        if np.isnan(wide_range_prev) or np.isnan(ema_prev) or np.isnan(vol_ma_prev):
+            continue
+        
+        # Create arrays for alignment (constant values for the period)
+        wide_range_arr = np.full(len(df_1d), wide_range_prev)
+        ema_arr = np.full(len(df_1w), ema_prev)
+        vol_ma_arr = np.full(len(df_1d), vol_ma_prev)
+        
+        # Align to daily timeframe
+        wide_range_daily = align_htf_to_ltf(prices, df_1d, wide_range_arr)[i]
+        ema_daily = align_htf_to_ltf(prices, df_1w, ema_arr)[i]
+        vol_ma_daily = align_htf_to_ltf(prices, df_1d, vol_ma_arr)[i]
+        
         if position == 0:
-            # Long: price breaks above R2 + price above weekly EMA (bullish trend) + volume confirmation
-            if (close[i] > r2_12h[i] and  # price breaks above R2 resistance
-                close[i] > ema_12h[i] and  # price above weekly EMA (bullish trend)
-                volume[i] > vol_ma[i] * 1.5):  # volume confirmation
+            # Long: wide range breakout above high + weekly uptrend + volume confirmation
+            if (high[i] > high_1d[idx_1d-1] and  # break above prior day high
+                wide_range_daily and             # prior day was wide range
+                close[i] > ema_daily and         # price above weekly EMA (uptrend)
+                volume[i] > vol_ma_daily * 1.5): # volume confirmation
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below S2 + price below weekly EMA (bearish trend) + volume confirmation
-            elif (close[i] < s2_12h[i] and  # price breaks below S2 support
-                  close[i] < ema_12h[i] and  # price below weekly EMA (bearish trend)
-                  volume[i] > vol_ma[i] * 1.5):  # volume confirmation
+            # Short: wide range breakdown below low + weekly downtrend + volume confirmation
+            elif (low[i] < low_1d[idx_1d-1] and   # break below prior day low
+                  wide_range_daily and            # prior day was wide range
+                  close[i] < ema_daily and        # price below weekly EMA (downtrend)
+                  volume[i] > vol_ma_daily * 1.5): # volume confirmation
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
-            # Exit: price crosses below pivot or weekly EMA
-            if close[i] < pivot_12h[i] or close[i] < ema_12h[i]:
+            # Exit: price closes below prior day low or weekly EMA
+            if close[i] < low_1d[idx_1d-1] or close[i] < ema_daily:
                 position = 0
                 signals[i] = 0.0
         elif position == -1:
-            # Exit: price crosses above pivot or weekly EMA
-            if close[i] > pivot_12h[i] or close[i] > ema_12h[i]:
+            # Exit: price closes above prior day high or weekly EMA
+            if close[i] > high_1d[idx_1d-1] or close[i] > ema_daily:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_Custom_Pivot_Trend_Filter_v2"
-timeframe = "12h"
+name = "1d_Wide_Range_Breakout"
+timeframe = "1d"
 leverage = 1.0
