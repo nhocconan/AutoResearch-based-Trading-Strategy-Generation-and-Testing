@@ -1,3 +1,10 @@
+# 4h_1d_Pivot_S3R3_Rejection_Volume_Filter
+# Hypothesis: Uses daily pivot S3/R3 levels for mean reversion entries in both bull and bear markets.
+# Price rejecting extreme S3/R3 levels with volume confirmation indicates potential reversal.
+# Works in bull markets (buying dips at S3) and bear markets (selling rallies at R3).
+# Volume filter ensures institutional participation, reducing false signals.
+# Timeframe: 4h balances trade frequency and signal quality.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
