@@ -57,6 +57,12 @@ def generate_signals(prices):
             donch_high[i] = np.max(high[i-19:i+1])
             donch_low[i] = np.min(low[i-19:i+1])
     
+    # Calculate volume moving average (20-period)
+    vol_ma_20 = np.full(n, np.nan)
+    if n >= 20:
+        for i in range(19, n):
+            vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
@@ -66,7 +72,8 @@ def generate_signals(prices):
         if (np.isnan(atr_12h[i]) or
             np.isnan(ema50_12h[i]) or
             np.isnan(donch_high[i]) or
-            np.isnan(donch_low[i])):
+            np.isnan(donch_low[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -75,13 +82,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 12h volume vs 20-period average
-        vol_ma_20 = np.full(n, np.nan)
-        if n >= 20:
-            for j in range(19, n):
-                vol_ma_20[j] = np.mean(volume[j-19:j+1])
-        
-        if np.isnan(vol_ma_20[i]) or vol_ma_20[i] <= 0:
+        # Volume ratio: current volume vs 20-period average
+        if vol_ma_20[i] <= 0:
             volume_ratio = 0
         else:
             volume_ratio = volume[i] / vol_ma_20[i]
@@ -99,9 +101,9 @@ def generate_signals(prices):
         r4 = prev_close + (prev_range * 1.1 / 2)
         s4 = prev_close - (prev_range * 1.1 / 2)
         
-        # Align to 12h timeframe
-        r4_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r4))[i]
-        s4_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s4))[i]
+        # Align to 4h timeframe (no extra delay needed for daily pivot)
+        r4_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r4))[i]
+        s4_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s4))[i]
         
         if position == 0:
             # Long: Price breaks above 4h Donchian high with volume confirmation and above daily EMA50
