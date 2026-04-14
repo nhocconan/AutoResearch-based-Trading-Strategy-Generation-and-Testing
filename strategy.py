@@ -46,6 +46,25 @@ def generate_signals(prices):
         for i in range(19, len(volume)):
             vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
+    # Calculate daily RSI (14-period)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.full_like(gain, np.nan)
+    avg_loss = np.full_like(loss, np.nan)
+    
+    if len(gain) >= 14:
+        avg_gain[13] = np.mean(gain[:14])
+        avg_loss[13] = np.mean(loss[:14])
+        for i in range(14, len(gain)):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_4h = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
@@ -53,7 +72,8 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any critical data is NaN
         if (np.isnan(atr_4h[i]) or
-            np.isnan(vol_ma_20[i])):
+            np.isnan(vol_ma_20[i]) or
+            np.isnan(rsi_4h[i])):
             signals[i] = 0.0
             continue
         
@@ -70,6 +90,10 @@ def generate_signals(prices):
         
         # Volume threshold: require significant spike
         vol_threshold = 2.5
+        
+        # RSI thresholds: avoid overbought/oversold extremes
+        rsi_overbought = 70
+        rsi_oversold = 30
         
         # Calculate dynamic pivot levels based on previous day's range
         prev_high = high_1d[i-1] if i > 0 else high_1d[0]
@@ -90,26 +114,26 @@ def generate_signals(prices):
         s3_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i]
         
         if position == 0:
-            # Long: Price breaks above R4 with volume confirmation
-            if close[i] > r4_4h and volume_ratio > vol_threshold:
+            # Long: Price breaks above R4 with volume confirmation and RSI not overbought
+            if close[i] > r4_4h and volume_ratio > vol_threshold and rsi_4h[i] < rsi_overbought:
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below S4 with volume confirmation
-            elif close[i] < s4_4h and volume_ratio > vol_threshold:
+            # Short: Price breaks below S4 with volume confirmation and RSI not oversold
+            elif close[i] < s4_4h and volume_ratio > vol_threshold and rsi_4h[i] > rsi_oversold:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below S3 (more sensitive exit)
-            if close[i] < s3_4h:
+            # Exit: Price falls back below S3 (more sensitive exit) OR RSI becomes overbought
+            if close[i] < s3_4h or rsi_4h[i] > rsi_overbought:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above R3 (more sensitive exit)
-            if close[i] > r3_4h:
+            # Exit: Price rises back above R3 (more sensitive exit) OR RSI becomes oversold
+            if close[i] > r3_4h or rsi_4h[i] < rsi_oversold:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -117,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_R4S4_Breakout_Volume_v2"
+name = "4h_1d_Camarilla_R4S4_Breakout_Volume_RSI_v2"
 timeframe = "4h"
 leverage = 1.0
