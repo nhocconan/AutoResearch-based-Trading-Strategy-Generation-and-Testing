@@ -1,15 +1,13 @@
+# 6h_MultiTimeframeConfluence_v1
+# 6h timeframe with 1d and 1w trend filters
+# Uses confluence of: 6h price above/below 1d VWAP, 1d candle direction, and 1w EMA trend
+# Designed to work in both bull and bear markets by requiring multi-timeframe agreement
+# Target: 15-25 trades/year per symbol (60-100 total over 4 years) to minimize fee drag
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 12h strategy using daily volatility breakout with weekly RSI trend filter.
-# Uses volatility-adjusted breakout levels based on prior day's range and ATR, providing adaptive support/resistance.
-# Long when price breaks above volatility-adjusted resistance with 1w RSI > 50 (uptrend) and volume confirmation.
-# Short when price breaks below volatility-adjusted support with 1w RSI < 50 (downtrend) and volume confirmation.
-# Exit when price returns to prior day's close or RSI crosses 50 in opposite direction.
-# Designed to work in both bull and bear markets by adapting to volatility and using RSI for trend confirmation.
-# Target: 12-37 trades/year per symbol (50-150 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,114 +19,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for volatility-adjusted levels
+    # Load 1d data ONCE for VWAP and candle direction
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate True Range and ATR on 1d
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
+    # Calculate 1d VWAP: cumulative (price * volume) / cumulative volume
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
+    pv_1d = typical_price_1d * volume_1d
+    cum_pv = np.nancumsum(pv_1d)
+    cum_vol = np.nancumsum(volume_1d)
+    vwap_1d = np.divide(cum_pv, cum_vol, out=np.full_like(cum_pv, np.nan), where=cum_vol!=0)
     
-    atr_period = 14
-    atr_1d = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    # 1d candle direction: 1 for bullish (close > open), -1 for bearish
+    open_1d = df_1d['open'].values
+    candle_dir_1d = np.where(close_1d > open_1d, 1, -1)
     
-    # Volatility-adjusted support/resistance: prior day's high/low ± 0.5 * ATR
-    var_resistance = np.roll(high_1d, 1) + 0.5 * np.roll(atr_1d, 1)
-    var_support = np.roll(low_1d, 1) - 0.5 * np.roll(atr_1d, 1)
-    var_resistance[0] = np.nan
-    var_support[0] = np.nan
-    
-    # Prior 1d close for exit condition
-    prior_close_1d = np.roll(close_1d, 1)
-    prior_close_1d[0] = np.nan
-    
-    # Load 1w data ONCE for RSI trend filter
+    # Load 1w data ONCE for EMA trend
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
     
-    # Calculate RSI(14) on 1w
-    delta = np.diff(close_1w, prepend=np.nan)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate 20-period EMA on 1w
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / avg_loss
-    rs = np.where(avg_loss == 0, 100, rs)
-    rsi_1w = 100 - (100 / (1 + rs))
-    
-    # Align indicators to lower timeframe
-    var_resistance_aligned = align_htf_to_ltf(prices, df_1d, var_resistance)
-    var_support_aligned = align_htf_to_ltf(prices, df_1d, var_support)
-    prior_close_1d_aligned = align_htf_to_ltf(prices, df_1d, prior_close_1d)
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
-    
-    # Volume confirmation: 1.5x average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align indicators to 6h timeframe
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    candle_dir_1d_aligned = align_htf_to_ltf(prices, df_1d, candle_dir_1d)
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(20, 14)  # Need VAR and RSI
+    start = 20  # Need EMA warmup
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(var_resistance_aligned[i]) or 
-            np.isnan(var_support_aligned[i]) or
-            np.isnan(prior_close_1d_aligned[i]) or
-            np.isnan(rsi_1w_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(vwap_1d_aligned[i]) or 
+            np.isnan(candle_dir_1d_aligned[i]) or
+            np.isnan(ema_20_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
-        
-        # Trend filter: RSI > 50 for uptrend, < 50 for downtrend
-        uptrend = rsi_1w_aligned[i] > 50
-        downtrend = rsi_1w_aligned[i] < 50
+        # Multi-timeframe confluence conditions
+        price_above_vwap = close[i] > vwap_1d_aligned[i]
+        price_below_vwap = close[i] < vwap_1d_aligned[i]
+        bullish_1d = candle_dir_1d_aligned[i] == 1
+        bearish_1d = candle_dir_1d_aligned[i] == -1
+        price_above_1w_ema = close[i] > ema_20_1w_aligned[i]
+        price_below_1w_ema = close[i] < ema_20_1w_aligned[i]
         
         if position == 0:
-            # Look for volatility-adjusted breakouts
-            # Long: price breaks above VAR resistance AND uptrend
-            if (close[i] > var_resistance_aligned[i] and 
-                uptrend and 
-                volume_confirmed):
+            # Long: price above 1d VWAP + bullish 1d candle + price above 1w EMA
+            if (price_above_vwap and 
+                bullish_1d and 
+                price_above_1w_ema):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below VAR support AND downtrend
-            elif (close[i] < var_support_aligned[i] and 
-                  downtrend and 
-                  volume_confirmed):
+            # Short: price below 1d VWAP + bearish 1d candle + price below 1w EMA
+            elif (price_below_vwap and 
+                  bearish_1d and 
+                  price_below_1w_ema):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to prior 1d close or RSI crosses below 50
-            if (close[i] <= prior_close_1d_aligned[i] or 
-                rsi_1w_aligned[i] <= 50):
+            # Exit long: any condition fails
+            if not (price_above_vwap and bullish_1d and price_above_1w_ema):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to prior 1d close or RSI crosses above 50
-            if (close[i] >= prior_close_1d_aligned[i] or 
-                rsi_1w_aligned[i] >= 50):
+            # Exit short: any condition fails
+            if not (price_below_vwap and bearish_1d and price_below_1w_ema):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -136,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_VolatilityAdjustedBreakout_1wRSI_v1"
-timeframe = "12h"
+name = "6h_MultiTimeframeConfluence_v1"
+timeframe = "6h"
 leverage = 1.0
