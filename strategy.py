@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Load daily data (HTF) once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -76,7 +76,7 @@ def generate_signals(prices):
     atr_6h = align_htf_to_ltf(prices, df_1d, atr_1d)
     adx_6h = align_htf_to_ltf(prices, df_1d, adx_14)
     
-    # Calculate 6-hour Donchian channels (20-period for balanced entries)
+    # Calculate 6-hour Donchian channels (20-period)
     donch_high = np.full(n, np.nan)
     donch_low = np.full(n, np.nan)
     if n >= 20:
