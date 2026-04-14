@@ -13,128 +13,104 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load daily data (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 20-period Donchian channels (weekly)
-    if len(high_1w) < 20:
+    # Calculate 20-period Donchian channels (daily)
+    if len(high_1d) < 20:
         return np.zeros(n)
     
-    # Upper band: highest high over last 20 weeks
-    upper_20 = np.full_like(high_1w, np.nan)
-    for i in range(19, len(high_1w)):
-        upper_20[i] = np.max(high_1w[i-19:i+1])
+    # Upper band: highest high over last 20 periods
+    upper_20 = np.full_like(high_1d, np.nan)
+    for i in range(19, len(high_1d)):
+        upper_20[i] = np.max(high_1d[i-19:i+1])
     
-    # Lower band: lowest low over last 20 weeks
-    lower_20 = np.full_like(low_1w, np.nan)
-    for i in range(19, len(low_1w)):
-        lower_20[i] = np.min(low_1w[i-19:i+1])
+    # Lower band: lowest low over last 20 periods
+    lower_20 = np.full_like(low_1d, np.nan)
+    for i in range(19, len(low_1d)):
+        lower_20[i] = np.min(low_1d[i-19:i+1])
     
-    upper_20_aligned = align_htf_to_ltf(prices, df_1w, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_1w, lower_20)
+    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
     
-    # Calculate 40-week EMA for trend filter (weekly)
-    if len(close_1w) < 40:
+    # Calculate 10-period ATR for volatility filter (daily)
+    if len(high_1d) < 14:
         return np.zeros(n)
     
-    ema40_1w = np.full_like(close_1w, np.nan)
-    ema40_1w[0] = close_1w[0]
-    alpha = 2 / (40 + 1)
-    for i in range(1, len(close_1w)):
-        ema40_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema40_1w[i-1]
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    ema40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema40_1w)
+    atr10 = np.full_like(close_1d, np.nan)
+    if len(tr) >= 10:
+        atr10[9] = np.mean(tr[1:11])
+        for i in range(10, len(tr)):
+            atr10[i] = (atr10[i-1] * 9 + tr[i]) / 10
     
-    # Calculate 14-week RSI for momentum (weekly)
-    if len(close_1w) < 14:
+    atr10_aligned = align_htf_to_ltf(prices, df_1d, atr10)
+    
+    # Calculate 50-day EMA for trend filter (daily)
+    if len(close_1d) < 50:
         return np.zeros(n)
     
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    ema50 = np.full_like(close_1d, np.nan)
+    ema50[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        ema50[i] = close_1d[i] * 0.0392 + ema50[i-1] * 0.9608  # 2/(50+1)
     
-    avg_gain = np.full_like(close_1w, np.nan)
-    avg_loss = np.full_like(close_1w, np.nan)
-    
-    if len(close_1w) >= 14:
-        avg_gain[13] = np.mean(gain[1:14])
-        avg_loss[13] = np.mean(loss[1:14])
-        for i in range(14, len(close_1w)):
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.full_like(close_1w, np.nan)
-    rsi14 = np.full_like(close_1w, np.nan)
-    for i in range(13, len(close_1w)):
-        if avg_loss[i] > 0:
-            rs[i] = avg_gain[i] / avg_loss[i]
-            rsi14[i] = 100 - (100 / (1 + rs[i]))
-        else:
-            rsi14[i] = 100 if avg_gain[i] > 0 else 0
-    
-    rsi14_aligned = align_htf_to_ltf(prices, df_1w, rsi14)
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    for i in range(40, n):
+    for i in range(50, n):
         # Skip if any critical data is NaN
         if (np.isnan(upper_20_aligned[i]) or 
             np.isnan(lower_20_aligned[i]) or 
-            np.isnan(ema40_1w_aligned[i]) or 
-            np.isnan(rsi14_aligned[i])):
+            np.isnan(ema50_aligned[i]) or 
+            np.isnan(atr10_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current weekly volume vs 20-period average
-        vol_ma_20 = np.full_like(volume_1w, np.nan)
-        for j in range(19, len(volume_1w)):
-            vol_ma_20[j] = np.mean(volume_1w[j-19:j+1])
-        
-        vol_ma_20_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20)
-        
-        if np.isnan(vol_ma_20_aligned[i]) or vol_ma_20_aligned[i] <= 0:
-            volume_ratio = 0
-        else:
-            volume_ratio = volume_1w[-1] / vol_ma_20_aligned[i] if len(volume_1w) > 0 else 0
+        # Volatility filter: require ATR > 0.5% of price
+        if atr10_aligned[i] / close[i] < 0.005:
+            signals[i] = 0.0
+            continue
         
         if position == 0:
-            # Long: Price breaks above upper Donchian + price above EMA40 + RSI > 55 + volume surge
+            # Long: Price breaks above upper Donchian + price above EMA50
             if (close[i] > upper_20_aligned[i] and
-                close[i] > ema40_1w_aligned[i] and
-                rsi14_aligned[i] > 55 and
-                volume_ratio > 2.0):
+                close[i] > ema50_aligned[i]):
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below lower Donchian + price below EMA40 + RSI < 45 + volume surge
+            # Short: Price breaks below lower Donchian + price below EMA50
             elif (close[i] < lower_20_aligned[i] and
-                  close[i] < ema40_1w_aligned[i] and
-                  rsi14_aligned[i] < 45 and
-                  volume_ratio > 2.0):
+                  close[i] < ema50_aligned[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price breaks below lower Donchian OR RSI < 40
+            # Exit: Price breaks below lower Donchian OR price below EMA50
             if (close[i] < lower_20_aligned[i] or 
-                rsi14_aligned[i] < 40):
+                close[i] < ema50_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price breaks above upper Donchian OR RSI > 60
+            # Exit: Price breaks above upper Donchian OR price above EMA50
             if (close[i] > upper_20_aligned[i] or 
-                rsi14_aligned[i] > 60):
+                close[i] > ema50_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -142,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_Donchian20_EMA40_RSI14_Volume_v1"
-timeframe = "1d"
+name = "4h_1d_Donchian20_EMA50_VolFilter"
+timeframe = "4h"
 leverage = 1.0
