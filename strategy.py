@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for pivot points
+    # Load 1d data for pivot points and volume
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -21,20 +21,7 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly EMA(50) for trend filter
-    if len(close_1w) >= 50:
-        ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    else:
-        ema_50_1w = np.full_like(close_1w, np.nan)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    volume_1d = df_1d['volume'].values
     
     # Calculate daily pivot points (S1, S2, R1, R2)
     pivot_point = np.full_like(close_1d, np.nan)
@@ -61,14 +48,21 @@ def generate_signals(prices):
             support1[i] = s1
             support2[i] = s2
     
-    # Align 1d indicators to 12h timeframe
-    pivot_point_12h = align_htf_to_ltf(prices, df_1d, pivot_point)
-    resistance1_12h = align_htf_to_ltf(prices, df_1d, resistance1)
-    resistance2_12h = align_htf_to_ltf(prices, df_1d, resistance2)
-    support1_12h = align_htf_to_ltf(prices, df_1d, support1)
-    support2_12h = align_htf_to_ltf(prices, df_1d, support2)
+    # Calculate 1d volume moving average (20-period)
+    vol_ma_1d = np.full_like(volume_1d, np.nan)
+    if len(volume_1d) >= 20:
+        for i in range(19, len(volume_1d)):
+            vol_ma_1d[i] = np.mean(volume_1d[i-19:i+1])
     
-    # Volume spike detection (20-period average)
+    # Align 1d indicators to 6h timeframe
+    pivot_point_6h = align_htf_to_ltf(prices, df_1d, pivot_point)
+    resistance1_6h = align_htf_to_ltf(prices, df_1d, resistance1)
+    resistance2_6h = align_htf_to_ltf(prices, df_1d, resistance2)
+    support1_6h = align_htf_to_ltf(prices, df_1d, support1)
+    support2_6h = align_htf_to_ltf(prices, df_1d, support2)
+    vol_ma_1d_6h = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # 6h volume moving average (20-period)
     vol_ma_20 = np.full_like(volume, np.nan)
     if len(volume) >= 20:
         for i in range(19, len(volume)):
@@ -78,52 +72,51 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25  # 25% position size
     
-    for i in range(60, n):
+    for i in range(100, n):
         # Skip if any critical data is NaN
-        if (np.isnan(pivot_point_12h[i]) or 
-            np.isnan(resistance1_12h[i]) or
-            np.isnan(resistance2_12h[i]) or
-            np.isnan(support1_12h[i]) or
-            np.isnan(support2_12h[i]) or
-            np.isnan(vol_ma_20[i]) or
-            np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(pivot_point_6h[i]) or 
+            np.isnan(resistance1_6h[i]) or
+            np.isnan(resistance2_6h[i]) or
+            np.isnan(support1_6h[i]) or
+            np.isnan(support2_6h[i]) or
+            np.isnan(vol_ma_1d_6h[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 12h volume vs 20-period average
-        if vol_ma_20[i] <= 0:
-            volume_ratio = 0
-        else:
-            volume_ratio = volume[i] / vol_ma_20[i]
+        # Volume ratios
+        vol_ratio_6h = volume[i] / vol_ma_20[i] if vol_ma_20[i] > 0 else 0
+        vol_ratio_1d = volume_1d[i//24] / vol_ma_1d_6h[i] if vol_ma_1d_6h[i] > 0 else 0
         
-        # Volume threshold: require significant spike
-        vol_threshold = 2.0
+        # Volume thresholds
+        vol_threshold_6h = 2.0
+        vol_threshold_1d = 1.5
         
         if position == 0:
-            # Long: Price breaks above R1 with volume spike AND weekly uptrend
-            if (close[i] > resistance1_12h[i] and 
-                volume_ratio > vol_threshold and
-                close[i] > ema_50_1w_aligned[i]):
+            # Long: Price breaks above R1 with volume spike on both timeframes
+            if (close[i] > resistance1_6h[i] and 
+                vol_ratio_6h > vol_threshold_6h and
+                vol_ratio_1d > vol_threshold_1d):
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below S1 with volume spike AND weekly downtrend
-            elif (close[i] < support1_12h[i] and 
-                  volume_ratio > vol_threshold and
-                  close[i] < ema_50_1w_aligned[i]):
+            # Short: Price breaks below S1 with volume spike on both timeframes
+            elif (close[i] < support1_6h[i] and 
+                  vol_ratio_6h > vol_threshold_6h and
+                  vol_ratio_1d > vol_threshold_1d):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price closes below pivot point (mean reversion) OR weekly trend breaks
-            if close[i] < pivot_point_12h[i] or close[i] < ema_50_1w_aligned[i]:
+            # Exit: Price closes below pivot point
+            if close[i] < pivot_point_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price closes above pivot point (mean reversion) OR weekly trend breaks
-            if close[i] > pivot_point_12h[i] or close[i] > ema_50_1w_aligned[i]:
+            # Exit: Price closes above pivot point
+            if close[i] > pivot_point_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -131,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Pivot_R1S1_Volume_1wTrend"
-timeframe = "12h"
+name = "6h_1d_Pivot_R1S1_Volume_BothTF"
+timeframe = "6h"
 leverage = 1.0
