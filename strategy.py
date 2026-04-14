@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -47,11 +47,11 @@ def generate_signals(prices):
         for i in range(50, len(df_1d)):
             ema_50_1d[i] = (close_1d[i] * multiplier) + (ema_50_1d[i-1] * (1 - multiplier))
     
-    # Calculate daily volatility filter (ATR > 1% of price)
+    # Calculate daily volatility filter (ATR > 0.8% of price)
     vol_filter_1d = np.zeros(len(df_1d))
     for i in range(len(df_1d)):
         if not np.isnan(atr_1d[i]) and close_1d[i] > 0:
-            vol_filter_1d[i] = atr_1d[i] / close_1d[i] > 0.01
+            vol_filter_1d[i] = atr_1d[i] / close_1d[i] > 0.008
         else:
             vol_filter_1d[i] = False
     
@@ -62,11 +62,11 @@ def generate_signals(prices):
         for i in range(20, len(df_1d)):
             vol_ma_1d[i] = (vol_ma_1d[i-1] * 19 + vol_1d[i]) / 20
     
-    # Calculate volume spike filter (current volume > 2x 20-day average)
+    # Calculate volume spike filter (current volume > 1.5x 20-day average)
     vol_spike_1d = np.zeros(len(df_1d))
     for i in range(len(df_1d)):
         if not np.isnan(vol_ma_1d[i]) and vol_ma_1d[i] > 0:
-            vol_spike_1d[i] = vol_1d[i] > vol_ma_1d[i] * 2.0
+            vol_spike_1d[i] = vol_1d[i] > vol_ma_1d[i] * 1.5
         else:
             vol_spike_1d[i] = False
     
@@ -97,7 +97,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Skip low volatility periods (ATR < 1% of price)
+        # Skip low volatility periods (ATR < 0.8% of price)
         if vol_filter_4h[i] < 0.5:
             signals[i] = 0.0
             continue
@@ -144,6 +144,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_R4S4_EMA50_VolumeSpike"
+name = "4h_1d_Camarilla_R4S4_EMA50_VolumeSpike_v2"
 timeframe = "4h"
 leverage = 1.0
