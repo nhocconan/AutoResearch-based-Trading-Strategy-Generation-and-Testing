@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,37 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data (HTF) once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
-    
-    # Calculate weekly ATR (14-period) for volatility filter
-    tr = np.zeros(len(df_1w))
-    tr[0] = high_1w[0] - low_1w[0]
-    for i in range(1, len(df_1w)):
-        tr[i] = max(
-            high_1w[i] - low_1w[i],
-            abs(high_1w[i] - close_1w[i-1]),
-            abs(low_1w[i] - close_1w[i-1])
-        )
-    
-    atr_1w = np.full(len(df_1w), np.nan)
-    if len(df_1w) >= 14:
-        atr_1w[13] = np.mean(tr[:14])
-        for i in range(14, len(df_1w)):
-            atr_1w[i] = (atr_1w[i-1] * 13 + tr[i]) / 14
-    
-    # Calculate weekly EMA200 for trend filter
-    close_1w_series = pd.Series(close_1w)
-    ema200_1w = close_1w_series.ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # Calculate daily Donchian channels (20-period) from daily data
+    # Load daily data (HTF) once before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -52,77 +22,117 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    donch_high_1d = np.full(len(df_1d), np.nan)
-    donch_low_1d = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 20:
-        for i in range(19, len(df_1d)):
-            donch_high_1d[i] = np.max(high_1d[i-19:i+1])
-            donch_low_1d[i] = np.min(low_1d[i-19:i+1])
+    # Calculate 60-day rolling 10th percentile of ATR(14) for volatility regime filter
+    tr = np.zeros(len(df_1d))
+    tr[0] = high_1d[0] - low_1d[0]
+    for i in range(1, len(df_1d)):
+        tr[i] = max(
+            high_1d[i] - low_1d[i],
+            abs(high_1d[i] - close_1d[i-1]),
+            abs(low_1d[i] - close_1d[i-1])
+        )
     
-    # Align weekly indicators to daily timeframe
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
-    donch_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
-    donch_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
+    atr_1d = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 14:
+        atr_1d[13] = np.mean(tr[:14])
+        for i in range(14, len(df_1d)):
+            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # Calculate volatility filter (weekly ATR > 1% of price)
-    vol_filter_1d = np.zeros(len(df_1d))
-    for i in range(len(df_1d)):
-        if not np.isnan(atr_1d_aligned[i]) and close_1d[i] > 0:
-            vol_filter_1d[i] = atr_1d_aligned[i] / close_1d[i] > 0.01
-        else:
-            vol_filter_1d[i] = False
+    # Calculate 60-day rolling 10th percentile of ATR (volatility regime)
+    atr_percentile = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 60:
+        for i in range(59, len(df_1d)):
+            window = atr_1d[i-59:i+1]
+            valid = window[~np.isnan(window)]
+            if len(valid) >= 10:
+                atr_percentile[i] = np.percentile(valid, 10)
+    
+    atr_percentile_6h = align_htf_to_ltf(prices, df_1d, atr_percentile)
+    atr_6h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # Calculate 6h RSI(14) for mean reversion entries
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    if n >= 14:
+        avg_gain[13] = np.mean(gain[:14])
+        avg_loss[13] = np.mean(loss[:14])
+        for i in range(14, n):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.full(n, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Calculate 60-day rolling 10th percentile of 1d RSI for regime filter
+    rsi_1d = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 14:
+        delta_1d = np.diff(close_1d, prepend=close_1d[0])
+        gain_1d = np.where(delta_1d > 0, delta_1d, 0)
+        loss_1d = np.where(delta_1d < 0, -delta_1d, 0)
+        avg_gain_1d = np.full(len(df_1d), np.nan)
+        avg_loss_1d = np.full(len(df_1d), np.nan)
+        avg_gain_1d[13] = np.mean(gain_1d[:14])
+        avg_loss_1d[13] = np.mean(loss_1d[:14])
+        for i in range(14, len(df_1d)):
+            avg_gain_1d[i] = (avg_gain_1d[i-1] * 13 + gain_1d[i]) / 14
+            avg_loss_1d[i] = (avg_loss_1d[i-1] * 13 + loss_1d[i]) / 14
+        rs_1d = np.divide(avg_gain_1d, avg_loss_1d, out=np.full(len(df_1d), np.nan), where=avg_loss_1d!=0)
+        rsi_1d = 100 - (100 / (1 + rs_1d))
+    
+    rsi_1d_percentile = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 60:
+        for i in range(59, len(df_1d)):
+            window = rsi_1d[i-59:i+1]
+            valid = window[~np.isnan(window)]
+            if len(valid) >= 10:
+                rsi_1d_percentile[i] = np.percentile(valid, 10)
+    
+    rsi_1d_percentile_6h = align_htf_to_ltf(prices, df_1d, rsi_1d_percentile)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    for i in range(200, n):  # Start after EMA200 warmup
+    for i in range(60, n):
         # Skip if any critical data is NaN
-        if (np.isnan(atr_1d_aligned[i]) or
-            np.isnan(ema200_1d_aligned[i]) or
-            np.isnan(donch_high_1d_aligned[i]) or
-            np.isnan(donch_low_1d_aligned[i])):
+        if (np.isnan(atr_percentile_6h[i]) or
+            np.isnan(atr_6h[i]) or
+            np.isnan(rsi[i]) or
+            np.isnan(rsi_1d_percentile_6h[i])):
             signals[i] = 0.0
             continue
         
-        # Skip low volatility periods (ATR < 1% of price)
-        if vol_filter_1d[i] < 0.5:
+        # Volatility regime filter: only trade when current ATR > 10th percentile of 60-day ATR
+        if atr_6h[i] <= atr_percentile_6h[i]:
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below weekly EMA200
-        uptrend = close_1d[i] > ema200_1d_aligned[i]
-        downtrend = close_1d[i] < ema200_1d_aligned[i]
+        # Mean reversion regime filter: only trade when 1d RSI < 10th percentile of 60-day RSI (oversold conditions)
+        if rsi_1d_percentile_6h[i] > 30:  # Avoid extremely oversold conditions that may persist
+            signals[i] = 0.0
+            continue
         
         if position == 0:
-            # Long: Price breaks above daily Donchian high AND in uptrend
-            if close_1d[i] > donch_high_1d_aligned[i] and uptrend:
+            # Long: RSI < 30 (oversold) in high volatility regime
+            if rsi[i] < 30:
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below daily Donchian low AND in downtrend
-            elif close_1d[i] < donch_low_1d_aligned[i] and downtrend:
-                position = -1
-                signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below daily Donchian low OR trend changes
-            if close_1d[i] < donch_low_1d_aligned[i] or not uptrend:
+            # Exit: RSI > 70 (overbought) or volatility drops below regime threshold
+            if rsi[i] > 70 or atr_6h[i] <= atr_percentile_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
-        elif position == -1:
-            # Exit: Price rises back above daily Donchian high OR trend changes
-            if close_1d[i] > donch_high_1d_aligned[i] or not downtrend:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = -position_size
     
     return signals
 
-name = "1d_1w_Donchian20_EMA200_Trend_Filter_Vol"
-timeframe = "1d"
+name = "6h_1d_VolRegime_MeanReversion_RSI"
+timeframe = "6h"
 leverage = 1.0
