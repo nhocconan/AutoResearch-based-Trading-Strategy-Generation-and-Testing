@@ -1,4 +1,3 @@
-# hypothesis: 4h Donchian breakout with volume confirmation and weekly trend filter should work in both bull and bear markets due to strong momentum capture during trends and reduced false signals in ranging markets via volume and trend filters. target trades ~30-40 per year.
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -14,13 +13,13 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data once for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Load daily data once for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    weekly_close = df_1w['close'].values
-    weekly_open = df_1w['open'].values
+    daily_close = df_1d['close'].values
+    daily_open = df_1d['open'].values
     
     # Donchian channels (20-period)
     donch_high = np.full(n, np.nan)
@@ -44,13 +43,13 @@ def generate_signals(prices):
             vol_sum -= volume[i-19]
             vol_count -= 1
     
-    # Weekly trend: 1 if bullish (close > open), -1 if bearish
-    weekly_bullish = weekly_close > weekly_open
-    weekly_bearish = weekly_close < weekly_open
+    # Daily trend: 1 if bullish (close > open), -1 if bearish
+    daily_bullish = daily_close > daily_open
+    daily_bearish = daily_close < daily_open
     
     # Create arrays for alignment
-    weekly_bullish_arr = weekly_bullish.astype(float)
-    weekly_bearish_arr = weekly_bearish.astype(float)
+    daily_bullish_arr = daily_bullish.astype(float)
+    daily_bearish_arr = daily_bearish.astype(float)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -61,20 +60,20 @@ def generate_signals(prices):
         if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(donch_mid[i]) or np.isnan(vol_ma[i]):
             continue
         
-        # Get aligned weekly trend values
-        weekly_bull = align_htf_to_ltf(prices, df_1w, weekly_bullish_arr)[i]
-        weekly_bear = align_htf_to_ltf(prices, df_1w, weekly_bearish_arr)[i]
+        # Get aligned daily trend values
+        daily_bull = align_htf_to_ltf(prices, df_1d, daily_bullish_arr)[i]
+        daily_bear = align_htf_to_ltf(prices, df_1d, daily_bearish_arr)[i]
         
-        if np.isnan(weekly_bull) or np.isnan(weekly_bear):
+        if np.isnan(daily_bull) or np.isnan(daily_bear):
             continue
         
         if position == 0:
-            # Long: Break above Donchian high, volume spike, weekly bullish
-            if close[i] > donch_high[i] and volume[i] > vol_ma[i] * 1.5 and weekly_bull > 0.5:
+            # Long: Break above Donchian high, volume spike, daily bullish
+            if close[i] > donch_high[i] and volume[i] > vol_ma[i] * 1.5 and daily_bull > 0.5:
                 position = 1
                 signals[i] = position_size
-            # Short: Break below Donchian low, volume spike, weekly bearish
-            elif close[i] < donch_low[i] and volume[i] > vol_ma[i] * 1.5 and weekly_bear > 0.5:
+            # Short: Break below Donchian low, volume spike, daily bearish
+            elif close[i] < donch_low[i] and volume[i] > vol_ma[i] * 1.5 and daily_bear > 0.5:
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
@@ -90,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_Volume_WeeklyTrend"
+name = "4h_Donchian_Breakout_Volume_DailyTrend"
 timeframe = "4h"
 leverage = 1.0
