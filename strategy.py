@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1-day trend filter and volume confirmation
-# Uses Williams Alligator (Jaw: SMA13, Teeth: SMA8, Lips: SMA5) on 12h for trend direction
-# Long when Lips > Teeth > Jaw and price above Lips; Short when Lips < Teeth < Jaw and price below Lips
+# Hypothesis: 12h Bollinger Band width expansion + 1-day trend + volume confirmation
+# Uses Bollinger Band width (BBW) on 12h to detect volatility expansion
+# Long when BBW increases and price > upper band; Short when BBW increases and price < lower band
 # Daily close > daily EMA50 as trend filter (only long in daily uptrend, short in daily downtrend)
 # Volume confirmation > 1.3x 20-period EMA on 12h to reduce false signals
-# Designed for ~15-25 trades/year with clear trend-following logic
-# Works in bull markets via bullish alignment + uptrend and in bear markets via bearish alignment + downtrend
-# Position size: 0.25 to balance return and drawdown
+# Designed for ~15-25 trades/year with clear volatility-based logic
+# Works in bull markets via uptrend + expansion and in bear markets via downtrend + expansion
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,10 +21,16 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Williams Alligator for 12h (SMA5, SMA8, SMA13)
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values  # SMA5
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values  # SMA8
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values  # SMA13
+    # Calculate Bollinger Bands (20-period, 2 std dev) for 12h
+    close_series = pd.Series(close)
+    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_series.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
+    bb_width = bb_upper - bb_lower
+    
+    # Calculate BBW change (current - previous)
+    bb_width_change = np.diff(bb_width, prepend=bb_width[0])
     
     # Load daily data once for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -43,49 +48,43 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Get aligned daily EMA50
         ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)[i]
         
-        if np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or np.isnan(ema50_1d_aligned) or np.isnan(vol_ma[i]):
+        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(bb_width_change[i]) or np.isnan(ema50_1d_aligned) or np.isnan(vol_ma[i]):
             continue
         
         # Daily trend filter: only long in uptrend, only short in downtrend
-        # Need to get the last known daily close for comparison
-        # Find the index of the last completed daily bar up to current 12h bar
-        # Since we can't easily compute this without datetime math, we'll use a simplification:
-        # Use the daily EMA50 value as proxy - if price > EMA50, consider uptrend
-        # This is not perfect but avoids look-ahead and uses available data
         price_vs_ema = close[i] > ema50_1d_aligned  # Simple price vs EMA comparison
         
-        # Williams Alligator signals
-        bullish_alignment = (lips[i] > teeth[i]) and (teeth[i] > jaw[i])  # Lips > Teeth > Jaw
-        bearish_alignment = (lips[i] < teeth[i]) and (teeth[i] < jaw[i])  # Lips < Teeth < Jaw
-        price_above_lips = close[i] > lips[i]
-        price_below_lips = close[i] < lips[i]
+        # Bollinger Band signals
+        bb_expansion = bb_width_change[i] > 0  # BB width increasing
+        price_above_upper = close[i] > bb_upper[i]
+        price_below_lower = close[i] < bb_lower[i]
         
         # Volume confirmation (1.3x average)
         volume_confirm = volume[i] > 1.3 * vol_ma[i]
         
-        # Long signal: bullish alignment + price above lips + daily uptrend + volume
-        if position == 0 and bullish_alignment and price_above_lips and price_vs_ema and volume_confirm:
+        # Long signal: BB expansion + price above upper band + daily uptrend + volume
+        if position == 0 and bb_expansion and price_above_upper and price_vs_ema and volume_confirm:
             position = 1
             signals[i] = position_size
-        # Short signal: bearish alignment + price below lips + daily downtrend + volume
-        elif position == 0 and bearish_alignment and price_below_lips and not price_vs_ema and volume_confirm:
+        # Short signal: BB expansion + price below lower band + daily downtrend + volume
+        elif position == 0 and bb_expansion and price_below_lower and not price_vs_ema and volume_confirm:
             position = -1
             signals[i] = -position_size
-        # Exit: loss of alignment or price crosses lips in opposite direction
+        # Exit: BB contraction or price crosses middle band
         elif position != 0:
-            if position == 1 and (not bullish_alignment or close[i] < lips[i]):
+            if position == 1 and (not bb_expansion or close[i] < bb_middle[i]):
                 position = 0
                 signals[i] = 0.0
-            elif position == -1 and (not bearish_alignment or close[i] > lips[i]):
+            elif position == -1 and (not bb_expansion or close[i] > bb_middle[i]):
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_WilliamsAlligator_1dTrend_Filter_Volume"
+name = "12h_BollingerWidth_1dTrend_Volume"
 timeframe = "12h"
 leverage = 1.0
