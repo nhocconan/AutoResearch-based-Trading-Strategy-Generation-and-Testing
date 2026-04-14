@@ -23,7 +23,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     vol_1d = df_1d['volume'].values
     
-    # Calculate daily ATR (14-period) with proper handling
+    # Calculate daily ATR (14-period)
     tr = np.zeros(len(df_1d))
     tr[0] = high_1d[0] - low_1d[0]
     for i in range(1, len(df_1d)):
@@ -39,7 +39,7 @@ def generate_signals(prices):
         for i in range(14, len(df_1d)):
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # Calculate daily EMA (50-period) for trend filter
+    # Calculate daily EMA (50-period)
     ema_50_1d = np.full(len(df_1d), np.nan)
     if len(df_1d) >= 50:
         ema_50_1d[49] = np.mean(close_1d[:50])
