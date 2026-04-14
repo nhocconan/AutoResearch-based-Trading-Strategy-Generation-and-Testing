@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d ADX trend filter and volume confirmation
-# Uses Donchian channel breakout (20-period) from 4h timeframe for entry signals
-# 1d ADX (14) provides trend strength filter to avoid low-momentum breakouts
-# Volume confirmation (>1.5x average volume) ensures institutional participation
+# Hypothesis: 4h Donchian(20) Breakout with 1d ADX Filter and Volume Spike
+# Uses Donchian channel breakouts from 4h timeframe
+# 1d ADX (14) filters for strong trending conditions to avoid false breakouts
+# Volume confirmation (>1.5x average) ensures institutional participation
 # Designed to work in both bull and bear markets by trading breakouts in direction of daily trend
-# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag
+# Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,12 +22,6 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop for ADX
     df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate Donchian channel (20-period) on 4h
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
     # Calculate 1d ADX (14) for trend strength
     def calculate_adx(high, low, close, period=14):
@@ -80,6 +74,12 @@ def generate_signals(prices):
     adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
+    # Donchian channel (20-period) on 4h timeframe
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().shift(1).values
+    
     # Volume confirmation: volume > 1.5x average volume (20-period)
     vol_series = pd.Series(volume)
     avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
@@ -89,7 +89,7 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 50  # for Donchian and ADX calculations
+    start = 40  # for Donchian and ADX calculations
     
     for i in range(start, n):
         # Skip if any critical data is NaN
