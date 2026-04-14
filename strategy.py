@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Bollinger Band Breakout with Weekly Trend Filter and Volume Spike
-# Uses Bollinger Bands (20, 2.0) on daily timeframe for mean-reversion entries
-# Weekly EMA (50) provides trend filter to trade in direction of higher timeframe trend
-# Volume confirmation (>2.0x average) ensures institutional participation
-# Designed to work in both bull and bear markets by fading extremes in ranging markets
-# and following trend in trending markets
-# Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag
+# Hypothesis: 6h Elder Ray with 1d ADX Trend Filter and Volume Spike
+# Uses 6h Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13) for momentum
+# 1d ADX (14) provides trend strength filter to avoid low-momentum entries
+# Volume confirmation (>1.5x average) ensures institutional participation
+# Works in both bull and bear markets by trading with the trend when momentum aligns
+# Target: 12-30 trades/year (48-120 total over 4 years) to minimize fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,49 +20,72 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for Bollinger Bands
+    # Load 1d data ONCE before loop for EMA13 and ADX
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Bollinger Bands (20, 2.0) on daily close
+    # Calculate 1d EMA13 for Elder Ray
     close_1d = df_1d['close'].values
-    bb_length = 20
-    bb_mult = 2.0
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate basis (SMA)
-    basis = np.zeros_like(close_1d)
-    for i in range(bb_length - 1, len(close_1d)):
-        basis[i] = np.mean(close_1d[i - bb_length + 1:i + 1])
+    # Calculate 1d Elder Ray components
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    bull_power_1d = high_1d - ema13_1d  # Bull Power = High - EMA13
+    bear_power_1d = low_1d - ema13_1d   # Bear Power = Low - EMA13
     
-    # Calculate standard deviation
-    dev = np.zeros_like(close_1d)
-    for i in range(bb_length - 1, len(close_1d)):
-        dev[i] = np.std(close_1d[i - bb_length + 1:i + 1])
+    # Align Elder Ray to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
     
-    # Calculate upper and lower bands
-    upper_bb = basis + bb_mult * dev
-    lower_bb = basis - bb_mult * dev
+    # Calculate 1d ADX (14) for trend strength
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = np.abs(high - low)
+        tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+        tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        
+        # Directional Movement
+        dm_plus = np.where((high - np.concatenate([[high[0]], high[:-1]])) > 
+                          (np.concatenate([[low[0]], low[:-1]]) - low), 
+                          np.maximum(high - np.concatenate([[high[0]], high[:-1]]), 0), 0)
+        dm_minus = np.where((np.concatenate([[low[0]], low[:-1]]) - low) > 
+                           (high - np.concatenate([[high[0]], high[:-1]])), 
+                          np.maximum(np.concatenate([[low[0]], low[:-1]]) - low, 0), 0)
+        
+        # Smoothed values
+        tr_sum = np.zeros_like(tr)
+        dm_plus_sum = np.zeros_like(dm_plus)
+        dm_minus_sum = np.zeros_like(dm_minus)
+        
+        # Initial values
+        tr_sum[period-1] = np.nansum(tr[:period])
+        dm_plus_sum[period-1] = np.nansum(dm_plus[:period])
+        dm_minus_sum[period-1] = np.nansum(dm_minus[:period])
+        
+        # Wilder's smoothing
+        for i in range(period, len(tr)):
+            tr_sum[i] = tr_sum[i-1] - (tr_sum[i-1] / period) + tr[i]
+            dm_plus_sum[i] = dm_plus_sum[i-1] - (dm_plus_sum[i-1] / period) + dm_plus[i]
+            dm_minus_sum[i] = dm_minus_sum[i-1] - (dm_minus_sum[i-1] / period) + dm_minus[i]
+        
+        # DI values
+        di_plus = np.where(tr_sum != 0, 100 * dm_plus_sum / tr_sum, 0)
+        di_minus = np.where(tr_sum != 0, 100 * dm_minus_sum / tr_sum, 0)
+        
+        # DX and ADX
+        dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+        adx = np.zeros_like(dx)
+        if len(dx) >= 2*period-1:
+            adx[2*period-2] = np.nansum(dx[period-1:2*period-1]) / period
+            for i in range(2*period-1, len(dx)):
+                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        return adx
     
-    # Align Bollinger Bands to daily timeframe
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
-    basis_aligned = align_htf_to_ltf(prices, df_1d, basis)
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Load weekly data ONCE before loop for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate weekly EMA (50) on close
-    close_1w = df_1w['close'].values
-    ema_length = 50
-    ema_1w = np.zeros_like(close_1w)
-    if len(close_1w) >= ema_length:
-        ema_1w[ema_length - 1] = np.mean(close_1w[:ema_length])
-        for i in range(ema_length, len(close_1w)):
-            ema_1w[i] = (close_1w[i] * (2 / (ema_length + 1))) + (ema_1w[i - 1] * (1 - (2 / (ema_length + 1))))
-    
-    # Align weekly EMA to daily timeframe
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Volume confirmation: volume > 2.0x average volume (20-period)
+    # Volume confirmation: volume > 1.5x average volume (20-period)
     vol_series = pd.Series(volume)
     avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
@@ -72,43 +94,42 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(50, 50)  # for Bollinger Bands and volume calculations
+    start = 50  # for EMA13 and ADX calculations
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or 
-            np.isnan(basis_aligned[i]) or np.isnan(ema_1w_aligned[i]) or np.isnan(avg_vol[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(adx_1d_aligned[i]) or np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         
-        # Trend filter: price above/below weekly EMA determines bias
-        bullish_bias = price > ema_1w_aligned[i]
-        bearish_bias = price < ema_1w_aligned[i]
+        # Trend filter: only trade when ADX > 25 (strong trend)
+        strong_trend = adx_1d_aligned[i] > 25
         
         if position == 0:
-            # Long: price touches lower Bollinger Band with volume filter and bullish bias
-            if price <= lower_bb_aligned[i] and vol > 2.0 * avg_vol[i] and bullish_bias:
+            # Long: Bull Power > 0 and rising with volume filter and strong trend
+            if bull_power_aligned[i] > 0 and bull_power_aligned[i] > bull_power_aligned[i-1] and vol > 1.5 * avg_vol[i] and strong_trend:
                 position = 1
                 signals[i] = position_size
-            # Short: price touches upper Bollinger Band with volume filter and bearish bias
-            elif price >= upper_bb_aligned[i] and vol > 2.0 * avg_vol[i] and bearish_bias:
+            # Short: Bear Power < 0 and falling with volume filter and strong trend
+            elif bear_power_aligned[i] < 0 and bear_power_aligned[i] < bear_power_aligned[i-1] and vol > 1.5 * avg_vol[i] and strong_trend:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to Bollinger basis (mean reversion target)
-            if price >= basis_aligned[i]:
+            # Exit long: Bear Power becomes positive (momentum shift) or ADX weakens
+            if bear_power_aligned[i] > 0 or adx_1d_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to Bollinger basis (mean reversion target)
-            if price <= basis_aligned[i]:
+            # Exit short: Bull Power becomes negative (momentum shift) or ADX weakens
+            if bull_power_aligned[i] < 0 or adx_1d_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -116,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Bollinger_Band_MeanReversion_WeeklyEMA_Volume"
-timeframe = "1d"
+name = "6h_ElderRay_1dADX_Volume"
+timeframe = "6h"
 leverage = 1.0
