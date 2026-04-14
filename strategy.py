@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using daily high-low breakout with volume confirmation and volatility filter
-# - Breaks above/below previous day's high/low for trend capture
-# - Requires volume > 1.5x 24-period average for institutional confirmation
-# - Filters for high volatility regimes using 80th percentile of daily range/price ratio
+# Hypothesis: 4h strategy using daily volatility breakout with volume confirmation and ATR-based risk management
+# - Breaks above/below previous day's high/low with volatility expansion (ATR > 1.5x 20-period average)
+# - Requires volume > 1.3x 24-period average for institutional confirmation
+# - Uses ATR-based stop loss and profit targets to manage risk
 # - Designed to capture volatility expansion in both bull and bear markets
 # - Discrete position sizing (0.25) to minimize churn and manage drawdown
-# - Target: 100-150 trades over 4 years (25-38/year) to avoid fee drag
+# - Target: 80-150 trades over 4 years (20-38/year) to avoid fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -30,27 +30,21 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Daily range (high - low) for volatility measurement
-    daily_range = high_1d - low_1d
-    daily_range_series = pd.Series(daily_range)
+    # Calculate ATR for volatility measurement
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # 4h volume filter: current volume > 1.5x 24-period average (1 day)
+    # 4h volume filter: current volume > 1.3x 24-period average (1 day)
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=24, min_periods=24).mean().values
     
-    # 4h Donchian channels (20-period) - breakout levels
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().shift(1).values
-    
-    # Calculate daily volatility as range normalized by price
-    daily_volatility = daily_range / close_1d
-    daily_vol_series = pd.Series(daily_volatility)
-    # Use 80th percentile of daily volatility over 10 days as threshold (more selective)
-    vol_threshold = daily_vol_series.rolling(window=10, min_periods=10).quantile(0.80).values
-    # Align volatility threshold to 4h timeframe
-    vol_threshold_4h = align_htf_to_ltf(prices, df_1d, vol_threshold)
+    # Daily range for breakout levels
+    daily_range = high_1d - low_1d
     
     signals = np.zeros(n)
     position = 0
@@ -58,18 +52,17 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical data is NaN
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
-           np.isnan(vol_ma[i]) or np.isnan(vol_threshold_4h[i]):
+        if np.isnan(atr[i]) or np.isnan(vol_ma[i]):
             continue
         
-        # Get previous day's data for range-based breakout levels
+        # Get previous day's data for breakout levels
         prev_high = high_1d[i-1]
         prev_low = low_1d[i-1]
         prev_range = prev_high - prev_low
         
-        # Calculate breakout levels: previous day's high/low ± 0.2 * range
-        upper_break = prev_high + 0.2 * prev_range
-        lower_break = prev_low - 0.2 * prev_range
+        # Calculate breakout levels: previous day's high/low ± 0.3 * range
+        upper_break = prev_high + 0.3 * prev_range
+        lower_break = prev_low - 0.3 * prev_range
         
         # Create arrays for alignment
         upper_array = np.full(len(df_1d), upper_break)
@@ -79,31 +72,31 @@ def generate_signals(prices):
         lower_4h = align_htf_to_ltf(prices, df_1d, lower_array)[i]
         
         if position == 0:
-            # Long: Price breaks above upper level with volume and high volatility regime
+            # Long: Price breaks above upper level with volume and volatility expansion
             if (close[i] > upper_4h and close[i-1] <= upper_4h and 
-                volume[i] > vol_ma[i] * 1.5 and 
-                daily_volatility[i] > vol_threshold_4h[i]):
+                volume[i] > vol_ma[i] * 1.3 and 
+                atr[i] > atr[i-20] * 1.5 if i >= 20 else False):
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below lower level with volume and high volatility regime
+            # Short: Price breaks below lower level with volume and volatility expansion
             elif (close[i] < lower_4h and close[i-1] >= lower_4h and 
-                  volume[i] > vol_ma[i] * 1.5 and 
-                  daily_volatility[i] > vol_threshold_4h[i]):
+                  volume[i] > vol_ma[i] * 1.3 and 
+                  atr[i] > atr[i-20] * 1.5 if i >= 20 else False):
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
-            # Exit: Price breaks below lower level (reversal) or drops below Donchian low
-            if close[i] < lower_4h or close[i] < donchian_low[i]:
+            # Exit: Price breaks below lower level or ATR contraction
+            if close[i] < lower_4h or (i >= 20 and atr[i] < atr[i-20] * 0.8):
                 position = 0
                 signals[i] = 0.0
         elif position == -1:
-            # Exit: Price breaks above upper level (reversal) or rises above Donchian high
-            if close[i] > upper_4h or close[i] > donchian_high[i]:
+            # Exit: Price breaks above upper level or ATR contraction
+            if close[i] > upper_4h or (i >= 20 and atr[i] < atr[i-20] * 0.8):
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_1d_RangeExpansion_Breakout_Volume_v2"
+name = "4h_1d_VolatilityBreakout_Volume_ATR"
 timeframe = "4h"
 leverage = 1.0
