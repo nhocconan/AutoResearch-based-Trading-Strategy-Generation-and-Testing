@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h price crossing above/below 1-day Simple Moving Average (50) with volume above 1.5x 20-period average and 1-day ADX > 20.
-Trades in direction of daily trend to avoid counter-trend whipsaws. Uses SMA for clearer trend.
+Hypothesis: 4h price breaking above/below 1-day Donchian channel (20-period) with volume above 1.3x 20-period average and 1-day ADX > 25.
+Trades in direction of daily trend to avoid counter-trend whipsaws. Uses Donchian for clear breakout signals.
 Targets 20-30 trades/year per symbol (80-120 total over 4 years).
 """
 
@@ -19,13 +19,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1-day SMA (50-period)
+    # Calculate 1-day Donchian channel (20-period)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    sma_50 = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Upper band: highest high over 20 periods
+    upper_band = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    # Lower band: lowest low over 20 periods
+    lower_band = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
     # Calculate 1-day ADX (14-period)
     if len(df_1d) < 30:
@@ -71,42 +76,43 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Get aligned indicators
-        sma_50_aligned = align_htf_to_ltf(prices, df_1d, sma_50)[i]
+        upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)[i]
+        lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)[i]
         adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)[i]
         vol_ma_20_aligned = vol_ma_20[i]  # already LTF
         
         # Check for NaN values
-        if (np.isnan(sma_50_aligned) or np.isnan(adx_1d_aligned) or 
-            np.isnan(vol_ma_20_aligned)):
+        if (np.isnan(upper_band_aligned) or np.isnan(lower_band_aligned) or 
+            np.isnan(adx_1d_aligned) or np.isnan(vol_ma_20_aligned)):
             continue
         
-        # Volume confirmation (> 1.5x average)
-        volume_confirm = volume[i] > 1.5 * vol_ma_20_aligned
+        # Volume confirmation (> 1.3x average)
+        volume_confirm = volume[i] > 1.3 * vol_ma_20_aligned
         
-        # ADX trend filter (> 20)
-        trend_filter = adx_1d_aligned > 20
+        # ADX trend filter (> 25)
+        trend_filter = adx_1d_aligned > 25
         
         if position == 0:  # No position - look for entries
             if volume_confirm and trend_filter:
-                # Long: price crosses above SMA and trending up
-                if close[i] > sma_50_aligned and close[i-1] <= sma_50_aligned:
+                # Long: price breaks above upper Donchian band
+                if close[i] > upper_band_aligned and close[i-1] <= upper_band_aligned:
                     position = 1
                     signals[i] = position_size
-                # Short: price crosses below SMA and trending down
-                elif close[i] < sma_50_aligned and close[i-1] >= sma_50_aligned:
+                # Short: price breaks below lower Donchian band
+                elif close[i] < lower_band_aligned and close[i-1] >= lower_band_aligned:
                     position = -1
                     signals[i] = -position_size
-        elif position == 1:  # Long position - exit when price crosses below SMA
-            if close[i] < sma_50_aligned and close[i-1] >= sma_50_aligned:
+        elif position == 1:  # Long position - exit when price breaks below lower band
+            if close[i] < lower_band_aligned and close[i-1] >= lower_band_aligned:
                 position = 0
                 signals[i] = 0.0
-        elif position == -1:  # Short position - exit when price crosses above SMA
-            if close[i] > sma_50_aligned and close[i-1] <= sma_50_aligned:
+        elif position == -1:  # Short position - exit when price breaks above upper band
+            if close[i] > upper_band_aligned and close[i-1] <= upper_band_aligned:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_1dSMA50_1dADX20_Volume_v1"
+name = "4h_1dDonchian20_1dADX25_Volume_v1"
 timeframe = "4h"
 leverage = 1.0
