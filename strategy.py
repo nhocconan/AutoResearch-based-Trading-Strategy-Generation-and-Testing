@@ -13,17 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data once for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    # Weekly EMA(21) for trend
-    close_1w = df_1w['close'].values
-    close_1w_series = pd.Series(close_1w)
-    ema_21_1w = close_1w_series.ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # Load daily data once for pivot levels and volume filter
+    # Load daily data once for pivot levels and volatility
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -46,14 +36,24 @@ def generate_signals(prices):
     r2_1d = pivot_1d + h_minus_l_1d
     s2_1d = pivot_1d - h_minus_l_1d
     
+    # Load weekly data once for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
+    # Weekly EMA(21) for trend
+    close_1w = df_1w['close'].values
+    close_1w_series = pd.Series(close_1w)
+    ema_21_1w = close_1w_series.ewm(span=21, adjust=False, min_periods=21).mean().values
+    
     # Create arrays for alignment
-    ema_21_1w_arr = ema_21_1w
     atr_1d_arr = atr_1d
     pivot_1d_arr = pivot_1d
     r1_1d_arr = r1_1d
     s1_1d_arr = s1_1d
     r2_1d_arr = r2_1d
     s2_1d_arr = s2_1d
+    ema_21_1w_arr = ema_21_1w
     
     # Calculate median volume for volume spike filter
     vol_median = np.nanmedian(volume)
@@ -63,8 +63,6 @@ def generate_signals(prices):
     position_size = 0.25
     
     for i in range(50, n):
-        # Get aligned weekly data
-        ema_21_1w_i = align_htf_to_ltf(prices, df_1w, ema_21_1w_arr)[i]
         # Get aligned daily data
         atr_1d_i = align_htf_to_ltf(prices, df_1d, atr_1d_arr)[i]
         pivot_1d_i = align_htf_to_ltf(prices, df_1d, pivot_1d_arr)[i]
@@ -72,6 +70,8 @@ def generate_signals(prices):
         s1_1d_i = align_htf_to_ltf(prices, df_1d, s1_1d_arr)[i]
         r2_1d_i = align_htf_to_ltf(prices, df_1d, r2_1d_arr)[i]
         s2_1d_i = align_htf_to_ltf(prices, df_1d, s2_1d_arr)[i]
+        # Get aligned weekly data
+        ema_21_1w_i = align_htf_to_ltf(prices, df_1w, ema_21_1w_arr)[i]
         
         if np.isnan(ema_21_1w_i) or np.isnan(atr_1d_i) or \
            np.isnan(pivot_1d_i) or np.isnan(r1_1d_i) or np.isnan(s1_1d_i) or \
@@ -115,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WeeklyEMA21_DailyPivot_Breakout_VolumeFilter"
-timeframe = "12h"
+name = "4h_1d_1w_PivotBreakout_EMA21_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
