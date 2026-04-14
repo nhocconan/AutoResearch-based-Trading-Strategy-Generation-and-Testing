@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,19 +13,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d RSI(14) for momentum filter
-    close_1d = pd.Series(df_1d['close'])
-    delta = close_1d.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=14).mean()
-    rs = gain / loss
-    rsi_14_1d = (100 - (100 / (1 + rs))).values
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
+    # Calculate daily Donchian channels (20-period)
+    high_1d = pd.Series(df_1d['high'])
+    low_1d = pd.Series(df_1d['low'])
+    donch_high_20 = high_1d.rolling(window=20, min_periods=20).max().values
+    donch_low_20 = low_1d.rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1d ATR(14) for volatility filter and stop-loss
+    # Align to 6h timeframe (with proper delay for completed daily bars)
+    donch_high_20_aligned = align_htf_to_ltf(prices, df_1d, donch_high_20)
+    donch_low_20_aligned = align_htf_to_ltf(prices, df_1d, donch_low_20)
+    
+    # Calculate daily ATR(14) for volatility filter
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     close_series = pd.Series(close)
@@ -33,9 +34,9 @@ def generate_signals(prices):
     tr2 = abs(high_series - close_series.shift(1))
     tr3 = abs(low_series - close_series.shift(1))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
+    atr_14 = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 24-period average volume for confirmation (1d * 24 = 24h = 1 day)
+    # Calculate 24-period average volume for confirmation (6h * 4 = 24h = 1 day)
     vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
@@ -43,12 +44,13 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 100
+    start = 50
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(rsi_14_1d_aligned[i]) or 
-            np.isnan(atr[i]) or 
+        if (np.isnan(donch_high_20_aligned[i]) or 
+            np.isnan(donch_low_20_aligned[i]) or 
+            np.isnan(atr_14[i]) or 
             np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
@@ -56,37 +58,38 @@ def generate_signals(prices):
         price = close[i]
         vol = volume[i]
         
-        # ATR-based volatility filter: avoid extremely low volatility periods
-        atr_ratio = atr[i] / price if price > 0 else 0
+        # Volatility filter: avoid extremely low volatility periods
+        atr_ratio = atr_14[i] / price if price > 0 else 0
         vol_filter = atr_ratio > 0.003  # Minimum 0.3% ATR relative to price
         
         # Volume confirmation: current volume > 1.5x average
         vol_confirm = vol > (vol_avg[i] * 1.5) if not np.isnan(vol_avg[i]) else False
         
-        # Momentum filter: RSI between 30 and 70 to avoid extremes
-        rsi_momentum = (rsi_14_1d_aligned[i] > 30) and (rsi_14_1d_aligned[i] < 70)
+        # Donchian breakout conditions
+        long_breakout = price > donch_high_20_aligned[i]
+        short_breakout = price < donch_low_20_aligned[i]
         
         if position == 0:
-            # Long setup: RSI > 50 + volume confirmation + volatility filter
-            if (rsi_14_1d_aligned[i] > 50 and vol_confirm and vol_filter):
+            # Long entry: price breaks above daily Donchian high + volume + volatility
+            if long_breakout and vol_confirm and vol_filter:
                 position = 1
                 signals[i] = position_size
-            # Short setup: RSI < 50 + volume confirmation + volatility filter
-            elif (rsi_14_1d_aligned[i] < 50 and vol_confirm and vol_filter):
+            # Short entry: price breaks below daily Donchian low + volume + volatility
+            elif short_breakout and vol_confirm and vol_filter:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI crosses below 50
-            if rsi_14_1d_aligned[i] < 50:
+            # Exit long: price breaks below daily Donchian low
+            if price < donch_low_20_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: RSI crosses above 50
-            if rsi_14_1d_aligned[i] > 50:
+            # Exit short: price breaks above daily Donchian high
+            if price > donch_high_20_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -94,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dRSI_Momentum_Volume_Filter"
-timeframe = "4h"
+name = "6h_1dDonchian20_Volume_Breakout"
+timeframe = "6h"
 leverage = 1.0
