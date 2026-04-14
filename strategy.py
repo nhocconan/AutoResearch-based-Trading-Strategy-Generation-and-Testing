@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Camarilla pivot levels from daily with volume confirmation and chop filter
-# Long when price touches Camarilla S1 (support) with volume >1.5x 24-period average and chop >61.8 (range)
-# Short when price touches Camarilla R1 (resistance) with volume >1.5x 24-period average and chop >61.8 (range)
-# Exit when price crosses Camarilla P (pivot point)
-# Uses daily Camarilla levels as structure, chop filter to avoid trending markets, volume for confirmation
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# Hypothesis: 6-hour Donchian(20) breakout with 1-day trend filter and volume confirmation
+# Long when price breaks above 6h Donchian upper band with volume >1.5x 20-period average and price above 1d EMA50
+# Short when price breaks below 6h Donchian lower band with volume >1.5x 20-period average and price below 1d EMA50
+# Exit when price crosses the 6h Donchian midline
+# 1-day EMA50 acts as a trend filter to avoid counter-trend trades
+# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and fee drag
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,87 +20,74 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
+    # Load 6h and 1d data ONCE before loop
+    df_6h = get_htf_data(prices, '6h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 6h Donchian channel (20-period lookback)
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    donchian_upper = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    donchian_middle = (donchian_upper + donchian_lower) / 2
+    
+    # Calculate 1d EMA50
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Camarilla formula: range = high - low
-    # Pivot = (high + low + close) / 3
-    # S1 = close - (range * 1.1 / 12)
-    # R1 = close + (range * 1.1 / 12)
-    range_1d = high_1d - low_1d
-    camarilla_p = (high_1d + low_1d + close_1d) / 3
-    camarilla_s1 = close_1d - (range_1d * 1.1 / 12)
-    camarilla_r1 = close_1d + (range_1d * 1.1 / 12)
+    # Calculate 6h volume average (20-period)
+    vol_6h = df_6h['volume'].values
+    vol_ma_6h = pd.Series(vol_6h).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 24-period volume average for 12h timeframe (24 * 12h = 12 days)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    
-    # Calculate 12-period chop index (choppiness) for regime filter
-    # Chop = 100 * log10(sum(ATR) / (max(high) - min(low))) / log10(n)
-    # Using simplified version: chop > 61.8 = range, chop < 38.2 = trend
-    tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]))
-    tr2 = np.maximum(tr1, np.abs(low[1:] - close[:-1]))
-    tr = np.concatenate([[0], tr2])  # align with index
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(pd.Series(atr).rolling(window=14, min_periods=14).sum().values / 
-                          np.maximum(max_high - min_low, 1e-10)) / np.log10(14)
-    
-    # Align daily Camarilla levels to 12h timeframe
-    camarilla_p_aligned = align_htf_to_ltf(prices, df_1d, camarilla_p)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    # Align indicators to 6h timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_6h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_6h, donchian_lower)
+    donchian_middle_aligned = align_htf_to_ltf(prices, df_6h, donchian_middle)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    vol_ma_6h_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_6h)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 30  # for 24-period volume and 14-period chop
+    start = 50  # for 20-period calculations and EMA50
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(camarilla_p_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(camarilla_r1_aligned[i]) or np.isnan(vol_ma_24[i]) or 
-            np.isnan(chop[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_6h_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_current = volume[i]
+        vol_6h_current = volume[i]  # Current 6h volume
         
         if position == 0:
-            # Long setup: touch S1 with volume confirmation in ranging market
-            if (abs(price - camarilla_s1_aligned[i]) < 0.001 * camarilla_s1_aligned[i] and  # within 0.1%
-                vol_current > 1.5 * vol_ma_24[i] and
-                chop[i] > 61.8):  # ranging market
+            # Long setup: break above Donchian upper with volume confirmation and price above 1d EMA50
+            if (price > donchian_upper_aligned[i] and 
+                vol_6h_current > 1.5 * vol_ma_6h_aligned[i] and  # Volume confirmation
+                price > ema_50_1d_aligned[i]):                 # Price above 1d EMA50 for bullish bias
                 position = 1
                 signals[i] = position_size
-            # Short setup: touch R1 with volume confirmation in ranging market
-            elif (abs(price - camarilla_r1_aligned[i]) < 0.001 * camarilla_r1_aligned[i] and  # within 0.1%
-                  vol_current > 1.5 * vol_ma_24[i] and
-                  chop[i] > 61.8):  # ranging market
+            # Short setup: break below Donchian lower with volume confirmation and price below 1d EMA50
+            elif (price < donchian_lower_aligned[i] and 
+                  vol_6h_current > 1.5 * vol_ma_6h_aligned[i] and  # Volume confirmation
+                  price < ema_50_1d_aligned[i]):                 # Price below 1d EMA50 for bearish bias
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses pivot point
-            if price > camarilla_p_aligned[i]:
+            # Exit long: price breaks below Donchian middle
+            if price < donchian_middle_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses pivot point
-            if price < camarilla_p_aligned[i]:
+            # Exit short: price breaks above Donchian middle
+            if price > donchian_middle_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -108,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_Daily_Volume_Chop"
-timeframe = "12h"
+name = "6h_Donchian_1dEMA50_Volume"
+timeframe = "6h"
 leverage = 1.0
