@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian breakout with 1-day volatility filter and volume confirmation
-# Uses Donchian(20) from daily data for entry signals
-# Daily ATR-based volatility filter to avoid choppy markets (ATR > 20-period median)
-# Volume confirmation > 1.3x 20-period EMA to reduce false breakouts
-# Designed for 20-40 trades/year with clear breakout logic
-# Works in bull markets via upward breaks and in bear markets via downward breaks
-# Position size: 0.25 to balance return and drawdown
+# Hypothesis: 4-hour momentum strategy using daily RSI extremes with volume confirmation
+# Long when daily RSI < 30 (oversold) and price closes above 4h VWAP
+# Short when daily RSI > 70 (overbought) and price closes below 4h VWAP
+# VWAP resets daily, providing intraday mean reversion edge
+# Volume filter (>1.5x 20-period EMA) reduces false signals
+# Designed for 20-40 trades/year, works in both bull (buy dips) and bear (sell rallies)
+# Position size: 0.25
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,36 +21,37 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data once for Donchian channels and volatility filter
+    # Load daily data once for RSI
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Donchian channels from daily high/low (20-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate daily RSI (14-period)
     close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Donchian upper/lower bands (20-period)
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
     
-    # Daily ATR for volatility filter (14-period)
-    high_1d_shift = np.roll(high_1d, 1)
-    low_1d_shift = np.roll(low_1d, 1)
-    close_1d_shift = np.roll(close_1d, 1)
-    high_1d_shift[0] = high_1d[0]
-    low_1d_shift[0] = low_1d[0]
-    close_1d_shift[0] = close_1d[0]
+    # Calculate 4h VWAP (typical price * volume) / cumulative volume
+    typical_price = (high + low + close) / 3
+    vwap_numerator = typical_price * volume
+    vwap_denominator = volume
     
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - close_1d_shift)
-    tr3 = np.abs(low_1d - close_1d_shift)
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_1d[0] = high_1d[0] - low_1d[0]
+    # Reset VWAP at daily boundaries using date change
+    dates = pd.to_datetime(prices['open_time']).date
+    date_changes = np.concatenate([[True], dates[1:] != dates[:-1]])
+    vwap_cumsum = np.where(date_changes, vwap_numerator, vwap_cumsum_prev + vwap_numerator) if 'vwap_cumsum_prev' in locals() else vwap_numerator
+    vol_cumsum = np.where(date_changes, vwap_denominator, vol_cumsum_prev + vwap_denominator) if 'vol_cumsum_prev' in locals() else vwap_denominator
+    vwap = vwap_cumsum / vol_cumsum
     
-    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_median = pd.Series(atr_1d).rolling(window=20, min_periods=20).median().values
+    # Store for next iteration
+    vwap_cumsum_prev = vwap_cumsum
+    vol_cumsum_prev = vol_cumsum
     
     # Volume moving average for confirmation (20-period EMA)
     vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -60,41 +61,34 @@ def generate_signals(prices):
     position_size = 0.25
     
     for i in range(20, n):
-        # Get aligned daily Donchian levels
-        donchian_high_i = align_htf_to_ltf(prices, df_1d, donchian_high)[i]
-        donchian_low_i = align_htf_to_ltf(prices, df_1d, donchian_low)[i]
+        # Get aligned daily RSI
+        rsi_i = align_htf_to_ltf(prices, df_1d, rsi_1d)[i]
         
-        # Get aligned daily volatility filter
-        atr_med_i = align_htf_to_ltf(prices, df_1d, atr_median)[i]
-        
-        if np.isnan(donchian_high_i) or np.isnan(donchian_low_i) or np.isnan(atr_med_i) or np.isnan(vol_ma[i]):
+        if np.isnan(rsi_i) or np.isnan(vwap[i]) or np.isnan(vol_ma[i]):
             continue
         
-        # Volatility filter: only trade when ATR > median (avoid choppy markets)
-        vol_filter = atr_1d[i] > atr_med_i
+        # Volume confirmation (1.5x average)
+        volume_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Volume confirmation (1.3x average)
-        volume_confirm = volume[i] > 1.3 * vol_ma[i]
-        
-        # Long: Price breaks above Donchian high + volatility filter + volume
-        if position == 0 and close[i] > donchian_high_i and vol_filter and volume_confirm:
+        # Long: Daily RSI oversold + price above VWAP + volume
+        if position == 0 and rsi_i < 30 and close[i] > vwap[i] and volume_confirm:
             position = 1
             signals[i] = position_size
-        # Short: Price breaks below Donchian low + volatility filter + volume
-        elif position == 0 and close[i] < donchian_low_i and vol_filter and volume_confirm:
+        # Short: Daily RSI overbought + price below VWAP + volume
+        elif position == 0 and rsi_i > 70 and close[i] < vwap[i] and volume_confirm:
             position = -1
             signals[i] = -position_size
-        # Exit: Price returns to opposite Donchian level or volatility drops
+        # Exit: Price returns to VWAP or RSI returns to neutral zone
         elif position != 0:
-            if position == 1 and (close[i] < donchian_low_i or not vol_filter):
+            if position == 1 and (close[i] < vwap[i] or rsi_i > 50):
                 position = 0
                 signals[i] = 0.0
-            elif position == -1 and (close[i] > donchian_high_i or not vol_filter):
+            elif position == -1 and (close[i] > vwap[i] or rsi_i < 50):
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian_DailyVolatility_Volume"
+name = "4h_DailyRSI_VWAP_Momentum"
 timeframe = "4h"
 leverage = 1.0
