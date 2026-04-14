@@ -15,20 +15,20 @@ def generate_signals(prices):
     
     # Load 1d data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d EMA20 for trend filter
     close_1d = df_1d['close'].values
-    ema_34_1d = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 34:
-        multiplier = 2 / (34 + 1)
-        ema_34_1d[33] = np.mean(close_1d[:34])
-        for i in range(34, len(df_1d)):
-            ema_34_1d[i] = (close_1d[i] - ema_34_1d[i-1]) * multiplier + ema_34_1d[i-1]
+    ema_20_1d = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 20:
+        multiplier = 2 / (20 + 1)
+        ema_20_1d[19] = np.mean(close_1d[:20])
+        for i in range(20, len(df_1d)):
+            ema_20_1d[i] = (close_1d[i] - ema_20_1d[i-1]) * multiplier + ema_20_1d[i-1]
     
-    # Align 1d EMA34 to 4h timeframe
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align 1d EMA20 to daily timeframe (no additional alignment needed as we're on 1d)
+    ema_20_1d_aligned = ema_20_1d  # Already on 1d timeframe
     
     # Calculate 1d ATR (14-period) for volatility filter
     high_1d = df_1d['high'].values
@@ -46,39 +46,38 @@ def generate_signals(prices):
         for i in range(14, len(df_1d)):
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # Align daily ATR to 4h timeframe
-    atr_4h_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Align daily ATR to daily timeframe
+    atr_1d_aligned = atr_1d  # Already on 1d timeframe
     
-    # Calculate 4h volume moving average (20-period)
-    volume_ma = np.full(n, np.nan)
-    if n >= 20:
-        for i in range(19, n):
-            volume_ma[i] = np.mean(volume[i-19:i+1])
+    # Calculate daily volume moving average (20-period)
+    volume_ma = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 20:
+        for i in range(19, len(df_1d)):
+            volume_ma[i] = np.mean(df_1d['volume'].values[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25
     
-    for i in range(100, n):
+    for i in range(20, len(df_1d)):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(atr_4h_aligned[i]) or
+        if (np.isnan(ema_20_1d_aligned[i]) or
+            np.isnan(atr_1d_aligned[i]) or
             np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         # Skip low volatility periods (ATR < 0.5% of price)
-        if atr_4h_aligned[i] / close[i] < 0.005:
+        if atr_1d_aligned[i] / close_1d[i] < 0.005:
             signals[i] = 0.0
             continue
         
         # Skip low volume periods (volume < 60% of 20-period MA)
-        if volume[i] < 0.6 * volume_ma[i]:
+        if df_1d['volume'].values[i] < 0.6 * volume_ma[i]:
             signals[i] = 0.0
             continue
         
         # Calculate pivot levels based on previous day's range
-        # Need previous day's data - use index-1 for daily data alignment
         if i >= 1:
             prev_high = high_1d[i-1]
             prev_low = low_1d[i-1]
@@ -89,17 +88,13 @@ def generate_signals(prices):
             s3 = prev_close - (prev_range * 1.1)
             r3 = prev_close + (prev_range * 1.1)
             
-            # Align S3/R3 to 4h timeframe (constant values for the day)
-            s3_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i]
-            r3_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r3))[i]
-            
             if position == 0:
                 # Long: Price rejects S3 with volume and trend alignment
-                if low[i] <= s3 and close[i] > s3 and volume[i] > volume_ma[i] and close[i] > ema_34_1d_aligned[i]:
+                if low_1d[i] <= s3 and close_1d[i] > s3 and df_1d['volume'].values[i] > volume_ma[i] and close_1d[i] > ema_20_1d_aligned[i]:
                     position = 1
                     signals[i] = position_size
                 # Short: Price rejects R3 with volume and trend alignment
-                elif high[i] >= r3 and close[i] < r3 and volume[i] > volume_ma[i] and close[i] < ema_34_1d_aligned[i]:
+                elif high_1d[i] >= r3 and close_1d[i] < r3 and df_1d['volume'].values[i] > volume_ma[i] and close_1d[i] < ema_20_1d_aligned[i]:
                     position = -1
                     signals[i] = -position_size
                 else:
@@ -108,8 +103,7 @@ def generate_signals(prices):
                 # Exit: Price breaks S3 again or reaches mean reversion target
                 # Calculate S1 for profit target (mean reversion level)
                 s1 = prev_close - (prev_range * 0.5)
-                s1_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s1))[i]
-                if low[i] <= s3 or close[i] <= s1_4h:
+                if low_1d[i] <= s3 or close_1d[i] <= s1:
                     position = 0
                     signals[i] = 0.0
                 else:
@@ -118,8 +112,7 @@ def generate_signals(prices):
                 # Exit: Price breaks R3 again or reaches mean reversion target
                 # Calculate R1 for profit target (mean reversion level)
                 r1 = prev_close + (prev_range * 0.5)
-                r1_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r1))[i]
-                if high[i] >= r3 or close[i] >= r1_4h:
+                if high_1d[i] >= r3 or close_1d[i] >= r1:
                     position = 0
                     signals[i] = 0.0
                 else:
@@ -129,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Pivot_S3R3_Rejection_Volume_Filter_v2"
-timeframe = "4h"
+name = "1d_Pivot_S3R3_Rejection_Volume_Filter_v3"
+timeframe = "1d"
 leverage = 1.0
