@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_1d_ADX_RangeBreakout_v1
-Hypothesis: On 6h timeframe, breakout from 1d range (high-low) with ADX filter to avoid false breakouts in chop.
-Long when price breaks above 1d high with volume spike and ADX > 25 (trending).
-Short when price breaks below 1d low with volume spike and ADX > 25.
-Exit when price returns to 1d midpoint or ADX drops below 20 (range resumption).
-Works in bull/bear by capturing breakouts in trending regimes while avoiding whipsaws in ranges.
+4h_12h_HeikinAshi_Trend_Follower_v1
+Hypothesis: On 4h timeframe, use Heikin Ashi candles from 12h timeframe to identify strong trends.
+Go long when 12h Heikin Ashi shows three consecutive bullish candles with no lower shadows.
+Go short when 12h Heikin Ashi shows three consecutive bearish candles with no upper shadows.
+Exit when trend weakens (opposite color candle appears).
+Uses volume confirmation on 4h to avoid false signals.
+Designed to catch strong trends in both bull and bear markets while avoiding choppy periods.
 """
 
 import numpy as np
@@ -22,125 +23,101 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data once
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load 12h data for Heikin Ashi calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    open_12h = df_12h['open'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 1d range and midpoint
-    range_1d = high_1d - low_1d
-    midpoint_1d = (high_1d + low_1d) / 2
+    # Calculate Heikin Ashi candles
+    ha_close = np.zeros_like(close_12h)
+    ha_open = np.zeros_like(close_12h)
+    ha_high = np.zeros_like(close_12h)
+    ha_low = np.zeros_like(close_12h)
     
-    # Calculate ADX on 1d data (14 period)
-    plus_dm = np.zeros_like(high_1d)
-    minus_dm = np.zeros_like(high_1d)
-    tr = np.zeros_like(high_1d)
+    for i in range(len(close_12h)):
+        if i == 0:
+            ha_close[i] = (open_12h[i] + high_12h[i] + low_12h[i] + close_12h[i]) / 4
+            ha_open[i] = (open_12h[i] + close_12h[i]) / 2
+        else:
+            ha_close[i] = (open_12h[i] + high_12h[i] + low_12h[i] + close_12h[i]) / 4
+            ha_open[i] = (ha_open[i-1] + ha_close[i-1]) / 2
+        ha_high[i] = max(high_12h[i], ha_open[i], ha_close[i])
+        ha_low[i] = min(low_12h[i], ha_open[i], ha_close[i])
     
-    for i in range(1, len(high_1d)):
-        if np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(high_1d[i-1]) or np.isnan(low_1d[i-1]):
-            continue
-        high_diff = high_1d[i] - high_1d[i-1]
-        low_diff = low_1d[i-1] - low_1d[i]
-        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
-        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
-        tr[i] = max(high_1d[i] - low_1d[i], 
-                   abs(high_1d[i] - high_1d[i-1]), 
-                   abs(low_1d[i] - low_1d[i-1]))
+    # Identify trend strength: consecutive same-color candles with no opposing shadows
+    bullish_streak = np.zeros_like(ha_close, dtype=int)
+    bearish_streak = np.zeros_like(ha_close, dtype=int)
     
-    # Wilder's smoothing
-    atr = np.zeros_like(high_1d)
-    plus_di = np.zeros_like(high_1d)
-    minus_di = np.zeros_like(high_1d)
-    dx = np.zeros_like(high_1d)
-    adx = np.full_like(high_1d, np.nan)
+    for i in range(len(ha_close)):
+        if ha_close[i] >= ha_open[i]:  # Bullish candle
+            bullish_streak[i] = bullish_streak[i-1] + 1 if i > 0 else 1
+            bearish_streak[i] = 0
+        else:  # Bearish candle
+            bearish_streak[i] = bearish_streak[i-1] + 1 if i > 0 else 1
+            bullish_streak[i] = 0
     
-    if len(high_1d) >= 14:
-        # Initial smoothed values
-        atr[13] = np.nansum(tr[1:14])
-        plus_dm_sum = np.nansum(plus_dm[1:14])
-        minus_dm_sum = np.nansum(minus_dm[1:14])
-        
-        for i in range(14, len(high_1d)):
-            if np.isnan(tr[i]) or np.isnan(plus_dm[i]) or np.isnan(minus_dm[i]):
-                atr[i] = atr[i-1]
-                plus_dm_sum = plus_dm_sum
-                minus_dm_sum = minus_dm_sum
-            else:
-                atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-                plus_dm_sum = (plus_dm_sum * 13 + plus_dm[i]) / 14
-                minus_dm_sum = (minus_dm_sum * 13 + minus_dm[i]) / 14
-            
-            if atr[i] > 0:
-                plus_di[i] = 100 * plus_dm_sum / atr[i]
-                minus_di[i] = 100 * minus_dm_sum / atr[i]
-                if plus_di[i] + minus_di[i] > 0:
-                    dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
-        
-        # Calculate ADX as smoothed DX
-        if len(high_1d) >= 27:
-            adx[26] = np.nanmean(dx[14:27])
-            for i in range(27, len(high_1d)):
-                if np.isnan(dx[i]):
-                    adx[i] = adx[i-1]
-                else:
-                    adx[i] = (adx[i-1] * 13 + dx[i]) / 14
+    # Strong trend conditions: 3+ consecutive candles with no opposing shadows
+    strong_bullish = np.zeros_like(ha_close, dtype=bool)
+    strong_bearish = np.zeros_like(ha_close, dtype=bool)
     
-    # Align 1d data to 6h
-    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
-    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
-    midpoint_1d_aligned = align_htf_to_ltf(prices, df_1d, midpoint_1d)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    for i in range(len(ha_close)):
+        if bullish_streak[i] >= 3 and ha_low[i] >= ha_open[i]:  # No lower shadow
+            strong_bullish[i] = True
+        if bearish_streak[i] >= 3 and ha_high[i] <= ha_open[i]:  # No upper shadow
+            strong_bearish[i] = True
     
-    # Volume ratio (6h volume vs 20-period average)
+    # Align trend signals to 4h timeframe
+    strong_bullish_aligned = align_htf_to_ltf(prices, df_12h, strong_bullish.astype(float))
+    strong_bearish_aligned = align_htf_to_ltf(prices, df_12h, strong_bearish.astype(float))
+    
+    # Volume confirmation on 4h: volume > 1.5x 20-period average
     vol_ma_20 = np.full_like(volume, np.nan)
-    for i in range(19, len(volume)):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    for j in range(19, len(volume)):
+        vol_ma_20[j] = np.mean(volume[j-19:j+1])
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position
+    position_size = 0.25  # 25% position size
     
     for i in range(20, n):
         # Skip if any critical data is NaN
-        if (np.isnan(high_1d_aligned[i]) or np.isnan(low_1d_aligned[i]) or
-            np.isnan(midpoint_1d_aligned[i]) or np.isnan(adx_aligned[i]) or
+        if (np.isnan(strong_bullish_aligned[i]) or np.isnan(strong_bearish_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        vol_ratio = volume[i] / vol_ma_20[i] if vol_ma_20[i] > 0 else 0
+        # Volume ratio
+        if vol_ma_20[i] <= 0:
+            volume_ratio = 0
+        else:
+            volume_ratio = volume[i] / vol_ma_20[i]
         
         if position == 0:
-            # Long: break above 1d high with volume and trend
-            if (close[i] > high_1d_aligned[i] and
-                vol_ratio > 2.0 and
-                adx_aligned[i] > 25):
+            # Look for long entry: strong bullish trend on 12h with volume confirmation
+            if strong_bullish_aligned[i] > 0.5 and volume_ratio > 1.5:
                 position = 1
                 signals[i] = position_size
-            # Short: break below 1d low with volume and trend
-            elif (close[i] < low_1d_aligned[i] and
-                  vol_ratio > 2.0 and
-                  adx_aligned[i] > 25):
+            # Look for short entry: strong bearish trend on 12h with volume confirmation
+            elif strong_bearish_aligned[i] > 0.5 and volume_ratio > 1.5:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: return to midpoint or trend weakens
-            if (close[i] < midpoint_1d_aligned[i] or
-                adx_aligned[i] < 20):
+            # Exit long: trend weakens (bearish signal appears) or volume drops
+            if strong_bearish_aligned[i] > 0.5 or volume_ratio < 1.0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: return to midpoint or trend weakens
-            if (close[i] > midpoint_1d_aligned[i] or
-                adx_aligned[i] < 20):
+            # Exit short: trend weakens (bullish signal appears) or volume drops
+            if strong_bullish_aligned[i] > 0.5 or volume_ratio < 1.0:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -148,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_ADX_RangeBreakout_v1"
-timeframe = "6h"
+name = "4h_12h_HeikinAshi_Trend_Follower_v1"
+timeframe = "4h"
 leverage = 1.0
