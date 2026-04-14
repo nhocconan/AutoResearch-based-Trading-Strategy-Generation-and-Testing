@@ -3,117 +3,107 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h timeframe with 1d ADX trend filter and 1w Williams %R momentum
-# ADX > 25 identifies strong trending conditions (works in both bull and bear markets)
-# Williams %R identifies overbought/oversold conditions within the trend
-# Long when: ADX > 25 (trending) + Williams %R crosses above -50 from below (bullish momentum)
-# Short when: ADX > 25 (trending) + Williams %R crosses below -50 from above (bearish momentum)
-# Uses 1d ADX for regime filter and 1w Williams %R for entry timing - avoids overtrading
-# Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+# Hypothesis: 12h timeframe with 1d VWAP deviation and 1w ATR-based volatility filter
+# VWAP deviation identifies mean reversion opportunities when price deviates significantly from VWAP
+# ATR volatility filter ensures trades occur in sufficient volatility environments
+# Works in both bull and bear markets as it captures mean reversion during extended moves
+# Uses 1d VWAP for mean reversion signal and 1w ATR for volatility regime filter
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load 1d data ONCE for ADX
+    # Load 1d data ONCE for VWAP calculation
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d ADX (14 periods)
-    adx_len = 14
-    # True Range
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    # Directional Movement
-    up = df_1d['high'] - df_1d['high'].shift(1)
-    down = df_1d['low'].shift(1) - df_1d['low']
-    plus_dm = np.where((up > down) & (up > 0), up, 0)
-    minus_dm = np.where((down > up) & (down > 0), down, 0)
-    # Smoothed values
-    tr_roll = pd.Series(tr).rolling(window=adx_len, min_periods=adx_len).sum()
-    plus_dm_smooth = pd.Series(plus_dm).rolling(window=adx_len, min_periods=adx_len).sum()
-    minus_dm_smooth = pd.Series(minus_dm).rolling(window=adx_len, min_periods=adx_len).sum()
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / tr_roll
-    minus_di = 100 * minus_dm_smooth / tr_roll
-    # DX and ADX
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=adx_len, min_periods=adx_len).mean().values
+    # Calculate 1d VWAP (Volume Weighted Average Price)
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    vwap_numerator = (typical_price * df_1d['volume']).cumsum()
+    vwap_denominator = df_1d['volume'].cumsum()
+    vwap = vwap_numerator / vwap_denominator
+    vwap = vwap.replace([np.inf, -np.inf], np.nan).ffill().values
     
-    # Align ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Calculate price deviation from VWAP (normalized by price)
+    price_dev = (df_1d['close'] - vwap) / vwap
+    price_dev = np.where(vwap == 0, 0, price_dev)
     
-    # Load 1w data ONCE for Williams %R
+    # Align price deviation to 12h timeframe
+    price_dev_aligned = align_htf_to_ltf(prices, df_1d, price_dev)
+    
+    # Load 1w data ONCE for ATR calculation
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1w Williams %R (14 periods)
-    williams_len = 14
-    highest_high = pd.Series(df_1w['high']).rolling(window=williams_len, min_periods=williams_len).max().values
-    lowest_low = pd.Series(df_1w['low']).rolling(window=williams_len, min_periods=williams_len).min().values
-    williams_r = (highest_high - df_1w['close'].values) / (highest_high - lowest_low) * -100
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # Handle division by zero
+    # Calculate 1w ATR (14 periods) for volatility filter
+    atr_length = 14
+    tr1 = df_1w['high'] - df_1w['low']
+    tr2 = np.abs(df_1w['high'] - df_1w['close'].shift(1))
+    tr3 = np.abs(df_1w['low'] - df_1w['close'].shift(1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(span=atr_length, adjust=False, min_periods=atr_length).mean().values
     
-    # Align Williams %R to 6h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1w, williams_r)
+    # Align ATR to 12h timeframe
+    atr_aligned = align_htf_to_ltf(prices, df_1w, atr)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(100, adx_len * 2, williams_len * 2)
+    start = max(50, atr_length)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(adx_aligned[i]) or 
-            np.isnan(williams_r_aligned[i])):
+        if (np.isnan(price_dev_aligned[i]) or 
+            np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: ADX > 25 indicates strong trend
-        strong_trend = adx_aligned[i] > 25
+        # Volatility filter: ATR above 20th percentile of last 20 periods
+        if i >= 20:
+            atr_slice = atr_aligned[max(0, i-20):i]
+            if len(atr_slice) > 0:
+                # Calculate percentile of current ATR vs last 20 values
+                valid_atr = atr_slice[~np.isnan(atr_slice)]
+                if len(valid_atr) > 0:
+                    sorted_atr = np.sort(valid_atr)
+                    current_atr = atr_aligned[i]
+                    rank = np.searchsorted(sorted_atr, current_atr, side='left')
+                    percentile = (rank / len(sorted_atr)) * 100
+                    sufficient_vol = percentile >= 20  # Sufficient volatility
+                else:
+                    sufficient_vol = False
+            else:
+                sufficient_vol = False
+        else:
+            sufficient_vol = False
         
         if position == 0:
-            # Entry conditions
-            # Long: strong trend + Williams %R crosses above -50 from below
-            long_entry = (strong_trend and 
-                         williams_r_aligned[i] > -50 and 
-                         i > start and 
-                         williams_r_aligned[i-1] <= -50)
-            # Short: strong trend + Williams %R crosses below -50 from above
-            short_entry = (strong_trend and 
-                          williams_r_aligned[i] < -50 and 
-                          i > start and 
-                          williams_r_aligned[i-1] >= -50)
-            
-            if long_entry:
+            # Enter long: price significantly below VWAP + sufficient volatility
+            if price_dev_aligned[i] < -0.02 and sufficient_vol:  # 2% below VWAP
                 position = 1
                 signals[i] = position_size
-            elif short_entry:
+            # Enter short: price significantly above VWAP + sufficient volatility
+            elif price_dev_aligned[i] > 0.02 and sufficient_vol:  # 2% above VWAP
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: trend weakens OR momentum reverses
-            exit_long = (adx_aligned[i] <= 25) or \
-                       (williams_r_aligned[i] < -80)  # Oversold exit
-            if exit_long:
+            # Exit long: price returns to VWAP or volatility drops
+            if price_dev_aligned[i] >= -0.005 or not sufficient_vol:  # Within 0.5% of VWAP or low vol
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: trend weakens OR momentum reverses
-            exit_short = (adx_aligned[i] <= 25) or \
-                        (williams_r_aligned[i] > -20)  # Overbought exit
-            if exit_short:
+            # Exit short: price returns to VWAP or volatility drops
+            if price_dev_aligned[i] <= 0.005 or not sufficient_vol:  # Within 0.5% of VWAP or low vol
                 position = 0
                 signals[i] = 0.0
             else:
@@ -121,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1dADX_1wWilliamsR_Trend_Momentum_v1"
-timeframe = "6h"
+name = "12h_1dVWAP_Dev_1wATR_VolFilter_v1"
+timeframe = "12h"
 leverage = 1.0
