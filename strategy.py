@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d timeframe with weekly Donchian breakout + volume confirmation + weekly ATR filter
-# - Uses weekly Donchian channels (20-period) for trend-following breakouts
-# - Volume confirmation ensures breakouts have institutional participation
-# - Weekly ATR filter adapts to volatility regimes, avoiding low-volatility false breakouts
-# - Designed to work in both bull (breakouts continue) and bear (breakouts fail quickly) markets
-# - Target: 20-50 trades over 4 years (5-12/year) to minimize fee drag while capturing major moves
+# Hypothesis: 4h strategy using 1-day volatility breakout with volume confirmation
+# - Uses daily ATR to set dynamic entry thresholds, adapting to market conditions
+# - Volume confirmation ensures breakouts are supported by participation
+# - Designed to capture volatility expansion phases in both bull and bear markets
+# - Target: 75-200 trades over 4 years to minimize fee drag while capturing significant moves
 # - Discrete position sizing (0.25) to reduce churn and manage drawdown
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,99 +20,98 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load daily data once before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    volume_1w = df_1w['volume'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # 20-period ATR for volatility measurement (weekly)
-    high_low = high_1w - low_1w
-    high_close = np.abs(high_1w - np.roll(close_1w, 1))
-    low_close = np.abs(low_1w - np.roll(close_1w, 1))
+    # 14-day ATR for volatility measurement
+    high_low = high_1d - low_1d
+    high_close = np.abs(high_1d - np.roll(close_1d, 1))
+    low_close = np.abs(low_1d - np.roll(close_1d, 1))
     high_close[0] = high_low[0]
     low_close[0] = high_low[0]
     tr = np.maximum(high_low, np.maximum(high_close, low_close))
     
     tr_series = pd.Series(tr)
-    atr_20w = tr_series.rolling(window=20, min_periods=20).mean().values
+    atr_14d = tr_series.rolling(window=14, min_periods=14).mean().values
     
-    # Weekly volume filter: current volume > 1.8x 20-period average
-    vol_series = pd.Series(volume_1w)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    # 4h volume filter: current volume > 1.5x 24-period average (1 day)
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=24, min_periods=24).mean().values
     
-    # Weekly Donchian channels (20-period) - breakout levels
-    high_series = pd.Series(high_1w)
-    low_series = pd.Series(low_1w)
+    # 4h Donchian channels (20-period) - breakout levels
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
     donchian_high = high_series.rolling(window=20, min_periods=20).max().shift(1).values
     donchian_low = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Calculate weekly volatility as ATR normalized by price
-    weekly_volatility = atr_20w / close_1w
-    weekly_vol_series = pd.Series(weekly_volatility)
-    # Use 70th percentile of weekly volatility over 8 weeks as threshold
-    vol_threshold = weekly_vol_series.rolling(window=8, min_periods=8).quantile(0.70).values
-    # Align volatility threshold to daily timeframe
-    vol_threshold_1d = align_htf_to_ltf(prices, df_1w, vol_threshold)
+    # Calculate daily volatility as ATR normalized by price
+    daily_volatility = atr_14d / close_1d
+    daily_vol_series = pd.Series(daily_volatility)
+    # Use 80th percentile of daily volatility over 10 days as threshold (more selective)
+    vol_threshold = daily_vol_series.rolling(window=10, min_periods=10).quantile(0.80).values
+    # Align volatility threshold to 4h timeframe
+    vol_threshold_4h = align_htf_to_ltf(prices, df_1d, vol_threshold)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any critical data is NaN
-        if np.isnan(atr_20w[i-1]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
-           np.isnan(vol_ma[i]) or np.isnan(vol_threshold_1d[i]):
+        if np.isnan(atr_14d[i-1]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
+           np.isnan(vol_ma[i]) or np.isnan(vol_threshold_4h[i]):
             continue
         
-        # Get previous week's data for volatility-based levels
-        prev_close = close_1w[i-1]
-        prev_atr = atr_20w[i-1]  # Previous week's ATR
+        # Get previous day's data for volatility-based S1/R1 levels
+        prev_close = close_1d[i-1]
+        prev_atr = atr_14d[i-1]  # Previous day's ATR
         
-        # Calculate volatility-adjusted threshold (0.4 * ATR) - balanced for signal frequency
-        threshold = prev_atr * 0.4
+        # Calculate volatility-adjusted threshold (0.35 * ATR) - balanced for signal frequency
+        threshold = prev_atr * 0.35
         
-        # Calculate dynamic breakout levels based on volatility
-        upper_break = prev_close + threshold
-        lower_break = prev_close - threshold
+        # Calculate dynamic S1/R1 levels based on volatility
+        s1 = prev_close - threshold
+        r1 = prev_close + threshold
         
         # Create arrays for alignment
-        upper_array = np.full(len(df_1w), upper_break)
-        lower_array = np.full(len(df_1w), lower_break)
+        s1_array = np.full(len(df_1d), s1)
+        r1_array = np.full(len(df_1d), r1)
         
-        upper_break_1d = align_htf_to_ltf(prices, df_1w, upper_array)[i]
-        lower_break_1d = align_htf_to_ltf(prices, df_1w, lower_array)[i]
+        s1_4h = align_htf_to_ltf(prices, df_1d, s1_array)[i]
+        r1_4h = align_htf_to_ltf(prices, df_1d, r1_array)[i]
         
         if position == 0:
-            # Long: Price breaks above upper level with volume and high volatility regime
-            if (close[i] > upper_break_1d and close[i-1] <= upper_break_1d and 
-                volume[i] > vol_ma[i] * 1.8 and 
-                weekly_volatility[i] > vol_threshold_1d[i]):
+            # Long: Price breaks above r1 with volume and high volatility regime
+            if (close[i] > r1_4h and close[i-1] <= r1_4h and 
+                volume[i] > vol_ma[i] * 1.5 and 
+                daily_volatility[i] > vol_threshold_4h[i]):
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below lower level with volume and high volatility regime
-            elif (close[i] < lower_break_1d and close[i-1] >= lower_break_1d and 
-                  volume[i] > vol_ma[i] * 1.8 and 
-                  weekly_volatility[i] > vol_threshold_1d[i]):
+            # Short: Price breaks below s1 with volume and high volatility regime
+            elif (close[i] < s1_4h and close[i-1] >= s1_4h and 
+                  volume[i] > vol_ma[i] * 1.5 and 
+                  daily_volatility[i] > vol_threshold_4h[i]):
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
-            # Exit: Price breaks below lower level (reversal) or drops below weekly Donchian low
-            if close[i] < lower_break_1d or close[i] < donchian_low[i]:
+            # Exit: Price breaks below s1 (reversal) or drops below Donchian low
+            if close[i] < s1_4h or close[i] < donchian_low[i]:
                 position = 0
                 signals[i] = 0.0
         elif position == -1:
-            # Exit: Price breaks above upper level (reversal) or rises above weekly Donchian high
-            if close[i] > upper_break_1d or close[i] > donchian_high[i]:
+            # Exit: Price breaks above s1 (reversal) or rises above Donchian high
+            if close[i] > s1_4h or close[i] > donchian_high[i]:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "1d_1w_VolatilityAdjusted_Donchian_Breakout_Volume_v1"
-timeframe = "1d"
+name = "4h_1d_VolatilityAdjusted_S1R1_Breakout_Volume_v4"
+timeframe = "4h"
 leverage = 1.0
