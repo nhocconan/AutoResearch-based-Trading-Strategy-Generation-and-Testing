@@ -46,25 +46,6 @@ def generate_signals(prices):
         for i in range(19, len(volume)):
             vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
-    # Calculate daily RSI (14-period)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.full_like(gain, np.nan)
-    avg_loss = np.full_like(loss, np.nan)
-    
-    if len(gain) >= 14:
-        avg_gain[13] = np.mean(gain[:14])
-        avg_loss[13] = np.mean(loss[:14])
-        for i in range(14, len(gain)):
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_6h = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
     # Calculate daily EMA200 for trend filter (1d)
     ema200_1d = np.full(len(df_1d), np.nan)
     if len(df_1d) >= 200:
@@ -74,6 +55,14 @@ def generate_signals(prices):
     
     ema200_6h = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
+    # Calculate 6h Donchian channels (20-period)
+    donch_high = np.full(n, np.nan)
+    donch_low = np.full(n, np.nan)
+    if n >= 20:
+        for i in range(19, n):
+            donch_high[i] = np.max(high[i-19:i+1])
+            donch_low[i] = np.min(low[i-19:i+1])
+    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
@@ -82,8 +71,9 @@ def generate_signals(prices):
         # Skip if any critical data is NaN
         if (np.isnan(atr_6h[i]) or
             np.isnan(vol_ma_20[i]) or
-            np.isnan(rsi_6h[i]) or
-            np.isnan(ema200_6h[i])):
+            np.isnan(ema200_6h[i]) or
+            np.isnan(donch_high[i]) or
+            np.isnan(donch_low[i])):
             signals[i] = 0.0
             continue
         
@@ -100,10 +90,6 @@ def generate_signals(prices):
         
         # Volume threshold: require significant spike
         vol_threshold = 2.5
-        
-        # RSI thresholds: avoid overbought/oversold extremes
-        rsi_overbought = 70
-        rsi_oversold = 30
         
         # Calculate dynamic pivot levels based on previous day's range
         prev_high = high_1d[i-1] if i > 0 else high_1d[0]
@@ -124,26 +110,26 @@ def generate_signals(prices):
         s3_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i]
         
         if position == 0:
-            # Long: Price breaks above R4 with volume confirmation and RSI not overbought
-            if close[i] > r4_6h and volume_ratio > vol_threshold and rsi_6h[i] < rsi_overbought:
+            # Long: Price breaks above Donchian high with volume confirmation and above daily EMA200
+            if close[i] > donch_high[i] and volume_ratio > vol_threshold and close[i] > ema200_6h[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below S4 with volume confirmation and RSI not oversold
-            elif close[i] < s4_6h and volume_ratio > vol_threshold and rsi_6h[i] > rsi_oversold:
+            # Short: Price breaks below Donchian low with volume confirmation and below daily EMA200
+            elif close[i] < donch_low[i] and volume_ratio > vol_threshold and close[i] < ema200_6h[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below S3 (more sensitive exit) OR RSI becomes overbought
-            if close[i] < s3_6h or rsi_6h[i] > rsi_overbought:
+            # Exit: Price falls back below Donchian low OR below daily EMA200
+            if close[i] < donch_low[i] or close[i] < ema200_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above R3 (more sensitive exit) OR RSI becomes oversold
-            if close[i] > r3_6h or rsi_6h[i] < rsi_oversold:
+            # Exit: Price rises back above Donchian high OR above daily EMA200
+            if close[i] > donch_high[i] or close[i] > ema200_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -151,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Camarilla_R4S4_Breakout_Volume_RSI_v2"
+name = "6h_1d_Donchian_EMA200_Volume"
 timeframe = "6h"
 leverage = 1.0
