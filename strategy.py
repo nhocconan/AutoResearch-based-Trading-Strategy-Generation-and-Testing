@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,84 +13,99 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate weekly EMA(21) for trend filter
-    ema_21_1w = pd.Series(df_1w['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Calculate 12h ADX(14) for trend strength
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate weekly ATR(14) for volatility filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    # True Range
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
     tr2[0] = np.inf
     tr3[0] = np.inf
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
     
-    # Calculate weekly RSI(14) for momentum filter
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1w = 100 - (100 / (1 + rs))
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # Directional Movement
+    up_move = high_12h - np.roll(high_12h, 1)
+    down_move = np.roll(low_12h, 1) - low_12h
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di_12h = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / (atr_12h + 1e-10)
+    minus_di_12h = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / (atr_12h + 1e-10)
+    dx_12h = 100 * np.abs(plus_di_12h - minus_di_12h) / (plus_di_12h + minus_di_12h + 1e-10)
+    adx_12h = pd.Series(dx_12h).rolling(window=14, min_periods=14).mean().values
+    
+    # Align ADX to 6h
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    
+    # Calculate 12h Donchian(20) channels
+    donch_high_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donch_low_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donch_high_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_high_12h)
+    donch_low_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_low_12h)
+    
+    # Calculate 6h volume filter
+    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 100
+    start = 200
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_21_1w_aligned[i]) or 
-            np.isnan(atr_1w_aligned[i]) or
-            np.isnan(rsi_1w_aligned[i])):
+        if (np.isnan(adx_12h_aligned[i]) or 
+            np.isnan(donch_high_12h_aligned[i]) or
+            np.isnan(donch_low_12h_aligned[i]) or
+            np.isnan(vol_ma_6h[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        vol = volume[i]
         
-        # Trend filter: price > weekly EMA21 for long, price < weekly EMA21 for short
-        trend_filter_long = price > ema_21_1w_aligned[i]
-        trend_filter_short = price < ema_21_1w_aligned[i]
+        # Trend filter: strong trend (ADX > 25)
+        trend_filter = adx_12h_aligned[i] > 25
         
-        # Volatility filter: weekly ATR > 1.5% of price to avoid low volatility periods
-        vol_filter = atr_1w_aligned[i] / price > 0.015 if price > 0 else False
+        # Breakout filters
+        breakout_long = price > donch_high_12h_aligned[i]
+        breakout_short = price < donch_low_12h_aligned[i]
         
-        # Momentum filter: RSI between 30 and 70 to avoid extremes
-        mom_filter = (rsi_1w_aligned[i] >= 30) & (rsi_1w_aligned[i] <= 70)
+        # Volume confirmation: volume > 1.5x average
+        vol_filter = vol > 1.5 * vol_ma_6h[i]
         
         if position == 0:
-            # Long setup: price above weekly EMA21 + volatility filter + momentum filter
-            if trend_filter_long and vol_filter and mom_filter:
+            # Long setup: bullish breakout + strong trend + volume
+            if breakout_long and trend_filter and vol_filter:
                 position = 1
                 signals[i] = position_size
-            # Short setup: price below weekly EMA21 + volatility filter + momentum filter
-            elif trend_filter_short and vol_filter and mom_filter:
+            # Short setup: bearish breakout + strong trend + volume
+            elif breakout_short and trend_filter and vol_filter:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below weekly EMA21
-            if price < ema_21_1w_aligned[i]:
+            # Exit long: price closes below Donchian low or trend weakens
+            if price < donch_low_12h_aligned[i] or adx_12h_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above weekly EMA21
-            if price > ema_21_1w_aligned[i]:
+            # Exit short: price closes above Donchian high or trend weakens
+            if price > donch_high_12h_aligned[i] or adx_12h_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -98,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_weekly_EMA21_VolFilter_RSI_Momentum_v1"
-timeframe = "1d"
+name = "6h_12hADX_Donchian_Breakout_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
