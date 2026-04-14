@@ -3,13 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h KAMA Trend + RSI Mean Reversion + Volume Spike
-# Uses KAMA (Kaufman Adaptive Moving Average) for trend detection, 
-# RSI(14) for mean reversion signals, and volume spike confirmation.
-# KAMA adapts to market noise, reducing false signals in choppy markets.
-# In trending markets (KAMA slope aligned), we look for RSI extremes to fade.
-# Volume spike confirms institutional participation.
-# Works in bull/bear by fading overextended moves in the direction of the trend.
+# Hypothesis: 4h Camarilla Pivot Breakout + Volume Spike + 1d ADX Trend Filter
+# Uses Camarilla pivot levels (H4/L4) from daily chart for breakout entries
+# Requires volume > 2x average volume and 1d ADX > 25 to ensure strong trend
+# Works in bull/bear by trading breakouts in direction of higher timeframe trend
 # Target: 75-200 total trades over 4 years (19-50/year)
 
 def generate_signals(prices):
@@ -17,54 +14,66 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # KAMA (Kaufman Adaptive Moving Average) - 10-period
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, 1))
-    change = np.insert(change, 0, 0)  # align with original length
+    # Get 1d data for Camarilla pivots and ADX
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    volatility = np.abs(np.diff(close, 1))
-    volatility = np.insert(volatility, 0, 0)
+    # Calculate Camarilla pivot levels (H4, L4) from previous day
+    # H4 = Close + 1.5 * (High - Low)
+    # L4 = Close - 1.5 * (High - Low)
+    camarilla_H4 = df_1d['close'] + 1.5 * (df_1d['high'] - df_1d['low'])
+    camarilla_L4 = df_1d['close'] - 1.5 * (df_1d['high'] - df_1d['low'])
     
-    # Sum over 10 periods
-    er_num = np.abs(np.subtract(close[9:], np.roll(close, 9)[9:]))
-    er_num = np.concatenate([np.zeros(9), er_num])
+    # Shift to use previous day's levels (avoid look-ahead)
+    camarilla_H4 = camarilla_H4.shift(1)
+    camarilla_L4 = camarilla_L4.shift(1)
     
-    er_den = np.sum(np.lib.stride_tricks.sliding_window_view(volatility, 10), axis=1)
-    er_den = np.concatenate([np.zeros(9), er_den])
+    # Calculate 1d ADX (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    er = np.where(er_den != 0, er_num / er_den, 0)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # KAMA calculation
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Smoothed values
+    tr14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
+    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
     
-    # KAMA slope (trend direction)
-    kama_slope = np.diff(kama, 1)
-    kama_slope = np.insert(kama_slope, 0, 0)
+    # Directional Indicators
+    di_plus = np.where(tr14 != 0, 100 * dm_plus14 / tr14, 0)
+    di_minus = np.where(tr14 != 0, 100 * dm_minus14 / tr14, 0)
     
-    # RSI (14-period)
-    delta = np.diff(close, 1)
-    delta = np.insert(delta, 0, 0)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx_1d = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    # Align 1d indicators to 4h timeframe
+    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4.values)
+    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4.values)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume spike: volume > 2.5x average volume (20-period)
+    # Volume confirmation: volume > 2x average volume (20-period)
     vol_series = pd.Series(volume)
     avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
@@ -73,21 +82,21 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 35  # for RSI and KAMA stability
+    start = 35  # for ADX calculation
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(kama[i]) or np.isnan(kama_slope[i]) or 
-            np.isnan(rsi[i]) or np.isnan(avg_vol[i])):
+        if (np.isnan(camarilla_H4_aligned[i]) or np.isnan(camarilla_L4_aligned[i]) or
+            np.isnan(adx_1d_aligned[i]) or np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         
-        # Trend filter: KAMA slope indicates trend direction
-        # Only trade when there's a clear trend
-        if abs(kama_slope[i]) < 0.01 * close[i]:  # minimal slope threshold
+        # Trend filter: only trade when 1d ADX > 25 (strong trend on higher timeframe)
+        if adx_1d_aligned[i] < 25:
+            # In weak trend/ranging market on 1d, stay flat
             if position != 0:
                 position = 0
                 signals[i] = 0.0
@@ -96,28 +105,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price below KAMA (dip in uptrend) + RSI oversold + volume spike
-            if (price < kama[i] and kama_slope[i] > 0 and 
-                rsi[i] < 30 and vol > 2.5 * avg_vol[i]):
+            # Long: price breaks above Camarilla H4 with volume filter
+            if price > camarilla_H4_aligned[i] and vol > 2.0 * avg_vol[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: price above KAMA (pullback in downtrend) + RSI overbought + volume spike
-            elif (price > kama[i] and kama_slope[i] < 0 and 
-                  rsi[i] > 70 and vol > 2.5 * avg_vol[i]):
+            # Short: price breaks below Camarilla L4 with volume filter
+            elif price < camarilla_L4_aligned[i] and vol > 2.0 * avg_vol[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses above KAMA or RSI overbought
-            if price > kama[i] or rsi[i] > 70:
+            # Exit long: price breaks below Camarilla L4
+            if price < camarilla_L4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses below KAMA or RSI oversold
-            if price < kama[i] or rsi[i] < 30:
+            # Exit short: price breaks above Camarilla H4
+            if price > camarilla_H4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -125,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_RSI_Volume_Spike"
+name = "4h_Camarilla_Pivot_Volume_ADX"
 timeframe = "4h"
 leverage = 1.0
