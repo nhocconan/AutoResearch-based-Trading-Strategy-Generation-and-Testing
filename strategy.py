@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,12 +15,13 @@ def generate_signals(prices):
     
     # Load daily data (HTF) once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
     # Calculate daily ATR (14-period)
     tr = np.zeros(len(df_1d))
@@ -38,11 +39,11 @@ def generate_signals(prices):
         for i in range(14, len(df_1d)):
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # Calculate daily volatility filter (ATR > 1.5% of price)
+    # Calculate daily volatility filter (ATR > 1.0% of price)
     vol_filter_1d = np.zeros(len(df_1d))
     for i in range(len(df_1d)):
         if not np.isnan(atr_1d[i]) and close_1d[i] > 0:
-            vol_filter_1d[i] = atr_1d[i] / close_1d[i] > 0.015
+            vol_filter_1d[i] = atr_1d[i] / close_1d[i] > 0.010
         else:
             vol_filter_1d[i] = False
     
@@ -68,10 +69,25 @@ def generate_signals(prices):
         elif not np.isnan(avg_gain[i]) and avg_loss[i] == 0:
             rsi_1d[i] = 100.0
     
+    # Calculate daily volume ratio (current volume / 20-period average)
+    vol_ma_20 = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 20:
+        vol_ma_20[19] = np.mean(volume_1d[:20])
+        for i in range(20, len(df_1d)):
+            vol_ma_20[i] = (vol_ma_20[i-1] * 19 + volume_1d[i]) / 20
+    
+    vol_ratio_1d = np.zeros(len(df_1d))
+    for i in range(len(df_1d)):
+        if not np.isnan(vol_ma_20[i]) and vol_ma_20[i] > 0:
+            vol_ratio_1d[i] = volume_1d[i] / vol_ma_20[i]
+        else:
+            vol_ratio_1d[i] = 1.0
+    
     # Align indicators to 4h timeframe (primary timeframe)
     atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
     vol_filter_4h = align_htf_to_ltf(prices, df_1d, vol_filter_1d.astype(float))
     rsi_4h = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    vol_ratio_4h = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
     # Calculate 4-hour Donchian channels (20-period)
     donch_high = np.full(n, np.nan)
@@ -85,17 +101,23 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25  # 25% position size
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any critical data is NaN
         if (np.isnan(atr_4h[i]) or
             np.isnan(donch_high[i]) or
             np.isnan(donch_low[i]) or
-            np.isnan(rsi_4h[i])):
+            np.isnan(rsi_4h[i]) or
+            np.isnan(vol_ratio_4h[i])):
             signals[i] = 0.0
             continue
         
-        # Skip low volatility periods (ATR < 1.5% of price)
+        # Skip low volatility periods (ATR < 1.0% of price)
         if vol_filter_4h[i] < 0.5:
+            signals[i] = 0.0
+            continue
+        
+        # Require volume confirmation (volume > 1.5x average)
+        if vol_ratio_4h[i] < 1.5:
             signals[i] = 0.0
             continue
         
@@ -105,35 +127,35 @@ def generate_signals(prices):
         prev_close = close_1d[i-1] if i > 0 else close_1d[0]
         prev_range = prev_high - prev_low
         
-        # Camarilla-style pivot levels (R3/S3)
-        r3 = prev_close + (prev_range * 1.1 / 4)
-        s3 = prev_close - (prev_range * 1.1 / 4)
+        # Camarilla-style pivot levels (R4/S4 - wider bands for fewer trades)
+        r4 = prev_close + (prev_range * 1.1 / 2)
+        s4 = prev_close - (prev_range * 1.1 / 2)
         
         # Align to 4h timeframe
-        r3_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r3))[i]
-        s3_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i]
+        r4_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r4))[i]
+        s4_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s4))[i]
         
         if position == 0:
-            # Long: Price breaks above 4h Donchian high AND above S3 AND RSI < 70
-            if close[i] > donch_high[i] and close[i] > s3_4h and rsi_4h[i] < 70:
+            # Long: Price breaks above 4h Donchian high AND above S4 AND RSI < 65
+            if close[i] > donch_high[i] and close[i] > s4_4h and rsi_4h[i] < 65:
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below 4h Donchian low AND below R3 AND RSI > 30
-            elif close[i] < donch_low[i] and close[i] < r3_4h and rsi_4h[i] > 30:
+            # Short: Price breaks below 4h Donchian low AND below R4 AND RSI > 35
+            elif close[i] < donch_low[i] and close[i] < r4_4h and rsi_4h[i] > 35:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below 4h Donchian low OR below S3 OR RSI > 70
-            if close[i] < donch_low[i] or close[i] < s3_4h or rsi_4h[i] > 70:
+            # Exit: Price falls back below 4h Donchian low OR below S4 OR RSI > 70
+            if close[i] < donch_low[i] or close[i] < s4_4h or rsi_4h[i] > 70:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above 4h Donchian high OR above R3 OR RSI < 30
-            if close[i] > donch_high[i] or close[i] > r3_4h or rsi_4h[i] < 30:
+            # Exit: Price rises back above 4h Donchian high OR above R4 OR RSI < 30
+            if close[i] > donch_high[i] or close[i] > r4_4h or rsi_4h[i] < 30:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -141,6 +163,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_R3S3_RSI_Filter"
+name = "4h_1d_Camarilla_R4S4_RSI_Volume_Filter"
 timeframe = "4h"
 leverage = 1.0
