@@ -21,7 +21,7 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    vol_1d = df_1d['volume'].values
+    volume_1d = df_1d['volume'].values
     
     # Calculate 20-period high and low for Donchian channel (daily)
     donchian_high_20 = np.full_like(close_1d, np.nan)
@@ -89,10 +89,11 @@ def generate_signals(prices):
     adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
     
     # Calculate 20-period volume average (daily)
-    vol_ma_20 = np.full_like(vol_1d, np.nan)
-    if len(vol_1d) >= 20:
-        for i in range(19, len(vol_1d)):
-            vol_ma_20[i] = np.mean(vol_1d[i-19:i+1])
+    vol_ma_20 = np.full_like(volume_1d, np.nan)
+    if len(volume_1d) >= 20:
+        for i in range(19, len(volume_1d)):
+            vol_ma_20[i] = np.mean(volume_1d[i-19:i+1])
+    
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
@@ -108,7 +109,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 12h volume vs 20-period daily average volume
+        # Volume ratio: current 4h volume vs 20-period daily average volume
         if vol_ma_20_aligned[i] <= 0:
             volume_ratio = 0
         else:
@@ -148,6 +149,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Donchian20_ADX25_Volume"
-timeframe = "12h"
+name = "4h_1d_Donchian20_ADX25_Volume"
+timeframe = "4h"
 leverage = 1.0
