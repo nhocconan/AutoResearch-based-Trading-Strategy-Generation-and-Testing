@@ -1,3 +1,7 @@
+# 4H_1D_VOLUME_SPIKE_BREAKOUT
+# Hypothesis: In both bull and bear markets, strong volume spikes during breakouts from key daily levels (support/resistance) indicate institutional participation and higher probability of follow-through. Using 1-day high/low as dynamic support/resistance with volume confirmation on 4H timeframe reduces false breakouts. The strategy works in trending markets (breakouts continue) and ranging markets (mean reversion at extremes with volume confirmation).
+# Timeframe: 4H balances trade frequency and signal quality, avoiding excessive fees while capturing significant moves.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -13,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data (HTF) once before loop
+    # Load daily data once before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -21,14 +25,6 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate 12-hour Donchian channels (20-period) for entry signals
-    donch_high = np.full(n, np.nan)
-    donch_low = np.full(n, np.nan)
-    if n >= 20:
-        for i in range(19, n):
-            donch_high[i] = np.max(high[i-19:i+1])
-            donch_low[i] = np.min(low[i-19:i+1])
     
     # Calculate daily ATR for volatility filter (14-period)
     tr = np.zeros(len(df_1d))
@@ -46,18 +42,10 @@ def generate_signals(prices):
         for i in range(14, len(df_1d)):
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Align daily ATR to 4H timeframe
+    atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate daily EMA200 for trend filter (1d)
-    ema200_1d = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 200:
-        ema200_1d[199] = np.mean(close_1d[:200])
-        for i in range(200, len(df_1d)):
-            ema200_1d[i] = (close_1d[i] * 2 + ema200_1d[i-1] * 198) / 200
-    
-    ema200_12h = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    
-    # Calculate volume moving average (20-period)
+    # Calculate volume moving average (20-period) for 4H
     vol_ma_20 = np.full(n, np.nan)
     if n >= 20:
         for i in range(19, n):
@@ -69,16 +57,13 @@ def generate_signals(prices):
     
     for i in range(200, n):
         # Skip if any critical data is NaN
-        if (np.isnan(atr_12h[i]) or
-            np.isnan(ema200_12h[i]) or
-            np.isnan(donch_high[i]) or
-            np.isnan(donch_low[i]) or
+        if (np.isnan(atr_4h[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Skip low volatility periods (ATR < 0.3% of price)
-        if atr_12h[i] < 0.003 * close[i]:
+        if atr_4h[i] < 0.003 * close[i]:
             signals[i] = 0.0
             continue
         
@@ -91,41 +76,31 @@ def generate_signals(prices):
         # Volume threshold: require significant spike
         vol_threshold = 2.0
         
-        # Calculate daily pivot levels based on previous day's range
+        # Get previous day's high and low for support/resistance
         prev_high = high_1d[i-1] if i > 0 else high_1d[0]
         prev_low = low_1d[i-1] if i > 0 else low_1d[0]
-        prev_close = close_1d[i-1] if i > 0 else close_1d[0]
-        prev_range = prev_high - prev_low
-        
-        # Camarilla-style pivot levels (R4/S4)
-        r4 = prev_close + (prev_range * 1.1 / 2)
-        s4 = prev_close - (prev_range * 1.1 / 2)
-        
-        # Align to 12h timeframe (no extra delay needed for daily pivot)
-        r4_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r4))[i]
-        s4_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s4))[i]
         
         if position == 0:
-            # Long: Price breaks above 12h Donchian high with volume confirmation and above daily EMA200
-            if close[i] > donch_high[i] and volume_ratio > vol_threshold and close[i] > ema200_12h[i]:
+            # Long: Price breaks above previous day's high with volume confirmation
+            if close[i] > prev_high and volume_ratio > vol_threshold:
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below 12h Donchian low with volume confirmation and below daily EMA200
-            elif close[i] < donch_low[i] and volume_ratio > vol_threshold and close[i] < ema200_12h[i]:
+            # Short: Price breaks below previous day's low with volume confirmation
+            elif close[i] < prev_low and volume_ratio > vol_threshold:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below 12h Donchian low OR below daily EMA200
-            if close[i] < donch_low[i] or close[i] < ema200_12h[i]:
+            # Exit: Price falls back below previous day's low
+            if close[i] < prev_low:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above 12h Donchian high OR above daily EMA200
-            if close[i] > donch_high[i] or close[i] > ema200_12h[i]:
+            # Exit: Price rises back above previous day's high
+            if close[i] > prev_high:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -133,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Donchian_EMA200_Volume"
-timeframe = "12h"
+name = "4H_1D_Volume_Spike_Breakout"
+timeframe = "4h"
 leverage = 1.0
