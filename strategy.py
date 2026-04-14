@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy combining weekly volatility-adjusted breakout levels with monthly RSI trend filter.
-# Uses dynamic support/resistance based on prior week's range adjusted by weekly ATR, providing adaptive breakout levels.
-# Long when price breaks above volatility-adjusted resistance with 4w RSI > 50 (uptrend) and volume confirmation.
-# Short when price breaks below volatility-adjusted support with 4w RSI < 50 (downtrend) and volume confirmation.
-# Exit when price returns to prior week's close or RSI crosses 50 in opposite direction.
-# Designed to work in both bull and bear markets by adapting to volatility and using RSI for trend confirmation.
-# Target: 15-25 trades/year per symbol (60-100 total over 4 years) to minimize fee drag.
+# Hypothesis: 4h strategy using 12h RSI momentum and 1d Donchian breakout with volume confirmation.
+# Long when price breaks above 1d Donchian high (20-period) AND 12h RSI > 60 (momentum) AND volume > 1.5x average.
+# Short when price breaks below 1d Donchian low (20-period) AND 12h RSI < 40 (momentum) AND volume > 1.5x average.
+# Exit when price returns to 1d midpoint or RSI crosses 50 in opposite direction.
+# Designed to capture momentum bursts in both bull and bear markets with volume confirmation to reduce false breakouts.
+# Target: 25-30 trades/year per symbol (100-120 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,44 +20,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for volatility-adjusted levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 1d data ONCE for Donchian channels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate True Range and ATR on weekly
-    tr1 = np.abs(high_1w[1:] - low_1w[1:])
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
+    # Calculate 1d Donchian channels (20-period)
+    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high + donch_low) / 2
     
-    atr_period = 14
-    atr_1w = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
-    
-    # Volatility-adjusted support/resistance: prior week's high/low ± 0.5 * ATR
-    var_resistance = np.roll(high_1w, 1) + 0.5 * np.roll(atr_1w, 1)
-    var_support = np.roll(low_1w, 1) - 0.5 * np.roll(atr_1w, 1)
-    var_resistance[0] = np.nan
-    var_support[0] = np.nan
-    
-    # Prior weekly close for exit condition
-    prior_close_1w = np.roll(close_1w, 1)
-    prior_close_1w[0] = np.nan
-    
-    # Load 4-week data ONCE for RSI trend filter
-    df_4w = get_htf_data(prices, '4w')
-    if len(df_4w) < 14:
+    # Load 12h data ONCE for RSI momentum
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 14:
         return np.zeros(n)
     
-    close_4w = df_4w['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate RSI(14) on 4-week
-    delta = np.diff(close_4w, prepend=np.nan)
+    # Calculate RSI(14) on 12h
+    delta = np.diff(close_12h, prepend=np.nan)
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     
@@ -66,13 +50,13 @@ def generate_signals(prices):
     avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     rs = avg_gain / avg_loss
     rs = np.where(avg_loss == 0, 100, rs)
-    rsi_4w = 100 - (100 / (1 + rs))
+    rsi_12h = 100 - (100 / (1 + rs))
     
-    # Align indicators to daily timeframe
-    var_resistance_aligned = align_htf_to_ltf(prices, df_1w, var_resistance)
-    var_support_aligned = align_htf_to_ltf(prices, df_1w, var_support)
-    prior_close_1w_aligned = align_htf_to_ltf(prices, df_1w, prior_close_1w)
-    rsi_4w_aligned = align_htf_to_ltf(prices, df_4w, rsi_4w)
+    # Align indicators to lower timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    donch_mid_aligned = align_htf_to_ltf(prices, df_1d, donch_mid)
+    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
     
     # Volume confirmation: 1.5x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -82,14 +66,14 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(20, 14)  # Need VAR and RSI
+    start = max(20, 14)  # Need Donchian and RSI
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(var_resistance_aligned[i]) or 
-            np.isnan(var_support_aligned[i]) or
-            np.isnan(prior_close_1w_aligned[i]) or
-            np.isnan(rsi_4w_aligned[i]) or
+        if (np.isnan(donch_high_aligned[i]) or 
+            np.isnan(donch_low_aligned[i]) or
+            np.isnan(donch_mid_aligned[i]) or
+            np.isnan(rsi_12h_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -97,38 +81,34 @@ def generate_signals(prices):
         # Volume confirmation
         volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
-        # Trend filter: RSI > 50 for uptrend, < 50 for downtrend
-        uptrend = rsi_4w_aligned[i] > 50
-        downtrend = rsi_4w_aligned[i] < 50
-        
         if position == 0:
-            # Look for volatility-adjusted breakouts
-            # Long: price breaks above VAR resistance AND uptrend
-            if (close[i] > var_resistance_aligned[i] and 
-                uptrend and 
+            # Look for Donchian breakouts with momentum confirmation
+            # Long: price breaks above Donchian high AND bullish momentum
+            if (close[i] > donch_high_aligned[i] and 
+                rsi_12h_aligned[i] > 60 and 
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below VAR support AND downtrend
-            elif (close[i] < var_support_aligned[i] and 
-                  downtrend and 
+            # Short: price breaks below Donchian low AND bearish momentum
+            elif (close[i] < donch_low_aligned[i] and 
+                  rsi_12h_aligned[i] < 40 and 
                   volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to prior weekly close or RSI crosses below 50
-            if (close[i] <= prior_close_1w_aligned[i] or 
-                rsi_4w_aligned[i] <= 50):
+            # Exit long: price returns to Donchian midpoint or RSI drops below 50
+            if (close[i] <= donch_mid_aligned[i] or 
+                rsi_12h_aligned[i] < 50):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to prior weekly close or RSI crosses above 50
-            if (close[i] >= prior_close_1w_aligned[i] or 
-                rsi_4w_aligned[i] >= 50):
+            # Exit short: price returns to Donchian midpoint or RSI rises above 50
+            if (close[i] >= donch_mid_aligned[i] or 
+                rsi_12h_aligned[i] > 50):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -136,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_VolatilityAdjustedBreakout_4wRSI_v1"
-timeframe = "1d"
+name = "4h_1dDonchian_12hRSI_Momentum_v1"
+timeframe = "4h"
 leverage = 1.0
