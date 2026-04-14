@@ -65,6 +65,15 @@ def generate_signals(prices):
     rsi_1d = 100 - (100 / (1 + rs))
     rsi_6h = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
+    # Calculate daily EMA200 for trend filter (1d)
+    ema200_1d = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 200:
+        ema200_1d[199] = np.mean(close_1d[:200])
+        for i in range(200, len(df_1d)):
+            ema200_1d[i] = (close_1d[i] * 2 + ema200_1d[i-1] * 198) / 200
+    
+    ema200_6h = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
@@ -73,7 +82,8 @@ def generate_signals(prices):
         # Skip if any critical data is NaN
         if (np.isnan(atr_6h[i]) or
             np.isnan(vol_ma_20[i]) or
-            np.isnan(rsi_6h[i])):
+            np.isnan(rsi_6h[i]) or
+            np.isnan(ema200_6h[i])):
             signals[i] = 0.0
             continue
         
