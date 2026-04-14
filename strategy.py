@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy combining 1w Ichimoku Cloud (Kijun/Tenkan) with 1d volume spikes.
-# Ichimoku provides trend direction and support/resistance (cloud) from weekly timeframe.
-# Volume spikes on 1d confirm institutional interest for breakout/breakdown entries.
-# Works in bull/bear markets: cloud acts as dynamic support/resistance, volume filters false breaks.
-# Weekly Ichimoku avoids whipsaw; daily volume ensures momentum behind moves.
+# Hypothesis: 12h strategy with 1d Donchian breakout + volume confirmation + KAMA trend filter
+# Donchian breakout captures strong directional moves in both bull and bear markets
+# Volume confirmation ensures breakouts are genuine and not false signals
+# KAMA adapts to market conditions, reducing whipsaw in choppy markets
+# Uses 1d Donchian channels for breakout direction, 1d volume spike for confirmation,
+# and 12h KAMA for trend filtering - aims for low trade frequency with high edge
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,97 +20,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE for Ichimoku
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate Ichimoku components (9, 26, 52)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    tenkan_sen = (pd.Series(high_1w).rolling(window=9, min_periods=9).max() + 
-                  pd.Series(low_1w).rolling(window=9, min_periods=9).min()) / 2
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    kijun_sen = (pd.Series(high_1w).rolling(window=26, min_periods=26).max() + 
-                 pd.Series(low_1w).rolling(window=26, min_periods=26).min()) / 2
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan_sen + kijun_sen) / 2)
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    senkou_b = ((pd.Series(high_1w).rolling(window=52, min_periods=52).max() + 
-                 pd.Series(low_1w).rolling(window=52, min_periods=52).min()) / 2)
-    # Chikou Span (Lagging Span): Close shifted 26 periods behind (not used for signals)
-    
-    # Align Ichimoku components to 6h timeframe (wait for weekly bar close)
-    tenkan_aligned = align_htf_to_ltf(prices, df_1w, tenkan_sen.values)
-    kijun_aligned = align_htf_to_ltf(prices, df_1w, kijun_sen.values)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1w, senkou_a.values, additional_delay_bars=26)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1w, senkou_b.values, additional_delay_bars=26)
-    
-    # Load 1d data ONCE for volume spike
+    # Load 1d data ONCE for Donchian channels and volume
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d volume spike (20-period average)
-    vol_1d = df_1d['volume'].values
-    vol_ma = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = vol_1d / vol_ma  # Current volume vs 20-period average
-    vol_ratio = np.where(vol_ma == 0, 1.0, vol_ratio)  # Avoid division by zero
+    # Calculate 1d Donchian channels (20 periods)
+    donch_len = 20
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align volume ratio to 6h timeframe
-    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
+    # Upper and lower bands
+    upper = pd.Series(high_1d).rolling(window=donch_len, min_periods=donch_len).max().values
+    lower = pd.Series(low_1d).rolling(window=donch_len, min_periods=donch_len).min().values
+    
+    # Align Donchian to 12h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
+    
+    # Calculate 1d volume average for spike detection
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)
+    
+    # Calculate 12h KAMA for trend filter
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, k=10))
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)
+    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
+    
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    
+    # KAMA calculation
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # Seed value
+    for i in range(10, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(100, 52 + 26)  # Ichimoku needs 52 periods + 26 shift
+    start = max(30, donch_len + 20)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
-            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
-            np.isnan(vol_ratio_aligned[i])):
+        if (np.isnan(upper_aligned[i]) or 
+            np.isnan(lower_aligned[i]) or 
+            np.isnan(vol_ma_aligned[i]) or
+            np.isnan(kama[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        vol = volume[i]
         
-        # Determine cloud boundaries and trend
-        upper_cloud = np.maximum(senkou_a_aligned[i], senkou_b_aligned[i])
-        lower_cloud = np.minimum(senkou_a_aligned[i], senkou_b_aligned[i])
-        above_cloud = price > upper_cloud
-        below_cloud = price < lower_cloud
-        in_cloud = (price >= lower_cloud) & (price <= upper_cloud)
-        
-        # Trend: Tenkan > Kijun = bullish, Tenkan < Kijun = bearish
-        bullish_trend = tenkan_aligned[i] > kijun_aligned[i]
-        bearish_trend = tenkan_aligned[i] < kijun_aligned[i]
-        
-        # Volume confirmation: significant spike (1.5x average)
-        volume_spike = vol_ratio_aligned[i] > 1.5
+        # Volume confirmation: current volume > 1.5x average
+        volume_spike = vol > 1.5 * vol_ma_aligned[i]
         
         if position == 0:
-            # Enter long: price above cloud + bullish trend + volume spike
-            if above_cloud and bullish_trend and volume_spike:
+            # Enter long: price breaks above upper Donchian band + volume spike + price > KAMA
+            if price > upper_aligned[i] and volume_spike and price > kama[i]:
                 position = 1
                 signals[i] = position_size
-            # Enter short: price below cloud + bearish trend + volume spike
-            elif below_cloud and bearish_trend and volume_spike:
+            # Enter short: price breaks below lower Donchian band + volume spike + price < KAMA
+            elif price < lower_aligned[i] and volume_spike and price < kama[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price falls below cloud OR trend turns bearish
-            if price < lower_cloud or not bullish_trend:
+            # Exit long: price crosses below lower Donchian band OR volume drops significantly
+            if price < lower_aligned[i] or vol < 0.5 * vol_ma_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price rises above cloud OR trend turns bullish
-            if price > upper_cloud or not bearish_trend:
+            # Exit short: price crosses above upper Donchian band OR volume drops significantly
+            if price > upper_aligned[i] or vol < 0.5 * vol_ma_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -117,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1wIchimoku_1dVolSpike_v1"
-timeframe = "6h"
+name = "12h_1dDonchian_Volume_KAMA_v1"
+timeframe = "12h"
 leverage = 1.0
