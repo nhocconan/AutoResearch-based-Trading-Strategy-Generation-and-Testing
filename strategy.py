@@ -13,72 +13,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for weekly pivot and EMA50
+    # Load 1d data for calculations
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate daily EMA50 for trend
-    ema_50_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 50:
-        ema_50_1d[49] = np.mean(close_1d[:50])
-        for i in range(50, len(close_1d)):
-            ema_50_1d[i] = (close_1d[i] * 2 + ema_50_1d[i-1] * 48) / 50
+    # Calculate daily EMA20 for trend
+    ema_20_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 20:
+        ema_20_1d[19] = np.mean(close_1d[:20])
+        for i in range(20, len(close_1d)):
+            ema_20_1d[i] = (close_1d[i] * 2 + ema_20_1d[i-1] * 18) / 20
     
-    # Calculate weekly pivot points (using prior week's data)
-    # We'll calculate weekly pivot from daily data: need to group by week
-    # For simplicity, use prior day's OHLC for daily pivot (common proxy)
-    pivot_point = np.full_like(close_1d, np.nan)
-    resistance1 = np.full_like(close_1d, np.nan)
-    support1 = np.full_like(close_1d, np.nan)
-    resistance2 = np.full_like(close_1d, np.nan)
-    support2 = np.full_like(close_1d, np.nan)
-    resistance3 = np.full_like(close_1d, np.nan)
-    support3 = np.full_like(close_1d, np.nan)
-    
-    if len(close_1d) >= 2:
+    # Calculate daily ATR(14) for volatility
+    atr_14_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 14:
+        tr = np.zeros(len(close_1d))
         for i in range(1, len(close_1d)):
-            # Prior day's OHLC
-            ph = high_1d[i-1]
-            pl = low_1d[i-1]
-            pc = close_1d[i-1]
-            
-            pp = (ph + pl + pc) / 3.0
-            r1 = 2 * pp - pl
-            s1 = 2 * pp - ph
-            r2 = pp + (ph - pl)
-            s2 = pp - (ph - pl)
-            r3 = ph + 2 * (pp - pl)
-            s3 = pl - 2 * (ph - pp)
-            
-            pivot_point[i] = pp
-            resistance1[i] = r1
-            support1[i] = s1
-            resistance2[i] = r2
-            support2[i] = s2
-            resistance3[i] = r3
-            support3[i] = s3
+            tr[i] = max(high_1d[i] - low_1d[i], 
+                       abs(high_1d[i] - close_1d[i-1]), 
+                       abs(low_1d[i] - close_1d[i-1]))
+        atr_14_1d[13] = np.mean(tr[1:14])
+        for i in range(14, len(close_1d)):
+            atr_14_1d[i] = (atr_14_1d[i-1] * 13 + tr[i]) / 14
     
-    # Align 1d indicators to 6h timeframe
-    ema_50_1d_6h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    pivot_point_6h = align_htf_to_ltf(prices, df_1d, pivot_point)
-    resistance1_6h = align_htf_to_ltf(prices, df_1d, resistance1)
-    support1_6h = align_htf_to_ltf(prices, df_1d, support1)
-    resistance2_6h = align_htf_to_ltf(prices, df_1d, resistance2)
-    support2_6h = align_htf_to_ltf(prices, df_1d, support2)
-    resistance3_6h = align_htf_to_ltf(prices, df_1d, resistance3)
-    support3_6h = align_htf_to_ltf(prices, df_1d, support3)
+    # Calculate Donchian channel (20-day)
+    upper_dc = np.full_like(close_1d, np.nan)
+    lower_dc = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 20:
+        for i in range(19, len(close_1d)):
+            upper_dc[i] = np.max(high_1d[i-19:i+1])
+            lower_dc[i] = np.min(low_1d[i-19:i+1])
     
-    # Load 6m data for entry timing (volume confirmation)
-    # Since we're on 6h timeframe, we use the same data but check volume spike
-    vol_ma_20 = np.full_like(volume, np.nan)
-    if len(volume) >= 20:
-        for i in range(19, len(volume)):
-            vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    # Align 1d indicators to 12h timeframe
+    ema_20_1d_12h = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    atr_14_1d_12h = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    upper_dc_12h = align_htf_to_ltf(prices, df_1d, upper_dc)
+    lower_dc_12h = align_htf_to_ltf(prices, df_1d, lower_dc)
+    
+    # Calculate 12h volume MA for confirmation
+    vol_ma_10 = np.full_like(volume, np.nan)
+    if len(volume) >= 10:
+        for i in range(9, len(volume)):
+            vol_ma_10[i] = np.mean(volume[i-9:i+1])
     
     signals = np.zeros(n)
     position = 0
@@ -86,51 +68,47 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_50_1d_6h[i]) or 
-            np.isnan(pivot_point_6h[i]) or 
-            np.isnan(resistance1_6h[i]) or 
-            np.isnan(support1_6h[i]) or
-            np.isnan(resistance2_6h[i]) or 
-            np.isnan(support2_6h[i]) or
-            np.isnan(resistance3_6h[i]) or 
-            np.isnan(support3_6h[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_20_1d_12h[i]) or 
+            np.isnan(atr_14_1d_12h[i]) or
+            np.isnan(upper_dc_12h[i]) or 
+            np.isnan(lower_dc_12h[i]) or
+            np.isnan(vol_ma_10[i])):
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 6h volume vs 20-period average
-        if vol_ma_20[i] <= 0:
+        # Volume ratio: current 12h volume vs 10-period average
+        if vol_ma_10[i] <= 0:
             volume_ratio = 0
         else:
-            volume_ratio = volume[i] / vol_ma_20[i]
+            volume_ratio = volume[i] / vol_ma_10[i]
         
         if position == 0:
-            # Long: Price crosses above S3 with volume spike and above daily EMA50
-            if (close[i] > support3_6h[i] and
-                close[i] > ema_50_1d_6h[i] and
-                volume_ratio > 2.0):
+            # Long: Price breaks above upper Donchian with volume and above EMA20
+            if (close[i] > upper_dc_12h[i] and
+                close[i] > ema_20_1d_12h[i] and
+                volume_ratio > 1.5):
                 position = 1
                 signals[i] = position_size
-            # Short: Price crosses below R3 with volume spike and below daily EMA50
-            elif (close[i] < resistance3_6h[i] and
-                  close[i] < ema_50_1d_6h[i] and
-                  volume_ratio > 2.0):
+            # Short: Price breaks below lower Donchian with volume and below EMA20
+            elif (close[i] < lower_dc_12h[i] and
+                  close[i] < ema_20_1d_12h[i] and
+                  volume_ratio > 1.5):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price crosses below S1 or below daily EMA50
-            if (close[i] < support1_6h[i] or 
-                close[i] < ema_50_1d_6h[i]):
+            # Exit: Price falls below lower Donchian or below EMA20
+            if (close[i] < lower_dc_12h[i] or 
+                close[i] < ema_20_1d_12h[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price crosses above R1 or above daily EMA50
-            if (close[i] > resistance1_6h[i] or 
-                close[i] > ema_50_1d_6h[i]):
+            # Exit: Price rises above upper Donchian or above EMA20
+            if (close[i] > upper_dc_12h[i] or 
+                close[i] > ema_20_1d_12h[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -138,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Pivot_S3R3_EMA50_Volume"
-timeframe = "6h"
+name = "12h_1d_Donchian20_EMA20_Volume"
+timeframe = "12h"
 leverage = 1.0
