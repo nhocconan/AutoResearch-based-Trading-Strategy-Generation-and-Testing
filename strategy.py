@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -33,7 +34,7 @@ def generate_signals(prices):
     tr_series = pd.Series(tr)
     atr = tr_series.rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 6-hour Donchian channels (20-period)
+    # Calculate 6-hour Donchian channels (20-period) - breakout levels
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_high = high_series.rolling(window=20, min_periods=20).max().shift(1).values
@@ -66,13 +67,17 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
+    # Calculate 1-day 20-period EMA for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_20_1d = close_1d_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25
     
     for i in range(50, n):
         # Skip if any critical data is NaN
-        if np.isnan(atr[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(adx[i]):
+        if np.isnan(atr[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(adx[i]) or np.isnan(ema_20_1d[i]):
             continue
         
         # Get previous day's data (1d index)
@@ -111,37 +116,41 @@ def generate_signals(prices):
                 vol_percentile = np.percentile(tr[max(0, i-50):i+1], 30)
                 vol_filter = atr[i] > vol_percentile
             
-            # Trend filter: daily ADX > 25
+            # Trend filter: daily ADX > 25 AND price above/below daily EMA20
             trend_filter = adx[i] > 25
             
             if position == 0:
                 # Long: Price breaks above R3 with volume, volatility, and trend filter
+                # Additional filter: price above daily EMA20 for long bias
                 if (close[i] > r3_1d and close[i-1] <= r3_1d and 
                     volume[i] > vol_ma * 1.5 and 
-                    close[i] > donchian_high[i] and  # Additional breakout confirmation
-                    vol_filter and trend_filter):
+                    close[i] > donchian_high[i] and  # Breakout confirmation
+                    vol_filter and trend_filter and 
+                    close[i] > ema_20_1d[i]):  # Above daily EMA20
                     position = 1
                     signals[i] = position_size
                 # Short: Price breaks below S3 with volume, volatility, and trend filter
+                # Additional filter: price below daily EMA20 for short bias
                 elif (close[i] < s3_1d and close[i-1] >= s3_1d and 
                       volume[i] > vol_ma * 1.5 and 
-                      close[i] < donchian_low[i] and  # Additional breakdown confirmation
-                      vol_filter and trend_filter):
+                      close[i] < donchian_low[i] and  # Breakdown confirmation
+                      vol_filter and trend_filter and 
+                      close[i] < ema_20_1d[i]):  # Below daily EMA20
                     position = -1
                     signals[i] = -position_size
             elif position == 1:
-                # Exit: Price breaks below S4 (strong reversal) or volatility drops significantly
-                if close[i] < s4_1d:
+                # Exit: Price breaks below S4 (strong reversal) or drops below daily EMA20
+                if close[i] < s4_1d or close[i] < ema_20_1d[i]:
                     position = 0
                     signals[i] = 0.0
             elif position == -1:
-                # Exit: Price breaks above R4 (strong reversal)
-                if close[i] > r4_1d:
+                # Exit: Price breaks above R4 (strong reversal) or rises above daily EMA20
+                if close[i] > r4_1d or close[i] > ema_20_1d[i]:
                     position = 0
                     signals[i] = 0.0
     
     return signals
 
-name = "6h_Pivot_S3R3_ADX_Trend_Filter"
+name = "6h_Pivot_S3R3_ADX_EMA20_Filter"
 timeframe = "6h"
 leverage = 1.0
