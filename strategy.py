@@ -11,13 +11,11 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Load weekly data once for regime and pivot levels
+    # Load weekly data once for regime detection
     df_1w = get_htf_data(prices, '1w')
-    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 2 or len(df_1d) < 2:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
     # Calculate weekly ATR for regime detection (trending vs ranging)
@@ -34,18 +32,6 @@ def generate_signals(prices):
     
     for i in range(14, len(tr_1w)):
         atr_1w[i] = np.nanmean(tr_1w[i-13:i+1])
-    
-    # Calculate daily pivot levels (resistance/support)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate pivot points and key levels
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
     
     # Calculate weekly trend direction using price vs 20-period EMA
     ema_20_1w = np.full(len(close_1w), np.nan)
@@ -65,10 +51,6 @@ def generate_signals(prices):
     # Create arrays for alignment
     atr_1w_arr = atr_1w
     weekly_trend_arr = weekly_trend
-    r1_arr = r1
-    s1_arr = s1
-    r2_arr = r2
-    s2_arr = s2
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -78,12 +60,8 @@ def generate_signals(prices):
         # Get aligned weekly data
         atr_w = align_htf_to_ltf(prices, df_1w, atr_1w_arr)[i]
         trend_w = align_htf_to_ltf(prices, df_1w, weekly_trend_arr)[i]
-        r1_d = align_htf_to_ltf(prices, df_1d, r1_arr)[i]
-        s1_d = align_htf_to_ltf(prices, df_1d, s1_arr)[i]
-        r2_d = align_htf_to_ltf(prices, df_1d, r2_arr)[i]
-        s2_d = align_htf_to_ltf(prices, df_1d, s2_arr)[i]
         
-        if np.isnan(atr_w) or np.isnan(trend_w) or np.isnan(r1_d) or np.isnan(s1_d) or np.isnan(r2_d) or np.isnan(s2_d):
+        if np.isnan(atr_w) or np.isnan(trend_w):
             continue
         
         # Volatility filter: only trade when volatility is above average
@@ -91,27 +69,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Weekly uptrend + price above S1 (support) with rejection
-            if trend_w == 1 and close[i] > s1_d and low[i] <= s1_d * 1.001:
+            # Long: Weekly uptrend + price above prior close
+            if trend_w == 1 and close[i] > close[i-1]:
                 position = 1
                 signals[i] = position_size
-            # Short: Weekly downtrend + price below R1 (resistance) with rejection
-            elif trend_w == -1 and close[i] < r1_d and high[i] >= r1_d * 0.999:
+            # Short: Weekly downtrend + price below prior close
+            elif trend_w == -1 and close[i] < close[i-1]:
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
-            # Exit: Weekly trend turns down OR price reaches R2 (resistance target)
-            if trend_w == -1 or close[i] >= r2_d:
+            # Exit: Weekly trend turns down OR price closes below prior close
+            if trend_w == -1 or close[i] < close[i-1]:
                 position = 0
                 signals[i] = 0.0
         elif position == -1:
-            # Exit: Weekly trend turns up OR price reaches S2 (support target)
-            if trend_w == 1 or close[i] <= s2_d:
+            # Exit: Weekly trend turns up OR price closes above prior close
+            if trend_w == 1 or close[i] > close[i-1]:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "1d_WeeklyTrend_Pivot_Rejection_v1"
+name = "1d_WeeklyTrend_Close_Momentum_v1"
 timeframe = "1d"
 leverage = 1.0
