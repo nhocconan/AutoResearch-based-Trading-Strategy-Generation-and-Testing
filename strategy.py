@@ -38,9 +38,9 @@ def generate_signals(prices):
         for i in range(14, len(df_1d)):
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    atr_6h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Volume spike detection (20-period average on 6h)
+    # Volume spike detection (20-period average on 4h)
     vol_ma_20 = np.full_like(volume, np.nan)
     if len(volume) >= 20:
         for i in range(19, len(volume)):
@@ -53,9 +53,9 @@ def generate_signals(prices):
         for i in range(200, len(df_1d)):
             ema200_1d[i] = (close_1d[i] * 2 + ema200_1d[i-1] * 198) / 200
     
-    ema200_6h = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    ema200_4h = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Calculate 6h Donchian channels (20-period)
+    # Calculate 4h Donchian channels (20-period)
     donch_high = np.full(n, np.nan)
     donch_low = np.full(n, np.nan)
     if n >= 20:
@@ -69,20 +69,20 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any critical data is NaN
-        if (np.isnan(atr_6h[i]) or
+        if (np.isnan(atr_4h[i]) or
             np.isnan(vol_ma_20[i]) or
-            np.isnan(ema200_6h[i]) or
+            np.isnan(ema200_4h[i]) or
             np.isnan(donch_high[i]) or
             np.isnan(donch_low[i])):
             signals[i] = 0.0
             continue
         
         # Skip low volatility periods (ATR < 0.5% of price)
-        if atr_6h[i] < 0.005 * close[i]:
+        if atr_4h[i] < 0.005 * close[i]:
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 6h volume vs 20-period average
+        # Volume ratio: current 4h volume vs 20-period average
         if vol_ma_20[i] <= 0:
             volume_ratio = 0
         else:
@@ -103,33 +103,33 @@ def generate_signals(prices):
         r3 = prev_close + (prev_range * 1.1 / 4)
         s3 = prev_close - (prev_range * 1.1 / 4)
         
-        # Align to 6h timeframe
-        r4_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r4))[i]
-        s4_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s4))[i]
-        r3_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r3))[i]
-        s3_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i]
+        # Align to 4h timeframe
+        r4_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r4))[i]
+        s4_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s4))[i]
+        r3_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r3))[i]
+        s3_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i]
         
         if position == 0:
             # Long: Price breaks above Donchian high with volume confirmation and above daily EMA200
-            if close[i] > donch_high[i] and volume_ratio > vol_threshold and close[i] > ema200_6h[i]:
+            if close[i] > donch_high[i] and volume_ratio > vol_threshold and close[i] > ema200_4h[i]:
                 position = 1
                 signals[i] = position_size
             # Short: Price breaks below Donchian low with volume confirmation and below daily EMA200
-            elif close[i] < donch_low[i] and volume_ratio > vol_threshold and close[i] < ema200_6h[i]:
+            elif close[i] < donch_low[i] and volume_ratio > vol_threshold and close[i] < ema200_4h[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Exit: Price falls back below Donchian low OR below daily EMA200
-            if close[i] < donch_low[i] or close[i] < ema200_6h[i]:
+            if close[i] < donch_low[i] or close[i] < ema200_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
             # Exit: Price rises back above Donchian high OR above daily EMA200
-            if close[i] > donch_high[i] or close[i] > ema200_6h[i]:
+            if close[i] > donch_high[i] or close[i] > ema200_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -137,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Donchian_EMA200_Volume"
-timeframe = "6h"
+name = "4h_1d_Donchian_EMA200_Volume"
+timeframe = "4h"
 leverage = 1.0
