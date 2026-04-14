@@ -26,14 +26,14 @@ def generate_signals(prices):
     upper_dc_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     lower_dc_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Daily ATR (14) for stop sizing
+    # Daily ATR (14)
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
     tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Daily volatility regime filter: ATR ratio
+    # Daily volatility regime filter: ATR ratio (ATR / 50-period MA of ATR)
     atr_ma_50_1d = pd.Series(atr_14_1d).rolling(window=50, min_periods=50).mean().values
     atr_ratio_1d = atr_14_1d / np.where(atr_ma_50_1d > 0, atr_ma_50_1d, np.nan)
     
