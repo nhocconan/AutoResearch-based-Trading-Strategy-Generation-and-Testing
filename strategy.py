@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 12h RSI momentum and 1d Donchian breakout with volume confirmation.
-# Long when price breaks above 1d Donchian high (20-period) AND 12h RSI > 60 (momentum) AND volume > 1.5x average.
-# Short when price breaks below 1d Donchian low (20-period) AND 12h RSI < 40 (momentum) AND volume > 1.5x average.
-# Exit when price returns to 1d midpoint or RSI crosses 50 in opposite direction.
-# Designed to capture momentum bursts in both bull and bear markets with volume confirmation to reduce false breakouts.
-# Target: 25-30 trades/year per symbol (100-120 total over 4 years) to minimize fee drag.
+# Hypothesis: 6h strategy using 1-day Volume Weighted Average Price (VWAP) as dynamic support/resistance
+# with 1-week RSI trend filter and volume confirmation. VWAP acts as institutional reference point
+# where price tends to revert or break with institutional flow. Long when price crosses above VWAP
+# in uptrend (1w RSI > 50) with volume confirmation, short when below VWAP in downtrend (1w RSI < 50).
+# Exit when price crosses back across VWAP or RSI flips. Designed to work in both bull/bear markets
+# by using VWAP as dynamic equilibrium and RSI for trend filter. Target: 15-25 trades/year per symbol.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,29 +20,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for Donchian channels
+    # Load 1d data ONCE for VWAP calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Donchian channels (20-period)
-    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2
+    # Calculate typical price and VWAP for each 1d bar
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
+    vwap_numerator = typical_price_1d * volume_1d
+    vwap_denominator = volume_1d
     
-    # Load 12h data ONCE for RSI momentum
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 14:
+    # Cumulative VWAP (resets daily)
+    cum_vwap_num = np.cumsum(vwap_numerator)
+    cum_vwap_den = np.cumsum(vwap_denominator)
+    vwap_1d = np.divide(cum_vwap_num, cum_vwap_den, out=np.full_like(cum_vwap_num, np.nan), where=cum_vwap_den!=0)
+    
+    # Load 1w data ONCE for RSI trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate RSI(14) on 12h
-    delta = np.diff(close_12h, prepend=np.nan)
+    # Calculate RSI(14) on 1w
+    delta = np.diff(close_1w, prepend=np.nan)
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     
@@ -50,15 +56,13 @@ def generate_signals(prices):
     avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     rs = avg_gain / avg_loss
     rs = np.where(avg_loss == 0, 100, rs)
-    rsi_12h = 100 - (100 / (1 + rs))
+    rsi_1w = 100 - (100 / (1 + rs))
     
     # Align indicators to lower timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
-    donch_mid_aligned = align_htf_to_ltf(prices, df_1d, donch_mid)
-    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
-    # Volume confirmation: 1.5x average volume
+    # Volume confirmation: 1.3x average volume (slightly lower to avoid whipsaws)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -66,49 +70,55 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(20, 14)  # Need Donchian and RSI
+    start = max(20, 14)  # Need volume MA and RSI
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or
-            np.isnan(donch_mid_aligned[i]) or
-            np.isnan(rsi_12h_aligned[i]) or
+        if (np.isnan(vwap_1d_aligned[i]) or 
+            np.isnan(rsi_1w_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
-        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
+        volume_confirmed = volume[i] > 1.3 * vol_ma[i]
+        
+        # Trend filter: RSI > 50 for uptrend, < 50 for downtrend
+        uptrend = rsi_1w_aligned[i] > 50
+        downtrend = rsi_1w_aligned[i] < 50
         
         if position == 0:
-            # Look for Donchian breakouts with momentum confirmation
-            # Long: price breaks above Donchian high AND bullish momentum
-            if (close[i] > donch_high_aligned[i] and 
-                rsi_12h_aligned[i] > 60 and 
+            # Look for VWAP crossovers with confirmation
+            # Long: price crosses above VWAP AND uptrend AND volume
+            if (close[i] > vwap_1d_aligned[i] and 
+                close[i-1] <= vwap_1d_aligned[i-1] and  # crossed above this bar
+                uptrend and 
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below Donchian low AND bearish momentum
-            elif (close[i] < donch_low_aligned[i] and 
-                  rsi_12h_aligned[i] < 40 and 
+            # Short: price crosses below VWAP AND downtrend AND volume
+            elif (close[i] < vwap_1d_aligned[i] and 
+                  close[i-1] >= vwap_1d_aligned[i-1] and  # crossed below this bar
+                  downtrend and 
                   volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to Donchian midpoint or RSI drops below 50
-            if (close[i] <= donch_mid_aligned[i] or 
-                rsi_12h_aligned[i] < 50):
+            # Exit long: price crosses back below VWAP or RSI flips to downtrend
+            if (close[i] < vwap_1d_aligned[i] and 
+                close[i-1] >= vwap_1d_aligned[i-1]) or \
+               rsi_1w_aligned[i] <= 50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to Donchian midpoint or RSI rises above 50
-            if (close[i] >= donch_mid_aligned[i] or 
-                rsi_12h_aligned[i] > 50):
+            # Exit short: price crosses back above VWAP or RSI flips to uptrend
+            if (close[i] > vwap_1d_aligned[i] and 
+                close[i-1] <= vwap_1d_aligned[i-1]) or \
+               rsi_1w_aligned[i] >= 50:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -116,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dDonchian_12hRSI_Momentum_v1"
-timeframe = "4h"
+name = "6h_VWAP_1wRSI_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
