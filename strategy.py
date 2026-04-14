@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian breakout with 1w trend filter and volume confirmation
-# Long when price breaks above Donchian(20) upper band AND 1w EMA(21) is rising AND volume > 1.5x average
-# Short when price breaks below Donchian(20) lower band AND 1w EMA(21) is falling AND volume > 1.5x average
-# Exit when price crosses back through Donchian middle (mean reversion) or opposite breakout occurs
-# Donchian channels capture breakouts; 1w EMA ensures higher timeframe trend alignment; volume confirms institutional interest
-# Designed to work in both bull and bear markets by following the dominant trend on 1w timeframe
-# Target: 30-100 total trades over 4 years (7-25/year) to balance opportunity and cost
+# Hypothesis: 6h Camarilla pivot breakout with 12h trend filter and volume confirmation
+# Long when price breaks above Camarilla R4 AND 12h EMA(21) is rising AND volume > 1.5x average
+# Short when price breaks below Camarilla S4 AND 12h EMA(21) is falling AND volume > 1.5x average
+# Exit when price crosses back through Camarilla pivot point (mean reversion) or opposite breakout
+# Camarilla levels from 1d provide intraday support/resistance; 12h EMA ensures intermediate trend alignment; volume confirms institutional interest
+# Designed to work in both bull and bear markets by following the dominant trend on 12h timeframe
+# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,16 +21,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Load 12h data ONCE before loop for trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate Donchian channels on 1d (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max()
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min()
-    donchian_mid = (highest_high + lowest_low) / 2
+    # Calculate Camarilla levels from 1d (using previous day's high, low, close)
+    # We need to shift by 1 to avoid look-ahead: use previous day's data for today's levels
+    prev_high = pd.Series(high).shift(1)
+    prev_low = pd.Series(low).shift(1)
+    prev_close = pd.Series(close).shift(1)
     
-    # Calculate EMA on 1w (21-period) for trend filter
-    ema_21 = pd.Series(df_1w['close']).ewm(span=21, adjust=False, min_periods=21).mean()
+    # Camarilla levels calculation
+    R4 = prev_close + ((prev_high - prev_low) * 1.1 / 2)
+    R3 = prev_close + ((prev_high - prev_low) * 1.1 / 4)
+    R2 = prev_close + ((prev_high - prev_low) * 1.1 / 6)
+    R1 = prev_close + ((prev_high - prev_low) * 1.1 / 12)
+    PP = (prev_high + prev_low + prev_close) / 3
+    S1 = prev_close - ((prev_high - prev_low) * 1.1 / 12)
+    S2 = prev_close - ((prev_high - prev_low) * 1.1 / 6)
+    S3 = prev_close - ((prev_high - prev_low) * 1.1 / 4)
+    S4 = prev_close - ((prev_high - prev_low) * 1.1 / 2)
+    
+    # Calculate EMA on 12h (21-period) for trend filter
+    ema_21 = pd.Series(df_12h['close']).ewm(span=21, adjust=False, min_periods=21).mean()
     
     # Calculate volume average for confirmation (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -44,14 +56,15 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or 
-            np.isnan(donchian_mid[i])):
+        if (np.isnan(R4.iloc[i]) or 
+            np.isnan(S4.iloc[i]) or 
+            np.isnan(PP.iloc[i]) or
+            np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
-        # Get EMA values aligned to 1d timeframe
-        ema_21_aligned = align_htf_to_ltf(prices, df_1w, ema_21.values)
+        # Get EMA values aligned to 6h timeframe
+        ema_21_aligned = align_htf_to_ltf(prices, df_12h, ema_21.values)
         ema_val = ema_21_aligned[i]
         ema_prev = ema_21_aligned[i-1]
         
@@ -62,28 +75,28 @@ def generate_signals(prices):
         vol_threshold = vol_avg[i] * 1.5
         
         if position == 0:
-            # Long setup: price breaks above Donchian upper AND 1w EMA rising AND volume confirmation
-            if (high_val > highest_high[i] and ema_val > ema_prev and vol > vol_threshold):
+            # Long setup: price breaks above Camarilla R4 AND 12h EMA rising AND volume confirmation
+            if (high_val > R4.iloc[i] and ema_val > ema_prev and vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: price breaks below Donchian lower AND 1w EMA falling AND volume confirmation
-            elif (low_val < lowest_low[i] and ema_val < ema_prev and vol > vol_threshold):
+            # Short setup: price breaks below Camarilla S4 AND 12h EMA falling AND volume confirmation
+            elif (low_val < S4.iloc[i] and ema_val < ema_prev and vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below Donchian middle OR opposite breakout
-            if (close_val < donchian_mid[i] or 
-                low_val < lowest_low[i]):
+            # Exit long: price crosses below Camarilla pivot point OR opposite breakout
+            if (close_val < PP.iloc[i] or 
+                low_val < S4.iloc[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above Donchian middle OR opposite breakout
-            if (close_val > donchian_mid[i] or 
-                high_val > highest_high[i]):
+            # Exit short: price crosses above Camarilla pivot point OR opposite breakout
+            if (close_val > PP.iloc[i] or 
+                high_val > R4.iloc[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -91,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian_1wEMA_Volume"
-timeframe = "1d"
+name = "6h_Camarilla_12hEMA_Volume"
+timeframe = "6h"
 leverage = 1.0
