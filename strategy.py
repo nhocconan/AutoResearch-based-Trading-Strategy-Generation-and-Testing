@@ -3,83 +3,70 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian Breakout + 12h Volume Spike + ADX Trend Filter
-# Uses Donchian channel breakouts with 12h volume confirmation and ADX trend filter
-# 12h volume filter ensures we only trade on significant volume spikes, reducing false breakouts
-# ADX > 25 ensures we only trade in trending markets, avoiding false breakouts in ranging conditions
-# Works in bull/bear by capturing breakouts in the direction of the trend
-# Target: 75-200 total trades over 4 years (19-50/year)
+# Hypothesis: 1h EMA Crossover with 4h Trend Filter and 1d Volume Regime
+# Uses fast/slow EMA crossovers on 1h for entry timing, filtered by 4h EMA trend direction
+# and 1d volume regime (high volume = active market). Avoids low-volume, choppy periods.
+# Works in bull/bear by only taking trades in direction of higher timeframe trend.
+# Target: 60-150 total trades over 4 years (15-37/year) with session filter (08-20 UTC)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    # Load HTF data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate indicators on HTF data
+    # 4h EMA for trend direction (20-period)
+    ema_4h = pd.Series(df_4h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    
+    # 1d average volume for regime filter (20-period)
+    vol_1d = pd.Series(df_1d['volume'].values)
+    avg_vol_1d = vol_1d.rolling(window=20, min_periods=20).mean().values
+    avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d)
+    
+    # 1h price data
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period) on 4h data
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # 1h EMA for entry signals (9 and 21 period)
+    ema_fast = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema_slow = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # ADX calculation (14-period) on 4h data
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
-    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
-    
-    # Directional Indicators
-    di_plus = np.where(tr14 != 0, 100 * dm_plus14 / tr14, 0)
-    di_minus = np.where(tr14 != 0, 100 * dm_minus14 / tr14, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # 12h Volume confirmation: volume > 2x average volume (20-period)
-    df_12h = get_htf_data(prices, '12h')
-    vol_12h = df_12h['volume'].values
-    avg_vol_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().shift(1).values
-    vol_12h_avg_aligned = align_htf_to_ltf(prices, df_12h, avg_vol_12h)
+    # Session filter: 08-20 UTC (pre-compute for efficiency)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position size
+    position_size = 0.20  # 20% position size
     
     # Start after enough data for calculations
-    start = 35  # for ADX calculation
+    start = 30  # for EMA calculations
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(adx[i]) or np.isnan(vol_12h_avg_aligned[i])):
+        if (np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or
+            np.isnan(ema_4h_aligned[i]) or np.isnan(avg_vol_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        vol = volume[i]
+        # Apply session filter
+        if not in_session[i]:
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
+            continue
         
-        # Trend filter: only trade when ADX > 25 (trending market)
-        if adx[i] < 25:
-            # In weak trend/ranging market, stay flat
+        # Volume regime filter: only trade when 1d volume > average volume
+        if volume[i] < 0.5 * avg_vol_1d_aligned[i]:  # Avoid very low volume periods
             if position != 0:
                 position = 0
                 signals[i] = 0.0
@@ -88,26 +75,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian high with 12h volume filter
-            if price > donchian_high[i] and vol > 2.0 * vol_12h_avg_aligned[i]:
+            # Long: fast EMA crosses above slow EMA AND price above 4h EMA (uptrend)
+            if ema_fast[i] > ema_slow[i] and close[i] > ema_4h_aligned[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below Donchian low with 12h volume filter
-            elif price < donchian_low[i] and vol > 2.0 * vol_12h_avg_aligned[i]:
+            # Short: fast EMA crosses below slow EMA AND price below 4h EMA (downtrend)
+            elif ema_fast[i] < ema_slow[i] and close[i] < ema_4h_aligned[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below Donchian low
-            if price < donchian_low[i]:
+            # Exit long: fast EMA crosses below slow EMA
+            if ema_fast[i] < ema_slow[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above Donchian high
-            if price > donchian_high[i]:
+            # Exit short: fast EMA crosses above slow EMA
+            if ema_fast[i] > ema_slow[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -115,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_12hVolume_ADX_Filter"
-timeframe = "4h"
+name = "1h_EMA_Cross_4hTrend_1dVolRegime"
+timeframe = "1h"
 leverage = 1.0
