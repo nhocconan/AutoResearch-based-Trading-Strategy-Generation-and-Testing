@@ -21,20 +21,19 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 34-period EMA for trend (daily)
-    if len(close_1d) < 34:
+    # Calculate 20-period EMA for trend (daily)
+    if len(close_1d) < 20:
         return np.zeros(n)
     
-    ema34_1d = np.full_like(close_1d, np.nan)
-    alpha = 2 / (34 + 1)
-    ema34_1d[0] = close_1d[0]
+    ema20_1d = np.full_like(close_1d, np.nan)
+    alpha = 2 / (20 + 1)
+    ema20_1d[0] = close_1d[0]
     for i in range(1, len(close_1d)):
-        ema34_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema34_1d[i-1]
+        ema20_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema20_1d[i-1]
     
     # Align EMA to 12h timeframe
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
     # Calculate 14-period RSI for momentum (daily)
     if len(close_1d) < 14:
@@ -66,31 +65,14 @@ def generate_signals(prices):
     # Align RSI to 12h timeframe
     rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
     
-    # Calculate 14-period ATR for volatility (daily)
-    tr = np.zeros_like(high_1d)
-    for i in range(1, len(high_1d)):
-        tr[i] = max(high_1d[i] - low_1d[i],
-                   abs(high_1d[i] - high_1d[i-1]),
-                   abs(low_1d[i] - low_1d[i-1]))
-    
-    atr_14 = np.full_like(high_1d, np.nan)
-    if len(high_1d) >= 14:
-        atr_14[13] = np.mean(tr[1:14])
-        for i in range(14, len(high_1d)):
-            atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
-    
-    # Align ATR to 12h timeframe
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # Position size: 25% of capital
     
     for i in range(100, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(rsi_14_aligned[i]) or
-            np.isnan(atr_14_aligned[i])):
+        if (np.isnan(ema20_1d_aligned[i]) or 
+            np.isnan(rsi_14_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -105,14 +87,14 @@ def generate_signals(prices):
             volume_ratio = volume[i] / vol_ma_14[i]
         
         if position == 0:
-            # Long: Price above EMA34 + RSI > 50 + volume surge
-            if (close[i] > ema34_1d_aligned[i] and
+            # Long: Price above EMA20 + RSI > 50 + volume surge
+            if (close[i] > ema20_1d_aligned[i] and
                 rsi_14_aligned[i] > 50 and
                 volume_ratio > 3.0):
                 position = 1
                 signals[i] = position_size
-            # Short: Price below EMA34 + RSI < 50 + volume surge
-            elif (close[i] < ema34_1d_aligned[i] and
+            # Short: Price below EMA20 + RSI < 50 + volume surge
+            elif (close[i] < ema20_1d_aligned[i] and
                   rsi_14_aligned[i] < 50 and
                   volume_ratio > 3.0):
                 position = -1
@@ -120,15 +102,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Price crosses below EMA34
-            if close[i] < ema34_1d_aligned[i]:
+            # Exit long: Price crosses below EMA20
+            if close[i] < ema20_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Price crosses above EMA34
-            if close[i] > ema34_1d_aligned[i]:
+            # Exit short: Price crosses above EMA20
+            if close[i] > ema20_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -136,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_EMA_RSI_Volume_v1"
+name = "12h_1d_EMA_RSI_Volume_v2"
 timeframe = "12h"
 leverage = 1.0
