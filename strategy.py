@@ -3,18 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Camarilla pivot levels with daily trend filter and volume confirmation
-# Long when price breaks above Camarilla R4 (bullish breakout) AND price > daily EMA200 AND volume > 1.5x 20-period average
-# Short when price breaks below Camarilla S4 (bearish breakdown) AND price < daily EMA200 AND volume > 1.5x 20-period average
-# Exit when price crosses back to the Camarilla Pivot point (mean reversion to equilibrium)
-# Camarilla levels provide precise intraday support/resistance based on prior day's range
-# EMA200 filter ensures trading with the higher timeframe trend
-# Volume confirmation avoids false breakouts
-# Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost
+# Hypothesis: 1-day Bollinger Band squeeze breakout with 1-week trend filter (EMA50) and volume confirmation
+# Long when price breaks above upper BB AND price > weekly EMA50 AND volume > 2x 20-period average
+# Short when price breaks below lower BB AND price < weekly EMA50 AND volume > 2x 20-period average
+# Exit when price crosses back inside the Bollinger Band (opposite band)
+# This captures explosive moves after low volatility periods with volume confirmation and trend alignment
+# Target: 30-100 total trades over 4 years (7-25/year) to balance opportunity and cost
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,29 +20,20 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for Camarilla calculation and EMA200
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate Camarilla levels from previous day's range
-    # R4 = Close + 1.5 * (High - Low)
-    # S4 = Close - 1.5 * (High - Low)
-    # Pivot = (High + Low + Close) / 3
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Bollinger Bands on 1d (20-period, 2 std dev)
+    close_series = pd.Series(close)
+    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_series.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
     
-    camarilla_r4 = close_1d + 1.5 * (high_1d - low_1d)
-    camarilla_s4 = close_1d - 1.5 * (high_1d - low_1d)
-    camarilla_pivot = (high_1d + low_1d + close_1d) / 3
-    
-    # Align Camarilla levels to 4h timeframe (available after daily candle closes)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    
-    # Calculate daily EMA200 for trend filter
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Calculate weekly EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     # Calculate volume average for confirmation (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,42 +42,41 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations (200 for EMA + buffer)
-    start = 220
+    # Start after enough data for calculations (20 for BB + buffer)
+    start = 30
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_threshold = vol_avg[i] * 1.5
+        vol_threshold = vol_avg[i] * 2.0  # Higher volume threshold for 1d
         
         if position == 0:
-            # Long setup: breakout above Camarilla R4 + above daily EMA200 + volume confirmation
-            if (price > r4_aligned[i] and price > ema200_1d_aligned[i] and vol > vol_threshold):
+            # Long setup: breakout above upper BB + above weekly EMA50 + volume confirmation
+            if (price > bb_upper[i] and price > ema50_1w_aligned[i] and vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: breakdown below Camarilla S4 + below daily EMA200 + volume confirmation
-            elif (price < s4_aligned[i] and price < ema200_1d_aligned[i] and vol > vol_threshold):
+            # Short setup: breakdown below lower BB + below weekly EMA50 + volume confirmation
+            elif (price < bb_lower[i] and price < ema50_1w_aligned[i] and vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to Camarilla Pivot (mean reversion)
-            if price <= pivot_aligned[i]:
+            # Exit long: price falls back below lower BB (opposite band)
+            if price < bb_lower[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to Camarilla Pivot (mean reversion)
-            if price >= pivot_aligned[i]:
+            # Exit short: price rises back above upper BB (opposite band)
+            if price > bb_upper[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -96,6 +84,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_1dEMA200_Volume"
-timeframe = "4h"
+name = "1d_BB_Squeeze_1wEMA50_Volume"
+timeframe = "1d"
 leverage = 1.0
