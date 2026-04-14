@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,27 +13,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data (HTF) once before loop
+    # Load 12h data once before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
+        return np.zeros(n)
+    
+    # Load daily data once before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Load weekly data (HTF) once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Calculate weekly EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = np.full(len(df_1w), np.nan)
-    if len(df_1w) >= 50:
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = np.full(len(df_12h), np.nan)
+    if len(df_12h) >= 50:
         multiplier = 2 / (50 + 1)
-        ema_50_1w[49] = np.mean(close_1w[:50])
-        for i in range(50, len(df_1w)):
-            ema_50_1w[i] = (close_1w[i] - ema_50_1w[i-1]) * multiplier + ema_50_1w[i-1]
+        ema_50_12h[49] = np.mean(close_12h[:50])
+        for i in range(50, len(df_12h)):
+            ema_50_12h[i] = (close_12h[i] - ema_50_12h[i-1]) * multiplier + ema_50_12h[i-1]
     
-    # Align weekly EMA to 12h timeframe
-    ema_50_12h = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align 12h EMA50 to 12h timeframe (already aligned, but ensure proper alignment)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # Calculate daily ATR (14-period) for volatility filter
     high_1d = df_1d['high'].values
@@ -52,9 +52,9 @@ def generate_signals(prices):
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
     # Align daily ATR to 12h timeframe
-    atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr_12h_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate 12-hour volume moving average (20-period)
+    # Calculate 12h volume moving average (20-period)
     volume_ma = np.full(n, np.nan)
     if n >= 20:
         for i in range(19, n):
@@ -64,16 +64,16 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_50_12h[i]) or
-            np.isnan(atr_12h[i]) or
+        if (np.isnan(ema_50_12h_aligned[i]) or
+            np.isnan(atr_12h_aligned[i]) or
             np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         # Skip low volatility periods (ATR < 0.3% of price)
-        if atr_12h[i] / close[i] < 0.003:
+        if atr_12h_aligned[i] / close[i] < 0.003:
             signals[i] = 0.0
             continue
         
@@ -100,13 +100,13 @@ def generate_signals(prices):
             
             if position == 0:
                 # Long: Price breaks below S3 (extreme rejection) AND closes back above S3
-                # with volume confirmation AND above weekly EMA50 (trend alignment)
-                if low[i] <= s3 and close[i] > s3 and volume[i] > volume_ma[i] and close[i] > ema_50_12h[i]:
+                # with volume confirmation AND above 12h EMA50 (trend alignment)
+                if low[i] <= s3 and close[i] > s3 and volume[i] > volume_ma[i] and close[i] > ema_50_12h_aligned[i]:
                     position = 1
                     signals[i] = position_size
                 # Short: Price breaks above R3 (extreme rejection) AND closes back below R3
-                # with volume confirmation AND below weekly EMA50 (trend alignment)
-                elif high[i] >= r3 and close[i] < r3 and volume[i] > volume_ma[i] and close[i] < ema_50_12h[i]:
+                # with volume confirmation AND below 12h EMA50 (trend alignment)
+                elif high[i] >= r3 and close[i] < r3 and volume[i] > volume_ma[i] and close[i] < ema_50_12h_aligned[i]:
                     position = -1
                     signals[i] = -position_size
                 else:
@@ -136,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1w_1d_S3R3_Pivot_Breakout_With_Volume_Confirmation"
+name = "12h_1d_Pivot_S3R3_Breakout_Volume_Filter"
 timeframe = "12h"
 leverage = 1.0
