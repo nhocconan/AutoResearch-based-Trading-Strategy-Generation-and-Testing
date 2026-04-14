@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Donchian channel breakout with 1w ADX trend filter and volume confirmation.
-# Long when price breaks above 1d Donchian upper band, 1w ADX > 25 (strong trend), and volume > 1.5x 20-period average.
-# Short when price breaks below 1d Donchian lower band, 1w ADX > 25, and volume confirmation.
-# Exit when price returns to 1d Donchian middle band or ADX < 20 (trend weakening).
-# Designed to capture strong trend breakouts while avoiding false signals in weak trends.
-# Target: 15-25 trades/year per symbol (60-100 total over 4 years) to minimize fee drag.
+# Hypothesis: 4h strategy using 12h VWAP deviation and 1d ATR-based volatility filter.
+# Long when price closes above 12h VWAP + 1.5*ATR(1d) with expanding volume and bullish 1d EMA(50).
+# Short when price closes below 12h VWAP - 1.5*ATR(1d) with expanding volume and bearish 1d EMA(50).
+# Exit when price crosses back to 12h VWAP or volatility contracts (ATR ratio < 0.8).
+# Designed to capture volatility expansion moves in both bull and bear markets with strict entry filters.
+# Target: 20-30 trades/year per symbol (80-120 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,7 +20,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for Donchian channels
+    # Load 12h data ONCE for VWAP
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
+    
+    # Calculate VWAP for 12h
+    typical_price_12h = (high_12h + low_12h + close_12h) / 3.0
+    vwap_num = np.cumsum(typical_price_12h * volume_12h)
+    vwap_den = np.cumsum(volume_12h)
+    vwap_12h = vwap_num / vwap_den
+    vwap_12h[vwap_den == 0] = np.nan
+    
+    # Load 1d data ONCE for ATR and EMA
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -29,57 +46,25 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Donchian channels (20-period) on 1d
-    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2
-    
-    # Load 1w data ONCE for ADX trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate ADX (14-period) on 1w
-    # True Range
-    tr1 = np.abs(high_1w[1:] - low_1w[1:])
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    # Calculate True Range and ATR(14) on 1d
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     
-    # Directional Movement
-    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
-                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
-                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    atr_period = 14
+    atr_1d = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
     
-    # Smoothed values
-    tr_period = 14
-    atr_1w = pd.Series(tr).ewm(alpha=1/tr_period, adjust=False).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/tr_period, adjust=False).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/tr_period, adjust=False).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / atr_1w
-    di_minus = 100 * dm_minus_smooth / atr_1w
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(alpha=1/tr_period, adjust=False).mean().values
+    # Calculate EMA(50) on 1d for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Align indicators to lower timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
-    donch_mid_aligned = align_htf_to_ltf(prices, df_1d, donch_mid)
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    vwap_12h_aligned = align_htf_to_ltf(prices, df_12h, vwap_12h)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: 1.5x average volume
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -87,14 +72,13 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(30, 20)  # Need ADX and Donchian
+    start = max(20, 20, 50)  # Need VWAP, volume MA, and EMA
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or
-            np.isnan(donch_mid_aligned[i]) or
-            np.isnan(adx_aligned[i]) or
+        if (np.isnan(vwap_12h_aligned[i]) or 
+            np.isnan(atr_1d_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -102,37 +86,39 @@ def generate_signals(prices):
         # Volume confirmation
         volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
-        # Trend filter: ADX > 25 indicates strong trend
-        strong_trend = adx_aligned[i] > 25
+        # Trend filter: EMA(50) slope
+        ema_slope = ema_50_1d_aligned[i] - ema_50_1d_aligned[i-1] if i > 0 else 0
+        uptrend = ema_slope > 0
+        downtrend = ema_slope < 0
         
         if position == 0:
-            # Look for Donchian breakouts
-            # Long: price breaks above Donchian high AND strong trend
-            if (close[i] > donch_high_aligned[i] and 
-                strong_trend and 
+            # Look for VWAP breakouts with volatility expansion
+            # Long: price close above VWAP + 1.5*ATR AND uptrend AND volume confirmation
+            if (close[i] > vwap_12h_aligned[i] + 1.5 * atr_1d_aligned[i] and 
+                uptrend and 
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below Donchian low AND strong trend
-            elif (close[i] < donch_low_aligned[i] and 
-                  strong_trend and 
+            # Short: price close below VWAP - 1.5*ATR AND downtrend AND volume confirmation
+            elif (close[i] < vwap_12h_aligned[i] - 1.5 * atr_1d_aligned[i] and 
+                  downtrend and 
                   volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to Donchian mid or trend weakens (ADX < 20)
-            if (close[i] <= donch_mid_aligned[i] or 
-                adx_aligned[i] < 20):
+            # Exit long: price crosses back to VWAP or volatility contracts
+            if (close[i] <= vwap_12h_aligned[i] or 
+                atr_1d_aligned[i] < 0.8 * atr_1d_aligned[i-1]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to Donchian mid or trend weakens (ADX < 20)
-            if (close[i] >= donch_mid_aligned[i] or 
-                adx_aligned[i] < 20):
+            # Exit short: price crosses back to VWAP or volatility contracts
+            if (close[i] >= vwap_12h_aligned[i] or 
+                atr_1d_aligned[i] < 0.8 * atr_1d_aligned[i-1]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -140,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1dDonchian_1wADX_VolumeFilter_v1"
-timeframe = "12h"
+name = "4h_VWAP_ATR_VolumeTrendFilter_v1"
+timeframe = "4h"
 leverage = 1.0
