@@ -1,12 +1,5 @@
+# hypothesis: 4h Donchian breakout with volume confirmation and weekly trend filter should work in both bull and bear markets due to strong momentum capture during trends and reduced false signals in ranging markets via volume and trend filters. target trades ~30-40 per year.
 #!/usr/bin/env python3
-"""
-4h Donchian Breakout + Volume Spike + Weekly Trend Filter
-Long when price breaks above Donchian(20) high, volume > 1.5x 20-bar avg, and weekly close > weekly open.
-Short when price breaks below Donchian(20) low, volume > 1.5x 20-bar avg, and weekly close < weekly open.
-Exit when price reverses back through Donchian middle (10-bar avg).
-Designed for ~25-40 trades/year per symbol.
-"""
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
