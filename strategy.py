@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Pivot_Volume_Trend_v1
-Hypothesis: On 4h timeframe, use 1d Camarilla pivot levels for mean reversion with volume confirmation and ADX trend filter.
-Buy when price touches S3 support with volume spike in a low-volatility regime (ADX < 25).
-Sell when price touches R3 resistance with volume spike in a low-volatility regime (ADX < 25).
-Exit when price reverts to the previous day's close (pivot point) or ADX rises above 25 indicating trend.
-Designed for 4h to capture reversals in ranging markets while avoiding trending conditions that cause false reversals.
-Works in both bull and bear markets by adapting to volatility regime.
+4h_1d_Range_Breakout_With_Volume_Confirmation_v1
+Hypothesis: On 4h timeframe, buy when price breaks above the previous day's high with volume confirmation in a low-volatility regime (ADX < 25), and sell when price breaks below the previous day's low with volume confirmation in a low-volatility regime. Exit when price returns to the previous day's close or ADX rises above 25 indicating a new trend.
+This strategy captures breakouts from the previous day's range, which often occur in both bull and bear markets as price seeks liquidity. Volume confirmation ensures genuine breakouts, while the ADX filter avoids false signals in strong trends where breakouts may fail.
 """
 
 import numpy as np
@@ -23,7 +19,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Camarilla pivot levels
+    # Load 1d data for previous day's high, low, and close
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -32,30 +28,20 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for each day
-    camarilla_s3 = np.full_like(close_1d, np.nan)
-    camarilla_r3 = np.full_like(close_1d, np.nan)
-    camarilla_pivot = np.full_like(close_1d, np.nan)
+    # Calculate previous day's high, low, and close for each day
+    prev_high = np.full_like(high_1d, np.nan)
+    prev_low = np.full_like(low_1d, np.nan)
+    prev_close = np.full_like(close_1d, np.nan)
     
-    for i in range(len(close_1d)):
-        if i == 0 or np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(close_1d[i]):
-            continue
-        # Use previous day's data for today's levels
-        if i > 0:
-            phigh = high_1d[i-1]
-            plow = low_1d[i-1]
-            pclose = close_1d[i-1]
-            if not (np.isnan(phigh) or np.isnan(plow) or np.isnan(pclose)):
-                range_val = phigh - plow
-                camarilla_pivot[i] = (phigh + plow + pclose) / 3
-                camarilla_s3[i] = pclose - range_val * 1.1 / 2
-                camarilla_r3[i] = pclose + range_val * 1.1 / 2
+    for i in range(1, len(high_1d)):
+        prev_high[i] = high_1d[i-1]
+        prev_low[i] = low_1d[i-1]
+        prev_close[i] = close_1d[i-1]
     
-    # Load 1d data for ADX calculation
+    # Calculate ADX on 1d data
     if len(high_1d) < 14:
         return np.zeros(n)
     
-    # Calculate ADX on 1d data
     plus_dm = np.zeros_like(high_1d)
     minus_dm = np.zeros_like(high_1d)
     tr = np.zeros_like(high_1d)
@@ -109,43 +95,44 @@ def generate_signals(prices):
                 else:
                     adx[i] = (adx[i-1] * 13 + dx[i]) / 14
     
-    # Align Camarilla levels and ADX to 4h timeframe
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    # Align 1d data to 4h timeframe
+    prev_high_aligned = align_htf_to_ltf(prices, df_1d, prev_high)
+    prev_low_aligned = align_htf_to_ltf(prices, df_1d, prev_low)
+    prev_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
+    # Precompute 20-period volume moving average for efficiency
+    vol_ma_20 = np.full_like(volume, np.nan)
+    for i in range(19, len(volume)):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    
     for i in range(20, n):  # Start after enough data for alignment
         # Skip if any critical data is NaN
-        if (np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(prev_high_aligned[i]) or np.isnan(prev_low_aligned[i]) or
+            np.isnan(prev_close_aligned[i]) or np.isnan(adx_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Volume ratio: current 4h volume vs 20-period average
-        vol_ma_20 = np.full_like(volume, np.nan)
-        for j in range(19, len(volume)):
-            vol_ma_20[j] = np.mean(volume[j-19:j+1])
-        vol_ma_20_aligned = vol_ma_20  # Already on 4h timeframe
-        
-        if np.isnan(vol_ma_20_aligned[i]) or vol_ma_20_aligned[i] <= 0:
+        if vol_ma_20[i] <= 0:
             volume_ratio = 0
         else:
-            volume_ratio = volume[i] / vol_ma_20_aligned[i]
+            volume_ratio = volume[i] / vol_ma_20[i]
         
         if position == 0:
-            # Look for long entries: price touches S3 with volume spike in low volatility regime
-            if (close[i] <= camarilla_s3_aligned[i] * 1.001 and  # Allow small tolerance
+            # Look for long entries: price breaks above previous day's high with volume confirmation in low volatility regime
+            if (close[i] > prev_high_aligned[i] and
                 volume_ratio > 1.8 and
                 adx_aligned[i] < 25):
                 position = 1
                 signals[i] = position_size
-            # Look for short entries: price touches R3 with volume spike in low volatility regime
-            elif (close[i] >= camarilla_r3_aligned[i] * 0.999 and  # Allow small tolerance
+            # Look for short entries: price breaks below previous day's low with volume confirmation in low volatility regime
+            elif (close[i] < prev_low_aligned[i] and
                   volume_ratio > 1.8 and
                   adx_aligned[i] < 25):
                 position = -1
@@ -153,16 +140,16 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price reaches pivot point or ADX rises indicating trend
-            if (close[i] >= camarilla_pivot_aligned[i] * 0.999 or
+            # Exit long: price returns to previous day's close or ADX rises indicating trend
+            if (close[i] <= prev_close_aligned[i] or
                 adx_aligned[i] >= 25):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price reaches pivot point or ADX rises indicating trend
-            if (close[i] <= camarilla_pivot_aligned[i] * 1.001 or
+            # Exit short: price returns to previous day's close or ADX rises indicating trend
+            if (close[i] >= prev_close_aligned[i] or
                 adx_aligned[i] >= 25):
                 position = 0
                 signals[i] = 0.0
@@ -171,6 +158,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_Pivot_Volume_Trend_v1"
+name = "4h_1d_Range_Breakout_With_Volume_Confirmation_v1"
 timeframe = "4h"
 leverage = 1.0
