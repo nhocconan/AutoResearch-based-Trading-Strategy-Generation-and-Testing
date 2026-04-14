@@ -3,42 +3,34 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h timeframe with 1d Bollinger Bands width filter and 1w Donchian breakout
-# Bollinger Bands width identifies low volatility (squeeze) conditions
-# When volatility is low, breakouts from Donchian channels (1w) tend to be strong
-# Works in both bull and bear markets as it captures volatility expansion phases
-# Uses 1d BB width for regime filter and 1w Donchian for direction - avoids overtrading
+# Hypothesis: 12h timeframe with 1d ATR-based volatility filter and 1w Donchian breakout
+# The strategy combines long-term trend direction (1w Donchian) with volatility regime filtering (1d ATR).
+# Low volatility periods (ATR below 20-day percentile) precede breakouts, which are then filtered by 1w Donchian breakout direction.
+# This approach aims to capture volatility expansion after contraction, working in both bull and bear markets.
+# Uses discrete position sizing (0.25) to minimize trade frequency and fee impact.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     
-    # Load 1d data ONCE for Bollinger Bands
+    # Load 1d data ONCE for ATR calculation
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d Bollinger Bands (20, 2)
-    bb_length = 20
-    bb_mult = 2.0
-    bb_src = df_1d['close'].values
+    # Calculate 1d ATR (14-period)
+    atr_length = 14
+    high_low = df_1d['high'] - df_1d['low']
+    high_close = np.abs(df_1d['high'] - df_1d['close'].shift())
+    low_close = np.abs(df_1d['low'] - df_1d['close'].shift())
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    atr = pd.Series(tr).rolling(window=atr_length, min_periods=atr_length).mean().values
     
-    # Basis (SMA)
-    basis = pd.Series(bb_src).rolling(window=bb_length, min_periods=bb_length).mean().values
-    # Deviation
-    dev = bb_mult * pd.Series(bb_src).rolling(window=bb_length, min_periods=bb_length).std().values
-    # Upper and Lower bands
-    upper = basis + dev
-    lower = basis - dev
-    # Bandwidth (normalized by basis to make it scale-invariant)
-    bb_width = (upper - lower) / basis
-    bb_width = np.where(basis == 0, 0, bb_width)  # Avoid division by zero
-    
-    # Align BB width to 6h timeframe
-    bb_width_aligned = align_htf_to_ltf(prices, df_1d, bb_width)
+    # Align ATR to 12h timeframe
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
     # Load 1w data ONCE for Donchian channels
     df_1w = get_htf_data(prices, '1w')
@@ -48,7 +40,7 @@ def generate_signals(prices):
     donch_high = pd.Series(df_1w['high']).rolling(window=donch_length, min_periods=donch_length).max().values
     donch_low = pd.Series(df_1w['low']).rolling(window=donch_length, min_periods=donch_length).min().values
     
-    # Align Donchian channels to 6h timeframe
+    # Align Donchian channels to 12h timeframe
     donch_high_aligned = align_htf_to_ltf(prices, df_1w, donch_high)
     donch_low_aligned = align_htf_to_ltf(prices, df_1w, donch_low)
     
@@ -57,11 +49,11 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(100, 20)  # Need enough for BB and Donchian
+    start = max(50, 20)  # Need enough for ATR and Donchian
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(bb_width_aligned[i]) or 
+        if (np.isnan(atr_aligned[i]) or 
             np.isnan(donch_high_aligned[i]) or 
             np.isnan(donch_low_aligned[i])):
             signals[i] = 0.0
@@ -69,18 +61,19 @@ def generate_signals(prices):
         
         price = close[i]
         
-        # Regime filter: Low volatility (BB width below 20th percentile of last 50 periods)
-        # We calculate percentile rank manually to avoid look-ahead
-        if i >= 50:
-            bb_width_slice = bb_width_aligned[max(0, i-50):i]
-            if len(bb_width_slice) > 0:
-                # Calculate percentile of current BB width vs last 50 values
-                sorted_widths = np.sort(bb_width_slice[~np.isnan(bb_width_slice)])
-                if len(sorted_widths) > 0:
-                    current_width = bb_width_aligned[i]
-                    # Count how many values are less than current width
-                    rank = np.searchsorted(sorted_widths, current_width, side='left')
-                    percentile = (rank / len(sorted_widths)) * 100
+        # Volatility regime filter: Low volatility (ATR below 20th percentile of last 30 periods)
+        # Calculate percentile rank manually to avoid look-ahead
+        if i >= 30:
+            atr_slice = atr_aligned[max(0, i-30):i]
+            if len(atr_slice) > 0:
+                # Remove NaN values
+                clean_atr = atr_slice[~np.isnan(atr_slice)]
+                if len(clean_atr) > 0:
+                    sorted_atr = np.sort(clean_atr)
+                    current_atr = atr_aligned[i]
+                    # Count how many values are less than current ATR
+                    rank = np.searchsorted(sorted_atr, current_atr, side='left')
+                    percentile = (rank / len(sorted_atr)) * 100
                     low_vol = percentile <= 20  # Low volatility regime
                 else:
                     low_vol = False
@@ -105,15 +98,16 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below Donchian low OR high volatility (BB width > 80th percentile)
-            if i >= 50:
-                bb_width_slice = bb_width_aligned[max(0, i-50):i]
-                if len(bb_width_slice) > 0:
-                    sorted_widths = np.sort(bb_width_slice[~np.isnan(bb_width_slice)])
-                    if len(sorted_widths) > 0:
-                        current_width = bb_width_aligned[i]
-                        rank = np.searchsorted(sorted_widths, current_width, side='left')
-                        percentile = (rank / len(sorted_widths)) * 100
+            # Exit long: price breaks below Donchian low OR high volatility (ATR > 80th percentile)
+            if i >= 30:
+                atr_slice = atr_aligned[max(0, i-30):i]
+                if len(atr_slice) > 0:
+                    clean_atr = atr_slice[~np.isnan(atr_slice)]
+                    if len(clean_atr) > 0:
+                        sorted_atr = np.sort(clean_atr)
+                        current_atr = atr_aligned[i]
+                        rank = np.searchsorted(sorted_atr, current_atr, side='left')
+                        percentile = (rank / len(sorted_atr)) * 100
                         high_vol = percentile >= 80
                     else:
                         high_vol = False
@@ -129,14 +123,15 @@ def generate_signals(prices):
                 signals[i] = position_size
         elif position == -1:
             # Exit short: price breaks above Donchian high OR high volatility
-            if i >= 50:
-                bb_width_slice = bb_width_aligned[max(0, i-50):i]
-                if len(bb_width_slice) > 0:
-                    sorted_widths = np.sort(bb_width_slice[~np.isnan(bb_width_slice)])
-                    if len(sorted_widths) > 0:
-                        current_width = bb_width_aligned[i]
-                        rank = np.searchsorted(sorted_widths, current_width, side='left')
-                        percentile = (rank / len(sorted_widths)) * 100
+            if i >= 30:
+                atr_slice = atr_aligned[max(0, i-30):i]
+                if len(atr_slice) > 0:
+                    clean_atr = atr_slice[~np.isnan(atr_slice)]
+                    if len(clean_atr) > 0:
+                        sorted_atr = np.sort(clean_atr)
+                        current_atr = atr_aligned[i]
+                        rank = np.searchsorted(sorted_atr, current_atr, side='left')
+                        percentile = (rank / len(sorted_atr)) * 100
                         high_vol = percentile >= 80
                     else:
                         high_vol = False
@@ -153,6 +148,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1dBBwidth_1wDonchian_Breakout_v1"
-timeframe = "6h"
+name = "12h_1dATR_1wDonchian_VolatilityBreakout_v1"
+timeframe = "12h"
 leverage = 1.0
