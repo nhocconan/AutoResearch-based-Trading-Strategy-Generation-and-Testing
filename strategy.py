@@ -1,7 +1,3 @@
-# 1H strategy for BTC/ETH: 4H trend + 1H entry with volume and session filters
-# Hypothesis: Use 4H EMA for trend direction, enter on 1H pullbacks with volume confirmation
-# Limited to London/NY session (08-20 UTC) to reduce noise. Target 15-37 trades/year.
-# Works in bull/bear by following higher timeframe trend.
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -9,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,83 +13,104 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4H data ONCE before loop (HTF for trend)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Load weekly data (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 20-period EMA on 4H close
-    ema20_4h = np.full_like(close_4h, np.nan)
-    if len(close_4h) >= 20:
-        alpha = 2 / (20 + 1)
-        ema20_4h[0] = close_4h[0]
-        for i in range(1, len(close_4h)):
-            ema20_4h[i] = alpha * close_4h[i] + (1 - alpha) * ema20_4h[i-1]
+    # Calculate weekly pivot points (based on prior week)
+    # Using standard pivot point formula: P = (H + L + C)/3
+    pivot_1w = np.full_like(close_1w, np.nan)
+    r1_1w = np.full_like(close_1w, np.nan)
+    s1_1w = np.full_like(close_1w, np.nan)
+    r2_1w = np.full_like(close_1w, np.nan)
+    s2_1w = np.full_like(close_1w, np.nan)
     
-    # Align 4H EMA to 1H timeframe (waits for 4H bar close)
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    for i in range(1, len(close_1w)):
+        pivot_1w[i] = (high_1w[i-1] + low_1w[i-1] + close_1w[i-1]) / 3.0
+        r1_1w[i] = 2 * pivot_1w[i] - low_1w[i-1]
+        s1_1w[i] = 2 * pivot_1w[i] - high_1w[i-1]
+        r2_1w[i] = pivot_1w[i] + (high_1w[i-1] - low_1w[i-1])
+        s2_1w[i] = pivot_1w[i] - (high_1w[i-1] - low_1w[i-1])
     
-    # Calculate 14-period RSI on 1H for momentum (uses only past data)
-    rsi14 = np.full(n, np.nan)
-    if n >= 14:
-        delta = np.diff(close, prepend=close[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.full(n, np.nan)
-        avg_loss = np.full(n, np.nan)
-        
-        avg_gain[13] = np.mean(gain[1:14])
-        avg_loss[13] = np.mean(loss[1:14])
-        
-        for i in range(14, n):
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-        
-        for i in range(13, n):
-            if avg_loss[i] > 0:
-                rs = avg_gain[i] / avg_loss[i]
-                rsi14[i] = 100 - (100 / (1 + rs))
-            else:
-                rsi14[i] = 100 if avg_gain[i] > 0 else 0
+    # Align pivot levels to 6h timeframe
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
+    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Calculate 6-day ATR for volatility filter
+    if len(high) < 6 or len(low) < 6 or len(close) < 6:
+        return np.zeros(n)
+    
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]
+    tr2[0] = np.abs(high[0] - close[0])
+    tr3[0] = np.abs(low[0] - close[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    atr6 = np.full_like(close, np.nan)
+    for i in range(5, len(tr)):
+        atr6[i] = np.mean(tr[i-5:i+1])
+    
+    # Calculate 6-day average volume
+    vol_avg6 = np.full_like(volume, np.nan)
+    for i in range(5, len(volume)):
+        vol_avg6[i] = np.mean(volume[i-5:i+1])
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
-    for i in range(30, n):
-        # Skip if no session or missing data
-        if not in_session[i] or np.isnan(ema20_4h_aligned[i]) or np.isnan(rsi14[i]):
+    for i in range(100, n):
+        # Skip if any critical data is NaN
+        if (np.isnan(pivot_1w_aligned[i]) or 
+            np.isnan(r1_1w_aligned[i]) or 
+            np.isnan(s1_1w_aligned[i]) or
+            np.isnan(atr6[i]) or
+            np.isnan(vol_avg6[i]) or
+            vol_avg6[i] <= 0):
             signals[i] = 0.0
             continue
         
+        # Volume filter: current volume vs 6-period average
+        volume_ratio = volume[i] / vol_avg6[i]
+        
+        # ATR filter: require sufficient volatility
+        volatility_filter = atr6[i] > 0
+        
         if position == 0:
-            # Long: Above 4H EMA + RSI > 50 (bullish momentum)
-            if close[i] > ema20_4h_aligned[i] and rsi14[i] > 50:
+            # Long: Price above weekly R1 + volume surge + volatility
+            if (close[i] > r1_1w_aligned[i] and
+                volume_ratio > 2.0 and
+                volatility_filter):
                 position = 1
                 signals[i] = position_size
-            # Short: Below 4H EMA + RSI < 50 (bearish momentum)
-            elif close[i] < ema20_4h_aligned[i] and rsi14[i] < 50:
+            # Short: Price below weekly S1 + volume surge + volatility
+            elif (close[i] < s1_1w_aligned[i] and
+                  volume_ratio > 2.0 and
+                  volatility_filter):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Below 4H EMA (trend change)
-            if close[i] < ema20_4h_aligned[i]:
+            # Exit long: Price crosses below weekly pivot
+            if close[i] < pivot_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Above 4H EMA (trend change)
-            if close[i] > ema20_4h_aligned[i]:
+            # Exit short: Price crosses above weekly pivot
+            if close[i] > pivot_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -101,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4h_ema_rsi_session"
-timeframe = "1h"
+name = "6h_1w_Pivot_R1S1_Volume_Filter"
+timeframe = "6h"
 leverage = 1.0
