@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1-week Exponential Moving Average (EMA) as trend filter
-# and 1-week Average True Range (ATR) for volatility-adjusted breakout detection.
-# Long when price breaks above weekly EMA by >1.5 * weekly ATR with volume confirmation (>1.2x average volume).
-# Short when price breaks below weekly EMA by >1.5 * weekly ATR with volume confirmation.
-# Exit when price crosses back over weekly EMA.
-# Weekly EMA provides robust trend direction, ATR normalization adapts to volatility,
-# volume confirmation reduces false breakouts. Weekly timeframe reduces noise and
-# aligns with institutional flows, effective in both bull and bear markets.
+# Hypothesis: 6h strategy using 1-day True Strength Index (TSI) with momentum and volatility filters.
+# TSI is a double-smoothed momentum oscillator that reduces whipsaws.
+# Long when TSI crosses above 25 AND price above 6h EMA(50) AND volume > 1.5x average volume.
+# Short when TSI crosses below -25 AND price below 6h EMA(50) AND volume > 1.5x average volume.
+# Exit when TSI returns to zero or volume drops below average.
+# TSI provides smooth momentum signals, EMA(50) filters direction, volume confirms strength.
+# Target: 20-30 trades/year per symbol (80-120 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,88 +21,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE for EMA, ATR, and average volume
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:  # Need enough for EMA(20) and ATR(14)
+    # Calculate 6h EMA(50) for trend filter
+    close_series = pd.Series(close)
+    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).values
+    
+    # Calculate average volume for volume filter
+    vol_series = pd.Series(volume)
+    avg_volume = vol_series.rolling(window=20, min_periods=20).mean().values
+    
+    # Load 1d data ONCE for TSI calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:  # Need enough for TSI calculation
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA (20) on weekly close
-    ema_20 = np.full_like(close_1w, np.nan)
-    ema_20[19] = np.mean(close_1w[:20])  # Simple average for first value
-    alpha = 2 / (20 + 1)
-    for i in range(20, len(close_1w)):
-        ema_20[i] = alpha * close_1w[i] + (1 - alpha) * ema_20[i-1]
+    # Calculate TSI (True Strength Index) on daily closes
+    # TSI = 100 * (EMA(EMA(PC, r), s) / EMA(EMA(|PC|, r), s))
+    # where PC = price change, typically r=25, s=13
+    pc = np.diff(close_1d, prepend=close_1d[0])  # Price change
+    abs_pc = np.abs(pc)
     
-    # Calculate ATR (14) on weekly data
-    # True Range
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # First EMA (r=25)
+    ema1_pc = pd.Series(pc).ewm(span=25, adjust=False, min_periods=25).values
+    ema1_abs_pc = pd.Series(abs_pc).ewm(span=25, adjust=False, min_periods=25).values
     
-    # ATR = smoothed TR (Wilder's smoothing)
-    atr = np.full_like(tr, np.nan)
-    atr[13] = np.nanmean(tr[1:14])  # First ATR: simple average of first 14 TR
-    for i in range(14, len(tr)):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    # Second EMA (s=13)
+    ema2_pc = pd.Series(ema1_pc).ewm(span=13, adjust=False, min_periods=13).values
+    ema2_abs_pc = pd.Series(ema1_abs_pc).ewm(span=13, adjust=False, min_periods=13).values
     
-    # Calculate average volume (20-period) for volume confirmation
-    avg_volume = np.full_like(volume_1w, np.nan)
-    for i in range(19, len(volume_1w)):
-        avg_volume[i] = np.mean(volume_1w[i-19:i+1])
+    # TSI calculation
+    tsi_raw = 100 * ema2_pc / ema2_abs_pc
+    tsi = np.where(ema2_abs_pc != 0, tsi_raw, 0)  # Avoid division by zero
     
-    # Align indicators to 1d timeframe
-    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
-    atr_aligned = align_htf_to_ltf(prices, df_1w, atr)
-    avg_volume_aligned = align_htf_to_ltf(prices, df_1w, avg_volume)
+    # Align TSI to 6h timeframe
+    tsi_aligned = align_htf_to_ltf(prices, df_1d, tsi)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(30, 20)  # Need EMA and ATR periods
+    start = max(50, 20)  # Need EMA(50) and volume average periods
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_20_aligned[i]) or 
-            np.isnan(atr_aligned[i]) or
-            np.isnan(avg_volume_aligned[i])):
+        if (np.isnan(tsi_aligned[i]) or 
+            np.isnan(ema_50[i]) or
+            np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.2 * average weekly volume
-        volume_confirmed = volume[i] > (1.2 * avg_volume_aligned[i])
+        # Volume filter: current volume > 1.5x average volume
+        strong_volume = volume[i] > 1.5 * avg_volume[i]
         
         if position == 0:
-            # Look for breakout entries
-            # Long: price breaks above EMA by >1.5*ATR AND volume confirmed
-            if (close[i] > ema_20_aligned[i] + (1.5 * atr_aligned[i]) and 
-                volume_confirmed):
+            # Look for TSI momentum entries
+            # Long: TSI crosses above 25 AND price above EMA(50) AND strong volume
+            if (tsi_aligned[i] > 25 and 
+                tsi_aligned[i-1] <= 25 and  # Crossed up
+                close[i] > ema_50[i] and
+                strong_volume):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below EMA by >1.5*ATR AND volume confirmed
-            elif (close[i] < ema_20_aligned[i] - (1.5 * atr_aligned[i]) and 
-                  volume_confirmed):
+            # Short: TSI crosses below -25 AND price below EMA(50) AND strong volume
+            elif (tsi_aligned[i] < -25 and 
+                  tsi_aligned[i-1] >= -25 and  # Crossed down
+                  close[i] < ema_50[i] and
+                  strong_volume):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses back below EMA
-            if close[i] < ema_20_aligned[i]:
+            # Exit long: TSI returns to zero or volume drops
+            if (tsi_aligned[i] <= 0 or 
+                not strong_volume):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses back above EMA
-            if close[i] > ema_20_aligned[i]:
+            # Exit short: TSI returns to zero or volume drops
+            if (tsi_aligned[i] >= 0 or 
+                not strong_volume):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -111,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_EMA_ATR_Volume_Breakout_v1"
-timeframe = "1d"
+name = "6h_1d_TSI_Momentum_Volume_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
