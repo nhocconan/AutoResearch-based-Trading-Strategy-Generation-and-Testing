@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Bollinger Band breakout with 1-day EMA trend filter and volume confirmation
-# Long when price closes above upper Bollinger Band AND price > daily EMA50 AND volume > 1.5x 20-period average
-# Short when price closes below lower Bollinger Band AND price < daily EMA50 AND volume > 1.5x 20-period average
-# Exit when price crosses back inside the Bollinger Bands (opposite band)
-# Uses Bollinger Bands to capture volatility expansions, daily EMA for trend alignment, volume for confirmation
+# Hypothesis: 12-hour Donchian breakout with 1-week EMA200 trend filter and volume confirmation
+# Long when price breaks above 20-period Donchian upper channel AND price > 1w EMA200 AND volume > 1.5x 20-period average
+# Short when price breaks below 20-period Donchian lower channel AND price < 1w EMA200 AND volume > 1.5x 20-period average
+# Exit when price crosses back inside the Donchian channel (opposite band)
+# Uses Donchian channels for breakout detection, EMA for trend alignment, volume for confirmation
 # Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,20 +20,19 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Load 1-week data ONCE before loop for EMA200 trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate Bollinger Bands on 6h (20-period, 2 std dev)
-    close_series = pd.Series(close)
-    sma20 = close_series.rolling(window=20, min_periods=20).mean().values
-    std20 = close_series.rolling(window=20, min_periods=20).std().values
-    upper_band = sma20 + 2 * std20
-    lower_band = sma20 - 2 * std20
+    # Calculate Donchian Channel on 12h (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper_channel = high_series.rolling(window=20, min_periods=20).max().values
+    lower_channel = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate 1-week EMA200 for trend filter
+    close_1w = df_1w['close'].values
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
     # Calculate volume average for confirmation (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -42,13 +41,13 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations (20 for Bollinger + buffer)
+    # Start after enough data for calculations (20 for Donchian + buffer)
     start = 30
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(sma20[i]) or np.isnan(std20[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
+            np.isnan(ema200_1w_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
@@ -57,26 +56,26 @@ def generate_signals(prices):
         vol_threshold = vol_avg[i] * 1.5
         
         if position == 0:
-            # Long setup: close above upper BB + above daily EMA50 + volume confirmation
-            if (price > upper_band[i] and price > ema50_1d_aligned[i] and vol > vol_threshold):
+            # Long setup: break above upper channel + above 1w EMA200 + volume confirmation
+            if (price > upper_channel[i] and price > ema200_1w_aligned[i] and vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: close below lower BB + below daily EMA50 + volume confirmation
-            elif (price < lower_band[i] and price < ema50_1d_aligned[i] and vol > vol_threshold):
+            # Short setup: break below lower channel + below 1w EMA200 + volume confirmation
+            elif (price < lower_channel[i] and price < ema200_1w_aligned[i] and vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes back inside Bollinger Bands (below upper band)
-            if price < upper_band[i]:
+            # Exit long: price crosses back inside Donchian channel (below lower channel)
+            if price < lower_channel[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes back inside Bollinger Bands (above lower band)
-            if price > lower_band[i]:
+            # Exit short: price crosses back inside Donchian channel (above upper channel)
+            if price > upper_channel[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -84,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Bollinger_1dEMA50_Volume"
-timeframe = "6h"
+name = "12h_Donchian_1wEMA200_Volume"
+timeframe = "12h"
 leverage = 1.0
