@@ -21,6 +21,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
     # Calculate 1d ATR (14-period) for volatility filter
     high_low_1d = high_1d - low_1d
@@ -37,7 +38,7 @@ def generate_signals(prices):
     atr_percentile = atr_series_1d.rolling(window=30, min_periods=30).quantile(0.6).values
     volatility_filter = atr_1d > atr_percentile
     
-    # Calculate 12h volume filter: current volume > 1.3x 20-period average
+    # Calculate 12h volume filter: current volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     
@@ -47,6 +48,21 @@ def generate_signals(prices):
     donchian_high = high_series.rolling(window=20, min_periods=20).max().shift(1).values
     donchian_low = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
+    # Calculate 1d ADX (14-period) for trend filter
+    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    
+    tr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / tr_14
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / tr_14
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_filter = adx > 25  # Strong trend
+    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25
@@ -54,7 +70,7 @@ def generate_signals(prices):
     for i in range(60, n):
         # Skip if any critical data is NaN
         if np.isnan(atr_1d[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
-           np.isnan(vol_ma[i]) or np.isnan(volatility_filter[i]):
+           np.isnan(vol_ma[i]) or np.isnan(volatility_filter[i]) or np.isnan(adx[i]):
             continue
         
         # Get previous day's data for pivot calculation
@@ -79,16 +95,16 @@ def generate_signals(prices):
             r1_12h = align_htf_to_ltf(prices, df_1d, r1_array)[i]
             
             if position == 0:
-                # Long: Price breaks above R1 with volume and in volatile regime
+                # Long: Price breaks above R1 with volume and in volatile/trending regime
                 if (close[i] > r1_12h and close[i-1] <= r1_12h and 
-                    volume[i] > vol_ma[i] * 1.3 and 
-                    volatility_filter[i]):
+                    volume[i] > vol_ma[i] * 1.5 and 
+                    volatility_filter[i] and adx_filter[i]):
                     position = 1
                     signals[i] = position_size
-                # Short: Price breaks below S1 with volume and in volatile regime
+                # Short: Price breaks below S1 with volume and in volatile/trending regime
                 elif (close[i] < s1_12h and close[i-1] >= s1_12h and 
-                      volume[i] > vol_ma[i] * 1.3 and 
-                      volatility_filter[i]):
+                      volume[i] > vol_ma[i] * 1.5 and 
+                      volatility_filter[i] and adx_filter[i]):
                     position = -1
                     signals[i] = -position_size
             elif position == 1:
@@ -104,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_S1R1_Breakout_Vol_VolatilityFilter_v1"
+name = "12h_1d_S1R1_Breakout_Vol_VolatilityTrendFilter_v1"
 timeframe = "12h"
 leverage = 1.0
