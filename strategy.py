@@ -1,9 +1,7 @@
-#!/usr/bin/env python3
-"""
-Hypothesis: 12h price breaking above/below 1-day Donchian(20) channel with volume above 1.5x 24-period average and 1-day ADX > 25.
-Trades in direction of daily trend to avoid counter-trend whipsaws. Uses Donchian for clear breakout signals and ADX for trend strength.
-Targets 12-37 trades/year per symbol (48-148 total over 4 years).
-"""
+# 1. Hypothesis: 1d price breaking above/below 4-hour Donchian(20) channel with volume above 1.5x 4-period average and 4-hour ADX > 25.
+# Trades in direction of 4-hour trend to avoid counter-trend whipsaws. Uses Donchian for clear breakout signals and ADX for trend strength.
+# Targets 12-37 trades/year per symbol (48-148 total over 4 years).
+# Uses 4h timeframe with 1h/4h multi-timeframe for trend confirmation.
 
 import numpy as np
 import pandas as pd
@@ -11,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,33 +17,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily Donchian channel (20-period)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Calculate 4-hour Donchian channel (20-period)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
     # Donchian upper and lower bands
-    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    upper_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Calculate daily ADX (14-period)
-    if len(df_1d) < 30:
+    # Calculate 4-hour ADX (14-period)
+    if len(df_4h) < 30:
         return np.zeros(n)
     
     # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - low_1d[:-1])  # high - prev close
-    tr3 = np.abs(low_1d[1:] - low_1d[:-1])  # low - prev close
+    tr1 = np.abs(high_4h[1:] - low_4h[1:])
+    tr2 = np.abs(high_4h[1:] - low_4h[:-1])  # high - prev close
+    tr3 = np.abs(low_4h[1:] - low_4h[:-1])  # low - prev close
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
     # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.where((high_4h[1:] - high_4h[:-1]) > (low_4h[:-1] - low_4h[1:]), 
+                       np.maximum(high_4h[1:] - high_4h[:-1], 0), 0)
+    dm_minus = np.where((low_4h[:-1] - low_4h[1:]) > (high_4h[1:] - high_4h[:-1]), 
+                        np.maximum(low_4h[:-1] - low_4h[1:], 0), 0)
     dm_plus = np.concatenate([[np.nan], dm_plus])
     dm_minus = np.concatenate([[np.nan], dm_minus])
     
@@ -60,32 +58,32 @@ def generate_signals(prices):
     
     # DX and ADX
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_4h = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 24-period average volume (12h periods in a day)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Calculate 4-period average volume (4h periods in a day)
+    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Get aligned indicators
-        upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)[i]
-        lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)[i]
-        adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)[i]
-        vol_ma_24_val = vol_ma_24[i]  # already LTF
+        upper_20_aligned = align_htf_to_ltf(prices, df_4h, upper_20)[i]
+        lower_20_aligned = align_htf_to_ltf(prices, df_4h, lower_20)[i]
+        adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)[i]
+        vol_ma_4_val = vol_ma_4[i]  # already LTF
         
         # Check for NaN values
         if (np.isnan(upper_20_aligned) or np.isnan(lower_20_aligned) or 
-            np.isnan(adx_1d_aligned) or np.isnan(vol_ma_24_val)):
+            np.isnan(adx_4h_aligned) or np.isnan(vol_ma_4_val)):
             continue
         
         # Volume confirmation (> 1.5x average)
-        volume_confirm = volume[i] > 1.5 * vol_ma_24_val
+        volume_confirm = volume[i] > 1.5 * vol_ma_4_val
         
         # ADX trend filter (> 25)
-        trend_filter = adx_1d_aligned > 25
+        trend_filter = adx_4h_aligned > 25
         
         if position == 0:  # No position - look for entries
             if volume_confirm and trend_filter:
@@ -108,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1dDonchian20_1dADX25_Volume1.5x_v1"
-timeframe = "12h"
+name = "4h_4hDonchian20_4hADX25_Volume1.5x_v1"
+timeframe = "4h"
 leverage = 1.0
