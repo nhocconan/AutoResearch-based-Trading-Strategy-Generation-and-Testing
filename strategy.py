@@ -1,16 +1,73 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12-hour strategy using 1-day True Range breakout with volume confirmation and 1-day ATR filter.
-Long when price breaks above previous 1-day high + ATR(14) + volume surge.
-Short when price breaks below previous 1-day low - ATR(14) + volume surge.
-Exit when price crosses 1-day VWAP or ATR-based stop is hit.
-Designed for low turnover: ~20-30 trades/year per symbol to minimize fee drag.
-ATR filter prevents whipsaws in choppy markets; VWAP exit captures mean reversion.
-Works in bull via breakouts and in bear via short-side symmetry with volatility filter.
+Hypothesis: 4h strategy using 1-day Parabolic SAR for trend direction and 1-day ATR for volatility filtering.
+Long when price > Parabolic SAR and ATR(14) > 20-period SMA of ATR (rising volatility).
+Short when price < Parabolic SAR and ATR(14) > 20-period SMA of ATR.
+Exit when price crosses Parabolic SAR in opposite direction.
+Designed for low turnover: ~20-40 trades/year per symbol to minimize fee drift.
+Works in bull via trend following and in bear via short-side symmetry.
+Uses volatility expansion to capture breakouts and avoid choppy markets.
 """
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_parabolic_sar(high, low, af_start=0.02, af_increment=0.02, af_max=0.2):
+    n = len(high)
+    sar = np.zeros(n)
+    trend = np.zeros(n)  # 1 for uptrend, -1 for downtrend
+    af = np.zeros(n)
+    ep = np.zeros(n)
+    
+    sar[0] = low[0]
+    trend[0] = 1
+    af[0] = af_start
+    ep[0] = high[0]
+    
+    for i in range(1, n):
+        if trend[i-1] == 1:  # uptrend
+            sar[i] = sar[i-1] + af[i-1] * (ep[i-1] - sar[i-1])
+            # Prevent SAR from penetrating previous lows
+            if i >= 2:
+                sar[i] = min(sar[i], low[i-1], low[i-2])
+            
+            # Trend reversal
+            if low[i] < sar[i]:
+                trend[i] = -1
+                sar[i] = ep[i-1]
+                af[i] = af_start
+                ep[i] = low[i]
+            else:
+                trend[i] = 1
+                if high[i] > ep[i-1]:
+                    ep[i] = high[i]
+                    af[i] = min(af[i-1] + af_increment, af_max)
+                else:
+                    ep[i] = ep[i-1]
+                    af[i] = af[i-1]
+        else:  # downtrend
+            sar[i] = sar[i-1] + af[i-1] * (ep[i-1] - sar[i-1])
+            # Prevent SAR from penetrating previous highs
+            if i >= 2:
+                sar[i] = max(sar[i], high[i-1], high[i-2])
+            
+            # Trend reversal
+            if high[i] > sar[i]:
+                trend[i] = 1
+                sar[i] = ep[i-1]
+                af[i] = af_start
+                ep[i] = high[i]
+            else:
+                trend[i] = -1
+                if low[i] < ep[i-1]:
+                    ep[i] = low[i]
+                    af[i] = min(af[i-1] + af_increment, af_max)
+                else:
+                    ep[i] = ep[i-1]
+                    af[i] = af[i-1]
+    
+    return sar
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,83 +79,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data once for ATR, high/low, and VWAP
+    # Load 1-day data once for Parabolic SAR and ATR
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 1-day ATR(14) for volatility filter
+    # 1-day Parabolic SAR
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    sar = calculate_parabolic_sar(high_1d, low_1d)
+    
+    # 1-day ATR (14)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # 20-period SMA of ATR for volatility filter
+    atr_sma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
+    
+    # Previous close for TR calculation
     close_1d = df_1d['close'].values
-    tr1 = np.maximum(high_1d - low_1d, 
-                     np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
-                                np.abs(low_1d - np.roll(close_1d, 1))))
-    tr1[0] = high_1d[0] - low_1d[0]  # first TR
-    atr = pd.Series(tr1).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # 1-day high and low for breakout levels
-    # 1-day VWAP for exit
-    typical_price = (high_1d + low_1d + close_1d) / 3
-    vwap = (np.cumsum(typical_price * df_1d['volume'].values) / 
-            np.cumsum(df_1d['volume'].values)).values
-    
-    # Volume filter: 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25
     
     for i in range(30, n):
-        # 1-day index (2 bars per day for 12h timeframe)
-        idx_1d = i // 2
-        if idx_1d < 14:  # need enough for ATR calculation
+        # 1-day index
+        idx_1d = i // 6  # 6 bars per day (4h timeframe)
+        if idx_1d < 20:  # need enough for ATR/SMA
             continue
         
-        # Get previous 1-day values to avoid look-ahead (use completed day)
-        high_prev = high_1d[idx_1d - 1] if idx_1d - 1 < len(high_1d) else high_1d[-1]
-        low_prev = low_1d[idx_1d - 1] if idx_1d - 1 < len(low_1d) else low_1d[-1]
+        # Get previous 1-day values to avoid look-ahead
+        sar_prev = sar[idx_1d - 1] if idx_1d - 1 < len(sar) else sar[-1]
         atr_prev = atr[idx_1d - 1] if idx_1d - 1 < len(atr) else atr[-1]
-        vwap_prev = vwap[idx_1d - 1] if idx_1d - 1 < len(vwap) else vwap[-1]
-        if np.isnan(high_prev) or np.isnan(low_prev) or np.isnan(atr_prev) or np.isnan(vwap_prev):
+        atr_sma_prev = atr_sma[idx_1d - 1] if idx_1d - 1 < len(atr_sma) else atr_sma[-1]
+        
+        if np.isnan(sar_prev) or np.isnan(atr_prev) or np.isnan(atr_sma_prev):
             continue
         
-        # Create arrays for alignment (using previous completed day's values)
-        high_arr = np.full(len(df_1d), high_prev)
-        low_arr = np.full(len(df_1d), low_prev)
+        # Create arrays for alignment (using previous values)
+        sar_arr = np.full(len(df_1d), sar_prev)
         atr_arr = np.full(len(df_1d), atr_prev)
-        vwap_arr = np.full(len(df_1d), vwap_prev)
-        high_12h = align_htf_to_ltf(prices, df_1d, high_arr)[i]
-        low_12h = align_htf_to_ltf(prices, df_1d, low_arr)[i]
-        atr_12h = align_htf_to_ltf(prices, df_1d, atr_arr)[i]
-        vwap_12h = align_htf_to_ltf(prices, df_1d, vwap_arr)[i]
+        atr_sma_arr = np.full(len(df_1d), atr_sma_prev)
+        sar_4h = align_htf_to_ltf(prices, df_1d, sar_arr)[i]
+        atr_4h = align_htf_to_ltf(prices, df_1d, atr_arr)[i]
+        atr_sma_4h = align_htf_to_ltf(prices, df_1d, atr_sma_arr)[i]
         
         if position == 0:
-            # Long: price breaks above (prev day high + 0.5*ATR) + volume surge
-            if (close[i] > (high_12h + 0.5 * atr_12h) and 
-                volume[i] > vol_ma[i] * 1.5):
+            # Long: price > SAR and rising volatility (ATR > SMA of ATR)
+            if (close[i] > sar_4h and 
+                atr_4h > atr_sma_4h):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below (prev day low - 0.5*ATR) + volume surge
-            elif (close[i] < (low_12h - 0.5 * atr_12h) and 
-                  volume[i] > vol_ma[i] * 1.5):
+            # Short: price < SAR and rising volatility
+            elif (close[i] < sar_4h and 
+                  atr_4h > atr_sma_4h):
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
-            # Exit: price crosses below VWAP or ATR-based stop (2*ATR below entry)
-            # Simplified: exit when price < VWAP or price drops significantly
-            if close[i] < vwap_12h:
+            # Exit: price crosses below SAR (trend reversal)
+            if close[i] < sar_4h:
                 position = 0
                 signals[i] = 0.0
         elif position == -1:
-            # Exit: price crosses above VWAP
-            if close[i] > vwap_12h:
+            # Exit: price crosses above SAR (trend reversal)
+            if close[i] > sar_4h:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_1d_ATR_VWAP_Volume_Breakout"
-timeframe = "12h"
+name = "4h_1D_ParabolicSAR_ATR_Volatility"
+timeframe = "4h"
 leverage = 1.0
