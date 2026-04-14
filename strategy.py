@@ -1,5 +1,3 @@
-# 11-02-2025
-# Hypothesis: On 4h timeframe, combine 1d price channels (high/low) with volume confirmation and trend strength (ADX) for breakout entries. Exit when price crosses 1d VWAP or trend weakens. Designed for both bull (catch breakouts) and bear (catch breakdowns) markets. Target 20-40 trades/year to avoid fee drag.
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -15,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for price channel and VWAP
+    # Load 1d data for price channel
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -37,7 +35,7 @@ def generate_signals(prices):
     low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
     vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
     
-    # Calculate ADX on 1d data
+    # Calculate ADX on 1d data with proper Wilder smoothing
     if len(high_1d) < 14:
         return np.zeros(n)
     
@@ -56,7 +54,7 @@ def generate_signals(prices):
                    abs(high_1d[i] - high_1d[i-1]), 
                    abs(low_1d[i] - low_1d[i-1]))
     
-    # Smooth TR, +DM, -DM with Wilder's smoothing (alpha = 1/14)
+    # Wilder smoothing (alpha = 1/14)
     atr = np.zeros_like(high_1d)
     plus_di = np.zeros_like(high_1d)
     minus_di = np.zeros_like(high_1d)
@@ -64,7 +62,7 @@ def generate_signals(prices):
     adx = np.full_like(high_1d, np.nan)
     
     if len(high_1d) >= 14:
-        # Initial values
+        # Initial values (first 14 periods)
         atr[13] = np.nansum(tr[1:14])
         plus_dm_sum = np.nansum(plus_dm[1:14])
         minus_dm_sum = np.nansum(minus_dm[1:14])
@@ -85,7 +83,7 @@ def generate_signals(prices):
                 if plus_di[i] + minus_di[i] > 0:
                     dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
         
-        # Calculate ADX as smoothed DX
+        # Calculate ADX as smoothed DX (14-period)
         if len(high_1d) >= 27:
             adx[26] = np.nanmean(dx[14:27])
             for i in range(27, len(high_1d)):
@@ -99,9 +97,9 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.30  # 30% position size
+    position_size = 0.25  # Reduced to 25% to lower trade frequency
     
-    for i in range(20, n):  # Start after enough data for alignment
+    for i in range(20, n):
         # Skip if any critical data is NaN
         if (np.isnan(high_1d_aligned[i]) or np.isnan(low_1d_aligned[i]) or
             np.isnan(vwap_1d_aligned[i]) or np.isnan(adx_aligned[i])):
@@ -122,14 +120,14 @@ def generate_signals(prices):
         if position == 0:
             # Look for long entries: breakout above 1d high with volume surge in strong trend
             if (close[i] > high_1d_aligned[i] and 
-                volume_ratio > 2.0 and
-                adx_aligned[i] > 25):
+                volume_ratio > 2.5 and  # Increased threshold to reduce trades
+                adx_aligned[i] > 30):   # Increased threshold to require stronger trend
                 position = 1
                 signals[i] = position_size
             # Look for short entries: breakdown below 1d low with volume surge in strong trend
             elif (close[i] < low_1d_aligned[i] and 
-                  volume_ratio > 2.0 and
-                  adx_aligned[i] > 25):
+                  volume_ratio > 2.5 and
+                  adx_aligned[i] > 30):
                 position = -1
                 signals[i] = -position_size
             else:
@@ -137,7 +135,7 @@ def generate_signals(prices):
         elif position == 1:
             # Exit long: price crosses below 1d VWAP or ADX falls indicating trend exhaustion
             if (close[i] < vwap_1d_aligned[i] or
-                adx_aligned[i] < 20):
+                adx_aligned[i] < 25):  # Slightly higher exit threshold
                 position = 0
                 signals[i] = 0.0
             else:
@@ -145,7 +143,7 @@ def generate_signals(prices):
         elif position == -1:
             # Exit short: price crosses above 1d VWAP or ADX falls indicating trend exhaustion
             if (close[i] > vwap_1d_aligned[i] or
-                adx_aligned[i] < 20):
+                adx_aligned[i] < 25):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -153,6 +151,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_PriceChannel_Breakout_Volume_Trend_v2"
+name = "4h_1d_PriceChannel_Breakout_Volume_Trend_v3"
 timeframe = "4h"
 leverage = 1.0
