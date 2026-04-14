@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data once before loop
+    # Load daily data (HTF) once before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -71,39 +71,23 @@ def generate_signals(prices):
         for i in range(27, len(df_1d)):
             adx_14[i] = (adx_14[i-1] * 13 + dx_14[i]) / 14
     
-    # Align indicators to 1d timeframe (same as price)
-    atr_1d_aligned = atr_1d  # Already at 1d frequency
-    adx_1d_aligned = adx_14  # Already at 1d frequency
+    # Align indicators to 12h timeframe
+    atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    adx_12h = align_htf_to_ltf(prices, df_1d, adx_14)
     
-    # Calculate daily Donchian channels (20-period)
-    donch_high = np.full(len(df_1d), np.nan)
-    donch_low = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 20:
-        for i in range(19, len(df_1d)):
-            donch_high[i] = np.max(high_1d[i-19:i+1])
-            donch_low[i] = np.min(low_1d[i-19:i+1])
+    # Calculate 12-hour Donchian channels (20-period)
+    donch_high = np.full(n, np.nan)
+    donch_low = np.full(n, np.nan)
+    if n >= 20:
+        for i in range(19, n):
+            donch_high[i] = np.max(high[i-19:i+1])
+            donch_low[i] = np.min(low[i-19:i+1])
     
-    # Calculate daily volume moving average (20-period)
-    volume_ma = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 20:
-        for i in range(19, len(df_1d)):
-            volume_ma[i] = np.mean(volume_1d[i-19:i+1])
-    
-    # We need volume_1d - get it from df_1d
-    volume_1d = df_1d['volume'].values
-    
-    # Recalculate volume_ma with actual volume_1d
-    volume_ma = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 20:
-        for i in range(19, len(df_1d)):
-            volume_ma[i] = np.mean(volume_1d[i-19:i+1])
-    
-    # Align daily indicators to lower timeframe (price timeframe)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d_aligned)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d_aligned)
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
+    # Calculate 12-hour volume moving average (20-period)
+    volume_ma = np.full(n, np.nan)
+    if n >= 20:
+        for i in range(19, n):
+            volume_ma[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0
@@ -111,50 +95,68 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any critical data is NaN
-        if (np.isnan(atr_aligned[i]) or
-            np.isnan(donch_high_aligned[i]) or
-            np.isnan(donch_low_aligned[i]) or
-            np.isnan(adx_aligned[i]) or
-            np.isnan(volume_ma_aligned[i])):
+        if (np.isnan(atr_12h[i]) or
+            np.isnan(donch_high[i]) or
+            np.isnan(donch_low[i]) or
+            np.isnan(adx_12h[i]) or
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         # Skip low volatility periods (ATR < 0.5% of price)
-        if atr_aligned[i] / close[i] < 0.005:
+        if atr_12h[i] / close[i] < 0.005:
             signals[i] = 0.0
             continue
         
-        # Skip low volume periods (volume < 70% of 20-period MA)
-        if volume[i] < 0.7 * volume_ma_aligned[i]:
+        # Skip low volume periods (volume < 65% of 20-period MA)
+        if volume[i] < 0.65 * volume_ma[i]:
             signals[i] = 0.0
             continue
         
-        # Skip low trend strength (ADX < 25)
-        if adx_aligned[i] < 25:
+        # Skip low trend strength (ADX < 28)
+        if adx_12h[i] < 28:
             signals[i] = 0.0
             continue
+        
+        # Calculate pivot levels based on previous day's range
+        prev_high = high_1d[i-1] if i > 0 else high_1d[0]
+        prev_low = low_1d[i-1] if i > 0 else low_1d[0]
+        prev_close = close_1d[i-1] if i > 0 else close_1d[0]
+        prev_range = prev_high - prev_low
+        
+        # Pivot levels for reversal at extremes
+        s3 = prev_close - (prev_range * 1.1 / 4)  # Support 3
+        r3 = prev_close + (prev_range * 1.1 / 4)  # Resistance 3
+        
+        # Align to 12h timeframe
+        s3_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i]
+        r3_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r3))[i]
         
         if position == 0:
-            # Long: Price breaks above daily Donchian high with volume confirmation
-            if close[i] > donch_high_aligned[i] and volume[i] > 1.5 * volume_ma_aligned[i]:
+            # Long: Price breaks above 12h Donchian high AND above S3 (support hold) AND volume > 1.6x MA
+            if close[i] > donch_high[i] and close[i] > s3_12h and volume[i] > 1.6 * volume_ma[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below daily Donchian low with volume confirmation
-            elif close[i] < donch_low_aligned[i] and volume[i] > 1.5 * volume_ma_aligned[i]:
+            # Short: Price breaks below 12h Donchian low AND below R3 (resistance hold) AND volume > 1.6x MA
+            elif close[i] < donch_low[i] and close[i] < r3_12h and volume[i] > 1.6 * volume_ma[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below daily Donchian low
-            if close[i] < donch_low_aligned[i]:
+            # Exit: Price falls back below 12h Donchian low OR below S4 (S3 - 0.5*range)
+            s4 = s3 - 0.5 * prev_range
+            s4_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s4))[i]
+            if close[i] < donch_low[i] or close[i] < s4_12h:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above daily Donchian high
-            if close[i] > donch_high_aligned[i]:
+            # Exit: Price rises back above 12h Donchian high OR above R4 (R3 + 0.5*range)
+            r4 = r3 + 0.5 * prev_range
+            r4_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r4))[i]
+            if close[i] > donch_high[i] or close[i] > r4_12h:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -162,6 +164,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian20_Volume_Trend_Filter"
-timeframe = "1d"
+name = "12h_1d_S3R3_Pivot_Breakout_With_Volume_Confirmation"
+timeframe = "12h"
 leverage = 1.0
