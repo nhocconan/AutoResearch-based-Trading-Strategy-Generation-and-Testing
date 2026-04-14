@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using daily Camarilla pivot levels with volume confirmation and ADX trend filter
-# - Uses previous day's Camarilla pivot levels (S1/S2/S3, R1/R2/R3) for mean reversion
-# - Requires volume > 1.5x 24-period average for institutional confirmation
-# - Filters for trending markets using ADX > 25 to avoid ranging whipsaws
-# - Designed to capture mean reversion in both bull and bear markets with controlled frequency
-# - Target: 50-150 trades over 4 years to minimize fee drag while capturing significant reversals
+# Hypothesis: 4h strategy using daily volatility breakout with volume confirmation and regime filter
+# - Uses previous day's ATR to set dynamic breakout levels (adaptive to volatility)
+# - Requires volume > 1.2x 24-period average for institutional confirmation
+# - Filters for high volatility regimes using 70th percentile of daily ATR/price ratio (more selective)
+# - Designed to capture volatility expansion in both bull and bear markets with controlled frequency
+# - Target: 75-200 trades over 4 years to minimize fee drag while capturing significant moves
 # - Discrete position sizing (0.25) to reduce churn and manage drawdown
 
 def generate_signals(prices):
@@ -30,8 +30,7 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Calculate ADX for trend filtering
-    # True Range
+    # 14-day ATR for volatility measurement
     high_low = high_1d - low_1d
     high_close = np.abs(high_1d - np.roll(close_1d, 1))
     low_close = np.abs(low_1d - np.roll(close_1d, 1))
@@ -39,71 +38,26 @@ def generate_signals(prices):
     low_close[0] = high_low[0]
     tr = np.maximum(high_low, np.maximum(high_close, low_close))
     
-    # Directional Movement
-    up_move = np.diff(high_1d, prepend=high_1d[0])
-    down_move = np.diff(low_1d, prepend=low_1d[0])
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    tr_series = pd.Series(tr)
+    atr_14d = tr_series.rolling(window=14, min_periods=14).mean().values
     
-    # Smoothed values
-    tr_period = 14
-    tr_smooth = pd.Series(tr).ewm(alpha=1/tr_period, adjust=False).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/tr_period, adjust=False).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/tr_period, adjust=False).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/tr_period, adjust=False).mean().values
-    
-    # Calculate Camarilla pivot levels from previous day
-    # Camarilla formula: 
-    # R4 = C + ((H-L) * 1.1/2)
-    # R3 = C + ((H-L) * 1.1/4)
-    # R2 = C + ((H-L) * 1.1/6)
-    # R1 = C + ((H-L) * 1.1/12)
-    # PP = (H + L + C) / 3
-    # S1 = C - ((H-L) * 1.1/12)
-    # S2 = C - ((H-L) * 1.1/6)
-    # S3 = C - ((H-L) * 1.1/4)
-    # S4 = C - ((H-L) * 1.1/2)
-    
-    # Calculate for each day
-    camarilla_s1 = np.zeros(len(df_1d))
-    camarilla_s2 = np.zeros(len(df_1d))
-    camarilla_s3 = np.zeros(len(df_1d))
-    camarilla_r1 = np.zeros(len(df_1d))
-    camarilla_r2 = np.zeros(len(df_1d))
-    camarilla_r3 = np.zeros(len(df_1d))
-    
-    for i in range(len(df_1d)):
-        h = high_1d[i]
-        l = low_1d[i]
-        c = close_1d[i]
-        range_hl = h - l
-        
-        camarilla_s1[i] = c - (range_hl * 1.1 / 12)
-        camarilla_s2[i] = c - (range_hl * 1.1 / 6)
-        camarilla_s3[i] = c - (range_hl * 1.1 / 4)
-        camarilla_r1[i] = c + (range_hl * 1.1 / 12)
-        camarilla_r2[i] = c + (range_hl * 1.1 / 6)
-        camarilla_r3[i] = c + (range_hl * 1.1 / 4)
-    
-    # Align Camarilla levels to 12h timeframe
-    camarilla_s1_12h = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    camarilla_s2_12h = align_htf_to_ltf(prices, df_1d, camarilla_s2)
-    camarilla_s3_12h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_r1_12h = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_r2_12h = align_htf_to_ltf(prices, df_1d, camarilla_r2)
-    camarilla_r3_12h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    adx_12h = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume filter: current volume > 1.5x 24-period average (1 day)
+    # 4h volume filter: current volume > 1.2x 24-period average (1 day)
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=24, min_periods=24).mean().values
+    
+    # 4h Donchian channels (20-period) - breakout levels
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().shift(1).values
+    
+    # Calculate daily volatility as ATR normalized by price
+    daily_volatility = atr_14d / close_1d
+    daily_vol_series = pd.Series(daily_volatility)
+    # Use 70th percentile of daily volatility over 10 days as threshold (more selective)
+    vol_threshold = daily_vol_series.rolling(window=10, min_periods=10).quantile(0.70).values
+    # Align volatility threshold to 4h timeframe
+    vol_threshold_4h = align_htf_to_ltf(prices, df_1d, vol_threshold)
     
     signals = np.zeros(n)
     position = 0
@@ -111,43 +65,54 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical data is NaN
-        if np.isnan(adx_12h[i]) or np.isnan(camarilla_s1_12h[i]) or np.isnan(camarilla_r1_12h[i]) or \
-           np.isnan(vol_ma[i]):
+        if np.isnan(atr_14d[i-1]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
+           np.isnan(vol_ma[i]) or np.isnan(vol_threshold_4h[i]):
             continue
         
-        # Only trade in trending markets (ADX > 25)
-        if adx_12h[i] <= 25:
-            # If we have a position, exit when trend weakens
-            if position != 0:
-                position = 0
-                signals[i] = 0.0
-            continue
+        # Get previous day's data for volatility-based S1/R1 levels
+        prev_close = close_1d[i-1]
+        prev_atr = atr_14d[i-1]  # Previous day's ATR
+        
+        # Calculate volatility-adjusted threshold (0.35 * ATR) - balanced for signal frequency
+        threshold = prev_atr * 0.35
+        
+        # Calculate dynamic S1/R1 levels based on volatility
+        s1 = prev_close - threshold
+        r1 = prev_close + threshold
+        
+        # Create arrays for alignment
+        s1_array = np.full(len(df_1d), s1)
+        r1_array = np.full(len(df_1d), r1)
+        
+        s1_4h = align_htf_to_ltf(prices, df_1d, s1_array)[i]
+        r1_4h = align_htf_to_ltf(prices, df_1d, r1_array)[i]
         
         if position == 0:
-            # Mean reversion entries:
-            # Long when price touches or goes below S1 with volume confirmation
-            # Short when price touches or goes above R1 with volume confirmation
-            if (low[i] <= camarilla_s1_12h[i] and 
-                volume[i] > vol_ma[i] * 1.5):
+            # Long: Price breaks above r1 with volume and high volatility regime
+            if (close[i] > r1_4h and close[i-1] <= r1_4h and 
+                volume[i] > vol_ma[i] * 1.2 and 
+                daily_volatility[i] > vol_threshold_4h[i]):
                 position = 1
                 signals[i] = position_size
-            elif (high[i] >= camarilla_r1_12h[i] and 
-                  volume[i] > vol_ma[i] * 1.5):
+            # Short: Price breaks below s1 with volume and high volatility regime
+            elif (close[i] < s1_4h and close[i-1] >= s1_4h and 
+                  volume[i] > vol_ma[i] * 1.2 and 
+                  daily_volatility[i] > vol_threshold_4h[i]):
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
-            # Exit long: price reaches R1 (mean reversion target) or S2 (stop)
-            if high[i] >= camarilla_r1_12h[i] or low[i] <= camarilla_s2_12h[i]:
+            # Exit: Price breaks below s1 (reversal) or drops below Donchian low
+            if close[i] < s1_4h or close[i] < donchian_low[i]:
                 position = 0
                 signals[i] = 0.0
         elif position == -1:
-            # Exit short: price reaches S1 (mean reversion target) or R2 (stop)
-            if low[i] <= camarilla_s1_12h[i] or high[i] >= camarilla_r2_12h[i]:
+            # Exit: Price breaks above s1 (reversal) or rises above Donchian high
+            if close[i] > s1_4h or close[i] > donchian_high[i]:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_1d_Camarilla_Pivot_MeanReversion_Volume_ADX"
-timeframe = "12h"
+name = "4h_1d_VolatilityAdjusted_S1R1_Breakout_Volume_v5"
+timeframe = "4h"
 leverage = 1.0
