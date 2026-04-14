@@ -1,3 +1,4 @@
+# Solution
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -13,22 +14,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
+    # Load 1d and 12h data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d EMA(34) for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 12h ATR(14) for volatility filter
+    tr1 = df_12h['high'] - df_12h['low']
+    tr2 = np.abs(df_12h['high'] - df_12h['close'].shift(1))
+    tr3 = np.abs(df_12h['low'] - df_12h['close'].shift(1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
     
-    # Calculate 1d RSI(14) for momentum filter
-    delta = np.diff(df_1d['close'], prepend=df_1d['close'].iloc[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Calculate 1d Williams %R(14) for momentum
+    highest_high = df_1d['high'].rolling(window=14, min_periods=14).max().values
+    lowest_low = df_1d['low'].rolling(window=14, min_periods=14).min().values
+    willr_1d = -100 * (highest_high - df_1d['close'].values) / (highest_high - lowest_low + 1e-10)
+    willr_1d_aligned = align_htf_to_ltf(prices, df_1d, willr_1d)
+    
+    # Calculate 1d EMA(20) for trend filter
+    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
     signals = np.zeros(n)
     position = 0
@@ -39,41 +45,45 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(rsi_1d_aligned[i])):
+        if (np.isnan(ema_20_1d_aligned[i]) or 
+            np.isnan(willr_1d_aligned[i]) or 
+            np.isnan(atr_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # Trend filter: price > 1d EMA34 for long, price < 1d EMA34 for short
-        trend_filter_long = price > ema_34_1d_aligned[i]
-        trend_filter_short = price < ema_34_1d_aligned[i]
+        # Trend filter: price > 1d EMA20 for long, price < 1d EMA20 for short
+        trend_filter_long = price > ema_20_1d_aligned[i]
+        trend_filter_short = price < ema_20_1d_aligned[i]
         
-        # Momentum filter: RSI between 35 and 65 to avoid extremes
-        mom_filter = (rsi_1d_aligned[i] >= 35) & (rsi_1d_aligned[i] <= 65)
+        # Momentum filter: Williams %R between -80 and -20 (not extreme)
+        mom_filter = (willr_1d_aligned[i] >= -80) & (willr_1d_aligned[i] <= -20)
+        
+        # Volatility filter: ATR > 0.5 * price (avoid low volatility chop)
+        vol_filter = atr_12h_aligned[i] > 0.5 * price
         
         if position == 0:
-            # Long setup: price above 1d EMA34 + momentum filter
-            if trend_filter_long and mom_filter:
+            # Long setup: price above 1d EMA20 + momentum filter + volatility filter
+            if trend_filter_long and mom_filter and vol_filter:
                 position = 1
                 signals[i] = position_size
-            # Short setup: price below 1d EMA34 + momentum filter
-            elif trend_filter_short and mom_filter:
+            # Short setup: price below 1d EMA20 + momentum filter + volatility filter
+            elif trend_filter_short and mom_filter and vol_filter:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below 1d EMA34 OR RSI > 70 (overbought)
-            if price < ema_34_1d_aligned[i] or rsi_1d_aligned[i] > 70:
+            # Exit long: price crosses below 1d EMA20 OR Williams %R > -10 (overbought)
+            if price < ema_20_1d_aligned[i] or willr_1d_aligned[i] > -10:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above 1d EMA34 OR RSI < 30 (oversold)
-            if price > ema_34_1d_aligned[i] or rsi_1d_aligned[i] < 30:
+            # Exit short: price crosses above 1d EMA20 OR Williams %R < -90 (oversold)
+            if price > ema_20_1d_aligned[i] or willr_1d_aligned[i] < -90:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -81,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dEMA34_RSI_Filter_v1"
-timeframe = "4h"
+name = "6h_12hATR_1dWilliamsR_EMA20_v1"
+timeframe = "6h"
 leverage = 1.0
