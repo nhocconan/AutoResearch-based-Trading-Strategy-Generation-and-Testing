@@ -1,3 +1,5 @@
+# 11-02-2025
+# Hypothesis: On 4h timeframe, combine 1d price channels (high/low) with volume confirmation and trend strength (ADX) for breakout entries. Exit when price crosses 1d VWAP or trend weakens. Designed for both bull (catch breakouts) and bear (catch breakdowns) markets. Target 20-40 trades/year to avoid fee drag.
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
