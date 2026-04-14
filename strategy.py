@@ -18,7 +18,7 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d close EMA34 for trend filter
+    # Calculate 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
     ema_34_1d = np.full(len(df_1d), np.nan)
     if len(df_1d) >= 34:
