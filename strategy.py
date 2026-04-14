@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Ichimoku Cloud with 1-day trend filter and volume confirmation
-# Long when Tenkan-sen > Kijun-sen, price above Kumo cloud, price > weekly EMA20, and volume > 1.5x 20-period average
-# Short when Tenkan-sen < Kijun-sen, price below Kumo cloud, price < weekly EMA20, and volume > 1.5x 20-period average
-# Exit when Tenkan-sen crosses back below/above Kijun-sen (opposite signal)
-# Ichimoku provides multi-line trend confirmation; weekly EMA filters higher timeframe trend; volume confirms momentum
-# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
+# Hypothesis: 12-hour price channel breakout (Donchian 10) with weekly ADX trend filter and volume confirmation
+# Long when price breaks above Donchian(10) high AND weekly ADX > 25 AND volume > 1.5x 10-period average
+# Short when price breaks below Donchian(10) low AND weekly ADX > 25 AND volume > 1.5x 10-period average
+# Exit when price crosses back inside the Donchian channel (opposite band)
+# Weekly ADX ensures we only trade in strong trends (avoiding chop), reducing false breakouts
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,48 +20,52 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for EMA20 trend filter
+    # Load weekly data ONCE before loop for ADX trend filter
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate Ichimoku components on 6h
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (high_9 + low_9) / 2
+    # Calculate Donchian channels on 12h (10-period high/low)
+    high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
+    low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (high_26 + low_26) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_span_b = (high_52 + low_52) / 2
-    
-    # Calculate weekly EMA20 for trend filter
+    # Calculate weekly ADX for trend filter (14-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # Calculate volume average for confirmation (20-period)
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # True Range
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.concatenate([[close_1w[0]], close_1w[:-1]]))
+    tr3 = np.abs(low_1w - np.concatenate([[close_1w[0]], close_1w[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Directional Movement
+    dm_plus = np.where((high_1w - np.concatenate([[high_1w[0]], high_1w[:-1]])) > 
+                       (np.concatenate([[low_1w[0]], low_1w[:-1]]) - low_1w), 
+                       np.maximum(high_1w - np.concatenate([[high_1w[0]], high_1w[:-1]]), 0), 0)
+    dm_minus = np.where((np.concatenate([[low_1w[0]], low_1w[:-1]]) - low_1w) > 
+                        (high_1w - np.concatenate([[high_1w[0]], high_1w[:-1]])), 
+                        np.maximum(np.concatenate([[low_1w[0]], low_1w[:-1]]) - low_1w, 0), 0)
+    
+    # Smoothed values
+    atr = pd.Series(tr).ewm(span=14, adjust=False).mean().values
+    dx = 100 * np.abs(dm_plus - dm_minus) / (dm_plus + dm_minus + 1e-10)
+    adx = pd.Series(dx).ewm(span=14, adjust=False).mean().values
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Calculate volume average for confirmation (10-period)
+    vol_avg = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations (52 for Senkou Span B + buffer)
-    start = 60
+    # Start after enough data for calculations (10 for Donchian + buffer)
+    start = 20
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or 
-            np.isnan(senkou_span_a[i]) or np.isnan(senkou_span_b[i]) or 
-            np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(high_10[i]) or np.isnan(low_10[i]) or 
+            np.isnan(adx_1w_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
@@ -69,37 +73,27 @@ def generate_signals(prices):
         vol = volume[i]
         vol_threshold = vol_avg[i] * 1.5
         
-        # Determine cloud top and bottom
-        cloud_top = max(senkou_span_a[i], senkou_span_b[i])
-        cloud_bottom = min(senkou_span_a[i], senkou_span_b[i])
-        
         if position == 0:
-            # Long setup: Tenkan > Kijun, price above cloud, price > weekly EMA20, volume confirmation
-            if (tenkan_sen[i] > kijun_sen[i] and 
-                price > cloud_top and 
-                price > ema20_1w_aligned[i] and 
-                vol > vol_threshold):
+            # Long setup: breakout above Donchian high + strong trend (ADX>25) + volume confirmation
+            if (price > high_10[i] and adx_1w_aligned[i] > 25 and vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: Tenkan < Kijun, price below cloud, price < weekly EMA20, volume confirmation
-            elif (tenkan_sen[i] < kijun_sen[i] and 
-                  price < cloud_bottom and 
-                  price < ema20_1w_aligned[i] and 
-                  vol > vol_threshold):
+            # Short setup: breakdown below Donchian low + strong trend (ADX>25) + volume confirmation
+            elif (price < low_10[i] and adx_1w_aligned[i] > 25 and vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Tenkan crosses back below Kijun (opposite signal)
-            if tenkan_sen[i] < kijun_sen[i]:
+            # Exit long: price falls back below Donchian low (opposite band)
+            if price < low_10[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Tenkan crosses back above Kijun (opposite signal)
-            if tenkan_sen[i] > kijun_sen[i]:
+            # Exit short: price rises back above Donchian high (opposite band)
+            if price > high_10[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -107,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_1wEMA20_Volume"
-timeframe = "6h"
+name = "12h_Donchian_1wADX_Volume"
+timeframe = "12h"
 leverage = 1.0
