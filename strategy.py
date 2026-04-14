@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1-day Choppiness Index and Donchian Channel breakout.
-# Long when price breaks above Donchian(20) upper band in trending market (CHOP < 38.2),
-# Short when price breaks below Donchian(20) lower band in trending market (CHOP < 38.2).
-# Exit when price returns to Donchian middle or market becomes choppy (CHOP > 61.8).
-# Uses 1-day timeframe for Choppiness Index and Donchian Channel to avoid lower timeframe noise.
-# Designed to work in both bull and bear markets by only trading in trending conditions.
-# Target: 25-35 trades/year per symbol (100-140 total over 4 years) to minimize fee drag.
+# Hypothesis: 12h strategy using 1-week ATR-based volatility expansion and 1-day Donchian breakout.
+# Long when price breaks above 1-day Donchian high (20) AND weekly ATR expansion > 1.3x (volatility surge).
+# Short when price breaks below 1-day Donchian low (20) AND weekly ATR expansion > 1.3x.
+# Exit when price returns to 1-day Donchian middle or ATR contraction < 0.8x.
+# Uses volatility expansion to capture momentum bursts in both bull and bear markets,
+# and Donchian channels for clear breakout levels. Designed for low trade frequency
+# to minimize fee drag while capturing strong moves.
+# Target: 15-25 trades/year per symbol (60-100 total over 4 years).
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,91 +21,94 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Load 1d data ONCE for Choppiness Index and Donchian Channel
+    # Load 1d data ONCE for Donchian channels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need enough for CHOP(14) and Donchian(20)
+    if len(df_1d) < 30:  # Need enough for Donchian(20)
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Choppiness Index (14)
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    # Calculate Donchian channels (20) on 1d
+    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high + donch_low) / 2
+    
+    # Load 1w data ONCE for ATR
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:  # Need enough for ATR(14)
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate ATR (14) on 1w
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # ATR(14)
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate ATR ratio: current ATR / average ATR (50-period)
+    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr / atr_ma
     
-    # Highest high and lowest low over 14 periods
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    
-    # Chop calculation
-    chop = 100 * np.log10(atr_14 * 14 / (highest_high - lowest_low)) / np.log10(14)
-    
-    # Calculate Donchian Channel (20)
-    dc_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    dc_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    dc_middle = (dc_upper + dc_lower) / 2
-    
-    # Align indicators to 4h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    dc_upper_aligned = align_htf_to_ltf(prices, df_1d, dc_upper)
-    dc_lower_aligned = align_htf_to_ltf(prices, df_1d, dc_lower)
-    dc_middle_aligned = align_htf_to_ltf(prices, df_1d, dc_middle)
+    # Align indicators to 12h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    donch_mid_aligned = align_htf_to_ltf(prices, df_1d, donch_mid)
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1w, atr_ratio)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(34, 20)  # Need CHOP and DC periods
+    start = max(30, 20, 50)  # Need Donchian and ATR periods
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(chop_aligned[i]) or 
-            np.isnan(dc_upper_aligned[i]) or
-            np.isnan(dc_lower_aligned[i]) or
-            np.isnan(dc_middle_aligned[i])):
+        if (np.isnan(donch_high_aligned[i]) or 
+            np.isnan(donch_low_aligned[i]) or
+            np.isnan(donch_mid_aligned[i]) or
+            np.isnan(atr_ratio_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: trending market (CHOP < 38.2)
-        trending = chop_aligned[i] < 38.2
+        # Volatility expansion filter: ATR ratio > 1.3 indicates volatility surge
+        vol_expansion = atr_ratio_aligned[i] > 1.3
         
-        # Choppy market (CHOP > 61.8)
-        choppy = chop_aligned[i] > 61.8
+        # Volatility contraction filter: ATR ratio < 0.8 indicates volatility collapse
+        vol_contraction = atr_ratio_aligned[i] < 0.8
         
         if position == 0:
-            # Look for Donchian breakouts in trending market
-            # Long: price breaks above upper DC AND trending market
-            if (close[i] > dc_upper_aligned[i] and 
-                trending):
+            # Look for Donchian breakouts with volatility expansion
+            # Long: price breaks above Donchian high AND volatility expansion
+            if (close[i] > donch_high_aligned[i] and 
+                vol_expansion):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below lower DC AND trending market
-            elif (close[i] < dc_lower_aligned[i] and 
-                  trending):
+            # Short: price breaks below Donchian low AND volatility expansion
+            elif (close[i] < donch_low_aligned[i] and 
+                  vol_expansion):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to middle DC or market becomes choppy
-            if (close[i] <= dc_middle_aligned[i] or 
-                choppy):
+            # Exit long: price returns to Donchian middle or volatility contraction
+            if (close[i] <= donch_mid_aligned[i] or 
+                vol_contraction):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to middle DC or market becomes choppy
-            if (close[i] >= dc_middle_aligned[i] or 
-                choppy):
+            # Exit short: price returns to Donchian middle or volatility contraction
+            if (close[i] >= donch_mid_aligned[i] or 
+                vol_contraction):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -112,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Choppiness_Donchian_Breakout_v1"
-timeframe = "4h"
+name = "12h_1d_Donchian_Breakout_1w_ATR_Expansion_v1"
+timeframe = "12h"
 leverage = 1.0
