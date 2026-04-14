@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1-day Camarilla pivot levels (S1, R1) with volume confirmation
-# - Long when price crosses above S1 with volume > 1.5x 48-period average
-# - Short when price crosses below R1 with volume > 1.5x 48-period average
-# - Uses 1-day EMA200 as trend filter: only long when price > EMA200, short when price < EMA200
-# - Exits on opposite pivot level touch (R1 for longs, S1 for shorts)
+# Hypothesis: 4h strategy using 1-day Donchian channel breakout with volume confirmation and ATR-based volatility filter
+# - Long when price breaks above previous 24h high with volume > 1.5x 48-period average and rising ATR (volatility expansion)
+# - Short when price breaks below previous 24h low with volume > 1.5x 48-period average and rising ATR
+# - Uses rising ATR as volatility filter to avoid whipsaws in low volatility periods
+# - Exits on opposite breakout (mean reversion tendency in ranging markets)
 # - Position size 0.25 to balance risk and returns
-# - Target: 50-150 trades over 4 years (12-37/year) to avoid excessive fees
+# - Target: 60-120 trades over 4 years (15-30/year) to minimize fee drag
+# - Works in both bull and bear markets by capturing breakouts with volatility confirmation
 
 def generate_signals(prices):
     n = len(prices)
@@ -26,27 +27,21 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1-day Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Camarilla levels: S1 = close - (high - low) * 1.1/6, R1 = close + (high - low) * 1.1/6
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 6
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 6
+    # Calculate ATR for volatility filter (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1-day EMA200 for trend filter
-    close_series = pd.Series(close_1d)
-    ema200_1d = close_series.ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # Volume filter: 48-period average (4 days of 12h bars)
+    # Volume filter: 48-period average (2 days of 4h bars)
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=48, min_periods=48).mean().values
-    
-    # Align 1d data to 12h timeframe
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -54,35 +49,47 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical data is NaN
-        if np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(ema200_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(atr[i]) or np.isnan(vol_ma[i]):
             continue
         
+        # Get previous 1d high/low for breakout levels
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        
+        # Create arrays for alignment (constant values for the 1d period)
+        high_array = np.full(len(df_1d), prev_high)
+        low_array = np.full(len(df_1d), prev_low)
+        
+        # Align to 4h timeframe
+        high_4h = align_htf_to_ltf(prices, df_1d, high_array)[i]
+        low_4h = align_htf_to_ltf(prices, df_1d, low_array)[i]
+        
         if position == 0:
-            # Long: Price crosses above S1 with volume and trend filter
-            if (close[i] > s1_aligned[i] and close[i-1] <= s1_aligned[i-1] and
+            # Long: Break above previous 24h high with volume and volatility filter
+            if (close[i] > high_4h and 
                 volume[i] > vol_ma[i] * 1.5 and
-                close[i] > ema200_aligned[i]):
+                i >= 28 and atr[i] > atr[i-14]):
                 position = 1
                 signals[i] = position_size
-            # Short: Price crosses below R1 with volume and trend filter
-            elif (close[i] < r1_aligned[i] and close[i-1] >= r1_aligned[i-1] and
+            # Short: Break below previous 24h low with volume and volatility filter
+            elif (close[i] < low_4h and 
                   volume[i] > vol_ma[i] * 1.5 and
-                  close[i] < ema200_aligned[i]):
+                  i >= 28 and atr[i] > atr[i-14]):
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
-            # Exit: Price touches R1
-            if close[i] >= r1_aligned[i]:
+            # Exit: Break below previous 24h low (mean reversion in ranging markets)
+            if close[i] < low_4h:
                 position = 0
                 signals[i] = 0.0
         elif position == -1:
-            # Exit: Price touches S1
-            if close[i] <= s1_aligned[i]:
+            # Exit: Break above previous 24h high (mean reversion in ranging markets)
+            if close[i] > high_4h:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_1d_Camarilla_Pivot_Volume_TrendFilter"
-timeframe = "12h"
+name = "4h_1d_DonchianBreakout_Volume_VolatilityFilter"
+timeframe = "4h"
 leverage = 1.0
