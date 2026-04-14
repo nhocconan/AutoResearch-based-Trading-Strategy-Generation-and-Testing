@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout (30) with 1d daily pivot context and volume confirmation
-# Daily pivot levels provide institutional support/resistance
-# Donchian breakout captures momentum in direction of pivot bias
-# Volume > 2x average confirms institutional participation
-# Works in bull/bear as pivot bias adapts to trend
-# Target: 15-25 trades/year per symbol (60-100 total over 4 years)
+# Hypothesis: 4h Donchian breakout with 1d trend filter and volume confirmation
+# Uses 1d EMA50 as trend filter - only take long when above, short when below
+# Donchian(20) breakout captures momentum, volume > 1.5x average confirms
+# Exit when price touches opposite Donchian band or trend reverses
+# Designed for fewer trades (target 20-30/year) to avoid fee drag
+# Works in bull/bear as trend filter adapts
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,34 +20,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for daily pivot and trend context
+    # Load 1d data ONCE for trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily pivot points from prior day (using 1d data)
-    prev_day_high = df_1d['high'].shift(1).values
-    prev_day_low = df_1d['low'].shift(1).values
-    prev_day_close = df_1d['close'].shift(1).values
+    # 1d EMA50 trend filter
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Daily pivot calculation (standard floor trader pivot)
-    daily_pivot = (prev_day_high + prev_day_low + prev_day_close) / 3
-    daily_r1 = 2 * daily_pivot - prev_day_low
-    daily_s1 = 2 * daily_pivot - prev_day_high
-    daily_r2 = daily_pivot + (prev_day_high - prev_day_low)
-    daily_s2 = daily_pivot - (prev_day_high - prev_day_low)
-    
-    # Align daily pivot levels to 12h timeframe
-    daily_pivot_aligned = align_htf_to_ltf(prices, df_1d, daily_pivot)
-    daily_r1_aligned = align_htf_to_ltf(prices, df_1d, daily_r1)
-    daily_s1_aligned = align_htf_to_ltf(prices, df_1d, daily_s1)
-    daily_r2_aligned = align_htf_to_ltf(prices, df_1d, daily_r2)
-    daily_s2_aligned = align_htf_to_ltf(prices, df_1d, daily_s2)
-    
-    # Donchian channel (30 periods) on 12h
-    dc_len = 30
+    # Donchian channel (20 periods) on 4h
+    dc_len = 20
     dc_upper = pd.Series(high).rolling(window=dc_len, min_periods=dc_len).max().shift(1).values
     dc_lower = pd.Series(low).rolling(window=dc_len, min_periods=dc_len).min().shift(1).values
     
-    # Volume confirmation: 2x average volume
+    # Volume confirmation: 1.5x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -55,51 +40,49 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(100, dc_len, 20)
+    start = max(50, dc_len, 20)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
         if (np.isnan(dc_upper[i]) or 
             np.isnan(dc_lower[i]) or
-            np.isnan(daily_pivot_aligned[i]) or
-            np.isnan(daily_r1_aligned[i]) or
-            np.isnan(daily_s1_aligned[i]) or
+            np.isnan(ema50_1d_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Pivot bias: price relative to daily pivot
-        above_pivot = close[i] > daily_pivot_aligned[i]
-        below_pivot = close[i] < daily_pivot_aligned[i]
+        # Trend filter: price vs 1d EMA50
+        above_ema50 = close[i] > ema50_1d_aligned[i]
+        below_ema50 = close[i] < ema50_1d_aligned[i]
         
-        # Volume confirmation: current volume > 2x average
-        volume_confirmed = volume[i] > 2.0 * vol_ma[i]
+        # Volume confirmation
+        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Enter long: Donchian breakout above + above daily pivot + volume
+            # Enter long: Donchian breakout above + above 1d EMA50 + volume
             if (close[i] > dc_upper[i] and 
-                above_pivot and 
+                above_ema50 and 
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Enter short: Donchian breakdown below + below daily pivot + volume
+            # Enter short: Donchian breakdown below + below 1d EMA50 + volume
             elif (close[i] < dc_lower[i] and 
-                  below_pivot and 
+                  below_ema50 and 
                   volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to daily pivot or breaks below S1
-            if close[i] < daily_pivot_aligned[i] or close[i] < daily_s1_aligned[i]:
+            # Exit long: price touches lower Donchian or trend turns bearish
+            if close[i] < dc_lower[i] or not above_ema50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to daily pivot or breaks above R1
-            if close[i] > daily_pivot_aligned[i] or close[i] > daily_r1_aligned[i]:
+            # Exit short: price touches upper Donchian or trend turns bullish
+            if close[i] > dc_upper[i] or not below_ema50:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -107,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_DailyPivot_Donchian_Volume_v1"
-timeframe = "12h"
+name = "4h_1d_EMA50_Donchian_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
