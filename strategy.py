@@ -1,14 +1,14 @@
+# 4h_1d_camarilla_breakout_vol_filter_v2
+# Hypothesis: Use 1d Camarilla pivot levels on 4h chart with volume confirmation to capture breakouts
+# Camarilla levels (H4/L4) act as strong support/resistance - breakouts with volume indicate genuine moves
+# Works in bull/bear markets: buy breakouts above H4, sell breakdowns below L4
+# Volume filter ensures only significant breakouts trigger entries, reducing false signals
+# Target: 20-50 trades/year on 4h timeframe to minimize fee drag
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 12h strategy with 1d Donchian breakout + volume confirmation + KAMA trend filter
-# Donchian breakout captures strong directional moves in both bull and bear markets
-# Volume confirmation ensures breakouts are genuine and not false signals
-# KAMA adapts to market conditions, reducing whipsaw in choppy markets
-# Uses 1d Donchian channels for breakout direction, 1d volume spike for confirmation,
-# and 12h KAMA for trend filtering - aims for low trade frequency with high edge
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,85 +20,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for Donchian channels and volume
+    # Load 1d data ONCE for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d Donchian channels (20 periods)
-    donch_len = 20
+    # Calculate 1d Camarilla levels
+    # Formula: Based on previous day's high, low, close
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Upper and lower bands
-    upper = pd.Series(high_1d).rolling(window=donch_len, min_periods=donch_len).max().values
-    lower = pd.Series(low_1d).rolling(window=donch_len, min_periods=donch_len).min().values
+    # Typical price for Camarilla calculation
+    # Using (high + low + close) / 3 as pivot point approximation
+    # Actual Camarilla uses previous day's close as base
+    # Levels: H4 = close + 1.5*(high-low), L4 = close - 1.5*(high-low)
+    # H3/H2/H1 and L3/L2/L1 also calculated but we focus on H4/L4 for breakouts
+    range_1d = high_1d - low_1d
+    camarilla_h4 = close_1d + 1.5 * range_1d
+    camarilla_l4 = close_1d - 1.5 * range_1d
     
-    # Align Donchian to 12h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
+    # Align Camarilla levels to 4h timeframe
+    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
-    # Calculate 1d volume average for spike detection
+    # Calculate volume moving average for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)
-    
-    # Calculate 12h KAMA for trend filter
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, k=10))
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)
-    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
-    
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    
-    # KAMA calculation
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # Seed value
-    for i in range(10, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(30, donch_len + 20)
+    start = 20
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(upper_aligned[i]) or 
-            np.isnan(lower_aligned[i]) or 
-            np.isnan(vol_ma_aligned[i]) or
-            np.isnan(kama[i])):
+        if (np.isnan(h4_aligned[i]) or 
+            np.isnan(l4_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         
-        # Volume confirmation: current volume > 1.5x average
-        volume_spike = vol > 1.5 * vol_ma_aligned[i]
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirmed = vol > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Enter long: price breaks above upper Donchian band + volume spike + price > KAMA
-            if price > upper_aligned[i] and volume_spike and price > kama[i]:
+            # Enter long: price breaks above H4 level with volume confirmation
+            if price > h4_aligned[i] and volume_confirmed:
                 position = 1
                 signals[i] = position_size
-            # Enter short: price breaks below lower Donchian band + volume spike + price < KAMA
-            elif price < lower_aligned[i] and volume_spike and price < kama[i]:
+            # Enter short: price breaks below L4 level with volume confirmation
+            elif price < l4_aligned[i] and volume_confirmed:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below lower Donchian band OR volume drops significantly
-            if price < lower_aligned[i] or vol < 0.5 * vol_ma_aligned[i]:
+            # Exit long: price returns below H4 level (failed breakout) or reverses below L4
+            if price < h4_aligned[i] or price < l4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above upper Donchian band OR volume drops significantly
-            if price > upper_aligned[i] or vol < 0.5 * vol_ma_aligned[i]:
+            # Exit short: price returns above L4 level (failed breakdown) or reverses above H4
+            if price > l4_aligned[i] or price > h4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -106,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1dDonchian_Volume_KAMA_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_vol_filter_v2"
+timeframe = "4h"
 leverage = 1.0
