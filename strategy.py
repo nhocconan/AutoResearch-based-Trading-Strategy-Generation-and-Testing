@@ -16,11 +16,11 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA(20) for trend filter
-    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    # Calculate 1d EMA(30) for trend filter
+    ema_30_1d = pd.Series(df_1d['close']).ewm(span=30, adjust=False, min_periods=30).mean().values
+    ema_30_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_30_1d)
     
-    # Calculate 1d ATR(14) for volatility filter
+    # Calculate 1d ATR(20) for volatility filter
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     close_series = pd.Series(close)
@@ -28,29 +28,34 @@ def generate_signals(prices):
     tr2 = abs(high_series - close_series.shift(1))
     tr3 = abs(low_series - close_series.shift(1))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
+    atr = tr.rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1d Bollinger Bands (20, 2)
-    sma_20_1d = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).mean().values
-    std_20_1d = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).std().values
-    upper_bb_1d = sma_20_1d + (2 * std_20_1d)
-    lower_bb_1d = sma_20_1d - (2 * std_20_1d)
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_1d)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_1d)
+    # Calculate 1d ADX(14) for trend strength filter
+    plus_dm = high_series.diff()
+    minus_dm = low_series.diff()
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0)
+    
+    tr_ma = tr.rolling(window=14, min_periods=14).mean()
+    plus_di = 100 * (plus_dm.rolling(window=14, min_periods=14).mean() / tr_ma)
+    minus_di = 100 * (minus_dm.rolling(window=14, min_periods=14).mean() / tr_ma)
+    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+    adx = dx.rolling(window=14, min_periods=14).mean().values
+    
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
     start = 100
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_20_1d_aligned[i]) or 
+        if (np.isnan(ema_30_1d_aligned[i]) or 
             np.isnan(atr[i]) or 
-            np.isnan(upper_bb_aligned[i]) or 
-            np.isnan(lower_bb_aligned[i])):
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -59,37 +64,36 @@ def generate_signals(prices):
         
         # ATR-based volatility filter: avoid extremely low volatility periods
         atr_ratio = atr[i] / price if price > 0 else 0
-        vol_filter = atr_ratio > 0.003  # Minimum 0.3% ATR relative to price
+        vol_filter = atr_ratio > 0.004  # Minimum 0.4% ATR relative to price
         
-        # Bollinger Band squeeze detection: bandwidth < 5% of price
-        bb_width = (upper_bb_aligned[i] - lower_bb_aligned[i]) / price if price > 0 else 0
-        bb_squeeze = bb_width < 0.05
+        # ADX trend strength filter: only trade when trend is strong enough
+        trend_filter = adx_aligned[i] > 25
         
-        # Trend filter: price > 1d EMA20 for long, price < 1d EMA20 for short
-        trend_filter_long = price > ema_20_1d_aligned[i]
-        trend_filter_short = price < ema_20_1d_aligned[i]
+        # Trend filter: price > 1d EMA30 for long, price < 1d EMA30 for short
+        trend_filter_long = price > ema_30_1d_aligned[i]
+        trend_filter_short = price < ema_30_1d_aligned[i]
         
         if position == 0:
-            # Long setup: price above 1d EMA20 + volatility filter + not in squeeze
-            if (trend_filter_long and vol_filter and not bb_squeeze):
+            # Long setup: price above 1d EMA30 + volatility filter + strong trend
+            if (trend_filter_long and vol_filter and trend_filter):
                 position = 1
                 signals[i] = position_size
-            # Short setup: price below 1d EMA20 + volatility filter + not in squeeze
-            elif (trend_filter_short and vol_filter and not bb_squeeze):
+            # Short setup: price below 1d EMA30 + volatility filter + strong trend
+            elif (trend_filter_short and vol_filter and trend_filter):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below 1d EMA20
-            if price < ema_20_1d_aligned[i]:
+            # Exit long: price crosses below 1d EMA30 OR ADX drops below 20 (trend weakening)
+            if price < ema_30_1d_aligned[i] or adx_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above 1d EMA20
-            if price > ema_20_1d_aligned[i]:
+            # Exit short: price crosses above 1d EMA30 OR ADX drops below 20 (trend weakening)
+            if price > ema_30_1d_aligned[i] or adx_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -97,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_1dEMA20_BBWidth_Filter"
-timeframe = "1h"
+name = "4h_1dEMA30_ADX_Volume_Filter"
+timeframe = "4h"
 leverage = 1.0
