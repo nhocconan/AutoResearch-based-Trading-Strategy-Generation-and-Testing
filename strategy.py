@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1-day price breaking above/below 1-week Donchian Channel (14) with volume above 1.5x 12-period average and 1-day ADX > 20.
-Trades in direction of 1-week trend to avoid counter-trend whipsaws. Uses Donchian period (14) and ADX threshold (20) for balanced signal frequency.
+Hypothesis: 12-hour price breaking above/below 1-day Donchian Channel (20) with volume above 1.3x 20-period average and 1-day ADX > 25.
+Trades in direction of 1-day trend to avoid counter-trend whipsaws. Uses Donchian period (20) and ADX threshold (25) for balanced signal frequency.
 Target: 15-25 trades/year per symbol (60-100 total over 4 years).
 """
 
@@ -19,24 +19,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1-week Donchian Channel (14-period)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    # Calculate 1-day Donchian Channel (20-period)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # Upper and lower bands
-    upper_dc = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    lower_dc = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+    upper_dc = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_dc = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
     # Middle line for trend
     mid_dc = (upper_dc + lower_dc) / 2
     
     # Calculate 1-day ADX (14-period)
-    df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
@@ -71,8 +70,8 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
     adx_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 12-period average volume (12 periods of 1d = 12 days)
-    vol_ma_12 = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    # Calculate 20-period average volume (20 periods of 12h = 10 days)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
@@ -80,23 +79,23 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Get aligned indicators
-        upper_dc_aligned = align_htf_to_ltf(prices, df_1w, upper_dc)[i]
-        lower_dc_aligned = align_htf_to_ltf(prices, df_1w, lower_dc)[i]
-        mid_dc_aligned = align_htf_to_ltf(prices, df_1w, mid_dc)[i]
+        upper_dc_aligned = align_htf_to_ltf(prices, df_1d, upper_dc)[i]
+        lower_dc_aligned = align_htf_to_ltf(prices, df_1d, lower_dc)[i]
+        mid_dc_aligned = align_htf_to_ltf(prices, df_1d, mid_dc)[i]
         adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)[i]
-        vol_ma_12_aligned = vol_ma_12[i]  # already LTF
+        vol_ma_20_aligned = vol_ma_20[i]  # already LTF
         
         # Check for NaN values
         if (np.isnan(upper_dc_aligned) or np.isnan(lower_dc_aligned) or 
             np.isnan(mid_dc_aligned) or np.isnan(adx_1d_aligned) or 
-            np.isnan(vol_ma_12_aligned)):
+            np.isnan(vol_ma_20_aligned)):
             continue
         
-        # Volume confirmation (> 1.5x average)
-        volume_confirm = volume[i] > 1.5 * vol_ma_12_aligned
+        # Volume confirmation (> 1.3x average)
+        volume_confirm = volume[i] > 1.3 * vol_ma_20_aligned
         
-        # ADX trend filter (> 20)
-        trend_filter = adx_1d_aligned > 20
+        # ADX trend filter (> 25)
+        trend_filter = adx_1d_aligned > 25
         
         if position == 0:  # No position - look for entries
             if volume_confirm and trend_filter:
@@ -119,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1wDC14_1dADX20_Volume"
-timeframe = "1d"
+name = "12h_1dDC20_1dADX25_Volume"
+timeframe = "12h"
 leverage = 1.0
