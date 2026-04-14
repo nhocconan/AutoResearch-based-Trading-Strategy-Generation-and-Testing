@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian breakout with 1-day trend filter and volume confirmation
-# Uses Donchian(20) breakout on 4h timeframe for entry
-# Daily ADX(14) > 25 to filter for trending markets on 1d
-# Volume > 1.5x 20-period EMA for confirmation (higher threshold to reduce trades)
-# Designed for 20-50 trades/year with clear trend-following logic
+# Hypothesis: 4-hour Camarilla pivot breakout with 1-day volatility filter
+# Uses Camarilla pivot levels (H4, L4) from daily data for entry signals
+# Daily ATR-based volatility filter to avoid choppy markets (ATR > 20-period median)
+# Volume confirmation > 1.3x 20-period EMA to reduce false breakouts
+# Designed for 20-40 trades/year with clear breakout logic
+# Works in bull markets via upward breaks and in bear markets via downward breaks
 # Position size: 0.25 to balance return and drawdown
-# Works in bull markets via trend continuation and in bear markets via short signals
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,49 +21,37 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data once
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    # Load daily data once for trend filter
+    # Load daily data once for Camarilla pivots and volatility filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 4h Donchian channels (20-period)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    
-    # Calculate Donchian upper/lower bands
-    donch_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    
-    # Daily ADX for trend filter (14-period)
+    # Calculate Camarilla pivot levels from daily OHLC
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate True Range and DM
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_1d[0] = tr1[0]
+    # Camarilla calculations
+    range_1d = high_1d - low_1d
+    camarilla_h4 = close_1d + range_1d * 1.1 / 2
+    camarilla_l4 = close_1d - range_1d * 1.1 / 2
     
-    plus_dm = np.zeros_like(high_1d)
-    minus_dm = np.zeros_like(high_1d)
-    for i in range(1, len(high_1d)):
-        up_move = high_1d[i] - high_1d[i-1]
-        down_move = low_1d[i-1] - low_1d[i]
-        plus_dm[i] = up_move if up_move > down_move and up_move > 0 else 0
-        minus_dm[i] = down_move if down_move > up_move and down_move > 0 else 0
+    # Daily ATR for volatility filter (14-period)
+    high_1d_shift = np.roll(high_1d, 1)
+    low_1d_shift = np.roll(low_1d, 1)
+    close_1d_shift = np.roll(close_1d, 1)
+    high_1d_shift[0] = high_1d[0]
+    low_1d_shift[0] = low_1d[0]
+    close_1d_shift[0] = close_1d[0]
+    
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - close_1d_shift)
+    tr3 = np.abs(low_1d - close_1d_shift)
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1d[0] = high_1d[0] - low_1d[0]
     
     atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    plus_di_1d = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / (atr_1d + 1e-10)
-    minus_di_1d = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / (atr_1d + 1e-10)
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d + 1e-10)
-    adx_1d = pd.Series(dx_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_median = pd.Series(atr_1d).rolling(window=20, min_periods=20).median().values
     
     # Volume moving average for confirmation (20-period EMA)
     vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -72,39 +60,42 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25
     
-    for i in range(20, n):  # Start after Donchian period
-        # Get aligned 4h Donchian levels
-        donch_high_i = align_htf_to_ltf(prices, df_4h, donch_high)[i]
-        donch_low_i = align_htf_to_ltf(prices, df_4h, donch_low)[i]
+    for i in range(20, n):
+        # Get aligned daily Camarilla levels
+        camarilla_h4_i = align_htf_to_ltf(prices, df_1d, camarilla_h4)[i]
+        camarilla_l4_i = align_htf_to_ltf(prices, df_1d, camarilla_l4)[i]
         
-        # Get aligned daily ADX
-        adx_1d_i = align_htf_to_ltf(prices, df_1d, adx_1d)[i]
+        # Get aligned daily volatility filter
+        atr_med_i = align_htf_to_ltf(prices, df_1d, atr_median)[i]
         
-        if np.isnan(donch_high_i) or np.isnan(donch_low_i) or np.isnan(adx_1d_i) or np.isnan(vol_ma[i]):
+        if np.isnan(camarilla_h4_i) or np.isnan(camarilla_l4_i) or np.isnan(atr_med_i) or np.isnan(vol_ma[i]):
             continue
         
-        # Volume confirmation (1.5x average - higher threshold to reduce trades)
-        volume_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Volatility filter: only trade when ATR > median (avoid choppy markets)
+        vol_filter = atr_1d[i] > atr_med_i
         
-        # Long: Price breaks above Donchian high + daily trend up + volume
-        if position == 0 and close[i] > donch_high_i and adx_1d_i > 25 and volume_confirm:
+        # Volume confirmation (1.3x average)
+        volume_confirm = volume[i] > 1.3 * vol_ma[i]
+        
+        # Long: Price breaks above Camarilla H4 + volatility filter + volume
+        if position == 0 and close[i] > camarilla_h4_i and vol_filter and volume_confirm:
             position = 1
             signals[i] = position_size
-        # Short: Price breaks below Donchian low + daily trend down + volume
-        elif position == 0 and close[i] < donch_low_i and adx_1d_i > 25 and volume_confirm:
+        # Short: Price breaks below Camarilla L4 + volatility filter + volume
+        elif position == 0 and close[i] < camarilla_l4_i and vol_filter and volume_confirm:
             position = -1
             signals[i] = -position_size
-        # Exit: Price returns to opposite Donchian band or trend weakens
+        # Exit: Price returns to opposite Camarilla level or volatility drops
         elif position != 0:
-            if position == 1 and (close[i] < donch_low_i or adx_1d_i < 20):
+            if position == 1 and (close[i] < camarilla_l4_i or not vol_filter):
                 position = 0
                 signals[i] = 0.0
-            elif position == -1 and (close[i] > donch_high_i or adx_1d_i < 20):
+            elif position == -1 and (close[i] > camarilla_h4_i or not vol_filter):
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian_DailyADX_Volume"
+name = "4h_Camarilla_DailyVolatility_Volume"
 timeframe = "4h"
 leverage = 1.0
