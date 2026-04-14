@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 12h Bollinger Band breakout with 1d ADX filter and volume confirmation.
+# Hypothesis: 4h strategy using 12h Donchian breakout with 1d ADX filter and volume confirmation.
 # 1d ADX > 25 filters for trending markets to avoid whipsaws in ranging conditions.
-# Bollinger Band breakout from 12h provides entry with volatility-based dynamic levels.
+# Donchian breakout from 12h provides entry with price channel structure.
 # Volume confirmation (>1.5x 20-period average) reduces false breakouts.
-# Exit when price returns to middle Bollinger Band or trend weakens (ADX < 20).
+# Exit when price returns to middle Donchian channel or trend weakens (ADX < 20).
 # Designed to work in both bull and bear markets by using 1d trend filter to avoid counter-trend trades.
 # Target: 20-25 trades/year per symbol (80-100 total over 4 years) to minimize fee drag.
 
@@ -48,9 +48,12 @@ def generate_signals(prices):
     
     # Smoothed values
     tr_period = 14
-    atr = pd.Series(tr).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
+    tr_series = pd.Series(tr)
+    atr = tr_series.ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
+    dm_plus_series = pd.Series(dm_plus)
+    dm_minus_series = pd.Series(dm_minus)
+    dm_plus_smooth = dm_plus_series.ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
+    dm_minus_smooth = dm_minus_series.ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
     
     # Directional Indicators
     di_plus = 100 * dm_plus_smooth / atr
@@ -58,28 +61,26 @@ def generate_signals(prices):
     
     # DX and ADX
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
+    dx_series = pd.Series(dx)
+    adx = dx_series.ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
     
-    # Load 12h data ONCE for Bollinger Bands
+    # Load 12h data ONCE for Donchian Channel
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate Bollinger Bands on 12h data
-    close_12h = df_12h['close'].values
+    # Calculate Donchian Channel on 12h data
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    bb_period = 20
-    bb_std = 2.0
-    sma = pd.Series(close_12h).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std = pd.Series(close_12h).rolling(window=bb_period, min_periods=bb_period).std().values
-    
-    upper_band = sma + bb_std * std
-    lower_band = sma - bb_std * std
+    dc_period = 20
+    upper_channel = pd.Series(high_12h).rolling(window=dc_period, min_periods=dc_period).max().values
+    lower_channel = pd.Series(low_12h).rolling(window=dc_period, min_periods=dc_period).min().values
     
     # Align indicators to 12h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    upper_band_aligned = align_htf_to_ltf(prices, df_12h, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_12h, lower_band)
+    upper_channel_aligned = align_htf_to_ltf(prices, df_12h, upper_channel)
+    lower_channel_aligned = align_htf_to_ltf(prices, df_12h, lower_channel)
     
     # Volume confirmation: 1.5x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -89,13 +90,13 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(20, 20)  # Need BB and volume MA
+    start = max(20, 20)  # Need Donchian and volume MA
     
     for i in range(start, n):
         # Skip if any critical data is NaN
         if (np.isnan(adx_aligned[i]) or 
-            np.isnan(upper_band_aligned[i]) or
-            np.isnan(lower_band_aligned[i]) or
+            np.isnan(upper_channel_aligned[i]) or
+            np.isnan(lower_channel_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -107,17 +108,17 @@ def generate_signals(prices):
         trending = adx_aligned[i] > 25
         
         if position == 0:
-            # Look for Bollinger Band breakouts
+            # Look for Donchian Channel breakouts
             # Only trade in trending markets
             
-            # Long: price breaks above upper Bollinger Band AND trending market
-            if (close[i] > upper_band_aligned[i] and 
+            # Long: price breaks above upper Donchian Channel AND trending market
+            if (close[i] > upper_channel_aligned[i] and 
                 trending and 
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below lower Bollinger Band AND trending market
-            elif (close[i] < lower_band_aligned[i] and 
+            # Short: price breaks below lower Donchian Channel AND trending market
+            elif (close[i] < lower_channel_aligned[i] and 
                   trending and 
                   volume_confirmed):
                 position = -1
@@ -125,18 +126,18 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to middle Bollinger Band or trend weakens
-            middle_band_aligned = align_htf_to_ltf(prices, df_12h, sma)
-            if (close[i] <= middle_band_aligned[i] or 
+            # Exit long: price returns to middle Donchian Channel or trend weakens
+            middle_channel = (upper_channel_aligned[i] + lower_channel_aligned[i]) / 2
+            if (close[i] <= middle_channel or 
                 adx_aligned[i] < 20):  # Trend weakening
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to middle Bollinger Band or trend weakens
-            middle_band_aligned = align_htf_to_ltf(prices, df_12h, sma)
-            if (close[i] >= middle_band_aligned[i] or 
+            # Exit short: price returns to middle Donchian Channel or trend weakens
+            middle_channel = (upper_channel_aligned[i] + lower_channel_aligned[i]) / 2
+            if (close[i] >= middle_channel or 
                 adx_aligned[i] < 20):  # Trend weakening
                 position = 0
                 signals[i] = 0.0
@@ -145,6 +146,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dADX_12hBB_Breakout_VolumeFilter_v1"
+name = "4h_1dADX_12hDC_Breakout_VolumeFilter_v1"
 timeframe = "4h"
 leverage = 1.0
