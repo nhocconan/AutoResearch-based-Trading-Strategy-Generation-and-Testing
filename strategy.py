@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,12 +13,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Hour of day filter (08:00-20:00 UTC) - computed once before loop
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    
-    # Load daily data once before loop
+    # Load daily data (HTF) once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -26,7 +23,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate daily ATR (14-period)
+    # Calculate daily ATR for volatility filter (14-period)
     tr = np.zeros(len(df_1d))
     tr[0] = high_1d[0] - low_1d[0]
     for i in range(1, len(df_1d)):
@@ -42,18 +39,26 @@ def generate_signals(prices):
         for i in range(14, len(df_1d)):
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    atr_1h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate daily 20-period EMA
-    ema20_1d = np.full(len(df_1d), np.nan)
+    # Calculate daily 10-period EMA for trend filter (1d)
+    ema10_1d = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 10:
+        ema10_1d[9] = np.mean(close_1d[:10])
+        for i in range(10, len(df_1d)):
+            ema10_1d[i] = (close_1d[i] * 2 + ema10_1d[i-1] * 8) / 10
+    
+    ema10_12h = align_htf_to_ltf(prices, df_1d, ema10_1d)
+    
+    # Calculate volume moving average (20-period) for daily volume
+    vol_ma_20_1d = np.full(len(df_1d), np.nan)
     if len(df_1d) >= 20:
-        ema20_1d[19] = np.mean(close_1d[:20])
-        for i in range(20, len(df_1d)):
-            ema20_1d[i] = (close_1d[i] * 2 + ema20_1d[i-1] * 18) / 20
+        for i in range(19, len(df_1d)):
+            vol_ma_20_1d[i] = np.mean(volume_1d[i-19:i+1])
     
-    ema20_1h = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    vol_ma_20_12h = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # Calculate 1-hour Donchian channels (20-period)
+    # Calculate 12-hour Donchian channels (20-period) for entry signals
     donch_high = np.full(n, np.nan)
     donch_low = np.full(n, np.nan)
     if n >= 20:
@@ -63,49 +68,67 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if any critical data is NaN
-        if (np.isnan(atr_1h[i]) or
-            np.isnan(ema20_1h[i]) or
+        if (np.isnan(atr_12h[i]) or
+            np.isnan(ema10_12h[i]) or
             np.isnan(donch_high[i]) or
-            np.isnan(donch_low[i])):
+            np.isnan(donch_low[i]) or
+            np.isnan(vol_ma_20_12h[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: 08:00-20:00 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
+        # Skip low volatility periods (ATR < 0.3% of price)
+        if atr_12h[i] < 0.003 * close[i]:
             signals[i] = 0.0
             continue
         
-        # Skip low volatility periods (ATR < 0.5% of price)
-        if atr_1h[i] < 0.005 * close[i]:
-            signals[i] = 0.0
-            continue
+        # Volume ratio: current volume vs 20-period average
+        if vol_ma_20_12h[i] <= 0:
+            volume_ratio = 0
+        else:
+            volume_ratio = volume[i] / vol_ma_20_12h[i]
+        
+        # Volume threshold: require significant spike
+        vol_threshold = 2.0
+        
+        # Calculate daily pivot levels based on previous day's range
+        prev_high = high_1d[i-1] if i > 0 else high_1d[0]
+        prev_low = low_1d[i-1] if i > 0 else low_1d[0]
+        prev_close = close_1d[i-1] if i > 0 else close_1d[0]
+        prev_range = prev_high - prev_low
+        
+        # Camarilla-style pivot levels (R3/S3) - tighter levels for more precise entries
+        r3 = prev_close + (prev_range * 1.1 / 4)
+        s3 = prev_close - (prev_range * 1.1 / 4)
+        
+        # Align to 12h timeframe (no extra delay needed for daily pivot)
+        r3_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r3))[i]
+        s3_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i]
         
         if position == 0:
-            # Long: Price breaks above 1h Donchian high with volatility filter and above daily EMA20
-            if close[i] > donch_high[i] and close[i] > ema20_1h[i]:
+            # Long: Price breaks above 12h Donchian high with volume confirmation and above daily EMA10
+            if close[i] > donch_high[i] and volume_ratio > vol_threshold and close[i] > ema10_12h[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below 1h Donchian low with volatility filter and below daily EMA20
-            elif close[i] < donch_low[i] and close[i] < ema20_1h[i]:
+            # Short: Price breaks below 12h Donchian low with volume confirmation and below daily EMA10
+            elif close[i] < donch_low[i] and volume_ratio > vol_threshold and close[i] < ema10_12h[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below 1h Donchian low OR below daily EMA20
-            if close[i] < donch_low[i] or close[i] < ema20_1h[i]:
+            # Exit: Price falls back below 12h Donchian low OR below daily EMA10
+            if close[i] < donch_low[i] or close[i] < ema10_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above 1h Donchian high OR above daily EMA20
-            if close[i] > donch_high[i] or close[i] > ema20_1h[i]:
+            # Exit: Price rises back above 12h Donchian high OR above daily EMA10
+            if close[i] > donch_high[i] or close[i] > ema10_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -113,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_1d_Donchian_EMA20_Volatility_Filter"
-timeframe = "1h"
+name = "12h_1d_Camarilla_R3S3_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
