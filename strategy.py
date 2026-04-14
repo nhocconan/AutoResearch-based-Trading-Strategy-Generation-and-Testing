@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R with 1d Volume Spike and ADX Trend Filter
-# Takes long when Williams %R crosses above -20 from oversold with volume spike and ADX > 25
-# Takes short when Williams %R crosses below -80 from overbought with volume spike and ADX > 25
-# Exits when Williams %R returns to neutral range (-50) or volume drops below average
-# Williams %R identifies momentum reversals; volume confirms institutional participation;
-# ADX ensures trades occur in trending markets to avoid chop. Designed for 12h timeframe
-# to capture medium-term swings in both bull and bear markets with controlled trade frequency.
+# Hypothesis: 6h Ichimoku Cloud with 1d Trend Filter and Volume Confirmation
+# Uses Ichimoku (Tenkan, Kijun, Senkou A/B) on 6h for entry/exit signals
+# Filters trades by 1d ADX > 25 (strong trend) and 1d volume > 1.5x 20-period average
+# Takes long when Tenkan crosses above Kijun AND price above Senkou Span (cloud)
+# Takes short when Tenkan crosses below Kijun AND price below Senkou Span (cloud)
+# Exits when Tenkan/Kijun cross reverses OR price crosses opposite Senkou Span
+# Designed to capture strong trends with cloud support/resistance, avoiding whipsaws
+# Target: 50-150 total trades over 4 years (12-37/year)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,21 +22,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h and 1d data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load 6h and 1d data ONCE before loop
+    df_6h = get_htf_data(prices, '6h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 12h Williams %R (14-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate Ichimoku components on 6h
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
     
-    # Highest high and lowest low over 14 periods
-    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    tenkan_sen = (pd.Series(high_6h).rolling(window=9, min_periods=9).max() + 
+                  pd.Series(low_6h).rolling(window=9, min_periods=9).min()) / 2
     
-    # Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    williams_r = -100 * (highest_high - close_12h) / (highest_high - lowest_low)
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    kijun_sen = (pd.Series(high_6h).rolling(window=26, min_periods=26).max() + 
+                 pd.Series(low_6h).rolling(window=26, min_periods=26).min()) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2
+    senkou_span_b = ((pd.Series(high_6h).rolling(window=52, min_periods=52).max() + 
+                      pd.Series(low_6h).rolling(window=52, min_periods=52).min()) / 2)
     
     # Calculate 1d ADX for trend strength
     high_1d = df_1d['high'].values
@@ -73,8 +81,11 @@ def generate_signals(prices):
     vol_1d = df_1d['volume'].values
     vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align indicators to 12h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r)
+    # Align indicators to 6h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_6h, tenkan_sen.values)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_6h, kijun_sen.values)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_6h, senkou_span_a.values)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_6h, senkou_span_b.values)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
@@ -82,44 +93,55 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations
-    start = 50  # for Williams %R and ADX calculations
+    # Start after enough data for calculations (52 for Senkou B)
+    start = 52
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol_1d_current = vol_1d[i] if i < len(vol_1d) else vol_1d[-1]
         
+        # Determine cloud top and bottom
+        cloud_top = max(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        cloud_bottom = min(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        
         if position == 0:
-            # Long setup: Williams %R crosses above -20 (exiting oversold) with volume spike and strong trend
-            if (williams_r_aligned[i] > -20 and williams_r_aligned[i-1] <= -20 and 
-                vol_1d_current > 1.5 * vol_ma_1d_aligned[i] and  # Volume spike
-                adx_aligned[i] > 25):                           # Strong trend
+            # Long setup: Tenkan crosses above Kijun AND price above cloud
+            if (tenkan_sen_aligned[i] > kijun_sen_aligned[i] and 
+                tenkan_sen_aligned[i-1] <= kijun_sen_aligned[i-1] and  # Cross just happened
+                price > cloud_top and
+                adx_aligned[i] > 25 and                           # Strong trend
+                vol_1d_current > 1.5 * vol_ma_1d_aligned[i]):     # Volume spike
                 position = 1
                 signals[i] = position_size
-            # Short setup: Williams %R crosses below -80 (entering overbought) with volume spike and strong trend
-            elif (williams_r_aligned[i] < -80 and williams_r_aligned[i-1] >= -80 and 
-                  vol_1d_current > 1.5 * vol_ma_1d_aligned[i] and  # Volume spike
-                  adx_aligned[i] > 25):                           # Strong trend
+            # Short setup: Tenkan crosses below Kijun AND price below cloud
+            elif (tenkan_sen_aligned[i] < kijun_sen_aligned[i] and 
+                  tenkan_sen_aligned[i-1] >= kijun_sen_aligned[i-1] and  # Cross just happened
+                  price < cloud_bottom and
+                  adx_aligned[i] > 25 and                           # Strong trend
+                  vol_1d_current > 1.5 * vol_ma_1d_aligned[i]):     # Volume spike
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Williams %R returns to neutral (-50) or volume drops
-            if williams_r_aligned[i] < -50 or vol_1d_current < vol_ma_1d_aligned[i]:
+            # Exit long: Tenkan/Kijun cross reverses OR price drops below cloud bottom
+            if (tenkan_sen_aligned[i] < kijun_sen_aligned[i] and 
+                tenkan_sen_aligned[i-1] >= kijun_sen_aligned[i-1]) or price < cloud_bottom:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Williams %R returns to neutral (-50) or volume drops
-            if williams_r_aligned[i] > -50 or vol_1d_current < vol_ma_1d_aligned[i]:
+            # Exit short: Tenkan/Kijun cross reverses OR price rises above cloud top
+            if (tenkan_sen_aligned[i] > kijun_sen_aligned[i] and 
+                tenkan_sen_aligned[i-1] <= kijun_sen_aligned[i-1]) or price > cloud_top:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -127,6 +149,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_WilliamsR_1dVolume_ADX"
-timeframe = "12h"
+name = "6h_Ichimoku_Cloud_1dADX_Volume"
+timeframe = "6h"
 leverage = 1.0
