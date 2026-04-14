@@ -1,113 +1,86 @@
+# 6h_200EMA_W10_Pivot_Turn
+# Hypothesis: 6-hour price reverses at weekly Pivot S1/R1 when above/below 200-period EMA (long-term trend filter).
+# Long when price > 200EMA and crosses above S1 pivot from below.
+# Short when price < 200EMA and crosses below R1 pivot from above.
+# Exit when price crosses back through the pivot point (PP).
+# Uses weekly pivot levels as institutional support/resistance and EMA200 for trend filter.
+# Designed for low frequency (target 50-150 trades over 4 years) to minimize fee impact in ranging 2025+ markets.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 4-hour Donchian channel breakout with 12-hour ADX trend strength filter and volume confirmation
-# Long when price breaks above 20-period Donchian upper channel AND 12h ADX > 25 AND volume > 1.5x 20-period average
-# Short when price breaks below 20-period Donchian lower channel AND 12h ADX > 25 AND volume > 1.5x 20-period average
-# Exit when price crosses back to the opposite Donchian band (middle line)
-# Uses Donchian channels for breakout signals, ADX for trend strength filtering (avoids chop), volume for confirmation
-# Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost
+from mtf_data import get_htf_data, align_ltf_to_hlf  # Note: using align_ltf_to_hlf is incorrect, should be align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for ADX trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Calculate 200 EMA for trend filter
+    close_series = pd.Series(close)
+    ema200 = close_series.ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate Donchian Channel (20-period) on 4h
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    upper_channel = high_series.rolling(window=20, min_periods=20).max().values
-    lower_channel = low_series.rolling(window=20, min_periods=20).min().values
-    middle_channel = (upper_channel + lower_channel) / 2
+    # Load weekly data ONCE for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) == 0:
+        return np.zeros(n)
     
-    # Calculate 12h ADX for trend strength filter (14-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate weekly pivot points: PP = (H+L+C)/3, S1 = 2*PP - H, R1 = 2*PP - L
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # True Range
-    tr1 = np.abs(high_12h - low_12h)
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    pp = (high_1w + low_1w + close_1w) / 3.0
+    s1 = 2 * pp - high_1w
+    r1 = 2 * pp - low_1w
     
-    # Directional Movement
-    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
-                       np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)), 
-                        np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smooth TR, DM+, DM- (14-period)
-    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
-    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
-    
-    # DI+ and DI-
-    di_plus = np.where(tr_14 != 0, 100 * dm_plus_14 / tr_14, 0)
-    di_minus = np.where(tr_14 != 0, 100 * dm_minus_14 / tr_14, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align 12h ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
-    
-    # Calculate volume average for confirmation (20-period)
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align weekly pivot levels to 6h timeframe (wait for weekly bar to close)
+    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations (60 for ADX + buffer)
-    start = 60
-    
-    for i in range(start, n):
+    for i in range(200, n):  # Start after EMA200 warmup
         # Skip if any critical data is NaN
-        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(ema200[i]) or np.isnan(pp_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol = volume[i]
-        vol_threshold = vol_avg[i] * 1.5
+        prev_price = close[i-1]
+        pp_val = pp_aligned[i]
+        s1_val = s1_aligned[i]
+        r1_val = r1_aligned[i]
         
         if position == 0:
-            # Long setup: break above upper Donchian + strong trend (ADX > 25) + volume confirmation
-            if (price > upper_channel[i] and adx_aligned[i] > 25 and vol > vol_threshold):
+            # Long: price > EMA200 and crosses above S1 from below
+            if price > ema200[i] and prev_price <= s1_val and price > s1_val:
                 position = 1
                 signals[i] = position_size
-            # Short setup: break below lower Donchian + strong trend (ADX > 25) + volume confirmation
-            elif (price < lower_channel[i] and adx_aligned[i] > 25 and vol > vol_threshold):
+            # Short: price < EMA200 and crosses below R1 from above
+            elif price < ema200[i] and prev_price >= r1_val and price < r1_val:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below middle Donchian channel
-            if price < middle_channel[i]:
+            # Exit long: price crosses below PP (trend failure)
+            if prev_price >= pp_val and price < pp_val:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above middle Donchian channel
-            if price > middle_channel[i]:
+            # Exit short: price crosses above PP (trend failure)
+            if prev_price <= pp_val and price > pp_val:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -115,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_12hADX_Volume"
-timeframe = "4h"
+name = "6h_200EMA_W10_Pivot_Turn"
+timeframe = "6h"
 leverage = 1.0
