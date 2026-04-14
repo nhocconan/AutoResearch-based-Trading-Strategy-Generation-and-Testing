@@ -1,15 +1,17 @@
+# 12h_1wPivot_1dIchimoku_CloudFilter_v1
+# Hypothesis: Use weekly Ichimoku cloud as primary trend filter on 12h timeframe.
+# Enter long when price is above cloud and breaks above 1-day Ichimoku conversion line with volume confirmation.
+# Enter short when price is below cloud and breaks below 1-day Ichimoku base line with volume confirmation.
+# Exit when price returns to the opposite Ichimoku line or trend changes.
+# Weekly Ichimoku provides strong trend filter to avoid counter-trend trades in both bull and bear markets.
+# Daily Ichimoku provides timely entry/exit signals.
+# Volume confirmation reduces false breakouts.
+# Target: 20-40 trades/year per symbol (80-160 total over 4 years) to minimize fee drag.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 6h strategy using 1-day Williams Fractal for market structure and 1-week EMA for trend direction.
-# Williams Fractals identify swing highs/lows with confirmation delay. Price breaking above a bearish fractal
-# suggests bullish continuation; breaking below a bullish fractal suggests bearish continuation.
-# 1-week EMA filter ensures trades align with higher timeframe trend, reducing counter-trend whipsaw.
-# Volume confirmation (>1.5x 20-period average) filters low-probability breakouts.
-# Designed to work in both bull and bear markets by using weekly trend filter.
-# Target: 15-30 trades/year per symbol (60-120 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,44 +23,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for Williams Fractals
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    # Load weekly data ONCE for Ichimoku cloud (trend filter)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 52:
         return np.zeros(n)
     
-    # Calculate Williams Fractals on 1d data
+    # Calculate Ichimoku on weekly data
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(high_1w).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1w).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(high_1w).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1w).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Conversion Line + Base Line)/2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
+    period52_high = pd.Series(high_1w).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1w).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = (period52_high + period52_low) / 2
+    
+    # Chikou Span (Lagging Span): Close plotted 26 periods behind
+    chikou_span = np.concatenate([np.full(26, np.nan), close_1w[:-26]])
+    
+    # Align weekly Ichimoku components to 12h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1w, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1w, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_b)
+    chikou_span_aligned = align_htf_to_ltf(prices, df_1w, chikou_span)
+    
+    # Load daily data ONCE for Ichimoku entry/exit signals
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 26:
+        return np.zeros(n)
+    
+    # Calculate Ichimoku on daily data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    bearish_fractal = np.full(len(high_1d), np.nan)
-    bullish_fractal = np.full(len(low_1d), np.nan)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high_1d = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low_1d = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan_sen_1d = (period9_high_1d + period9_low_1d) / 2
     
-    for i in range(2, len(high_1d) - 2):
-        # Bearish fractal: high[i] is highest among 5 bars (i-2, i-1, i, i+1, i+2)
-        if (high_1d[i] >= high_1d[i-2] and high_1d[i] >= high_1d[i-1] and
-            high_1d[i] >= high_1d[i+1] and high_1d[i] >= high_1d[i+2]):
-            bearish_fractal[i] = high_1d[i]
-        # Bullish fractal: low[i] is lowest among 5 bars
-        if (low_1d[i] <= low_1d[i-2] and low_1d[i] <= low_1d[i-1] and
-            low_1d[i] <= low_1d[i+1] and low_1d[i] <= low_1d[i+2]):
-            bullish_fractal[i] = low_1d[i]
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high_1d = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low_1d = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun_sen_1d = (period26_high_1d + period26_low_1d) / 2
     
-    # Load 1w data ONCE for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
-        return np.zeros(n)
-    
-    # Calculate EMA(21) on 1w close
-    close_1w = df_1w['close'].values
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # Align indicators to 6h timeframe
-    # Williams Fractals need 2-bar confirmation delay (already calculated, but align with extra delay for safety)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
-    
-    # EMA alignment (no extra delay needed as it's based on weekly close)
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Align daily Ichimoku components to 12h timeframe
+    tenkan_sen_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen_1d)
+    kijun_sen_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen_1d)
     
     # Volume confirmation: 1.5x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -68,52 +93,58 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(20, 5)  # Need volume MA and fractal lookback
+    start = max(52, 26, 20)  # Need weekly Ichimoku and daily Ichimoku and volume MA
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(bearish_fractal_aligned[i]) or 
-            np.isnan(bullish_fractal_aligned[i]) or
-            np.isnan(ema_21_1w_aligned[i]) or
+        if (np.isnan(tenkan_sen_aligned[i]) or 
+            np.isnan(kijun_sen_aligned[i]) or
+            np.isnan(senkou_span_a_aligned[i]) or
+            np.isnan(senkou_span_b_aligned[i]) or
+            np.isnan(chikou_span_aligned[i]) or
+            np.isnan(tenkan_sen_1d_aligned[i]) or
+            np.isnan(kijun_sen_1d_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
+        
+        # Determine if price is above or below weekly cloud
+        cloud_top = np.maximum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        cloud_bottom = np.minimum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        price_above_cloud = close[i] > cloud_top
+        price_below_cloud = close[i] < cloud_bottom
         
         # Volume confirmation
         volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Look for breakouts with trend filter
-            # Long: price above bearish fractal AND price > weekly EMA (uptrend)
-            if (not np.isnan(bearish_fractal_aligned[i]) and
-                close[i] > bearish_fractal_aligned[i] and
-                close[i] > ema_21_1w_aligned[i] and
+            # Look for entries
+            # Long: price above weekly cloud AND breaks above daily Tenkan-sen with volume
+            if (price_above_cloud and 
+                close[i] > tenkan_sen_1d_aligned[i] and 
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: price below bullish fractal AND price < weekly EMA (downtrend)
-            elif (not np.isnan(bullish_fractal_aligned[i]) and
-                  close[i] < bullish_fractal_aligned[i] and
-                  close[i] < ema_21_1w_aligned[i] and
+            # Short: price below weekly cloud AND breaks below daily Kijun-sen with volume
+            elif (price_below_cloud and 
+                  close[i] < kijun_sen_1d_aligned[i] and 
                   volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to bullish fractal or weekly EMA turns down
-            if (not np.isnan(bullish_fractal_aligned[i]) and
-                close[i] < bullish_fractal_aligned[i]) or \
-               (i > 0 and ema_21_1w_aligned[i] < ema_21_1w_aligned[i-1]):
+            # Exit long: price breaks below daily Kijun-sen or returns to weekly cloud
+            if (close[i] < kijun_sen_1d_aligned[i] or 
+                close[i] < cloud_top):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to bearish fractal or weekly EMA turns up
-            if (not np.isnan(bearish_fractal_aligned[i]) and
-                close[i] > bearish_fractal_aligned[i]) or \
-               (i > 0 and ema_21_1w_aligned[i] > ema_21_1w_aligned[i-1]):
+            # Exit short: price breaks above daily Tenkan-sen or returns to weekly cloud
+            if (close[i] > tenkan_sen_1d_aligned[i] or 
+                close[i] > cloud_bottom):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -121,6 +152,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1dWilliamsFractal_1wEMA_TrendFilter_v1"
-timeframe = "6h"
+name = "12h_1wPivot_1dIchimoku_CloudFilter_v1"
+timeframe = "12h"
 leverage = 1.0
