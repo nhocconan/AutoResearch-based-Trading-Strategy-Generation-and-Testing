@@ -3,6 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 12h timeframe with 1-day ATR-based volatility breakout (S1/R1 levels)
+# - Uses daily volatility to set dynamic entry thresholds, adapting to market conditions
+# - Volume confirmation ensures breakouts are supported by participation
+# - Designed to capture volatility expansion phases in both bull and bear markets
+# - Target: 50-150 trades over 4 years to minimize fee drag while capturing significant moves
+# - Discrete position sizing (0.25) to reduce churn and manage drawdown
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
