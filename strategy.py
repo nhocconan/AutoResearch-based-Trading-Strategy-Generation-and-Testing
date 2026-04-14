@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using weekly Donchian breakouts with daily EMA trend filter and volume confirmation.
-# Long when price breaks above weekly Donchian upper with daily EMA alignment (price > EMA) and volume > 1.5x average.
-# Short when price breaks below weekly Donchian lower with daily EMA alignment (price < EMA) and volume > 1.5x average.
-# Exit when price returns to weekly Donchian midpoint or crosses the daily EMA in opposite direction.
-# Weekly Donchian provides structural breaks, daily EMA filters trend direction, volume confirms strength.
-# Target: 20-30 trades/year per symbol (80-120 total over 4 years) to minimize fee drag and avoid overtrading.
+# Hypothesis: 4h strategy using 12h Donchian breakouts with 12h EMA trend filter and volume confirmation.
+# Long when price breaks above 12h Donchian upper with price above 12h EMA(20) and volume > 1.5x average.
+# Short when price breaks below 12h Donchian lower with price below 12h EMA(20) and volume > 1.5x average.
+# Exit when price returns to 12h Donchian midpoint or crosses 12h EMA.
+# Uses 12h Donchian for structure, 12h EMA for trend filter, volume for confirmation.
+# Target: 20-30 trades/year per symbol (80-120 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,37 +20,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for Donchian channels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 12h data ONCE for Donchian channels and EMA
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate weekly Donchian channels (20-week)
-    donchian_upper = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Calculate 12h Donchian channels (20-period)
+    donchian_upper = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     donchian_mid = (donchian_upper + donchian_lower) / 2
     
-    # Load daily data ONCE for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    
-    # Calculate daily EMA(20)
-    ema_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate 12h EMA(20)
+    ema_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     # Align indicators to lower timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1w, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1w, donchian_lower)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_12h, donchian_mid)
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Volume confirmation: 1.5x average volume
+    # Volume confirmation: 1.5x average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -65,7 +58,7 @@ def generate_signals(prices):
         if (np.isnan(donchian_upper_aligned[i]) or 
             np.isnan(donchian_lower_aligned[i]) or
             np.isnan(donchian_mid_aligned[i]) or
-            np.isnan(ema_1d_aligned[i]) or
+            np.isnan(ema_12h_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -73,19 +66,19 @@ def generate_signals(prices):
         # Volume confirmation
         volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
-        # Trend filter: price above/below daily EMA
-        price_above_ema = close[i] > ema_1d_aligned[i]
-        price_below_ema = close[i] < ema_1d_aligned[i]
+        # Trend filter: price above/below 12h EMA
+        price_above_ema = close[i] > ema_12h_aligned[i]
+        price_below_ema = close[i] < ema_12h_aligned[i]
         
         if position == 0:
             # Look for Donchian breakouts
-            # Long: price breaks above weekly Donchian upper AND price above daily EMA
+            # Long: price breaks above Donchian upper AND price above 12h EMA
             if (close[i] > donchian_upper_aligned[i] and 
                 price_above_ema and 
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below weekly Donchian lower AND price below daily EMA
+            # Short: price breaks below Donchian lower AND price below 12h EMA
             elif (close[i] < donchian_lower_aligned[i] and 
                   price_below_ema and 
                   volume_confirmed):
@@ -94,17 +87,17 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to weekly Donchian midpoint or price crosses below daily EMA
+            # Exit long: price returns to Donchian midpoint or price crosses below 12h EMA
             if (close[i] <= donchian_mid_aligned[i] or 
-                close[i] < ema_1d_aligned[i]):
+                close[i] < ema_12h_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to weekly Donchian midpoint or price crosses above daily EMA
+            # Exit short: price returns to Donchian midpoint or price crosses above 12h EMA
             if (close[i] >= donchian_mid_aligned[i] or 
-                close[i] > ema_1d_aligned[i]):
+                close[i] > ema_12h_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -112,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WeeklyDonchian_DailyEMA_VolumeFilter_v1"
+name = "4h_12hDonchian_12hEMA_VolumeFilter_v1"
 timeframe = "4h"
 leverage = 1.0
