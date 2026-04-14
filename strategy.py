@@ -1,9 +1,3 @@
-# The solution is a strategy based on the 4-hour timeframe, using a 1-day timeframe for the trend filter.
-# It uses the Donchian channel (20-period) for breakout signals, with entry only in the direction of the
-# 1-day ADX trend. A volume filter confirms the breakout, and exits are triggered by a touch of the
-# opposite Donchian band. This approach aims to capture momentum in trending markets while avoiding
-# whipsaws in ranging conditions, suitable for both bull and bear markets.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
