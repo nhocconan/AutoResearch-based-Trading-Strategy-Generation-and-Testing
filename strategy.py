@@ -1,17 +1,16 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 12-hour exponential moving average crossover with volume confirmation
-# - Long when 9-period EMA crosses above 21-period EMA on 12h timeframe, volume > 1.5x 48-period average
-# - Short when 9-period EMA crosses below 21-period EMA on 12h timeframe, volume > 1.5x 48-period average
-# - Uses EMA crossover on higher timeframe to reduce whipsaws and capture sustained trends
-# - Volume confirmation ensures breakouts have institutional participation
+# Hypothesis: 1d strategy using 1-week Donchian channel breakout with volume confirmation and ADX trend filter
+# - Long when price breaks above previous weekly high with volume > 1.5x 20-day average and ADX > 25 (trending)
+# - Short when price breaks below previous weekly low with volume > 1.5x 20-day average and ADX > 25 (trending)
+# - Uses ADX > 25 to filter for trending markets and avoid whipsaws in ranging periods
+# - Exits on opposite breakout (mean reversion tendency in ranging markets)
 # - Position size 0.25 to balance risk and returns
-# - Target: 50-100 trades over 4 years (12-25/year) to minimize fee drag
-# - Works in both bull and bear markets by following established trends with confirmation
+# - Target: 40-100 trades over 4 years (10-25/year) to minimize fee drag
+# - Works in both bull and bear markets by capturing breakouts with trend confirmation
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,31 +18,52 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data once before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 21:
+    # Load 1w data once before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Calculate 9 and 21 period EMA on 12h timeframe
-    close_12h_series = pd.Series(close_12h)
-    ema9_12h = close_12h_series.ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema21_12h = close_12h_series.ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Calculate ADX for trend filter (14-period)
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Calculate EMA crossover signals on 12h timeframe
-    ema_crossover = np.zeros(len(df_12h))
-    ema_crossover[9:] = np.where(ema9_12h[9:] > ema21_12h[9:], 1, 
-                                np.where(ema9_12h[9:] < ema21_12h[9:], -1, 0))
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
     
-    # Align EMA crossover to 4h timeframe (waits for 12h bar to close)
-    ema_crossover_aligned = align_htf_to_ltf(prices, df_12h, ema_crossover)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Volume filter: 48-period average (2 days of 4h bars)
+    # Smoothed values
+    tr_ma = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_dm_ma = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_ma = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_ma / tr_ma
+    minus_di = 100 * minus_dm_ma / tr_ma
+    
+    # DX and ADX
+    dx = np.where((plus_di + minus_di) > 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Volume filter: 20-period average (approximately 20 days)
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=48, min_periods=48).mean().values
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -51,33 +71,47 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical data is NaN
-        if np.isnan(ema_crossover_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(adx[i]) or np.isnan(vol_ma[i]):
             continue
         
+        # Get previous weekly high/low for breakout levels
+        prev_high = high_1w[i-1]
+        prev_low = low_1w[i-1]
+        
+        # Create arrays for alignment (constant values for the 1w period)
+        high_array = np.full(len(df_1w), prev_high)
+        low_array = np.full(len(df_1w), prev_low)
+        
+        # Align to 1d timeframe
+        high_1d = align_htf_to_ltf(prices, df_1w, high_array)[i]
+        low_1d = align_htf_to_ltf(prices, df_1w, low_array)[i]
+        
         if position == 0:
-            # Long: EMA bullish crossover on 12h with volume confirmation
-            if (ema_crossover_aligned[i] == 1 and 
-                volume[i] > vol_ma[i] * 1.5):
+            # Long: Break above previous weekly high with volume and trend filter
+            if (close[i] > high_1d and 
+                volume[i] > vol_ma[i] * 1.5 and
+                adx[i] > 25):
                 position = 1
                 signals[i] = position_size
-            # Short: EMA bearish crossover on 12h with volume confirmation
-            elif (ema_crossover_aligned[i] == -1 and 
-                  volume[i] > vol_ma[i] * 1.5):
+            # Short: Break below previous weekly low with volume and trend filter
+            elif (close[i] < low_1d and 
+                  volume[i] > vol_ma[i] * 1.5 and
+                  adx[i] > 25):
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
-            # Exit: EMA bearish crossover on 12h (trend change)
-            if ema_crossover_aligned[i] == -1:
+            # Exit: Break below previous weekly low (mean reversion in ranging markets)
+            if close[i] < low_1d:
                 position = 0
                 signals[i] = 0.0
         elif position == -1:
-            # Exit: EMA bullish crossover on 12h (trend change)
-            if ema_crossover_aligned[i] == 1:
+            # Exit: Break above previous weekly high (mean reversion in ranging markets)
+            if close[i] > high_1d:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_12h_EMA9_21_Crossover_Volume"
-timeframe = "4h"
+name = "1d_1w_DonchianBreakout_Volume_ADXFilter"
+timeframe = "1d"
 leverage = 1.0
