@@ -3,109 +3,192 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R + 12h EMA trend + volume confirmation.
-# Williams %R identifies overbought/oversold conditions; mean reversion in ranging markets.
-# In trending markets (12h EMA slope), fade extreme %R readings for counter-trend entries.
-# Long when %R < -80 (oversold) and 12h EMA uptrend; short when %R > -20 (overbought) and 12h EMA downtrend.
-# Volume confirmation (>1.5x 20-period average) filters low-quality signals.
-# Exit when %R reverts to -50 (mean) or trend weakens.
-# Designed to work in both bull (buy dips in uptrend) and bear (sell rallies in downtrend).
-# Target: 25-35 trades/year per symbol (100-140 total over 4 years) to minimize fee drag.
+# Hypothesis: 1d strategy using 1d Supertrend and 1w ADX trend filter.
+# Supertrend(10, 3) on 1d provides dynamic trend direction and trailing stop.
+# 1w ADX(14) > 25 confirms strong trend on higher timeframe.
+# Long when Supertrend flips to up and 1w ADX > 25.
+# Short when Supertrend flips to down and 1w ADX > 25.
+# Exit when Supertrend flips opposite direction.
+# Designed to capture strong trends while avoiding whipsaws in weak trends.
+# Target: 15-25 trades/year per symbol (60-100 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Williams %R parameters
-    willr_period = 14
-    
-    # Load 12h data ONCE for Williams %R and EMA
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < willr_period:
+    # Load 1d data ONCE for Supertrend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_12h).rolling(window=willr_period, min_periods=willr_period).max().values
-    lowest_low = pd.Series(low_12h).rolling(window=willr_period, min_periods=willr_period).min().values
-    ws = highest_high - lowest_low
-    # Avoid division by zero
-    ws = np.where(ws == 0, 1e-10, ws)
-    willr_12h = ((highest_high - close_12h) / ws) * -100
+    # Calculate True Range and ATR on 1d
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
-    # Calculate EMA(21) on 12h for trend filter
-    ema_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    # EMA slope: current EMA - previous EMA
-    ema_slope = np.diff(ema_12h, prepend=np.nan)
+    atr_period = 10
+    atr_1d = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    
+    # Supertrend parameters
+    factor = 3.0
+    
+    # Basic upper and lower bands
+    basic_ub = (high_1d + low_1d) / 2 + factor * atr_1d
+    basic_lb = (high_1d + low_1d) / 2 - factor * atr_1d
+    
+    # Final upper and lower bands
+    final_ub = np.zeros_like(basic_ub)
+    final_lb = np.zeros_like(basic_lb)
+    
+    # Initialize first values
+    final_ub[0] = basic_ub[0]
+    final_lb[0] = basic_lb[0]
+    
+    for i in range(1, len(close_1d)):
+        if close_1d[i-1] <= final_ub[i-1]:
+            final_ub[i] = min(basic_ub[i], final_ub[i-1])
+        else:
+            final_ub[i] = basic_ub[i]
+            
+        if close_1d[i-1] >= final_lb[i-1]:
+            final_lb[i] = max(basic_lb[i], final_lb[i-1])
+        else:
+            final_lb[i] = basic_lb[i]
+    
+    # Supertrend direction: 1 for uptrend, -1 for downtrend
+    supertrend = np.zeros_like(close_1d)
+    direction = np.ones_like(close_1d)  # Start with uptrend assumption
+    
+    supertrend[0] = final_ub[0]
+    direction[0] = 1
+    
+    for i in range(1, len(close_1d)):
+        if close_1d[i] <= final_ub[i]:
+            direction[i] = -1
+            supertrend[i] = final_ub[i]
+        elif close_1d[i] >= final_lb[i]:
+            direction[i] = 1
+            supertrend[i] = final_lb[i]
+        else:
+            direction[i] = direction[i-1]
+            if direction[i] == 1:
+                supertrend[i] = final_lb[i]
+            else:
+                supertrend[i] = final_ub[i]
+    
+    # Load 1w data ONCE for ADX trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate ADX on 1w
+    period = 14
+    
+    # True Range
+    tr1_w = np.abs(high_1w[1:] - low_1w[1:])
+    tr2_w = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3_w = np.abs(low_1w[1:] - close_1w[:-1])
+    tr_w = np.maximum(tr1_w, np.maximum(tr2_w, tr3_w))
+    tr_w = np.concatenate([[np.nan], tr_w])
+    
+    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
+    plus_dm = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    
+    minus_dm = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    minus_dm = np.concatenate([[0], minus_dm])
+    
+    # Smoothed values using Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    def wilders_smoothing(data, period):
+        if len(data) < period:
+            return np.full_like(data, np.nan)
+        result = np.full_like(data, np.nan)
+        # First value is simple average
+        result[period-1] = np.nansum(data[1:period]) / period
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    atr_wilders = wilders_smoothing(tr_w, period)
+    plus_dm_smooth = wilders_smoothing(plus_dm, period)
+    minus_dm_smooth = wilders_smoothing(minus_dm, period)
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / atr_wilders
+    minus_di = 100 * minus_dm_smooth / atr_wilders
+    
+    # DX and ADX
+    dx = np.where((plus_di + minus_di) != 0, 
+                  100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = wilders_smoothing(dx, period)
     
     # Align indicators to lower timeframe
-    willr_12h_aligned = align_htf_to_ltf(prices, df_12h, willr_12h)
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
-    ema_slope_aligned = align_htf_to_ltf(prices, df_12h, ema_slope)
-    
-    # Volume confirmation: 1.5x average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend)
+    direction_aligned = align_htf_to_ltf(prices, df_1d, direction)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(willr_period, 21, 20)  # Need Williams %R, EMA, and volume MA
+    start = max(30, 30)  # Need Supertrend and ADX
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(willr_12h_aligned[i]) or 
-            np.isnan(ema_12h_aligned[i]) or
-            np.isnan(ema_slope_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(supertrend_aligned[i]) or 
+            np.isnan(direction_aligned[i]) or
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
-        
-        # Trend filter: EMA slope positive for uptrend, negative for downtrend
-        uptrend = ema_slope_aligned[i] > 0
-        downtrend = ema_slope_aligned[i] < 0
+        # Trend filter: ADX > 25 indicates strong trend
+        strong_trend = adx_aligned[i] > 25
         
         if position == 0:
-            # Look for mean reversion entries
-            # Long: Williams %R oversold (< -80) AND uptrend
-            if (willr_12h_aligned[i] < -80 and 
-                uptrend and 
-                volume_confirmed):
+            # Look for Supertrend direction changes
+            # Long: Supertrend flips to up AND strong trend
+            if (direction_aligned[i] == 1 and 
+                direction_aligned[i-1] == -1 and 
+                strong_trend):
                 position = 1
                 signals[i] = position_size
-            # Short: Williams %R overbought (> -20) AND downtrend
-            elif (willr_12h_aligned[i] > -20 and 
-                  downtrend and 
-                  volume_confirmed):
+            # Short: Supertrend flips to down AND strong trend
+            elif (direction_aligned[i] == -1 and 
+                  direction_aligned[i-1] == 1 and 
+                  strong_trend):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Williams %R reverts to mean (>= -50) or trend weakens (EMA slope <= 0)
-            if (willr_12h_aligned[i] >= -50 or 
-                ema_slope_aligned[i] <= 0):
+            # Exit long: Supertrend flips to down
+            if direction_aligned[i] == -1:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Williams %R reverts to mean (<= -50) or trend weakens (EMA slope >= 0)
-            if (willr_12h_aligned[i] <= -50 or 
-                ema_slope_aligned[i] >= 0):
+            # Exit short: Supertrend flips to up
+            if direction_aligned[i] == 1:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -113,6 +196,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_12hEMA_Trend_VolumeFilter_v1"
-timeframe = "4h"
+name = "1d_Supertrend_1wADX_TrendFilter_v1"
+timeframe = "1d"
 leverage = 1.0
