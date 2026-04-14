@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian(20) breakout with 1-day EMA(50) trend filter and volume confirmation.
+# Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA(50) trend filter and volume confirmation.
 # The 1-day EMA(50) adapts to both bull and bear markets, ensuring trades follow the dominant trend.
 # The Donchian(20) breakout captures momentum in the direction of the 1-day trend.
 # Volume > 1.5x the 20-period average confirms institutional participation and reduces false breakouts.
 # Exit occurs when price returns to the 1-day EMA(50) or breaks the opposite Donchian band.
-# This combination aims for 10-30 trades per year per symbol (40-120 total over 4 years), staying within the optimal range to minimize fee drag.
+# This combination aims for 20-40 trades per year per symbol (80-160 total over 4 years), staying within the optimal range to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -31,7 +31,7 @@ def generate_signals(prices):
     ema_1d = pd.Series(df_1d['close']).ewm(span=ema_len, adjust=False, min_periods=ema_len).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Donchian channel (20 periods) on 12h
+    # Donchian channel (20 periods) on 4h
     dc_len = 20
     dc_upper = pd.Series(high).rolling(window=dc_len, min_periods=dc_len).max().shift(1).values
     dc_lower = pd.Series(low).rolling(window=dc_len, min_periods=dc_len).min().shift(1).values
@@ -94,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_EMA50_Donchian_Volume_v1"
-timeframe = "12h"
+name = "4h_1d_EMA50_Donchian_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
