@@ -3,51 +3,65 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA(20) trend filter and volume confirmation
-# Donchian breakouts capture breakouts of recent price ranges. EMA filter ensures alignment with higher timeframe trend.
-# Volume confirmation filters out low-momentum breakouts. Works in bull/bear by using EMA filter (long only above EMA, short only below EMA).
-# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag.
+# Hypothesis: 6h momentum strategy using weekly RSI(14) + daily volume confirmation
+# Weekly RSI provides smoothed momentum filter (avoids 6h noise) while daily volume confirms institutional participation
+# Works in bull/bear: long when weekly RSI > 50 with volume surge, short when weekly RSI < 50 with volume surge
+# Target: 50-150 total trades over 4 years (12-37/year) with selective entry conditions
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Get weekly data for RSI calculation
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate 12h EMA(20) for trend filter
-    close_12h_series = pd.Series(close_12h)
-    ema_20_12h = close_12h_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
+    # Calculate weekly RSI(14)
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate 4h Donchian channels (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14])  # First average
+    avg_loss[13] = np.mean(loss[1:14])
     
-    # Volume confirmation: volume > 1.5x average volume (20-period)
-    vol_series = pd.Series(volume)
-    avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi_1w = np.where(avg_loss == 0, 100, 100 - (100 / (1 + rs)))
+    
+    # Align weekly RSI to 6h timeframe
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    
+    # Get daily data for volume average
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    
+    # Calculate daily volume average (20-period)
+    vol_1d_series = pd.Series(volume)
+    avg_vol_1d = vol_1d_series.rolling(window=20, min_periods=20).mean().shift(1).values
+    
+    # Align daily volume average to 6h
+    avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 20  # for Donchian and volume average
+    start = 20  # for volume average
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(ema_20_12h_aligned[i]) or np.isnan(avg_vol[i])):
+        if (np.isnan(rsi_1w_aligned[i]) or np.isnan(avg_vol_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -55,28 +69,26 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long: price breaks above Donchian high with volume filter AND above 12h EMA20
-            if (price > donchian_high[i] and price > ema_20_12h_aligned[i] and 
-                vol > 1.5 * avg_vol[i]):
+            # Long: weekly RSI > 50 (bullish momentum) with volume confirmation
+            if (rsi_1w_aligned[i] > 50 and vol > 2.0 * avg_vol_1d_aligned[i]):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below Donchian low with volume filter AND below 12h EMA20
-            elif (price < donchian_low[i] and price < ema_20_12h_aligned[i] and 
-                  vol > 1.5 * avg_vol[i]):
+            # Short: weekly RSI < 50 (bearish momentum) with volume confirmation
+            elif (rsi_1w_aligned[i] < 50 and vol > 2.0 * avg_vol_1d_aligned[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below Donchian low OR below 12h EMA20
-            if price < donchian_low[i] or price < ema_20_12h_aligned[i]:
+            # Exit long: weekly RSI drops below 50
+            if rsi_1w_aligned[i] < 50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above Donchian high OR above 12h EMA20
-            if price > donchian_high[i] or price > ema_20_12h_aligned[i]:
+            # Exit short: weekly RSI rises above 50
+            if rsi_1w_aligned[i] > 50:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -84,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_EMA12h_Volume"
-timeframe = "4h"
+name = "6h_Weekly_RSI_Volume_Momentum"
+timeframe = "6h"
 leverage = 1.0
