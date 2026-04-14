@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian(20) breakout with 1-day trend filter and volume confirmation
-# Long when price breaks above 12h Donchian upper band with volume >1.5x 20-period average and price above 1d EMA50
-# Short when price breaks below 12h Donchian lower band with volume >1.5x 20-period average and price below 1d EMA50
-# Exit when price crosses the 12h Donchian midline
-# 1-day EMA50 acts as a trend filter to avoid counter-trend trades
-# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and fee drag
+# Hypothesis: 4-hour Bollinger Band breakout with 12-hour EMA trend filter and volume confirmation
+# Long when price closes above upper Bollinger Band with volume >1.5x 20-period average and price above 12h EMA50
+# Short when price closes below lower Bollinger Band with volume >1.5x 20-period average and price below 12h EMA50
+# Exit when price crosses the Bollinger Band middle (SMA20)
+# Bollinger Bands provide adaptive volatility-based channels, EMA50 filters trend direction, volume confirms breakout strength
+# Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and fee drag
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,31 +20,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h and 1d data ONCE before loop
+    # Load 4h and 12h data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     df_12h = get_htf_data(prices, '12h')
-    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 12h Donchian channel (20-period lookback)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    donchian_upper = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donchian_middle = (donchian_upper + donchian_lower) / 2
+    # Calculate 4h Bollinger Bands (20-period, 2 std dev)
+    close_4h = df_4h['close'].values
+    sma_20 = pd.Series(close_4h).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_4h).rolling(window=20, min_periods=20).std().values
+    bollinger_upper = sma_20 + (2 * std_20)
+    bollinger_lower = sma_20 - (2 * std_20)
+    bollinger_middle = sma_20
     
-    # Calculate 1d EMA50
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Calculate 12h EMA50
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Calculate 12h volume average (20-period)
-    vol_12h = df_12h['volume'].values
-    vol_ma_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
+    # Calculate 4h volume average (20-period)
+    vol_4h = df_4h['volume'].values
+    vol_ma_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
     
-    # Align indicators to 12h timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
-    donchian_middle_aligned = align_htf_to_ltf(prices, df_12h, donchian_middle)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
+    # Align indicators to 4h timeframe
+    bollinger_upper_aligned = align_htf_to_ltf(prices, df_4h, bollinger_upper)
+    bollinger_lower_aligned = align_htf_to_ltf(prices, df_4h, bollinger_lower)
+    bollinger_middle_aligned = align_htf_to_ltf(prices, df_4h, bollinger_middle)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
     
     signals = np.zeros(n)
     position = 0
@@ -55,39 +56,39 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_12h_aligned[i])):
+        if (np.isnan(bollinger_upper_aligned[i]) or np.isnan(bollinger_lower_aligned[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_12h_current = volume[i]  # Current 12h volume
+        vol_4h_current = volume[i]  # Current 4h volume
         
         if position == 0:
-            # Long setup: break above Donchian upper with volume confirmation and price above 1d EMA50
-            if (price > donchian_upper_aligned[i] and 
-                vol_12h_current > 1.5 * vol_ma_12h_aligned[i] and  # Volume confirmation
-                price > ema_50_1d_aligned[i]):                 # Price above 1d EMA50 for bullish bias
+            # Long setup: close above Bollinger upper with volume confirmation and price above 12h EMA50
+            if (price > bollinger_upper_aligned[i] and 
+                vol_4h_current > 1.5 * vol_ma_4h_aligned[i] and  # Volume confirmation
+                price > ema_50_12h_aligned[i]):                 # Price above 12h EMA50 for bullish bias
                 position = 1
                 signals[i] = position_size
-            # Short setup: break below Donchian lower with volume confirmation and price below 1d EMA50
-            elif (price < donchian_lower_aligned[i] and 
-                  vol_12h_current > 1.5 * vol_ma_12h_aligned[i] and  # Volume confirmation
-                  price < ema_50_1d_aligned[i]):                 # Price below 1d EMA50 for bearish bias
+            # Short setup: close below Bollinger lower with volume confirmation and price below 12h EMA50
+            elif (price < bollinger_lower_aligned[i] and 
+                  vol_4h_current > 1.5 * vol_ma_4h_aligned[i] and  # Volume confirmation
+                  price < ema_50_12h_aligned[i]):                 # Price below 12h EMA50 for bearish bias
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below Donchian middle
-            if price < donchian_middle_aligned[i]:
+            # Exit long: price crosses below Bollinger middle
+            if price < bollinger_middle_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above Donchian middle
-            if price > donchian_middle_aligned[i]:
+            # Exit short: price crosses above Bollinger middle
+            if price > bollinger_middle_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -95,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_1dEMA50_Volume"
-timeframe = "12h"
+name = "4h_Bollinger_12hEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
