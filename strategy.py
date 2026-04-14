@@ -3,12 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Weekly RSI Extreme + Volume Confirmation with 1d Trend Filter
-# Uses weekly RSI extremes (overbought/oversold) to catch reversals
-# 1d EMA (50) provides trend filter to avoid counter-trend trades
-# Volume spike (>2x 20-period average) confirms momentum at reversal points
-# Works in bull/bear markets by capturing exhaustion moves
-# Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag
+# Hypothesis: 12h Williams %R with 1d Trend Filter (EMA 50)
+# Williams %R identifies overbought/oversold conditions; mean reversion works in both bull/bear markets
+# 1d EMA (50) filters trades to align with higher-timeframe trend, reducing false signals
+# Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag
+# Williams %R formula: (Highest High - Close) / (Highest High - Lowest Low) * -100
+# Long when %R < -80 (oversold) and price > 1d EMA50
+# Short when %R > -20 (overbought) and price < 1d EMA50
+# Exit when %R crosses above -50 (for long) or below -50 (for short)
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,76 +20,58 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for RSI
-    df_weekly = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop for trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly RSI (14)
-    close_weekly = df_weekly['close'].values
-    delta = np.diff(close_weekly, prepend=close_weekly[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate 1d EMA (50) for trend direction
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_weekly = 100 - (100 / (1 + rs))
-    rsi_weekly_aligned = align_htf_to_ltf(prices, df_weekly, rsi_weekly)
-    
-    # Load daily data ONCE before loop for trend filter
-    df_daily = get_htf_data(prices, '1d')
-    
-    # Calculate daily EMA (50) for trend direction
-    close_daily = df_daily['close'].values
-    ema_daily = pd.Series(close_daily).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
-    
-    # Volume spike detection: current volume > 2x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Calculate Williams %R (14-period) on 12h data
+    period = 14
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations
-    start = max(20, 14)  # for volume MA and RSI
+    # Start after enough data for Williams %R calculation
+    start = period
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(rsi_weekly_aligned[i]) or 
-            np.isnan(ema_daily_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(williams_r[i]) or 
+            np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # Trend filter: only trade in direction of daily EMA
-        above_ema = price > ema_daily_aligned[i]
-        
         if position == 0:
-            # Long: weekly RSI oversold (<30) + volume spike + uptrend filter
-            if (rsi_weekly_aligned[i] < 30 and volume_spike[i] and above_ema):
+            # Long: oversold (%R < -80) with uptrend filter
+            if williams_r[i] < -80 and price > ema_1d_aligned[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: weekly RSI overbought (>70) + volume spike + downtrend filter
-            elif (rsi_weekly_aligned[i] > 70 and volume_spike[i] and not above_ema):
+            # Short: overbought (%R > -20) with downtrend filter
+            elif williams_r[i] > -20 and price < ema_1d_aligned[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: weekly RSI returns to neutral (>50) or trend changes
-            if rsi_weekly_aligned[i] > 50 or price < ema_daily_aligned[i]:
+            # Exit long: %R crosses above -50 (momentum fading)
+            if williams_r[i] > -50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: weekly RSI returns to neutral (<50) or trend changes
-            if rsi_weekly_aligned[i] < 50 or price > ema_daily_aligned[i]:
+            # Exit short: %R crosses below -50 (momentum fading)
+            if williams_r[i] < -50:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -95,6 +79,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyRSI_Extreme_Volume_Spike"
-timeframe = "6h"
+name = "12h_WilliamsR_1dEMA50_Trend"
+timeframe = "12h"
 leverage = 1.0
