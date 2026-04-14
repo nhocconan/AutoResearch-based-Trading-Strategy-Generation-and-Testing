@@ -13,51 +13,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data (HTF) once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load daily data (HTF) once before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly ATR (14-period) - Wilder's smoothing
-    high_low = high_1w - low_1w
-    high_close = np.abs(high_1w - np.concatenate([[close_1w[0]], close_1w[:-1]]))
-    low_close = np.abs(low_1w - np.concatenate([[close_1w[0]], close_1w[:-1]]))
+    # Calculate daily ATR (14-period) - Wilder's smoothing
+    high_low = high_1d - low_1d
+    high_close = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    low_close = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
     tr = np.maximum(high_low, np.maximum(high_close, low_close))
     
-    atr_1w = np.full(len(df_1w), np.nan)
-    if len(df_1w) >= 14:
-        atr_1w[13] = np.mean(tr[:14])
-        for i in range(14, len(df_1w)):
-            atr_1w[i] = (atr_1w[i-1] * 13 + tr[i]) / 14
+    atr_1d = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 14:
+        atr_1d[13] = np.mean(tr[:14])
+        for i in range(14, len(df_1d)):
+            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # Calculate weekly ADX (14-period) - Wilder's smoothing
-    plus_dm = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
-                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    minus_dm = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
-                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    # Calculate daily ADX (14-period) - Wilder's smoothing
+    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
     plus_dm = np.concatenate([[0], plus_dm])
     minus_dm = np.concatenate([[0], minus_dm])
     
     tr_14 = tr
-    plus_di_14 = np.full(len(df_1w), np.nan)
-    minus_di_14 = np.full(len(df_1w), np.nan)
-    dx_14 = np.full(len(df_1w), np.nan)
+    plus_di_14 = np.full(len(df_1d), np.nan)
+    minus_di_14 = np.full(len(df_1d), np.nan)
+    dx_14 = np.full(len(df_1d), np.nan)
     
-    if len(df_1w) >= 14:
+    if len(df_1d) >= 14:
         # Smooth +DM, -DM, TR
-        plus_dm_smooth = np.full(len(df_1w), np.nan)
-        minus_dm_smooth = np.full(len(df_1w), np.nan)
-        tr_smooth = np.full(len(df_1w), np.nan)
+        plus_dm_smooth = np.full(len(df_1d), np.nan)
+        minus_dm_smooth = np.full(len(df_1d), np.nan)
+        tr_smooth = np.full(len(df_1d), np.nan)
         
         plus_dm_smooth[13] = np.sum(plus_dm[1:15])
         minus_dm_smooth[13] = np.sum(minus_dm[1:15])
         tr_smooth[13] = np.sum(tr[1:15])
         
-        for i in range(14, len(df_1w)):
+        for i in range(14, len(df_1d)):
             plus_dm_smooth[i] = plus_dm_smooth[i-1] - (plus_dm_smooth[i-1] / 14) + plus_dm[i]
             minus_dm_smooth[i] = minus_dm_smooth[i-1] - (minus_dm_smooth[i-1] / 14) + minus_dm[i]
             tr_smooth[i] = tr_smooth[i-1] - (tr_smooth[i-1] / 14) + tr[i]
@@ -66,15 +66,15 @@ def generate_signals(prices):
         minus_di_14 = 100 * minus_dm_smooth / tr_smooth
         dx_14 = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
     
-    adx_1w = np.full(len(df_1w), np.nan)
-    if len(df_1w) >= 27:  # Need 14 + 14 for smoothing
-        adx_1w[26] = np.mean(dx_14[14:28])
-        for i in range(27, len(df_1w)):
-            adx_1w[i] = (adx_1w[i-1] * 13 + dx_14[i]) / 14
+    adx_14 = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 27:  # Need 14 + 14 for smoothing
+        adx_14[26] = np.mean(dx_14[14:28])
+        for i in range(27, len(df_1d)):
+            adx_14[i] = (adx_14[i-1] * 13 + dx_14[i]) / 14
     
     # Align indicators to 6h timeframe
-    atr_6h = align_htf_to_ltf(prices, df_1w, atr_1w)
-    adx_6h = align_htf_to_ltf(prices, df_1w, adx_1w)
+    atr_6h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    adx_6h = align_htf_to_ltf(prices, df_1d, adx_14)
     
     # Calculate 6-hour Donchian channels (20-period)
     donch_high = np.full(n, np.nan)
@@ -119,10 +119,10 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Calculate pivot levels based on previous week's range
-        prev_high = high_1w[i-1] if i > 0 else high_1w[0]
-        prev_low = low_1w[i-1] if i > 0 else low_1w[0]
-        prev_close = close_1w[i-1] if i > 0 else close_1w[0]
+        # Calculate pivot levels based on previous day's range
+        prev_high = high_1d[i-1] if i > 0 else high_1d[0]
+        prev_low = low_1d[i-1] if i > 0 else low_1d[0]
+        prev_close = close_1d[i-1] if i > 0 else close_1d[0]
         prev_range = prev_high - prev_low
         
         # Pivot levels for reversal at extremes
@@ -132,10 +132,10 @@ def generate_signals(prices):
         s4 = prev_close - (prev_range * 1.1 / 2)  # Support 4
         
         # Align to 6h timeframe
-        r3_6h = align_htf_to_ltf(prices, df_1w, np.full(len(df_1w), r3))[i]
-        s3_6h = align_htf_to_ltf(prices, df_1w, np.full(len(df_1w), s3))[i]
-        r4_6h = align_htf_to_ltf(prices, df_1w, np.full(len(df_1w), r4))[i]
-        s4_6h = align_htf_to_ltf(prices, df_1w, np.full(len(df_1w), s4))[i]
+        r3_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r3))[i]
+        s3_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i]
+        r4_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r4))[i]
+        s4_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s4))[i]
         
         if position == 0:
             # Long: Price breaks above 6h Donchian high AND above S3 (support hold) AND ADX > 25
@@ -165,6 +165,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_Pivot_S3R3_Donchian20_Volume_ADX_Filter"
+name = "6h_1d_Pivot_S3R3_Donchian20_Volume_ADX_Filter"
 timeframe = "6h"
 leverage = 1.0
