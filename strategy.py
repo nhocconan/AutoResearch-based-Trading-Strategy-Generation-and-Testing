@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 12-hour Donchian channel breakout with volume confirmation
-# - Long when price breaks above previous 12h high with volume > 1.6x 48-period average
-# - Short when price breaks below previous 12h low with volume > 1.6x 48-period average
-# - Requires volatility filter: ATR(14) > ATR(14) 14 periods ago
+# Hypothesis: 4h strategy using 12-hour Donchian channel breakout with volume confirmation and volatility filter
+# - Long when price breaks above previous 12h high with volume > 1.6x 48-period average and rising volatility
+# - Short when price breaks below previous 12h low with volume > 1.6x 48-period average and rising volatility
+# - Uses rising ATR as volatility filter to avoid whipsaws in low volatility
 # - Exits on opposite breakout
 # - Position size 0.28 to balance risk and returns
 # - Target: 80-180 trades over 4 years (20-45/year) to avoid excessive fees
