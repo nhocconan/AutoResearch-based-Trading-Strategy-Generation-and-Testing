@@ -13,7 +13,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for daily pivot levels
+    # Get 1d data for pivot levels
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -35,7 +35,7 @@ def generate_signals(prices):
     r2 = pp + (high_1d - low_1d)
     s2 = pp - (high_1d - low_1d)
     
-    # Align pivot levels to 12h timeframe
+    # Align pivot levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
@@ -45,72 +45,66 @@ def generate_signals(prices):
     vol_series = pd.Series(volume)
     avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
-    # Choppiness regime filter: avoid choppy markets
-    # Calculate ATR(14) for chop calculation
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(np.maximum(tr1, tr2), tr3)])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # True range for chop calculation
-    true_range = np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1))), np.abs(low - np.roll(close, 1)))
-    true_range[0] = np.nan
-    
-    # Calculate chop: 100 * log10(sum(TR(14)) / (max(HH(14)) - min(LL(14))))
-    atr_sum = pd.Series(true_range).rolling(window=14, min_periods=14).sum().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    denominator = highest_high - lowest_low
-    chop = 100 * np.log10(atr_sum / denominator)
+    # Choppiness regime filter (14-period)
+    # Chop > 61.8 = ranging (mean revert), Chop < 38.2 = trending (trend follow)
+    # We use Chop > 61.8 for mean reversion at pivot levels
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    close_series = pd.Series(close)
+    tr1 = high_series - low_series
+    tr2 = abs(high_series - close_series.shift(1))
+    tr3 = abs(low_series - close_series.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean()
+    chop = 100 * np.log10(atr.rolling(window=14, min_periods=14).sum() / 
+                          np.log10(tr.rolling(window=14, min_periods=14).sum())) / np.log10(14)
+    chop_values = chop.values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 20  # for volume and chop calculation
+    start = 30  # for chop and volume calculation
     
     for i in range(start, n):
         # Skip if any critical data is NaN
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
             np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(avg_vol[i]) or np.isnan(chop[i])):
+            np.isnan(avg_vol[i]) or np.isnan(chop_values[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
+        chop_val = chop_values[i]
         
-        # Only trade in trending markets (chop < 61.8)
-        if chop[i] >= 61.8:
-            if position != 0:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.0
+        # Only trade in ranging market (Chop > 61.8) for mean reversion
+        if chop_val <= 61.8:
+            # In trending market, stay flat
+            signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: price breaks above R2 with volume confirmation
+            # Long: price breaks above R2 with volume confirmation in ranging market
             if price > r2_aligned[i] and vol > 1.5 * avg_vol[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below S2 with volume confirmation
+            # Short: price breaks below S2 with volume confirmation in ranging market
             elif price < s2_aligned[i] and vol > 1.5 * avg_vol[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below S1
+            # Exit long: price breaks below S1 (mean reversion to support)
             if price < s1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above R1
+            # Exit short: price breaks above R1 (mean reversion to resistance)
             if price > r1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
@@ -119,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Pivot_Breakout_ChopFilter"
-timeframe = "12h"
+name = "4h_1d_Pivot_Breakout_ChopFilter"
+timeframe = "4h"
 leverage = 1.0
