@@ -3,93 +3,93 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using daily price channels and volume imbalance
-# - Long when price breaks above daily Donchian upper band with volume > 1.5x 20-period average
-# - Short when price breaks below daily Donchian lower band with volume > 1.5x 20-period average
-# - Uses 4h ATR(14) for volatility filtering (ATR > 20-period ATR average)
-# - Target: 80-160 total trades over 4 years (20-40/year) to balance opportunity and cost
+# Hypothesis: 1d strategy using weekly trend as filter with Donchian breakout on daily
+# - Long when weekly trend is up (price above weekly EMA20) and price breaks above Donchian(10) high
+# - Short when weekly trend is down (price below weekly EMA20) and price breaks below Donchian(10) low
+# - Uses weekly EMA20 to determine trend direction, works in both bull and bear markets
+# - Donchian breakout provides entry timing with clear risk management
+# - Volume confirmation ensures institutional participation at breakout
+# - Target: 30-80 total trades over 4 years (7-20/year) to balance opportunity and cost
 # - Position size 0.25 for balanced risk exposure
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    open_price = prices['open'].values
     volume = prices['volume'].values
     
-    # Load daily data once before loop
-    df_d = get_htf_data(prices, '1d')
-    if len(df_d) < 20:
+    # Load weekly data once before loop
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 20:
         return np.zeros(n)
     
-    # Calculate daily Donchian channels
-    high_d = df_d['high'].values
-    low_d = df_d['low'].values
+    # Calculate weekly EMA20
+    close_w = df_w['close'].values
+    ema20_w = pd.Series(close_w).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # 20-period Donchian high/low
-    donch_high = pd.Series(high_d).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_d).rolling(window=20, min_periods=20).min().values
+    # Calculate daily Donchian channels (10-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donch_high = high_series.rolling(window=10, min_periods=10).max().values
+    donch_low = low_series.rolling(window=10, min_periods=10).min().values
     
-    # Daily volume average
-    vol_d = df_d['volume'].values
-    vol_ma_d = pd.Series(vol_d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align daily indicators to 4h timeframe
-    donch_high_4h = align_htf_to_ltf(prices, df_d, donch_high)
-    donch_low_4h = align_htf_to_ltf(prices, df_d, donch_low)
-    vol_ma_d_4h = align_htf_to_ltf(prices, df_d, vol_ma_d)
-    
-    # 4h ATR for volatility filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma_14 = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values
+    # Volume filter: 20-period average
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25
     
-    for i in range(60, n):
+    for i in range(30, n):
         # Skip if any critical data is NaN
-        if np.isnan(donch_high_4h[i]) or np.isnan(donch_low_4h[i]) or np.isnan(vol_ma_d_4h[i]) or np.isnan(atr_ma_14[i]):
+        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(vol_ma[i]):
+            continue
+        
+        # Get weekly index for current daily bar
+        idx_w = i // 7  # Approximate weekly index from daily bars
+        if idx_w < 1:
             continue
             
-        # Volatility filter: only trade when current ATR > average ATR
-        if atr_14[i] <= atr_ma_14[i]:
-            continue
-            
-        # Volume filter: current volume > 1.5x daily average volume
-        if volume[i] <= vol_ma_d_4h[i] * 1.5:
-            continue
-            
+        # Previous week's EMA20 (to avoid look-ahead)
+        ema20_prev = ema20_w[idx_w-1]
+        
+        # Create arrays for alignment (constant values for the week)
+        ema20_arr = np.full(len(df_w), ema20_prev)
+        
+        # Align to daily timeframe
+        ema20_daily = align_htf_to_ltf(prices, df_w, ema20_arr)[i]
+        
         if position == 0:
-            # Long: Price breaks above daily Donchian high with volume and volatility
-            if high[i] > donch_high_4h[i]:
+            # Long: Weekly trend up + price breaks above Donchian high + volume
+            if (close[i] > ema20_daily and  # Weekly trend up
+                high[i] > donch_high[i] and  # Break above Donchian high
+                volume[i] > vol_ma[i] * 1.5):  # Volume confirmation
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below daily Donchian low with volume and volatility
-            elif low[i] < donch_low_4h[i]:
+            # Short: Weekly trend down + price breaks below Donchian low + volume
+            elif (close[i] < ema20_daily and  # Weekly trend down
+                  low[i] < donch_low[i] and  # Break below Donchian low
+                  volume[i] > vol_ma[i] * 1.5):  # Volume confirmation
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
-            # Exit: Price returns to daily Donchian low or opposite band
-            if low[i] <= donch_low_4h[i] or high[i] >= donch_high_4h[i]:
+            # Exit: Price breaks below Donchian low or weekly trend turns down
+            if low[i] < donch_low[i] or close[i] < ema20_daily:
                 position = 0
                 signals[i] = 0.0
         elif position == -1:
-            # Exit: Price returns to daily Donchian high or opposite band
-            if high[i] >= donch_high_4h[i] or low[i] <= donch_low_4h[i]:
+            # Exit: Price breaks above Donchian high or weekly trend turns up
+            if high[i] > donch_high[i] or close[i] > ema20_daily:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_1d_Donchian_Volume_Volatility"
-timeframe = "4h"
+name = "1d_1w_EMA20_Donchian_Volume"
+timeframe = "1d"
 leverage = 1.0
