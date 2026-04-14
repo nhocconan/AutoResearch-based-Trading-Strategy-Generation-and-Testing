@@ -3,6 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 12h timeframe with 1-day pivot rejection + volume confirmation + EMA200 trend filter
+# Works in bull/bear: Pivot rejection captures mean-reversion at key levels, volume confirms institutional interest, EMA200 ensures trend alignment
+# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag
+
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
@@ -28,24 +32,6 @@ def generate_signals(prices):
     # Align daily EMA200 to 12h timeframe
     ema200_12h_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Calculate 1d ATR (14-period) for volatility filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    high_low = high_1d - low_1d
-    high_close = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    low_close = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    
-    atr_1d = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 14:
-        atr_1d[13] = np.mean(tr[:14])
-        for i in range(14, len(df_1d)):
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
-    
-    # Align daily ATR to 12h timeframe
-    atr_12h_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
     # Calculate 12h volume moving average (20-period) for volume filter
     volume_ma = np.full(n, np.nan)
     if n >= 20:
@@ -58,17 +44,20 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any critical data is NaN
-        if np.isnan(ema200_12h_aligned[i]) or np.isnan(atr_12h_aligned[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(ema200_12h_aligned[i]) or np.isnan(volume_ma[i]):
             signals[i] = 0.0
             continue
         
-        # Skip low volatility periods (ATR < 0.3% of price)
-        if atr_12h_aligned[i] / close[i] < 0.003:
-            signals[i] = 0.0
-            continue
+        # Skip low volatility periods (ATR proxy: avoid tight ranges)
+        # Use 12h price range as volatility filter
+        if i >= 1:
+            price_range = (high[i] - low[i]) / close[i]
+            if price_range < 0.005:  # Skip if daily range < 0.5%
+                signals[i] = 0.0
+                continue
         
-        # Skip low volume periods (volume < 60% of 20-period MA)
-        if volume[i] < 0.6 * volume_ma[i]:
+        # Skip low volume periods (volume < 70% of 20-period MA)
+        if volume[i] < 0.7 * volume_ma[i]:
             signals[i] = 0.0
             continue
         
@@ -123,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Pivot_S3R3_Rejection_Volume_EMA200_Filter_v2"
+name = "12h_1d_Pivot_S3R3_Rejection_Volume_EMA200_Filter_v3"
 timeframe = "12h"
 leverage = 1.0
