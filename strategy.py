@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 150:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,15 +13,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w and 1d data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA(20) for long-term trend filter
-    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate 1d EMA(20) for trend filter
+    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # Calculate daily ATR(14) for volatility and position sizing
+    # Calculate 1d ATR(14) for volatility filter
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     close_series = pd.Series(close)
@@ -29,62 +28,68 @@ def generate_signals(prices):
     tr2 = abs(high_series - close_series.shift(1))
     tr3 = abs(low_series - close_series.shift(1))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = tr.rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 12-period average volume for confirmation (12h * 12 = 6 days)
-    vol_avg = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    # Calculate 1d Bollinger Bands (20, 2)
+    sma_20_1d = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).mean().values
+    std_20_1d = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).std().values
+    upper_bb_1d = sma_20_1d + (2 * std_20_1d)
+    lower_bb_1d = sma_20_1d - (2 * std_20_1d)
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_1d)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_1d)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 150
+    start = 100
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_20_1w_aligned[i]) or 
-            np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(ema_20_1d_aligned[i]) or 
+            np.isnan(atr[i]) or 
+            np.isnan(upper_bb_aligned[i]) or 
+            np.isnan(lower_bb_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         
-        # Volatility filter: avoid extremely low volatility periods
-        atr_ratio = atr_1d_aligned[i] / price if price > 0 else 0
-        vol_filter = atr_ratio > 0.005  # Minimum 0.5% ATR relative to price
+        # ATR-based volatility filter: avoid extremely low volatility periods
+        atr_ratio = atr[i] / price if price > 0 else 0
+        vol_filter = atr_ratio > 0.003  # Minimum 0.3% ATR relative to price
         
-        # Volume confirmation: current volume > 2x average (more stringent)
-        vol_confirm = vol > (vol_avg[i] * 2.0) if not np.isnan(vol_avg[i]) else False
+        # Bollinger Band squeeze detection: bandwidth < 5% of price
+        bb_width = (upper_bb_aligned[i] - lower_bb_aligned[i]) / price if price > 0 else 0
+        bb_squeeze = bb_width < 0.05
         
-        # Trend filter: price > weekly EMA20 for long, price < weekly EMA20 for short
-        trend_filter_long = price > ema_20_1w_aligned[i]
-        trend_filter_short = price < ema_20_1w_aligned[i]
+        # Trend filter: price > 1d EMA20 for long, price < 1d EMA20 for short
+        trend_filter_long = price > ema_20_1d_aligned[i]
+        trend_filter_short = price < ema_20_1d_aligned[i]
         
         if position == 0:
-            # Long setup: price above weekly EMA20 + volume confirmation + volatility filter
-            if (trend_filter_long and vol_confirm and vol_filter):
+            # Long setup: price above 1d EMA20 + volatility filter + not in squeeze
+            if (trend_filter_long and vol_filter and not bb_squeeze):
                 position = 1
                 signals[i] = position_size
-            # Short setup: price below weekly EMA20 + volume confirmation + volatility filter
-            elif (trend_filter_short and vol_confirm and vol_filter):
+            # Short setup: price below 1d EMA20 + volatility filter + not in squeeze
+            elif (trend_filter_short and vol_filter and not bb_squeeze):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below weekly EMA20
-            if price < ema_20_1w_aligned[i]:
+            # Exit long: price crosses below 1d EMA20
+            if price < ema_20_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above weekly EMA20
-            if price > ema_20_1w_aligned[i]:
+            # Exit short: price crosses above 1d EMA20
+            if price > ema_20_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -92,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1wEMA20_Volume_Filter"
-timeframe = "12h"
+name = "4h_1dEMA20_BBWidth_Filter"
+timeframe = "4h"
 leverage = 1.0
