@@ -66,24 +66,14 @@ def generate_signals(prices):
             range_ = prev_high - prev_low
             c = prev_close
             # Camarilla levels
-            s1 = c - (range_ * 1.1 / 12)
-            s2 = c - (range_ * 1.1 / 6)
             s3 = c - (range_ * 1.1 / 4)
-            s4 = c - (range_ * 1.1 / 2)
-            r1 = c + (range_ * 1.1 / 12)
-            r2 = c + (range_ * 1.1 / 6)
             r3 = c + (range_ * 1.1 / 4)
-            r4 = c + (range_ * 1.1 / 2)
             
             # Align Camarilla levels to daily timeframe (constant values for the day)
             s3_array = np.full(len(df_1d), s3)
-            s4_array = np.full(len(df_1d), s4)
             r3_array = np.full(len(df_1d), r3)
-            r4_array = np.full(len(df_1d), r4)
             s3_1d = align_htf_to_ltf(prices, df_1d, s3_array)[i]
-            s4_1d = align_htf_to_ltf(prices, df_1d, s4_array)[i]
             r3_1d = align_htf_to_ltf(prices, df_1d, r3_array)[i]
-            r4_1d = align_htf_to_ltf(prices, df_1d, r4_array)[i]
             
             # Volume filter: current volume > 1.3x 5-period average
             vol_ma = np.mean(volume[max(0, i-5):i]) if i >= 5 else volume[i]
@@ -113,18 +103,18 @@ def generate_signals(prices):
                     position = -1
                     signals[i] = -position_size
             elif position == 1:
-                # Exit: Price breaks below S4 (strong reversal) or drops below Donchian low
-                if close[i] < s4_1d or close[i] < donchian_low[i]:
+                # Exit: Price breaks below S3 (reverse signal) or drops below Donchian low
+                if close[i] < s3_1d or close[i] < donchian_low[i]:
                     position = 0
                     signals[i] = 0.0
             elif position == -1:
-                # Exit: Price breaks above R4 (strong reversal) or rises above Donchian high
-                if close[i] > r4_1d or close[i] > donchian_high[i]:
+                # Exit: Price breaks above R3 (reverse signal) or rises above Donchian high
+                if close[i] > r3_1d or close[i] > donchian_high[i]:
                     position = 0
                     signals[i] = 0.0
     
     return signals
 
-name = "12h_Camarilla_R3S3_Donchian_Volume_RSI_Filter"
+name = "12h_Camarilla_R3_Donchian_Volume_RSI_Filter"
 timeframe = "12h"
 leverage = 1.0
