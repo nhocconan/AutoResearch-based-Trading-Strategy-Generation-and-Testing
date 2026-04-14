@@ -48,7 +48,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    position_size = 0.30
+    position_size = 0.25
     
     for i in range(100, n):
         # Get aligned daily data
