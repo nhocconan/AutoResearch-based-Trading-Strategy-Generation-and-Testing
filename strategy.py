@@ -1,109 +1,94 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour KAMA trend with daily RSI and volume confirmation
-# Long when KAMA turns up, RSI < 50 (mean reversion in uptrend), and volume > average
-# Short when KAMA turns down, RSI > 50 (mean reversion in downtrend), and volume > average
-# Exit when KAMA reverses direction
-# Uses KAMA's adaptive smoothing to reduce whipsaw in choppy markets
-# Volume filter ensures trades occur with participation
-# Target: 50-150 trades over 4 years (12-37/year) to balance opportunity and cost
+# Hypothesis: 12-hour Donchian channel breakout with daily volume confirmation and weekly trend filter
+# Long when price breaks above 12h Donchian upper band with volume spike and weekly bullish trend
+# Short when price breaks below 12h Donchian lower band with volume spike and weekly bearish trend
+# Exit when price crosses the Donchian midline
+# Uses weekly EMA trend filter to avoid counter-trend trades in bear markets
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+# This strategy is designed for the 12h timeframe as requested, with proper risk management
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
-    df_daily = get_htf_data(prices, '1d')
+    # Load 12h and weekly data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate KAMA (2-period ER, 30-period smoothing constant)
-    # ER = |close - close[10]| / sum(|close - close[1]|) over 10 periods
-    change = np.abs(np.diff(close, n=10))  # |close - close[10]|
-    volatility = np.zeros_like(close)
-    for i in range(1, len(close)):
-        volatility[i] = volatility[i-1] + np.abs(close[i] - close[i-1])
-    # Pad volatility for first 10 values
-    volatility[:10] = volatility[10] if len(volatility) > 10 else 0
-    er = np.zeros_like(close)
-    er[10:] = change[10:] / (volatility[10:] - volatility[:-10])
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # Calculate KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate 12h Donchian channel (20-period lookback for 12h timeframe)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    donchian_upper = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donchian_middle = (donchian_upper + donchian_lower) / 2
     
-    # Calculate daily RSI (14-period)
-    close_daily = df_daily['close'].values
-    delta = np.diff(close_daily, prepend=close_daily[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_daily = 100 - (100 / (1 + rs))
+    # Calculate weekly EMA for trend filter (21-period)
+    close_weekly = df_weekly['close'].values
+    ema_weekly = pd.Series(close_weekly).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Calculate daily volume average (20-period)
-    vol_daily = df_daily['volume'].values
-    vol_ma_daily = pd.Series(vol_daily).rolling(window=20, min_periods=20).mean().values
+    # Calculate 12h volume average (20-period)
+    vol_12h = df_12h['volume'].values
+    vol_ma_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
     
-    # Align indicators to 4h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_daily, kama)
-    rsi_daily_aligned = align_htf_to_ltf(prices, df_daily, rsi_daily)
-    vol_ma_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_ma_daily)
+    # Align indicators to 12h timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
+    donchian_middle_aligned = align_htf_to_ltf(prices, df_12h, donchian_middle)
+    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
+    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 30  # for KAMA and RSI calculations
+    start = 40  # for 20-period calculations
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_daily_aligned[i]) or 
-            np.isnan(vol_ma_daily_aligned[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(ema_weekly_aligned[i]) or np.isnan(vol_ma_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_4h_current = volume[i]  # Current 4h volume
-        kama_prev = kama_aligned[i-1]
-        kama_curr = kama_aligned[i]
+        vol_12h_current = volume[i]  # Current 12h volume
         
         if position == 0:
-            # Long setup: KAMA turning up, RSI < 50 (buy dip in uptrend), volume above average
-            if (kama_curr > kama_prev and 
-                rsi_daily_aligned[i] < 50 and 
-                vol_4h_current > vol_ma_daily_aligned[i]):
+            # Long setup: break above Donchian upper with volume spike and weekly bullish trend
+            if (price > donchian_upper_aligned[i] and 
+                vol_12h_current > 1.8 * vol_ma_12h_aligned[i] and  # Volume spike
+                price > ema_weekly_aligned[i]):                    # Price above weekly EMA for bullish trend
                 position = 1
                 signals[i] = position_size
-            # Short setup: KAMA turning down, RSI > 50 (sell rally in downtrend), volume above average
-            elif (kama_curr < kama_prev and 
-                  rsi_daily_aligned[i] > 50 and 
-                  vol_4h_current > vol_ma_daily_aligned[i]):
+            # Short setup: break below Donchian lower with volume spike and weekly bearish trend
+            elif (price < donchian_lower_aligned[i] and 
+                  vol_12h_current > 1.8 * vol_ma_12h_aligned[i] and  # Volume spike
+                  price < ema_weekly_aligned[i]):                    # Price below weekly EMA for bearish trend
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: KAMA turns down
-            if kama_curr < kama_prev:
+            # Exit long: price breaks below Donchian middle
+            if price < donchian_middle_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: KAMA turns up
-            if kama_curr > kama_prev:
+            # Exit short: price breaks above Donchian middle
+            if price > donchian_middle_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -111,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_KAMA_DailyRSI_Volume"
-timeframe = "4h"
+name = "12h_Donchian_WeeklyTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
