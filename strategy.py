@@ -50,7 +50,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position size
+    position_size = 0.20  # 20% position size
     
     # Start after enough data for calculations
     start = 50
@@ -111,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1dEMA20_BBWidth_RSI_Filter_v2"
-timeframe = "12h"
+name = "1h_1dEMA20_BBWidth_RSI_Filter_v2"
+timeframe = "1h"
 leverage = 1.0
