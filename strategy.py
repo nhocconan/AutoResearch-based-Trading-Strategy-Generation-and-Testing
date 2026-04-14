@@ -13,91 +13,93 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data for trend and pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Load daily data for pivot and ATR calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 15:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    r1_1w = 2 * pivot_1w - low_1w
-    s1_1w = 2 * pivot_1w - high_1w
-    r2_1w = pivot_1w + (high_1w - low_1w)
-    s2_1w = pivot_1w - (high_1w - low_1w)
+    # Calculate daily pivot points (standard formula)
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
+    r2 = pivot + (high_1d - low_1d)
+    s2 = pivot - (high_1d - low_1d)
+    r3 = high_1d + 2 * (pivot - low_1d)
+    s3 = low_1d - 2 * (high_1d - pivot)
     
-    # Align weekly pivot levels to 12h timeframe
-    pivot_12h = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_12h = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_12h = align_htf_to_ltf(prices, df_1w, s1_1w)
-    r2_12h = align_htf_to_ltf(prices, df_1w, r2_1w)
-    s2_12h = align_htf_to_ltf(prices, df_1w, s2_1w)
+    # Align pivot levels to daily timeframe (1d primary)
+    pivot_1d = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_1d = align_htf_to_ltf(prices, df_1d, r1)
+    s1_1d = align_htf_to_ltf(prices, df_1d, s1)
+    r2_1d = align_htf_to_ltf(prices, df_1d, r2)
+    s2_1d = align_htf_to_ltf(prices, df_1d, s2)
+    r3_1d = align_htf_to_ltf(prices, df_1d, r3)
+    s3_1d = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Calculate weekly ATR for volatility filter
-    tr_1w = np.zeros(len(df_1w))
-    tr_1w[0] = high_1w[0] - low_1w[0]
-    for i in range(1, len(df_1w)):
-        tr_1w[i] = max(
-            high_1w[i] - low_1w[i],
-            abs(high_1w[i] - close_1w[i-1]),
-            abs(low_1w[i] - close_1w[i-1])
+    # Calculate daily ATR for volatility filter
+    tr = np.zeros(len(df_1d))
+    tr[0] = high_1d[0] - low_1d[0]
+    for i in range(1, len(df_1d)):
+        tr[i] = max(
+            high_1d[i] - low_1d[i],
+            abs(high_1d[i] - close_1d[i-1]),
+            abs(low_1d[i] - close_1d[i-1])
         )
     
-    atr_1w = np.full(len(df_1w), np.nan)
-    if len(df_1w) >= 14:
-        atr_1w[13] = np.mean(tr_1w[:14])
-        for i in range(14, len(df_1w)):
-            atr_1w[i] = (atr_1w[i-1] * 13 + tr_1w[i]) / 14
+    atr_1d = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 14:
+        atr_1d[13] = np.mean(tr[:14])
+        for i in range(14, len(df_1d)):
+            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    atr_12h = align_htf_to_ltf(prices, df_1w, atr_1w)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Volume spike detection (10-period average on 12h)
-    vol_ma_10 = np.full_like(volume, np.nan)
-    if len(volume) >= 10:
-        for i in range(9, len(volume)):
-            vol_ma_10[i] = np.mean(volume[i-9:i+1])
+    # Volume spike detection (20-period average on daily)
+    vol_ma_20 = np.full_like(volume, np.nan)
+    if len(volume) >= 20:
+        for i in range(19, len(volume)):
+            vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    for i in range(10, n):
+    for i in range(20, n):
         # Skip if any critical data is NaN
-        if (np.isnan(pivot_12h[i]) or 
-            np.isnan(r1_12h[i]) or
-            np.isnan(s1_12h[i]) or
-            np.isnan(r2_12h[i]) or
-            np.isnan(s2_12h[i]) or
-            np.isnan(atr_12h[i]) or
-            np.isnan(vol_ma_10[i])):
+        if (np.isnan(pivot_1d[i]) or 
+            np.isnan(r2_1d[i]) or
+            np.isnan(s2_1d[i]) or
+            np.isnan(atr_1d_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Skip low volatility periods (ATR < 0.5% of price)
-        if atr_12h[i] < 0.005 * close[i]:
+        if atr_1d_aligned[i] < 0.005 * close[i]:
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 12h volume vs 10-period average
-        if vol_ma_10[i] <= 0:
+        # Volume ratio: current daily volume vs 20-period average
+        if vol_ma_20[i] <= 0:
             volume_ratio = 0
         else:
-            volume_ratio = volume[i] / vol_ma_10[i]
+            volume_ratio = volume[i] / vol_ma_20[i]
         
         # Volume threshold: require significant spike
         vol_threshold = 2.0
         
         if position == 0:
             # Long: Price breaks above R2 with volume confirmation
-            if (close[i] > r2_12h[i] and 
+            if (close[i] > r2_1d[i] and 
                 volume_ratio > vol_threshold):
                 position = 1
                 signals[i] = position_size
             # Short: Price breaks below S2 with volume confirmation
-            elif (close[i] < s2_12h[i] and 
+            elif (close[i] < s2_1d[i] and 
                   volume_ratio > vol_threshold):
                 position = -1
                 signals[i] = -position_size
@@ -105,14 +107,14 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Exit: Price falls back below pivot
-            if close[i] < pivot_12h[i]:
+            if close[i] < pivot_1d[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
             # Exit: Price rises back above pivot
-            if close[i] > pivot_12h[i]:
+            if close[i] > pivot_1d[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -120,6 +122,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1w_Pivot_R2S2_Breakout"
-timeframe = "12h"
+name = "1d_1w_Pivot_R2S2_Breakout"
+timeframe = "1d"
 leverage = 1.0
