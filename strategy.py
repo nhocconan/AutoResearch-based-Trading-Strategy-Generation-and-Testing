@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -13,20 +13,21 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly EMA(34) for trend filter
-    close_1w_series = pd.Series(close_1w)
-    ema_34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Get daily data for pivot points
+    # Get daily data for pivot points and ATR
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    # Calculate daily ATR(14) for volatility filter
+    high_1d_series = pd.Series(high_1d)
+    low_1d_series = pd.Series(low_1d)
+    close_1d_series = pd.Series(close_1d)
+    tr1 = high_1d_series - low_1d_series
+    tr2 = abs(high_1d_series - close_1d_series.shift(1))
+    tr3 = abs(low_1d_series - close_1d_series.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_14_1d = tr.rolling(window=14, min_periods=14).mean().values
     
     # Calculate daily pivot points (using prior day's OHLC)
     prev_day_high = np.roll(high_1d, 1)
@@ -39,14 +40,19 @@ def generate_signals(prices):
     # Daily pivot point
     pp = (prev_day_high + prev_day_low + prev_day_close) / 3
     # Daily resistance and support levels
+    r1 = 2 * pp - prev_day_low
+    s1 = 2 * pp - prev_day_high
     r2 = pp + (prev_day_high - prev_day_low)
     s2 = pp - (prev_day_high - prev_day_low)
     
-    # Align daily pivot levels to 1d timeframe (using prior day's data)
+    # Align daily pivot levels to 1d timeframe (no shift needed as we use prior day's data)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
     s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Volume confirmation: volume > 1.8x average volume (20-period)
+    # Volume confirmation: volume > 1.5x average volume (20-period)
     vol_series = pd.Series(volume)
     avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
@@ -55,12 +61,13 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(34, 20)  # for 34-period EMA and 20-period volume average
+    start = max(21, 20)  # for 21-period EMA and 20-period volume average
     
     for i in range(start, n):
         # Skip if any critical data is NaN
         if (np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(avg_vol[i])):
+            np.isnan(atr_14_aligned[i]) or
+            np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
         
@@ -68,31 +75,28 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long: price breaks above daily R2 AND above weekly EMA34 with volume filter
-            if (price > r2_aligned[i] and price > ema_34_1w_aligned[i] and 
-                vol > 1.8 * avg_vol[i]):
+            # Long: price breaks above daily R2 AND above weekly EMA21 with volume and volatility filter
+            if (price > r2_aligned[i] and 
+                vol > 1.5 * avg_vol[i] and atr_14_aligned[i] > 0):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below daily S2 AND below weekly EMA34 with volume filter
-            elif (price < s2_aligned[i] and price < ema_34_1w_aligned[i] and 
-                  vol > 1.8 * avg_vol[i]):
+            # Short: price breaks below daily S2 AND below weekly EMA21 with volume and volatility filter
+            elif (price < s2_aligned[i] and 
+                  vol > 1.5 * avg_vol[i] and atr_14_aligned[i] > 0):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below daily pivot point (PP)
-            # Recalculate PP for current day's exit
-            pp_current = (high_1d[i] + low_1d[i] + close_1d[i // 1]) / 3 if i > 0 else np.nan
-            if i > 0 and not np.isnan(pp_current) and price < pp_current:
+            # Exit long: price breaks below daily S1
+            if price < s1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above daily pivot point (PP)
-            pp_current = (high_1d[i] + low_1d[i] + close_1d[i // 1]) / 3 if i > 0 else np.nan
-            if i > 0 and not np.isnan(pp_current) and price > pp_current:
+            # Exit short: price breaks above daily R1
+            if price > r1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -100,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Daily_Pivot_Weekly_EMA_Volume_Filter"
-timeframe = "1d"
+name = "6h_1d_Pivot_R2_S2_Volume"
+timeframe = "6h"
 leverage = 1.0
