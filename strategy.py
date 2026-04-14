@@ -1,15 +1,14 @@
+# 6h strategy using monthly pivot levels for institutional support/resistance with volume confirmation
+# Monthly pivots provide strong institutional reference points that work across market regimes
+# Volume ensures institutional participation at key levels
+# Long when bouncing from monthly S1/S2 with bullish candle and volume > 1.3x average
+# Short when rejected at monthly R1/R2 with bearish candle and volume > 1.3x average
+# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 6h strategy using weekly pivot levels as support/resistance with volume confirmation
-# - Long when price rebounds from weekly S1/S2 with volume > 1.3x 50-period average and close > open
-# - Short when price reverses from weekly R1/R2 with volume > 1.3x 50-period average and close < open
-# - Uses weekly pivot levels as institutional reference points that work in both bull and bear markets
-# - Volume confirmation ensures institutional participation at key levels
-# - Target: 80-160 total trades over 4 years (20-40/year) to balance opportunity and cost
-# - Position size 0.25 for balanced risk exposure
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,21 +21,21 @@ def generate_signals(prices):
     open_price = prices['open'].values
     volume = prices['volume'].values
     
-    # Load weekly data once before loop
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 2:
+    # Load monthly data once before loop
+    df_m = get_htf_data(prices, '1M')
+    if len(df_m) < 2:
         return np.zeros(n)
     
-    high_w = df_w['high'].values
-    low_w = df_w['low'].values
-    close_w = df_w['close'].values
+    high_m = df_m['high'].values
+    low_m = df_m['low'].values
+    close_m = df_m['close'].values
     
-    # Calculate weekly pivot points
-    pivot = (high_w + low_w + close_w) / 3
-    r1 = 2 * pivot - low_w
-    s1 = 2 * pivot - high_w
-    r2 = pivot + (high_w - low_w)
-    s2 = pivot - (high_w - low_w)
+    # Calculate monthly pivot points
+    pivot = (high_m + low_m + close_m) / 3
+    r1 = 2 * pivot - low_m
+    s1 = 2 * pivot - high_m
+    r2 = pivot + (high_m - low_m)
+    s2 = pivot - (high_m - low_m)
     
     # Volume filter: 50-period average
     vol_series = pd.Series(volume)
@@ -51,31 +50,31 @@ def generate_signals(prices):
         if np.isnan(vol_ma[i]):
             continue
         
-        # Get previous week's pivot levels for current week
-        idx_w = i // (7 * 24 * 60 // 6)  # Approximate weekly index from 6h bars
-        if idx_w < 1:
+        # Get previous month's pivot levels for current month
+        idx_m = i // (30 * 24 * 60 // 6)  # Approximate monthly index from 6h bars
+        if idx_m < 1:
             continue
             
-        # Previous week's levels
-        piv_prev = pivot[idx_w-1]
-        r1_prev = r1[idx_w-1]
-        s1_prev = s1[idx_w-1]
-        r2_prev = r2[idx_w-1]
-        s2_prev = s2[idx_w-1]
+        # Previous month's levels
+        piv_prev = pivot[idx_m-1]
+        r1_prev = r1[idx_m-1]
+        s1_prev = s1[idx_m-1]
+        r2_prev = r2[idx_m-1]
+        s2_prev = s2[idx_m-1]
         
-        # Create arrays for alignment (constant values for the week)
-        pivot_arr = np.full(len(df_w), piv_prev)
-        r1_arr = np.full(len(df_w), r1_prev)
-        s1_arr = np.full(len(df_w), s1_prev)
-        r2_arr = np.full(len(df_w), r2_prev)
-        s2_arr = np.full(len(df_w), s2_prev)
+        # Create arrays for alignment (constant values for the month)
+        pivot_arr = np.full(len(df_m), piv_prev)
+        r1_arr = np.full(len(df_m), r1_prev)
+        s1_arr = np.full(len(df_m), s1_prev)
+        r2_arr = np.full(len(df_m), r2_prev)
+        s2_arr = np.full(len(df_m), s2_prev)
         
         # Align to 6h timeframe
-        pivot_6h = align_htf_to_ltf(prices, df_w, pivot_arr)[i]
-        r1_6h = align_htf_to_ltf(prices, df_w, r1_arr)[i]
-        s1_6h = align_htf_to_ltf(prices, df_w, s1_arr)[i]
-        r2_6h = align_htf_to_ltf(prices, df_w, r2_arr)[i]
-        s2_6h = align_htf_to_ltf(prices, df_w, s2_arr)[i]
+        pivot_6h = align_htf_to_ltf(prices, df_m, pivot_arr)[i]
+        r1_6h = align_htf_to_ltf(prices, df_m, r1_arr)[i]
+        s1_6h = align_htf_to_ltf(prices, df_m, s1_arr)[i]
+        r2_6h = align_htf_to_ltf(prices, df_m, r2_arr)[i]
+        s2_6h = align_htf_to_ltf(prices, df_m, s2_arr)[i]
         
         if position == 0:
             # Long: Price near support with bullish candle and volume
@@ -103,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_PivotReversal_Volume"
+name = "6h_1M_PivotReversal_Volume"
 timeframe = "6h"
 leverage = 1.0
