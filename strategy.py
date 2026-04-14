@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using weekly pivot levels from prior week as support/resistance.
-# Long when price breaks above weekly R3 with volume confirmation and price above 6h EMA20.
-# Short when price breaks below weekly S3 with volume confirmation and price below 6h EMA20.
-# Exit when price returns to weekly pivot point or crosses EMA20 in opposite direction.
-# Weekly pivots provide structure that works in both trending and ranging markets.
-# Target: 15-25 trades/year per symbol (60-100 total over 4 years) to minimize fee drag.
+# Hypothesis: 6h strategy combining daily Camarilla pivot levels with 6h price action and volume confirmation.
+# Camarilla levels (R3/S3, R4/S4) from prior day provide institutional support/resistance.
+# Long when price closes above R3 with volume > 1.5x average, targeting R4.
+# Short when price closes below S3 with volume > 1.5x average, targeting S4.
+# Exit when price reaches target level or reverses back through R3/S3.
+# Uses discrete position sizing (0.25) to limit drawdown and minimize fee churn.
+# Designed to work in both trending and ranging markets by fading extremes and capturing breakouts.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,56 +21,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly pivot points: P = (H+L+C)/3
-    pp_1w = (high_1w + low_1w + close_1w) / 3.0
-    # Resistance levels: R1 = 2*P - L, R2 = P + (H-L), R3 = H + 2*(P-L)
-    r1_1w = 2 * pp_1w - low_1w
-    r2_1w = pp_1w + (high_1w - low_1w)
-    r3_1w = high_1w + 2 * (pp_1w - low_1w)
-    # Support levels: S1 = 2*P - H, S2 = P - (H-L), S3 = L - 2*(H-P)
-    s1_1w = 2 * pp_1w - high_1w
-    s2_1w = pp_1w - (high_1w - low_1w)
-    s3_1w = low_1w - 2 * (high_1w - pp_1w)
-    
-    # Load daily data for EMA20 filter
+    # Load 1d data ONCE for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align indicators to 6h timeframe
-    pp_1w_aligned = align_htf_to_ltf(prices, df_1w, pp_1w)
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    # Calculate Camarilla levels for each day using prior day's range
+    # R4 = close + 1.5 * (high - low)
+    # R3 = close + 1.1 * (high - low)
+    # S3 = close - 1.1 * (high - low)
+    # S4 = close - 1.5 * (high - low)
+    range_1d = high_1d - low_1d
+    camarilla_r4 = close_1d + 1.5 * range_1d
+    camarilla_r3 = close_1d + 1.1 * range_1d
+    camarilla_s3 = close_1d - 1.1 * range_1d
+    camarilla_s4 = close_1d - 1.5 * range_1d
+    
+    # Shift to use prior day's levels (avoid look-ahead)
+    camarilla_r4 = np.roll(camarilla_r4, 1)
+    camarilla_r3 = np.roll(camarilla_r3, 1)
+    camarilla_s3 = np.roll(camarilla_s3, 1)
+    camarilla_s4 = np.roll(camarilla_s4, 1)
+    camarilla_r4[0] = np.nan
+    camarilla_r3[0] = np.nan
+    camarilla_s3[0] = np.nan
+    camarilla_s4[0] = np.nan
+    
+    # Align Camarilla levels to 6h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
     # Volume confirmation: 1.5x average volume over 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations
-    start = max(20, 2)  # Need EMA20 and weekly data
-    
-    for i in range(start, n):
+    for i in range(20, n):  # Start after enough data for volume MA
         # Skip if any critical data is NaN
-        if (np.isnan(pp_1w_aligned[i]) or 
-            np.isnan(r3_1w_aligned[i]) or
-            np.isnan(s3_1w_aligned[i]) or
-            np.isnan(ema_20_1d_aligned[i]) or
+        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -78,33 +76,29 @@ def generate_signals(prices):
         volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Look for breakouts from weekly S3/R3
-            # Long: price breaks above R3 AND above EMA20
-            if (close[i] > r3_1w_aligned[i] and 
-                close[i] > ema_20_1d_aligned[i] and 
-                volume_confirmed):
+            # Look for new positions
+            # Long: close above R3 with volume confirmation
+            if close[i] > r3_aligned[i] and volume_confirmed:
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below S3 AND below EMA20
-            elif (close[i] < s3_1w_aligned[i] and 
-                  close[i] < ema_20_1d_aligned[i] and 
-                  volume_confirmed):
+            # Short: close below S3 with volume confirmation
+            elif close[i] < s3_aligned[i] and volume_confirmed:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to weekly pivot or crosses below EMA20
-            if (close[i] <= pp_1w_aligned[i] or 
-                close[i] < ema_20_1d_aligned[i]):
+            # Manage long position
+            # Exit if: reaches R4 target OR reverses back below R3
+            if close[i] >= r4_aligned[i] or close[i] <= r3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to weekly pivot or crosses above EMA20
-            if (close[i] >= pp_1w_aligned[i] or 
-                close[i] > ema_20_1d_aligned[i]):
+            # Manage short position
+            # Exit if: reaches S4 target OR reverses back above S3
+            if close[i] <= s4_aligned[i] or close[i] >= s3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -112,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WeeklyPivot_S3R3_Breakout_EMA20_v1"
+name = "6h_Camarilla_R3S3_Breakout_Volume"
 timeframe = "6h"
 leverage = 1.0
