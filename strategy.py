@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,27 +13,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for Donchian channel
+    # Load daily data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 20-period daily Donchian channels
-    upper_20d = np.full_like(high_1d, np.nan)
-    lower_20d = np.full_like(low_1d, np.nan)
+    # Calculate daily pivot points (standard formula)
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
+    r2 = pivot + (high_1d - low_1d)
+    s2 = pivot - (high_1d - low_1d)
     
-    for i in range(19, len(high_1d)):
-        upper_20d[i] = np.max(high_1d[i-19:i+1])
-        lower_20d[i] = np.min(low_1d[i-19:i+1])
+    # Align pivot levels to 4h timeframe
+    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    r2_4h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_4h = align_htf_to_ltf(prices, df_1d, s2)
     
-    # Align Donchian levels to 4h timeframe
-    upper_20d_4h = align_htf_to_ltf(prices, df_1d, upper_20d)
-    lower_20d_4h = align_htf_to_ltf(prices, df_1d, lower_20d)
-    
-    # Calculate daily ATR for volatility filter
+    # Calculate 14-period daily ATR for volatility filter
     tr = np.zeros(len(df_1d))
     tr[0] = high_1d[0] - low_1d[0]
     for i in range(1, len(df_1d)):
@@ -59,19 +62,22 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position size
+    position_size = 0.25  # 25% position size for lower drawdown
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any critical data is NaN
-        if (np.isnan(upper_20d_4h[i]) or 
-            np.isnan(lower_20d_4h[i]) or
+        if (np.isnan(pivot_4h[i]) or 
+            np.isnan(r1_4h[i]) or
+            np.isnan(s1_4h[i]) or
+            np.isnan(r2_4h[i]) or
+            np.isnan(s2_4h[i]) or
             np.isnan(atr_4h[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Skip low volatility periods (ATR < 0.5% of price)
-        if atr_4h[i] < 0.005 * close[i]:
+        # Skip low volatility periods (ATR < 0.8% of price)
+        if atr_4h[i] < 0.008 * close[i]:
             signals[i] = 0.0
             continue
         
@@ -82,29 +88,29 @@ def generate_signals(prices):
             volume_ratio = volume[i] / vol_ma_20[i]
         
         # Volume threshold: require significant spike
-        vol_threshold = 1.5
+        vol_threshold = 2.0
         
         if position == 0:
-            # Long: Price breaks above 20-day high with volume confirmation
-            if (close[i] > upper_20d_4h[i] and volume_ratio > vol_threshold):
+            # Long: Price breaks above R2 with volume confirmation
+            if (close[i] > r2_4h[i] and volume_ratio > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below 20-day low with volume confirmation
-            elif (close[i] < lower_20d_4h[i] and volume_ratio > vol_threshold):
+            # Short: Price breaks below S2 with volume confirmation
+            elif (close[i] < s2_4h[i] and volume_ratio > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below 20-day low
-            if close[i] < lower_20d_4h[i]:
+            # Exit: Price falls back below S1
+            if close[i] < s1_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above 20-day high
-            if close[i] > upper_20d_4h[i]:
+            # Exit: Price rises back above R1
+            if close[i] > r1_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -112,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_Volume_Spike"
+name = "4h_1d_Pivot_R2S2_Breakout_Volume"
 timeframe = "4h"
 leverage = 1.0
