@@ -90,31 +90,9 @@ def generate_signals(prices):
         for i in range(19, n):
             volume_ma[i] = np.mean(volume[i-19:i+1])
     
-    # Calculate 6-hour RSI (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.full(n, np.nan)
-    avg_loss = np.full(n, np.nan)
-    if n >= 14:
-        avg_gain[13] = np.mean(gain[1:15])
-        avg_loss[13] = np.mean(loss[1:15])
-        for i in range(14, n):
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rsi = np.full(n, np.nan)
-    for i in range(14, n):
-        if avg_loss[i] != 0:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs))
-        else:
-            rsi[i] = 100
-    
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position size
+    position_size = 0.30  # 30% position size
     
     for i in range(100, n):
         # Skip if any critical data is NaN
@@ -122,8 +100,7 @@ def generate_signals(prices):
             np.isnan(donch_high[i]) or
             np.isnan(donch_low[i]) or
             np.isnan(adx_6h[i]) or
-            np.isnan(volume_ma[i]) or
-            np.isnan(rsi[i])):
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
@@ -161,26 +138,26 @@ def generate_signals(prices):
         s4_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s4))[i]
         
         if position == 0:
-            # Long: Price breaks above 6h Donchian high AND above S3 (support hold) AND RSI > 50 (bullish momentum)
-            if close[i] > donch_high[i] and close[i] > s3_6h and rsi[i] > 50:
+            # Long: Price breaks above 6h Donchian high AND above S3 (support hold) AND volume > 1.5x MA
+            if close[i] > donch_high[i] and close[i] > s3_6h and volume[i] > 1.5 * volume_ma[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below 6h Donchian low AND below R3 (resistance hold) AND RSI < 50 (bearish momentum)
-            elif close[i] < donch_low[i] and close[i] < r3_6h and rsi[i] < 50:
+            # Short: Price breaks below 6h Donchian low AND below R3 (resistance hold) AND volume > 1.5x MA
+            elif close[i] < donch_low[i] and close[i] < r3_6h and volume[i] > 1.5 * volume_ma[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below 6h Donchian low OR below S4 OR RSI < 40
-            if close[i] < donch_low[i] or close[i] < s4_6h or rsi[i] < 40:
+            # Exit: Price falls back below 6h Donchian low OR below S4
+            if close[i] < donch_low[i] or close[i] < s4_6h:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above 6h Donchian high OR above R4 OR RSI > 60
-            if close[i] > donch_high[i] or close[i] > r4_6h or rsi[i] > 60:
+            # Exit: Price rises back above 6h Donchian high OR above R4
+            if close[i] > donch_high[i] or close[i] > r4_6h:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -188,6 +165,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Pivot_S3R3_Donchian20_Volume_ADX_RSI_Filter"
+name = "6h_1d_Pivot_S3R3_Donchian20_Volume_Filter"
 timeframe = "6h"
 leverage = 1.0
