@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Choppiness Index regime filter with 1-day Donchian breakout and volume confirmation.
-# The Choppiness Index (CHOP) identifies ranging (CHOP > 61.8) vs trending (CHOP < 38.2) markets.
-# In ranging markets, we mean-revert at Donchian channel boundaries; in trending markets, we follow breakouts.
-# Volume > 1.3x the 20-period average confirms institutional participation.
-# This regime-adaptive approach works in both bull and bear markets by adjusting strategy to market conditions.
-# Target: 20-40 trades per year per symbol (80-160 total over 4 years) to minimize fee drag.
+# Hypothesis: Daily RSI(14) with 1-week EMA(50) trend filter and volume confirmation.
+# RSI(14) provides mean-reversion signals: oversold (<30) for long, overbought (>70) for short.
+# The 1-week EMA(50) adapts to both bull and bear markets, ensuring trades follow the dominant trend.
+# Volume > 1.5x the 20-period average confirms institutional participation and reduces false signals.
+# Exit occurs when RSI returns to neutral (40-60 range) or opposite extreme is reached.
+# This combination aims for 10-25 trades per year per symbol (40-100 total over 4 years), staying within optimal range.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,41 +20,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for regime and trend filters
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Choppiness Index (14-period) for regime detection
-    chop_len = 14
-    if len(df_1d) < chop_len:
+    # 1-week EMA(50) for trend filter
+    ema_len = 50
+    if len(df_1w) < ema_len:
         return np.zeros(n)
     
-    # True Range
-    tr1 = pd.Series(df_1d['high']).diff().abs()
-    tr2 = (pd.Series(df_1d['high']) - pd.Series(df_1d['close'].shift())).abs()
-    tr3 = (pd.Series(df_1d['low']) - pd.Series(df_1d['close'].shift())).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=chop_len, min_periods=chop_len).mean()
+    ema_1w = pd.Series(df_1w['close']).ewm(span=ema_len, adjust=False, min_periods=ema_len).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Highest high and lowest low over chop_len
-    hh = pd.Series(df_1d['high']).rolling(window=chop_len, min_periods=chop_len).max()
-    ll = pd.Series(df_1d['low']).rolling(window=chop_len, min_periods=chop_len).min()
-    
-    # Choppiness Index: 100 * log10(sum(tr)/ (hh - ll)) / log10(chop_len)
-    chop = 100 * np.log10(tr.sum() / (hh - ll)) / np.log10(chop_len)
-    chop_values = chop.values
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_values)
-    
-    # 1d Donchian channel (20 periods) for breakout levels
-    donch_len = 20
-    if len(df_1d) < donch_len:
+    # Daily RSI(14)
+    rsi_len = 14
+    if len(close) < rsi_len + 1:
         return np.zeros(n)
     
-    donch_high = pd.Series(df_1d['high']).rolling(window=donch_len, min_periods=donch_len).max().shift(1).values
-    donch_low = pd.Series(df_1d['low']).rolling(window=donch_len, min_periods=donch_len).min().shift(1).values
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Volume confirmation: 1.3x average volume
+    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_len, adjust=False, min_periods=rsi_len).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_len, adjust=False, min_periods=rsi_len).mean().values
+    
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume confirmation: 1.5x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -62,56 +54,53 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(60, chop_len, donch_len, 20)
+    start = max(60, rsi_len + 1, 20)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(chop_1d_aligned[i]) or 
-            np.isnan(donch_high_aligned[i]) or
-            np.isnan(donch_low_aligned[i]) or
+        if (np.isnan(rsi[i]) or 
+            np.isnan(ema_1w_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        chop_val = chop_1d_aligned[i]
-        vol_confirmed = volume[i] > 1.3 * vol_ma[i]
+        # Trend filter: price relative to 1-week EMA50
+        above_ema = close[i] > ema_1w_aligned[i]
+        below_ema = close[i] < ema_1w_aligned[i]
+        
+        # Volume confirmation: current volume > 1.5x average
+        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
+        
+        # RSI conditions
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
+        rsi_neutral = (rsi[i] >= 40) & (rsi[i] <= 60)
         
         if position == 0:
-            # Ranging market (CHOP > 61.8): mean reversion at Donchian boundaries
-            if chop_val > 61.8 and vol_confirmed:
-                if close[i] <= donch_low_aligned[i]:
-                    position = 1  # Long at support
-                    signals[i] = position_size
-                elif close[i] >= donch_high_aligned[i]:
-                    position = -1  # Short at resistance
-                    signals[i] = -position_size
-                else:
-                    signals[i] = 0.0
-            # Trending market (CHOP < 38.2): follow breakouts
-            elif chop_val < 38.2 and vol_confirmed:
-                if close[i] > donch_high_aligned[i]:
-                    position = 1  # Long breakout
-                    signals[i] = position_size
-                elif close[i] < donch_low_aligned[i]:
-                    position = -1  # Short breakdown
-                    signals[i] = -position_size
-                else:
-                    signals[i] = 0.0
+            # Enter long: RSI oversold + above 1-week EMA + volume
+            if (rsi_oversold and 
+                above_ema and 
+                volume_confirmed):
+                position = 1
+                signals[i] = position_size
+            # Enter short: RSI overbought + below 1-week EMA + volume
+            elif (rsi_overbought and 
+                  below_ema and 
+                  volume_confirmed):
+                position = -1
+                signals[i] = -position_size
             else:
-                # Transition zone or no volume: stay flat
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price reaches opposite Donchian band or regime shifts strongly
-            if (close[i] >= donch_high_aligned[i] or 
-                chop_val < 30.0):  # Strong trend signal exits mean reversion
+            # Exit long: RSI returns to neutral or becomes overbought
+            if rsi_neutral or rsi_overbought:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price reaches opposite Donchian band or regime shifts strongly
-            if (close[i] <= donch_low_aligned[i] or 
-                chop_val < 30.0):  # Strong trend signal exits mean reversion
+            # Exit short: RSI returns to neutral or becomes oversold
+            if rsi_neutral or rsi_oversold:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -119,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Choppiness_Donchian_Volume_Regime"
-timeframe = "4h"
+name = "1d_1w_RSI_EMA50_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
