@@ -35,6 +35,10 @@ def generate_signals(prices):
         for i in range(14, len(df_1d)):
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
+    # Calculate daily EMA (20-period)
+    close_1d_series = pd.Series(close_1d)
+    ema_20_1d = close_1d_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    
     # Calculate daily RSI (14-period) with proper handling
     delta = np.diff(close_1d, prepend=close_1d[0])
     gain = np.where(delta > 0, delta, 0)
@@ -50,14 +54,10 @@ def generate_signals(prices):
     rs = np.where(avg_loss != 0, avg_gain / avg_loss, np.inf)
     rsi_1d = 100 - (100 / (1 + rs))
     
-    # Calculate daily EMA (20-period)
-    close_1d_series = pd.Series(close_1d)
-    ema_20_1d = close_1d_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    
     # Align indicators to 4h timeframe (primary timeframe)
     atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
-    rsi_4h = align_htf_to_ltf(prices, df_1d, rsi_1d)
     ema_20_4h = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    rsi_4h = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     # Calculate 4-hour Donchian channels (20-period)
     donch_high = np.full(n, np.nan)
@@ -113,26 +113,26 @@ def generate_signals(prices):
         s4_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s4))[i]
         
         if position == 0:
-            # Long: Price breaks above 4h Donchian high AND above S4 AND RSI > 50
-            if close[i] > donch_high[i] and close[i] > s4_4h and rsi_4h[i] > 50:
+            # Long: Price breaks above 4h Donchian high AND above S4 AND RSI > 50 AND price above daily EMA20
+            if close[i] > donch_high[i] and close[i] > s4_4h and rsi_4h[i] > 50 and close[i] > ema_20_4h[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below 4h Donchian low AND below R4 AND RSI < 50
-            elif close[i] < donch_low[i] and close[i] < r4_4h and rsi_4h[i] < 50:
+            # Short: Price breaks below 4h Donchian low AND below R4 AND RSI < 50 AND price below daily EMA20
+            elif close[i] < donch_low[i] and close[i] < r4_4h and rsi_4h[i] < 50 and close[i] < ema_20_4h[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below 4h Donchian low OR below S4 OR RSI < 50
-            if close[i] < donch_low[i] or close[i] < s4_4h or rsi_4h[i] < 50:
+            # Exit: Price falls back below 4h Donchian low OR below S4 OR RSI < 50 OR price below daily EMA20
+            if close[i] < donch_low[i] or close[i] < s4_4h or rsi_4h[i] < 50 or close[i] < ema_20_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above 4h Donchian high OR above R4 OR RSI > 50
-            if close[i] > donch_high[i] or close[i] > r4_4h or rsi_4h[i] > 50:
+            # Exit: Price rises back above 4h Donchian high OR above R4 OR RSI > 50 OR price above daily EMA20
+            if close[i] > donch_high[i] or close[i] > r4_4h or rsi_4h[i] > 50 or close[i] > ema_20_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -140,6 +140,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_R4S4_RSI50_Filter_Volume"
+name = "4h_1d_Camarilla_R4S4_RSI50_EMA20_Filter_Volume"
 timeframe = "4h"
 leverage = 1.0
