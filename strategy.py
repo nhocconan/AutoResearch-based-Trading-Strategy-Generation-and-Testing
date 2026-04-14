@@ -3,11 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with volume confirmation and ADX trend filter
-# Uses 20-period Donchian channels for breakout signals, volume confirmation to avoid false breakouts,
-# and ADX(14) > 25 to ensure trending markets. Exits when price crosses the opposite Donchian boundary.
-# Designed to capture sustained trends in both bull and bear markets while minimizing false signals
-# through volume and trend confirmation. Target: 25-35 trades/year per symbol (100-140 total over 4 years).
+# Hypothesis: 6h strategy using 1d Williams Alligator (3 SMAs) and 1w RSI trend filter.
+# Long when price > Alligator Jaw (13-period SMA) and Teeth > Lips (bullish alignment) with 1w RSI > 50.
+# Short when price < Alligator Jaw and Teeth < Lips (bearish alignment) with 1w RSI < 50.
+# Exit when price crosses back below/above Jaw or RSI crosses 50 in opposite direction.
+# Williams Alligator identifies trend phases; RSI filter avoids counter-trend trades.
+# Designed for 6h timeframe to capture multi-day trends with reduced whipsaw.
+# Target: 60-100 total trades over 4 years (15-25/year) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,52 +21,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data for Donchian channels (same timeframe, but we'll use it for reference)
-    # Actually, we'll calculate Donchian on the 4h data directly
-    
-    # Calculate Donchian channels (20-period high/low)
-    donchian_period = 20
-    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
-    
-    # Load 1d data for ADX trend filter
+    # Load 1d data ONCE for Williams Alligator
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 13:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate True Range and ADX components on 1d
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
+    # Williams Alligator: Jaw (13), Teeth (8), Lips (5) SMAs
+    jaw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().values
+    teeth = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().values
+    lips = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values
     
-    # Calculate directional movement
-    up_move = np.concatenate([[np.nan], high_1d[1:] - high_1d[:-1]])
-    down_move = np.concatenate([[np.nan], low_1d[:-1] - low_1d[1:]])
+    # Bullish: price > Jaw AND Teeth > Lips
+    bullish = (close_1d > jaw) & (teeth > lips)
+    # Bearish: price < Jaw AND Teeth < Lips
+    bearish = (close_1d < jaw) & (teeth < lips)
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Load 1w data ONCE for RSI trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
+        return np.zeros(n)
     
-    # Smooth TR, +DM, -DM using Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    adx_period = 14
-    atr_1d = pd.Series(tr).ewm(alpha=1/adx_period, adjust=False, min_periods=adx_period).mean().values
-    plus_di_1d = 100 * pd.Series(plus_dm).ewm(alpha=1/adx_period, adjust=False, min_periods=adx_period).mean().values / atr_1d
-    minus_di_1d = 100 * pd.Series(minus_dm).ewm(alpha=1/adx_period, adjust=False, min_periods=adx_period).mean().values / atr_1d
+    close_1w = df_1w['close'].values
     
-    # Calculate DX and ADX
-    dx = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    dx = np.where((plus_di_1d + minus_di_1d) == 0, 0, dx)
-    adx_1d = pd.Series(dx).ewm(alpha=1/adx_period, adjust=False, min_periods=adx_period).mean().values
+    # Calculate RSI(14) on 1w
+    delta = np.diff(close_1w, prepend=np.nan)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Align ADX to lower timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / avg_loss
+    rs = np.where(avg_loss == 0, 100, rs)
+    rsi_1w = 100 - (100 / (1 + rs))
     
-    # Volume confirmation: 1.3x average volume
+    # Align indicators to lower timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    bullish_aligned = align_htf_to_ltf(prices, df_1d, bullish.astype(float))
+    bearish_aligned = align_htf_to_ltf(prices, df_1d, bearish.astype(float))
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    
+    # Volume confirmation: 1.5x average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -72,49 +72,51 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(donchian_period, adx_period * 2)  # Need Donchian and ADX
+    start = max(13, 14)  # Need Alligator and RSI
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or
-            np.isnan(adx_1d_aligned[i]) or
+        if (np.isnan(jaw_aligned[i]) or 
+            np.isnan(teeth_aligned[i]) or
+            np.isnan(lips_aligned[i]) or
+            np.isnan(bullish_aligned[i]) or
+            np.isnan(bearish_aligned[i]) or
+            np.isnan(rsi_1w_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
-        volume_confirmed = volume[i] > 1.3 * vol_ma[i]
-        
-        # Trend filter: ADX > 25 indicates trending market
-        trending = adx_1d_aligned[i] > 25
+        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Look for Donchian breakouts
-            # Long: price breaks above Donchian high AND trending AND volume
-            if (close[i] > donchian_high[i] and 
-                trending and 
+            # Look for new trend alignments
+            # Long: bullish Alligator alignment AND uptrend (RSI > 50) AND volume
+            if (bullish_aligned[i] == 1 and 
+                rsi_1w_aligned[i] > 50 and 
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below Donchian low AND trending AND volume
-            elif (close[i] < donchian_low[i] and 
-                  trending and 
+            # Short: bearish Alligator alignment AND downtrend (RSI < 50) AND volume
+            elif (bearish_aligned[i] == 1 and 
+                  rsi_1w_aligned[i] < 50 and 
                   volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below Donchian low
-            if close[i] < donchian_low[i]:
+            # Exit long: price crosses below Jaw OR RSI crosses below 50
+            if (close[i] <= jaw_aligned[i] or 
+                rsi_1w_aligned[i] <= 50):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above Donchian high
-            if close[i] > donchian_high[i]:
+            # Exit short: price crosses above Jaw OR RSI crosses above 50
+            if (close[i] >= jaw_aligned[i] or 
+                rsi_1w_aligned[i] >= 50):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -122,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DonchianBreakout_Volume_ADX"
-timeframe = "4h"
+name = "6h_WilliamsAlligator_1wRSI_TrendFilter_v1"
+timeframe = "6h"
 leverage = 1.0
