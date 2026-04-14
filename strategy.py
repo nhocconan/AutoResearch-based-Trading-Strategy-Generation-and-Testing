@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,6 +21,20 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    # Calculate weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly EMA(50) for trend filter
+    if len(close_1w) >= 50:
+        ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    else:
+        ema_50_1w = np.full_like(close_1w, np.nan)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Calculate daily pivot points (S1, S2, R1, R2)
     pivot_point = np.full_like(close_1d, np.nan)
@@ -47,12 +61,12 @@ def generate_signals(prices):
             support1[i] = s1
             support2[i] = s2
     
-    # Align 1d indicators to 4h timeframe
-    pivot_point_4h = align_htf_to_ltf(prices, df_1d, pivot_point)
-    resistance1_4h = align_htf_to_ltf(prices, df_1d, resistance1)
-    resistance2_4h = align_htf_to_ltf(prices, df_1d, resistance2)
-    support1_4h = align_htf_to_ltf(prices, df_1d, support1)
-    support2_4h = align_htf_to_ltf(prices, df_1d, support2)
+    # Align 1d indicators to 12h timeframe
+    pivot_point_12h = align_htf_to_ltf(prices, df_1d, pivot_point)
+    resistance1_12h = align_htf_to_ltf(prices, df_1d, resistance1)
+    resistance2_12h = align_htf_to_ltf(prices, df_1d, resistance2)
+    support1_12h = align_htf_to_ltf(prices, df_1d, support1)
+    support2_12h = align_htf_to_ltf(prices, df_1d, support2)
     
     # Volume spike detection (20-period average)
     vol_ma_20 = np.full_like(volume, np.nan)
@@ -64,18 +78,19 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25  # 25% position size
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if any critical data is NaN
-        if (np.isnan(pivot_point_4h[i]) or 
-            np.isnan(resistance1_4h[i]) or
-            np.isnan(resistance2_4h[i]) or
-            np.isnan(support1_4h[i]) or
-            np.isnan(support2_4h[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(pivot_point_12h[i]) or 
+            np.isnan(resistance1_12h[i]) or
+            np.isnan(resistance2_12h[i]) or
+            np.isnan(support1_12h[i]) or
+            np.isnan(support2_12h[i]) or
+            np.isnan(vol_ma_20[i]) or
+            np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 4h volume vs 20-period average
+        # Volume ratio: current 12h volume vs 20-period average
         if vol_ma_20[i] <= 0:
             volume_ratio = 0
         else:
@@ -85,28 +100,30 @@ def generate_signals(prices):
         vol_threshold = 2.0
         
         if position == 0:
-            # Long: Price breaks above R1 with volume spike
-            if (close[i] > resistance1_4h[i] and 
-                volume_ratio > vol_threshold):
+            # Long: Price breaks above R1 with volume spike AND weekly uptrend
+            if (close[i] > resistance1_12h[i] and 
+                volume_ratio > vol_threshold and
+                close[i] > ema_50_1w_aligned[i]):
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below S1 with volume spike
-            elif (close[i] < support1_4h[i] and 
-                  volume_ratio > vol_threshold):
+            # Short: Price breaks below S1 with volume spike AND weekly downtrend
+            elif (close[i] < support1_12h[i] and 
+                  volume_ratio > vol_threshold and
+                  close[i] < ema_50_1w_aligned[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price closes below pivot point (mean reversion)
-            if close[i] < pivot_point_4h[i]:
+            # Exit: Price closes below pivot point (mean reversion) OR weekly trend breaks
+            if close[i] < pivot_point_12h[i] or close[i] < ema_50_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price closes above pivot point (mean reversion)
-            if close[i] > pivot_point_4h[i]:
+            # Exit: Price closes above pivot point (mean reversion) OR weekly trend breaks
+            if close[i] > pivot_point_12h[i] or close[i] > ema_50_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -114,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Pivot_R1S1_Volume"
-timeframe = "4h"
+name = "12h_1d_Pivot_R1S1_Volume_1wTrend"
+timeframe = "12h"
 leverage = 1.0
