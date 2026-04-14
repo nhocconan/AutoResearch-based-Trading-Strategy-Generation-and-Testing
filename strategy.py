@@ -1,4 +1,3 @@
-# SPDX-License-Identifier: MIT
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -6,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,7 +21,6 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
     
     # Calculate 6h ATR for volatility filter (14-period)
     high_low = high - low
@@ -75,7 +73,7 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any critical data is NaN
         if np.isnan(atr[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(adx[i]) or np.isnan(ema_20_1d[i]):
             continue
