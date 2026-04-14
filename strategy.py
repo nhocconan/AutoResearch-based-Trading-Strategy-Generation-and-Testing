@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 12h Williams %R for momentum extremes and 1d ADX for trend strength.
-# Williams %R < -80 indicates oversold conditions for long entries, > -20 indicates overbought for shorts.
-# 1d ADX > 25 filters for trending markets to avoid whipsaws in ranging conditions.
-# Volume confirmation (>1.5x 20-period average) reduces false signals.
-# Designed to work in both bull and bear markets by using 1d trend filter to avoid counter-trend trades.
-# Target: 15-25 trades/year per symbol (60-100 total over 4 years) to minimize fee drag.
+# Hypothesis: 4h strategy using 1d Choppiness Index to detect trending vs ranging markets,
+# combined with 4h Donchian breakout and volume confirmation.
+# In trending markets (CHOP < 38.2): breakout entries in direction of trend.
+# In ranging markets (CHOP > 61.8): mean reversion at Donchian channels.
+# Volume > 1.5x 20-period average confirms breakout strength.
+# Designed to work in both bull and bear markets by adapting to market regime.
+# Target: 20-40 trades/year per symbol (80-160 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,12 +21,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for ADX calculation
+    # Load 1d data ONCE for Choppiness Index
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate ADX on 1d data
+    # Calculate Choppiness Index on 1d data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -37,47 +38,41 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # ATR (14-period)
+    atr_period = 14
+    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
     
-    # Smoothed values
-    tr_period = 14
-    atr = pd.Series(tr).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
+    # Sum of ATR over 14 periods
+    sum_atr = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
     
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / atr
-    di_minus = 100 * dm_minus_smooth / atr
+    # High-Low range over 14 periods
+    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    range_hl = max_high - min_low
     
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
+    # Choppiness Index: 100 * log10(sum(ATR) / (HH - LL)) / log10(14)
+    # Avoid division by zero and log of zero
+    ratio = np.where(range_hl > 0, sum_atr / range_hl, 1.0)
+    chop = 100 * np.log10(ratio) / np.log10(14)
+    chop = np.concatenate([[np.full(14, np.nan)], chop[14:]])  # First 14 values are NaN
     
-    # Load 12h data ONCE for Williams %R
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 14:
+    # Load 4h data ONCE for Donchian channels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate Williams %R on 12h data
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate Donchian Channels on 4h data (20-period)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_12h) / (highest_high - lowest_low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # Avoid division by zero
+    donchian_period = 20
+    upper_channel = pd.Series(high_4h).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    lower_channel = pd.Series(low_4h).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
-    # Align indicators to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r)
+    # Align indicators to 4h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    upper_channel_aligned = align_htf_to_ltf(prices, df_4h, upper_channel)
+    lower_channel_aligned = align_htf_to_ltf(prices, df_4h, lower_channel)
     
     # Volume confirmation: 1.5x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -87,12 +82,13 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(20, 14)  # Need volume MA and Williams %R
+    start = max(34, 20, 20)  # Need Chop (14+14+6), Donchian (20), volume MA (20)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(adx_aligned[i]) or 
-            np.isnan(williams_r_aligned[i]) or
+        if (np.isnan(chop_aligned[i]) or 
+            np.isnan(upper_channel_aligned[i]) or
+            np.isnan(lower_channel_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -100,39 +96,55 @@ def generate_signals(prices):
         # Volume confirmation
         volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
-        # Trend filter: ADX > 25 indicates trending market
-        trending = adx_aligned[i] > 25
+        # Chop thresholds
+        chopping = chop_aligned[i] > 61.8  # Ranging market
+        trending = chop_aligned[i] < 38.2  # Trending market
         
         if position == 0:
-            # Look for Williams %R extremes
-            # Only trade in trending markets
-            
-            # Long: Williams %R < -80 (oversold) AND trending market
-            if (williams_r_aligned[i] < -80 and 
-                trending and 
-                volume_confirmed):
-                position = 1
-                signals[i] = position_size
-            # Short: Williams %R > -20 (overbought) AND trending market
-            elif (williams_r_aligned[i] > -20 and 
-                  trending and 
-                  volume_confirmed):
-                position = -1
-                signals[i] = -position_size
+            if trending and volume_confirmed:
+                # In trending market: breakout in direction of trend
+                # Determine trend direction using price vs midpoint
+                mid_channel = (upper_channel_aligned[i] + lower_channel_aligned[i]) / 2
+                if close[i] > mid_channel:
+                    # Uptrend: long on breakout above upper channel
+                    if close[i] > upper_channel_aligned[i]:
+                        position = 1
+                        signals[i] = position_size
+                else:
+                    # Downtrend: short on breakout below lower channel
+                    if close[i] < lower_channel_aligned[i]:
+                        position = -1
+                        signals[i] = -position_size
+            elif chopping and volume_confirmed:
+                # In ranging market: mean reversion at channels
+                if close[i] > upper_channel_aligned[i]:
+                    # Sold off at resistance: short
+                    position = -1
+                    signals[i] = -position_size
+                elif close[i] < lower_channel_aligned[i]:
+                    # Bought at support: long
+                    position = 1
+                    signals[i] = position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Williams %R returns to -50 (neutral) or trend weakens
-            if (williams_r_aligned[i] >= -50 or 
-                adx_aligned[i] < 20):  # Trend weakening
+            # Exit long: price returns to middle or opposite signal
+            mid_channel = (upper_channel_aligned[i] + lower_channel_aligned[i]) / 2
+            if close[i] < mid_channel:  # Return to middle
+                position = 0
+                signals[i] = 0.0
+            elif chopping and close[i] < lower_channel_aligned[i]:  # Reverse signal in ranging
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Williams %R returns to -50 (neutral) or trend weakens
-            if (williams_r_aligned[i] <= -50 or 
-                adx_aligned[i] < 20):  # Trend weakening
+            # Exit short: price returns to middle or opposite signal
+            mid_channel = (upper_channel_aligned[i] + lower_channel_aligned[i]) / 2
+            if close[i] > mid_channel:  # Return to middle
+                position = 0
+                signals[i] = 0.0
+            elif chopping and close[i] > upper_channel_aligned[i]:  # Reverse signal in ranging
                 position = 0
                 signals[i] = 0.0
             else:
@@ -140,6 +152,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12hWilliamsR_1dADX_VolumeFilter_v1"
-timeframe = "6h"
+name = "4h_1dChop_4hDonchian_VolumeFilter_v1"
+timeframe = "4h"
 leverage = 1.0
