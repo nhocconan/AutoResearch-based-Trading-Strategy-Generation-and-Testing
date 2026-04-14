@@ -3,128 +3,96 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla Pivot Breakout + Volume Spike + ADX Trend Filter
-# Camarilla levels provide statistically significant support/resistance levels
-# Breakouts above/below key levels (H4/L4) with volume confirmation and ADX > 25
-# Trend filter ensures we trade only in trending markets, avoiding false breakouts
-# Works in bull/bear by capturing breakouts in the direction of the trend
-# Target: 75-200 total trades over 4 years (19-50/year)
+# Hypothesis: 4h 12h/1d Multi-timeframe Price Channel Breakout with Volume Confirmation
+# Uses 12h Donchian breakout direction + 4h entry timing + 1d volume filter
+# 12h timeframe provides trend direction (fewer signals), 4h provides precise entry
+# Volume filter ensures breakouts have institutional participation
+# Works in bull/bear by following higher timeframe trend direction
+# Target: 80-150 total trades over 4 years (20-38/year)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    # === Multi-timeframe Data Loading (ONCE before loop) ===
+    # 12h for trend direction
+    df_12h = get_htf_data(prices, '12h')
+    # 1d for volume filter
+    df_1d = get_htf_data(prices, '1d')
+    
+    # === 12h Donchian Channel (Trend Direction) ===
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    donchian_high_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    
+    # Align 12h Donchian levels to 4h
+    donchian_high_12h_aligned = align_htf_to_ltf(prices, df_12h, donchian_high_12h)
+    donchian_low_12h_aligned = align_htf_to_ltf(prices, df_12h, donchian_low_12h)
+    
+    # === 1d Volume Filter ===
+    vol_1d = df_1d['volume'].values
+    avg_vol_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_1d = vol_1d / np.where(avg_vol_1d > 0, avg_vol_1d, 1)
+    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    
+    # === 4h Price Data ===
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Calculate Camarilla levels from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla multipliers
-    H4 = close_1d + 1.5 * (high_1d - low_1d)  # Resistance level 4
-    L4 = close_1d - 1.5 * (high_1d - low_1d)  # Support level 4
-    H3 = close_1d + 1.25 * (high_1d - low_1d)  # Resistance level 3
-    L3 = close_1d - 1.25 * (high_1d - low_1d)  # Support level 3
-    
-    # Align to 4h timeframe (one-day delay for previous day's levels)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    
-    # ADX calculation (14-period)
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
-    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
-    
-    # Directional Indicators
-    di_plus = np.where(tr14 != 0, 100 * dm_plus14 / tr14, 0)
-    di_minus = np.where(tr14 != 0, 100 * dm_minus14 / tr14, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Volume confirmation: volume > 2x average volume (20-period)
+    # === 4h Volume Spike (Entry Timing) ===
     vol_series = pd.Series(volume)
-    avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
+    avg_vol_4h = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 35  # for ADX calculation
+    start = 40  # for 20-period calculations with buffer
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or
-            np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
-            np.isnan(adx[i]) or np.isnan(avg_vol[i])):
+        if (np.isnan(donchian_high_12h_aligned[i]) or np.isnan(donchian_low_12h_aligned[i]) or
+            np.isnan(vol_ratio_1d_aligned[i]) or np.isnan(avg_vol_4h[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         
-        # Trend filter: only trade when ADX > 25 (trending market)
-        if adx[i] < 25:
-            # In weak trend/ranging market, stay flat
-            if position != 0:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.0
-            continue
+        # Determine trend direction from 12h Donchian breakout
+        trend_up = price > donchian_high_12h_aligned[i]
+        trend_down = price < donchian_low_12h_aligned[i]
+        
+        # Volume conditions: both 1d and 4h volume must be elevated
+        vol_1d_high = vol_ratio_1d_aligned[i] > 1.5  # 1d volume > 1.5x average
+        vol_4h_high = vol > 2.0 * avg_vol_4h[i]      # 4h volume > 2x average
         
         if position == 0:
-            # Long: price breaks above H4 with volume filter
-            if price > H4_aligned[i] and vol > 2.0 * avg_vol[i]:
+            # Long: 12h uptrend + volume confirmation on both timeframes
+            if trend_up and vol_1d_high and vol_4h_high:
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below L4 with volume filter
-            elif price < L4_aligned[i] and vol > 2.0 * avg_vol[i]:
+            # Short: 12h downtrend + volume confirmation on both timeframes
+            elif trend_down and vol_1d_high and vol_4h_high:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below L3 (reversal signal)
-            if price < L3_aligned[i]:
+            # Exit long: 12h trend reverses or volume dries up
+            if not trend_up or not (vol_1d_high and vol_4h_high):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above H3 (reversal signal)
-            if price > H3_aligned[i]:
+            # Exit short: 12h trend reverses or volume dries up
+            if not trend_down or not (vol_1d_high and vol_4h_high):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -132,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_Volume_ADX_Filter"
+name = "4h_12h_1d_MTF_Volume_Breakout"
 timeframe = "4h"
 leverage = 1.0
