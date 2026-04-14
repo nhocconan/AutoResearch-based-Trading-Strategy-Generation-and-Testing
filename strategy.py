@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour ATR-based breakout with daily trend filter and volume confirmation
-# Long when price closes above ATR(14) upper band AND daily EMA50 trend is up AND volume > 1.5x 20-period average
-# Short when price closes below ATR(14) lower band AND daily EMA50 trend is down AND volume > 1.5x 20-period average
-# Exit when price crosses back inside the ATR bands (opposite band)
-# Uses ATR to capture volatility expansions, daily EMA for trend alignment, volume for confirmation
-# Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost
+# Hypothesis: 12-hour Camarilla Pivot reversal with weekly trend filter and volume confirmation
+# Long when price touches L3 level AND weekly close > weekly EMA50 AND volume > 2x 24-period average
+# Short when price touches H3 level AND weekly close < weekly EMA50 AND volume > 2x 24-period average
+# Exit when price reaches opposite H3/L3 level or reverses from touch
+# Uses Camarilla levels for institutional reversal zones, weekly trend for direction filter, volume for confirmation
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag while capturing reversals
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,69 +20,79 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for EMA50 trend filter
+    # Load weekly data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate Camarilla levels from previous day (requires daily data)
     df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Calculate ATR(14) for volatility bands
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate daily Camarilla levels: based on previous day's range
+    # H3 = C + (H-L)*1.1/4, L3 = C - (H-L)*1.1/4
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    camarilla_h3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    camarilla_l3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # Calculate ATR-based bands (upper and lower)
-    atr_mult = 1.5
-    upper_atr = close + atr_mult * atr14
-    lower_atr = close - atr_mult * atr14
+    # Align Camarilla levels to 12h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Calculate daily EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate weekly EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Calculate volume average for confirmation (20-period)
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate volume average for confirmation (24-period = 2 days of 12h data)
+    vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations (14 for ATR + buffer)
-    start = 20
+    # Start after enough data for calculations
+    start = 50
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(atr14[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_threshold = vol_avg[i] * 1.5
+        vol_threshold = vol_avg[i] * 2.0
         
         if position == 0:
-            # Long setup: close above ATR upper band AND daily EMA50 up AND volume confirmation
-            if (price > upper_atr[i] and price > ema50_1d_aligned[i] and vol > vol_threshold):
+            # Long setup: price touches L3 AND weekly uptrend AND volume confirmation
+            if (price <= camarilla_l3_aligned[i] * 1.001 and  # Allow small buffer for touch
+                price > camarilla_l3_aligned[i] * 0.999 and
+                close_1w[-1] > ema50_1w[-1] if len(close_1w) > 0 else False and  # Weekly trend (use last known)
+                vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: close below ATR lower band AND daily EMA50 down AND volume confirmation
-            elif (price < lower_atr[i] and price < ema50_1d_aligned[i] and vol > vol_threshold):
+            # Short setup: price touches H3 AND weekly downtrend AND volume confirmation
+            elif (price >= camarilla_h3_aligned[i] * 0.999 and  # Allow small buffer for touch
+                  price <= camarilla_h3_aligned[i] * 1.001 and
+                  close_1w[-1] < ema50_1w[-1] if len(close_1w) > 0 else False and  # Weekly trend
+                  vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes back inside ATR bands (below upper band)
-            if price < upper_atr[i]:
+            # Exit long: price reaches H3 level or shows rejection from L3 area
+            if price >= camarilla_h3_aligned[i] * 0.999:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes back inside ATR bands (above lower band)
-            if price > lower_atr[i]:
+            # Exit short: price reaches L3 level or shows rejection from H3 area
+            if price <= camarilla_l3_aligned[i] * 1.001:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -90,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_ATR_Breakout_DailyEMA50_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_L3H3_WeeklyTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
