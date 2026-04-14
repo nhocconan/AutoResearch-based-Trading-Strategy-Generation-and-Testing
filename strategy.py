@@ -3,158 +3,158 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Choppiness Index regime filter + 1-day ADX trend filter + 12-hour Donchian(20) breakout.
-# Uses daily ADX > 25 to identify trending markets and 12h Choppiness Index > 61.8 to avoid ranging markets.
-# Enters on Donchian breakout in the direction of daily ADX trend (ADX slope) with volume confirmation.
-# Exits when price returns to the 12-hour EMA(50) or breaks opposite Donchian band.
-# Designed for low trade frequency (15-25/year) to minimize fee drag in 12h timeframe.
+# Hypothesis: 4-hour Williams Alligator + Elder Ray Power Index with 1-day ADX filter.
+# The Williams Alligator (JAWS/TEETH/LIPS) identifies trend direction and strength.
+# Elder Ray Power Index measures bull/bear power relative to EMA13.
+# 1-day ADX > 20 filters for trending markets, avoiding chop.
+# Long: LIPS > TEETH > JAWS (bullish alignment) + Bull Power > 0 + ADX > 20.
+# Short: LIPS < TEETH < JAWS (bearish alignment) + Bear Power < 0 + ADX > 20.
+# Exit when Alligator alignment breaks or ADX falls below 15.
+# This combines trend-following with oscillator confirmation for robust signals in both bull and bear markets.
+# Target: 20-30 trades per year per symbol (80-120 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Load daily data ONCE for ADX trend filter
+    # Load 1-day data ONCE for ADX filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate ADX(14) on daily data
-    if len(df_1d) < 30:
+    # 1-day ADX(14) for trend strength filter
+    adx_len = 14
+    if len(df_1d) < adx_len:
         return np.zeros(n)
     
+    # Calculate ADX components
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
     # True Range
-    tr1 = pd.Series(df_1d['high']).diff().abs()
-    tr2 = (pd.Series(df_1d['high']) - pd.Series(df_1d['close'].shift())).abs()
-    tr3 = (pd.Series(df_1d['low']) - pd.Series(df_1d['close'].shift())).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean()
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period has no previous close
     
     # Directional Movement
-    up_move = pd.Series(df_1d['high']).diff()
-    down_move = -pd.Series(df_1d['low']).diff()
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Smoothed DM
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean() / atr
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean() / atr
+    # Smoothed values
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nansum(data[:period]) / period
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    atr = wilders_smoothing(tr, adx_len)
+    dm_plus_smooth = wilders_smoothing(dm_plus, adx_len)
+    dm_minus_smooth = wilders_smoothing(dm_minus, adx_len)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr != 0, dm_plus_smooth / atr * 100, 0)
+    di_minus = np.where(atr != 0, dm_minus_smooth / atr * 100, 0)
     
     # DX and ADX
-    dx = 100 * (pd.Series(plus_di) - pd.Series(minus_di)).abs() / (pd.Series(plus_di) + pd.Series(minus_di))
-    adx = dx.rolling(window=14, min_periods=14).mean()
-    adx_values = adx.values
+    dx = np.where((di_plus + di_minus) != 0, np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
+    adx = wilders_smoothing(dx, adx_len)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # ADX slope for trend direction (rising ADX = strengthening trend)
-    adx_slope = pd.Series(adx_values).diff(3)  # 3-period slope
+    # Williams Alligator on 4h: SMMA(13,8,5) with offsets
+    jaw_len, teeth_len, lips_len = 13, 8, 5
+    jaw_offset, teeth_offset, lips_offset = 8, 5, 3
     
-    # Load 12h data ONCE for Choppiness Index and Donchian
-    df_12h = get_htf_data(prices, '12h')
+    def smoothed_moving_average(data, period):
+        sma = np.full_like(data, np.nan)
+        if len(data) < period:
+            return sma
+        sma[period-1] = np.mean(data[:period])
+        for i in range(period, len(data)):
+            sma[i] = (sma[i-1] * (period-1) + data[i]) / period
+        return sma
     
-    if len(df_12h) < 30:
-        return np.zeros(n)
+    jaw = smoothed_moving_average(close, jaw_len)
+    teeth = smoothed_moving_average(close, teeth_len)
+    lips = smoothed_moving_average(close, lips_len)
     
-    # Choppiness Index(14) on 12h data
-    # True Range
-    tr1_12h = pd.Series(df_12h['high']).diff().abs()
-    tr2_12h = (pd.Series(df_12h['high']) - pd.Series(df_12h['close'].shift())).abs()
-    tr3_12h = (pd.Series(df_12h['low']) - pd.Series(df_12h['close'].shift())).abs()
-    tr_12h = pd.concat([tr1_12h, tr2_12h, tr3_12h], axis=1).max(axis=1)
-    atr_12h_sum = tr_12h.rolling(window=14, min_periods=14).sum()
+    # Apply offsets (shift right)
+    jaw = np.roll(jaw, jaw_offset)
+    teeth = np.roll(teeth, teeth_offset)
+    lips = np.roll(lips, lips_offset)
+    # Set offset periods to NaN
+    jaw[:jaw_offset] = np.nan
+    teeth[:teeth_offset] = np.nan
+    lips[:lips_offset] = np.nan
     
-    # Max and min over 14 periods
-    max_hh = pd.Series(df_12h['high']).rolling(window=14, min_periods=14).max()
-    min_ll = pd.Series(df_12h['low']).rolling(window=14, min_periods=14).min()
-    
-    # Chop = 100 * log10(atr_sum / (max_h - min_l)) / log10(14)
-    chop = 100 * np.log10(atr_12h_sum / (max_hh - min_ll)) / np.log10(14)
-    chop_values = chop.values
-    
-    # EMA(50) on 12h for exit
-    ema_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Donchian channel (20 periods) on 12h
-    dc_len = 20
-    dc_upper = pd.Series(df_12h['high']).rolling(window=dc_len, min_periods=dc_len).max().shift(1).values
-    dc_lower = pd.Series(df_12h['low']).rolling(window=dc_len, min_periods=dc_len).min().shift(1).values
-    
-    # Volume confirmation: 1.5x average volume on 12h
-    vol_ma = pd.Series(df_12h['volume']).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all indicators to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
-    adx_slope_aligned = align_htf_to_ltf(prices, df_1d, adx_slope.values)
-    chop_aligned = align_htf_to_ltf(prices, df_12h, chop_values)
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
-    dc_upper_aligned = align_htf_to_ltf(prices, df_12h, dc_upper)
-    dc_lower_aligned = align_htf_to_ltf(prices, df_12h, dc_lower)
-    vol_ma_aligned = align_htf_to_ltf(prices, df_12h, vol_ma)
+    # Elder Ray Power Index: EMA13 and Bull/Bear Power
+    ema_len = 13
+    ema_13 = pd.Series(close).ewm(span=ema_len, adjust=False, min_periods=ema_len).mean().values
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(50, 30, 20)
+    start = max(50, jaw_len + jaw_offset, teeth_len + teeth_offset, lips_len + lips_offset, ema_len)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(dc_upper_aligned[i]) or 
-            np.isnan(dc_lower_aligned[i]) or
-            np.isnan(ema_12h_aligned[i]) or
-            np.isnan(chop_aligned[i]) or
-            np.isnan(adx_aligned[i]) or
-            np.isnan(adx_slope_aligned[i]) or
-            np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(ema_13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filters
-        trending = adx_aligned[i] > 25  # ADX > 25 = trending market
-        not_choppy = chop_aligned[i] <= 61.8  # Chop <= 61.8 = not ranging
-        adx_rising = adx_slope_aligned[i] > 0  # ADX slope positive = strengthening trend
+        # Alligator alignment: JAWS (slowest), TEETH (middle), LIPS (fastest)
+        bullish_alignment = (lips[i] > teeth[i] > jaw[i])
+        bearish_alignment = (lips[i] < teeth[i] < jaw[i])
         
-        # Volume confirmation
-        volume_confirmed = df_12h['volume'].iloc[i] > 1.5 * vol_ma_aligned[i] if i < len(df_12h) else volume[i] > 1.5 * vol_ma_aligned[i]
+        # Elder Ray: Bull Power > 0 (bulls in control), Bear Power < 0 (bears in control)
+        bull_power_positive = bull_power[i] > 0
+        bear_power_negative = bear_power[i] < 0
+        
+        # ADX filter: trending market
+        strong_trend = adx_aligned[i] > 20
+        weak_trend = adx_aligned[i] < 15  # Exit when trend weakens
         
         if position == 0:
-            # Enter long: Donchian breakout above + ADX rising + not choppy + volume
-            if (i < len(df_12h) and 
-                df_12h['close'].iloc[i] > dc_upper_aligned[i] and 
-                adx_rising and 
-                trending and 
-                not_choppy and 
-                volume_confirmed):
+            # Enter long: bullish alignment + bull power + strong trend
+            if bullish_alignment and bull_power_positive and strong_trend:
                 position = 1
                 signals[i] = position_size
-            # Enter short: Donchian breakdown below + ADX rising + not choppy + volume
-            elif (i < len(df_12h) and 
-                  df_12h['close'].iloc[i] < dc_lower_aligned[i] and 
-                  adx_rising and 
-                  trending and 
-                  not_choppy and 
-                  volume_confirmed):
+            # Enter short: bearish alignment + bear power + strong trend
+            elif bearish_alignment and bear_power_negative and strong_trend:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to 12h EMA or breaks below Donchian lower
-            if (i < len(df_12h) and 
-                (df_12h['close'].iloc[i] < ema_12h_aligned[i] or 
-                 df_12h['close'].iloc[i] < dc_lower_aligned[i])):
+            # Exit long: alignment breaks or trend weakens
+            if not bullish_alignment or weak_trend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to 12h EMA or breaks above Donchian upper
-            if (i < len(df_12h) and 
-                (df_12h['close'].iloc[i] > ema_12h_aligned[i] or 
-                 df_12h['close'].iloc[i] > dc_upper_aligned[i])):
+            # Exit short: alignment breaks or trend weakens
+            if not bearish_alignment or weak_trend:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -162,6 +162,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_ADX_Chop_Donchian_Volume_v1"
-timeframe = "12h"
+name = "4h_Alligator_ElderRay_ADX_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
