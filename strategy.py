@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using daily ADX for trend strength and daily Bollinger Bands for mean reversion.
-# Long when ADX > 25 (trending) and price touches lower Bollinger Band (oversold in uptrend).
-# Short when ADX > 25 (trending) and price touches upper Bollinger Band (overbought in downtrend).
-# Uses Bollinger Band width to filter ranging markets (avoid when BB width < 5th percentile).
-# Volume confirmation (>1.3x 20-period average) reduces false signals.
-# Designed to capture trend continuations after pullbacks in both bull and bear markets.
-# Target: 25-40 trades/year per symbol (100-160 total over 4 years) to minimize fee drag.
+# Hypothesis: 1d strategy using weekly Donchian channels (20-period) for breakout signals.
+# Weekly Donchian high/low provide strong institutional support/resistance levels.
+# Entry only when price breaks above/below weekly Donchian channel with volume confirmation (>1.5x 20-day average).
+# Trend filter: price must be above/below 50-day EMA to avoid counter-trend trades.
+# Exit when price returns to weekly midline (average of Donchian high/low) or opposite Donchian band is touched.
+# Designed for low trade frequency (target: 15-25 trades/year) to minimize fee drag in both bull and bear markets.
+# Works in trending markets via breakouts and in ranging markets via mean reversion to midline.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,78 +21,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE for ADX and Bollinger Bands
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need enough data for ADX calculation
+    # Load weekly data ONCE for Donchian channels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate ADX components
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate weekly Donchian channels (20-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    
+    # Donchian High: 20-period rolling maximum
+    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    # Donchian Low: 20-period rolling minimum
+    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Donchian Midline: average of high and low
+    donchian_mid = (donchian_high + donchian_low) / 2.0
+    
+    # Align weekly Donchian levels to daily timeframe (wait for weekly close)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid)
+    
+    # Load daily data ONCE for EMA and volume
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # Calculate 50-day EMA for trend filter
     close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
-    
-    # Smoothed values (Wilder's smoothing)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(data[1:period])
-        # Subsequent values: smoothed = (prev_smoothed * (period-1) + current) / period
-        for i in range(period, len(data)):
-            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    period = 14
-    tr_period = wilders_smoothing(tr, period)
-    dm_plus_period = wilders_smoothing(dm_plus, period)
-    dm_minus_period = wilders_smoothing(dm_minus, period)
-    
-    # DI+ and DI-
-    di_plus = np.where(tr_period != 0, 100 * dm_plus_period / tr_period, 0)
-    di_minus = np.where(tr_period != 0, 100 * dm_minus_period / tr_period, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 
-                  100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilders_smoothing(dx, period)
-    
-    # Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2
-    sma = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper = sma + bb_std * std
-    lower = sma - bb_std * std
-    
-    # Bollinger Band width for ranging filter
-    bb_width = (upper - lower) / sma
-    # Use 5th percentile as threshold for ranging markets
-    bb_width_threshold = np.nanpercentile(bb_width[~np.isnan(bb_width)], 5) if np.sum(~np.isnan(bb_width)) > 0 else 0.01
-    
-    # Align indicators to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
-    bb_width_aligned = align_htf_to_ltf(prices, df_1d, bb_width)
-    
-    # Volume confirmation: 1.3x average volume
+    # Volume confirmation: 1.5x 20-day average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -100,53 +60,51 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(30, 20)  # Need ADX and Bollinger Bands
+    start = max(50, 20)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(adx_aligned[i]) or 
-            np.isnan(upper_aligned[i]) or
-            np.isnan(lower_aligned[i]) or
-            np.isnan(bb_width_aligned[i]) or
+        if (np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or
+            np.isnan(donchian_mid_aligned[i]) or
+            np.isnan(ema_50_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
-        volume_confirmed = volume[i] > 1.3 * vol_ma[i]
-        
-        # Avoid ranging markets (low BB width)
-        not_ranging = bb_width_aligned[i] > bb_width_threshold
+        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Look for entries in trending markets
-            if adx_aligned[i] > 25 and volume_confirmed and not_ranging:
-                # Long: price touches lower Bollinger Band (oversold in uptrend)
-                if close[i] <= lower_aligned[i]:
-                    position = 1
-                    signals[i] = position_size
-                # Short: price touches upper Bollinger Band (overbought in downtrend)
-                elif close[i] >= upper_aligned[i]:
-                    position = -1
-                    signals[i] = -position_size
-                else:
-                    signals[i] = 0.0
+            # Look for breakouts above weekly Donchian high or below weekly Donchian low
+            # Only trade in direction of 50-day EMA (trend filter)
+            
+            # Long: price breaks above weekly Donchian high AND price above 50-day EMA (bullish)
+            if (close[i] > donchian_high_aligned[i] and 
+                close[i] > ema_50_aligned[i] and 
+                volume_confirmed):
+                position = 1
+                signals[i] = position_size
+            # Short: price breaks below weekly Donchian low AND price below 50-day EMA (bearish)
+            elif (close[i] < donchian_low_aligned[i] and 
+                  close[i] < ema_50_aligned[i] and 
+                  volume_confirmed):
+                position = -1
+                signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to middle of Bollinger Bands or ADX weakens
-            middle = (upper_aligned[i] + lower_aligned[i]) / 2
-            if (close[i] >= middle or 
-                adx_aligned[i] < 20):
+            # Exit long: price returns to weekly midline or touches weekly Donchian low
+            if (close[i] <= donchian_mid_aligned[i] or 
+                close[i] <= donchian_low_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to middle of Bollinger Bands or ADX weakens
-            middle = (upper_aligned[i] + lower_aligned[i]) / 2
-            if (close[i] <= middle or 
-                adx_aligned[i] < 20):
+            # Exit short: price returns to weekly midline or touches weekly Donchian high
+            if (close[i] >= donchian_mid_aligned[i] or 
+                close[i] >= donchian_high_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -154,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_ADX_Bollinger_MeanReversion_v1"
-timeframe = "4h"
+name = "1d_20wDonchian_50EMA_VolumeFilter_v1"
+timeframe = "1d"
 leverage = 1.0
