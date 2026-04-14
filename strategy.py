@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian Breakout with 12h EMA Trend Filter and Volume Confirmation
-# Uses Donchian channel breakout for trend following with 12h EMA to filter direction
-# Volume confirmation ensures breakout validity
-# Designed for low trade frequency to minimize fee drag in both bull and bear markets
-# Target: 20-40 trades/year (80-160 total over 4 years)
+# Hypothesis: 1h VWAP Mean Reversion with 4h Trend Filter and Session Filter
+# Uses 1h VWAP deviation for mean reversion signals - price tends to revert to VWAP
+# 4h EMA (50) provides trend filter to avoid counter-trend trades
+# Session filter (08-20 UTC) reduces noise during low-volume periods
+# Target: 15-37 trades/year (60-150 total over 4 years) to minimize fee drag
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,64 +19,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Load 4h data ONCE before loop for trend filter
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate 12h EMA (50) for trend direction
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate 4h EMA (50) for trend direction
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Calculate Donchian channel (20-period) on 4h data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate VWAP (20-period) on 1h data
+    typical_price = (high + low + close) / 3.0
+    tpv = typical_price * volume
+    cum_tpv = np.nancumsum(tpv)  # cumulative sum treating NaN as 0
+    cum_vol = np.nancumsum(volume)
+    vwap = np.full_like(typical_price, np.nan)
+    valid_vol = cum_vol != 0
+    vwap[valid_vol] = cum_tpv[valid_vol] / cum_vol[valid_vol]
     
-    # Volume confirmation (20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Standard deviation of price from VWAP (20-period)
+    price_dev = typical_price - vwap
+    dev_series = pd.Series(price_dev)
+    std_dev = dev_series.rolling(window=20, min_periods=20).std().values
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position size
+    position_size = 0.20  # 20% position size
     
     # Start after enough data for calculations
-    start = 20
+    start = 20  # for VWAP and std dev
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(ema_12h_aligned[i])):
+        if (np.isnan(vwap[i]) or np.isnan(std_dev[i]) or 
+            np.isnan(ema_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol = volume[i]
         
-        # Trend filter: only trade in direction of 12h EMA
-        above_ema = price > ema_12h_aligned[i]
+        # Trend filter: only trade in direction of 4h EMA
+        above_ema = price > ema_4h_aligned[i]
         
         if position == 0:
-            # Long: price breaks above Donchian upper band with volume confirmation and uptrend
-            if price > highest_high[i] and vol > vol_ma[i] and above_ema:
+            # Long: price reverts to VWAP from below (oversold) with uptrend filter
+            if price < vwap[i] - 1.5 * std_dev[i] and above_ema:
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below Donchian lower band with volume confirmation and downtrend
-            elif price < lowest_low[i] and vol > vol_ma[i] and not above_ema:
+            # Short: price reverts to VWAP from above (overbought) with downtrend filter
+            elif price > vwap[i] + 1.5 * std_dev[i] and not above_ema:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to Donchian middle or trend changes
-            middle = (highest_high[i] + lowest_low[i]) / 2.0
-            if price < middle or price < ema_12h_aligned[i]:
+            # Exit long: price reaches VWAP (mean reversion complete) or trend changes
+            if price >= vwap[i] or price < ema_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to Donchian middle or trend changes
-            middle = (highest_high[i] + lowest_low[i]) / 2.0
-            if price > middle or price > ema_12h_aligned[i]:
+            # Exit short: price reaches VWAP (mean reversion complete) or trend changes
+            if price <= vwap[i] or price > ema_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -84,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_12hEMA_Volume"
-timeframe = "4h"
+name = "1h_VWAP_MeanReversion_4hEMA_Trend"
+timeframe = "1h"
 leverage = 1.0
