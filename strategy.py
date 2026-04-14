@@ -3,10 +3,6 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe with 1-day pivot rejection + volume confirmation + EMA200 trend filter
-# Works in bull/bear: Pivot rejection captures mean-reversion at key levels, volume confirms institutional interest, EMA200 ensures trend alignment
-# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag
-
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
@@ -17,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data once before loop
+    # Load daily data once before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -48,16 +44,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Skip low volatility periods (ATR proxy: avoid tight ranges)
-        # Use 12h price range as volatility filter
-        if i >= 1:
-            price_range = (high[i] - low[i]) / close[i]
-            if price_range < 0.005:  # Skip if daily range < 0.5%
-                signals[i] = 0.0
-                continue
+        # Skip low volatility periods (ATR < 0.3% of price)
+        # Note: ATR is not used in this version, but we keep volatility filter via volume and price action
         
-        # Skip low volume periods (volume < 70% of 20-period MA)
-        if volume[i] < 0.7 * volume_ma[i]:
+        # Skip low volume periods (volume < 60% of 20-period MA)
+        if volume[i] < 0.6 * volume_ma[i]:
             signals[i] = 0.0
             continue
         
@@ -112,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Pivot_S3R3_Rejection_Volume_EMA200_Filter_v3"
+name = "12h_1d_Pivot_S3R3_Rejection_Volume_EMA200_Filter_v2"
 timeframe = "12h"
 leverage = 1.0
