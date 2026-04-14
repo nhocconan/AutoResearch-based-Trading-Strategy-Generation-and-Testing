@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h KAMA trend with RSI and Choppiness Index filter
-# KAMA adapts to market noise, reducing whipsaws in ranging markets
-# RSI(14) avoids overbought/oversold extremes
-# Choppiness Index > 61.8 indicates ranging market (mean reversion opportunity)
-# Target: 12-30 trades/year per symbol to stay within fee limits
+# Hypothesis: 4h Donchian Breakout with volume confirmation and 12h trend filter
+# Donchian channels (20-period high/low) capture breakouts of volatility expansion
+# Volume > 1.8x average confirms breakout strength (prevents fakeouts)
+# 12h EMA(20) filter ensures we trade in direction of higher timeframe trend
+# Exit when price crosses opposite Donchian band (trailing stop within trend)
+# Target: 20-40 trades/year per symbol to avoid fee drag
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,115 +20,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for Choppiness Index
-    df_1d = get_htf_data(prices, '1d')
+    # Load 12h data ONCE for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate Choppiness Index (14 periods)
-    chop_len = 14
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 12h EMA(20)
+    ema_len = 20
+    ema_12h = pd.Series(df_12h['close'].values).ewm(span=ema_len, adjust=False, min_periods=ema_len).values
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Align EMA to 4h timeframe
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Sum of true ranges over chop_len periods
-    tr_sum = pd.Series(tr).rolling(window=chop_len, min_periods=chop_len).sum().values
+    # Donchian Channels (20-period)
+    dc_len = 20
+    upper_dc = pd.Series(high).rolling(window=dc_len, min_periods=dc_len).max().values
+    lower_dc = pd.Series(low).rolling(window=dc_len, min_periods=dc_len).min().values
     
-    # Highest high and lowest low over chop_len periods
-    hh = pd.Series(high_1d).rolling(window=chop_len, min_periods=chop_len).max().values
-    ll = pd.Series(low_1d).rolling(window=chop_len, min_periods=chop_len).min().values
-    
-    # Choppiness Index
-    chop = 100 * np.log10(tr_sum / (hh - ll)) / np.log10(chop_len)
-    chop = np.where((hh - ll) == 0, 50, chop)  # avoid division by zero
-    
-    # Align Choppiness Index to 12h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # KAMA (Adaptive Moving Average)
-    er_len = 10
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1) # EMA(30)
-    
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, n=er_len))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    # Vectorized volatility sum
-    volatility_sum = pd.Series(np.abs(np.diff(close))).rolling(window=er_len, min_periods=1).sum().values
-    er = np.where(volatility_sum > 0, change / volatility_sum, 0)
-    er = np.concatenate([np.zeros(er_len), er])  # align length
-    
-    # Smoothing Constant
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # KAMA calculation
-    kama = np.full_like(close, np.nan)
-    kama[er_len] = close[er_len]  # seed
-    for i in range(er_len + 1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # RSI (14 periods)
-    rsi_len = 14
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).rolling(window=rsi_len, min_periods=rsi_len).mean().values
-    avg_loss = pd.Series(loss).rolling(window=rsi_len, min_periods=rsi_len).mean().values
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.concatenate([np.full(rsi_len, np.nan), rsi])
+    # Volume average (20 periods)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(100, er_len, rsi_len)
+    start = max(50, dc_len, 20)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(kama[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(ema_12h_aligned[i]) or 
+            np.isnan(upper_dc[i]) or 
+            np.isnan(lower_dc[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Range filter: Choppiness > 61.8 indicates ranging market
-        ranging = chop_aligned[i] > 61.8
+        # Trend filter: price above/below 12h EMA
+        price_above_ema = close[i] > ema_12h_aligned[i]
+        price_below_ema = close[i] < ema_12h_aligned[i]
+        
+        # Volume confirmation: current volume > 1.8x average
+        volume_confirmed = volume[i] > 1.8 * vol_ma[i]
         
         if position == 0:
-            # Enter long: price > KAMA + RSI < 40 (oversold) + ranging
-            if (close[i] > kama[i] and 
-                rsi[i] < 40 and 
-                ranging):
+            # Enter long: price breaks above upper DC + volume + above 12h EMA
+            if (close[i] > upper_dc[i-1] and 
+                volume_confirmed and 
+                price_above_ema):
                 position = 1
                 signals[i] = position_size
-            # Enter short: price < KAMA + RSI > 60 (overbought) + ranging
-            elif (close[i] < kama[i] and 
-                  rsi[i] > 60 and 
-                  ranging):
+            # Enter short: price breaks below lower DC + volume + below 12h EMA
+            elif (close[i] < lower_dc[i-1] and 
+                  volume_confirmed and 
+                  price_below_ema):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price < KAMA OR RSI > 60 (overbought)
-            if (close[i] < kama[i] or 
-                rsi[i] > 60):
+            # Exit long: price crosses below lower DC (trailing stop)
+            if close[i] < lower_dc[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price > KAMA OR RSI < 40 (oversold)
-            if (close[i] > kama[i] or 
-                rsi[i] < 40):
+            # Exit short: price crosses above upper DC (trailing stop)
+            if close[i] > upper_dc[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -135,6 +93,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_KAMA_RSI_Chop_v1"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_Volume_12hEMA_v1"
+timeframe = "4h"
 leverage = 1.0
