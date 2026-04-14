@@ -1,5 +1,3 @@
-# 4h_1d_S3R3_Pivot_Breakout_With_Volume_Confirmation
-# Hypothesis: Daily S3/S3 and R3/R3 levels act as strong support/resistance. Breakouts above S3 with volume confirmation indicate bullish momentum, while breakdowns below R3 with volume indicate bearish momentum. Uses 4h timeframe for lower noise and better trend capture. Works in bull markets via breakout continuation and in bear markets via reversal at daily extremes. Includes volume filter to avoid false breakouts and reduce trade frequency.
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -7,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,7 +15,7 @@ def generate_signals(prices):
     
     # Load daily data (HTF) once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
