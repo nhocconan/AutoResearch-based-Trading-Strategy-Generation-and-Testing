@@ -31,7 +31,7 @@ def generate_signals(prices):
     rs = avg_gain / (avg_loss + 1e-10)
     rsi_1d = 100 - (100 / (1 + rs))
     
-    # Calculate 1d ATR (14-period) for volatility filter
+    # Calculate 14-period ATR on 1d
     tr1 = df_1d['high'].values - df_1d['low'].values
     tr2 = np.abs(df_1d['high'].values - np.concatenate([[close_1d[0]], close_1d[:-1]]))
     tr3 = np.abs(df_1d['low'].values - np.concatenate([[close_1d[0]], close_1d[:-1]]))
@@ -82,6 +82,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_RSI30_70_Volume1.2x_VolatilityFilter_v1"
-timeframe = "6h"
+name = "4h_RSI30_70_Volume1.2x_VolatilityFilter_v1"
+timeframe = "4h"
 leverage = 1.0
