@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,90 +13,96 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 12h data (HTF)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate daily pivot points (classic)
-    if len(high_1d) < 1:
+    # Calculate 12h Donchian channels (20-period)
+    if len(high_12h) < 20 or len(low_12h) < 20:
         return np.zeros(n)
     
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
+    # Upper band: highest high over last 20 periods
+    donchian_upper = np.full_like(close_12h, np.nan)
+    for i in range(19, len(close_12h)):
+        donchian_upper[i] = np.max(high_12h[i-19:i+1])
     
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Lower band: lowest low over last 20 periods
+    donchian_lower = np.full_like(close_12h, np.nan)
+    for i in range(19, len(close_12h)):
+        donchian_lower[i] = np.min(low_12h[i-19:i+1])
     
-    # Calculate 20-period EMA for trend filter (daily)
-    if len(close_1d) < 20:
+    # Calculate 12h EMA (50-period) for trend filter
+    if len(close_12h) < 50:
         return np.zeros(n)
     
-    ema20_1d = np.full_like(close_1d, np.nan)
-    ema20_1d[19] = np.mean(close_1d[:20])
-    for i in range(20, len(close_1d)):
-        ema20_1d[i] = close_1d[i] * 0.0952 + ema20_1d[i-1] * 0.9048  # alpha = 2/(20+1)
+    ema50_12h = np.full_like(close_12h, np.nan)
+    alpha = 2.0 / (50 + 1)
+    ema50_12h[49] = np.mean(close_12h[:50])
+    for i in range(50, len(close_12h)):
+        ema50_12h[i] = close_12h[i] * alpha + ema50_12h[i-1] * (1 - alpha)
     
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
-    
-    # Calculate 14-day RSI for momentum (daily)
-    if len(close_1d) < 14:
+    # Calculate 12h RSI (14-period) for momentum
+    if len(close_12h) < 14:
         return np.zeros(n)
     
-    delta = np.diff(close_1d, prepend=close_1d[0])
+    delta = np.diff(close_12h, prepend=close_12h[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     
-    avg_gain = np.full_like(close_1d, np.nan)
-    avg_loss = np.full_like(close_1d, np.nan)
+    avg_gain = np.full_like(close_12h, np.nan)
+    avg_loss = np.full_like(close_12h, np.nan)
     
-    if len(close_1d) >= 14:
+    if len(close_12h) >= 14:
         avg_gain[13] = np.mean(gain[1:14])
         avg_loss[13] = np.mean(loss[1:14])
-        for i in range(14, len(close_1d)):
+        for i in range(14, len(close_12h)):
             avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
             avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    rs = np.full_like(close_1d, np.nan)
-    rsi14 = np.full_like(close_1d, np.nan)
-    for i in range(13, len(close_1d)):
+    rs = np.full_like(close_12h, np.nan)
+    rsi14_12h = np.full_like(close_12h, np.nan)
+    for i in range(13, len(close_12h)):
         if avg_loss[i] > 0:
             rs[i] = avg_gain[i] / avg_loss[i]
-            rsi14[i] = 100 - (100 / (1 + rs[i]))
+            rsi14_12h[i] = 100 - (100 / (1 + rs[i]))
         else:
-            rsi14[i] = 100 if avg_gain[i] > 0 else 0
+            rsi14_12h[i] = 100 if avg_gain[i] > 0 else 0
     
-    rsi14_aligned = align_htf_to_ltf(prices, df_1d, rsi14)
-    
-    # Calculate 14-day ATR for volatility filter (daily)
-    if len(high_1d) < 14 or len(low_1d) < 14 or len(close_1d) < 14:
+    # Calculate 12h ATR (14-period) for volatility filter
+    if len(high_12h) < 14 or len(low_12h) < 14 or len(close_12h) < 14:
         return np.zeros(n)
     
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first TR
+    tr[0] = tr1[0]
     
-    atr14 = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 14:
-        atr14[13] = np.mean(tr[1:14])
-        for i in range(14, len(close_1d)):
-            atr14[i] = (atr14[i-1] * 13 + tr[i]) / 14
+    atr14_12h = np.full_like(close_12h, np.nan)
+    if len(close_12h) >= 14:
+        atr14_12h[13] = np.mean(tr[1:14])
+        for i in range(14, len(close_12h)):
+            atr14_12h[i] = (atr14_12h[i-1] * 13 + tr[i]) / 14
     
-    atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14)
+    # Align HTF indicators to LTF
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    rsi14_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi14_12h)
+    atr14_12h_aligned = align_htf_to_ltf(prices, df_12h, atr14_12h)
     
-    # Calculate 20-period volume MA for volume filter (12h)
-    vol_ma_20 = np.full_like(volume, np.nan)
-    for j in range(19, len(volume)):
-        vol_ma_20[j] = np.mean(volume[j-19:j+1])
+    # Volume ratio: current 12h volume vs 20-period average
+    vol_ma_20 = np.full_like(volume_12h, np.nan)
+    for i in range(19, len(volume_12h)):
+        vol_ma_20[i] = np.mean(volume_12h[i-19:i+1])
+    
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0
@@ -104,53 +110,50 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical data is NaN
-        if (np.isnan(pivot_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(ema20_1d_aligned[i]) or 
-            np.isnan(rsi14_aligned[i]) or 
-            np.isnan(atr14_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or 
+            np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or 
+            np.isnan(rsi14_12h_aligned[i]) or 
+            np.isnan(atr14_12h_aligned[i]) or 
+            np.isnan(vol_ma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 12h volume vs 20-period average
-        if vol_ma_20[i] <= 0:
+        # Volume ratio calculation
+        if vol_ma_20_aligned[i] <= 0:
             volume_ratio = 0
         else:
-            volume_ratio = volume[i] / vol_ma_20[i]
+            volume_ratio = volume_12h[i] / vol_ma_20_aligned[i] if i < len(volume_12h) else 1.0
         
         if position == 0:
-            # Long: Price above S1 + price above EMA20 + RSI > 55 + volume surge + ATR filter
-            if (close[i] > s1_aligned[i] and
-                close[i] > ema20_1d_aligned[i] and
-                rsi14_aligned[i] > 55 and
-                volume_ratio > 2.0 and
-                atr14_aligned[i] > 0):
+            # Long: Price breaks above Donchian upper + above EMA50 + RSI > 55 + volume surge
+            if (close[i] > donchian_upper_aligned[i] and
+                close[i] > ema50_12h_aligned[i] and
+                rsi14_12h_aligned[i] > 55 and
+                volume_ratio > 2.0):
                 position = 1
                 signals[i] = position_size
-            # Short: Price below R1 + price below EMA20 + RSI < 45 + volume surge + ATR filter
-            elif (close[i] < r1_aligned[i] and
-                  close[i] < ema20_1d_aligned[i] and
-                  rsi14_aligned[i] < 45 and
-                  volume_ratio > 2.0 and
-                  atr14_aligned[i] > 0):
+            # Short: Price breaks below Donchian lower + below EMA50 + RSI < 45 + volume surge
+            elif (close[i] < donchian_lower_aligned[i] and
+                  close[i] < ema50_12h_aligned[i] and
+                  rsi14_12h_aligned[i] < 45 and
+                  volume_ratio > 2.0):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price below S1 OR RSI < 40
-            if (close[i] < s1_aligned[i] or 
-                rsi14_aligned[i] < 40):
+            # Exit: Price breaks below Donchian lower OR RSI < 40
+            if (close[i] < donchian_lower_aligned[i] or 
+                rsi14_12h_aligned[i] < 40):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price above R1 OR RSI > 60
-            if (close[i] > r1_aligned[i] or 
-                rsi14_aligned[i] > 60):
+            # Exit: Price breaks above Donchian upper OR RSI > 60
+            if (close[i] > donchian_upper_aligned[i] or 
+                rsi14_12h_aligned[i] > 60):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -158,6 +161,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Pivot_R1S1_EMA20_RSI14_Volume_ATR"
+name = "12h_Donchian20_EMA50_RSI14_Volume"
 timeframe = "12h"
 leverage = 1.0
