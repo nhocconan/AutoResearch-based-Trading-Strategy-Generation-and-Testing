@@ -1,9 +1,11 @@
-# 42357
 #!/usr/bin/env python3
 """
-Hypothesis: 1d price crossing above/below 1-week 50-period EMA with volume above 1.5x 30-period average and 1-week ADX > 25.
-Trades in direction of weekly trend to avoid counter-trend whipsaws. Uses EMA for smooth trend and ADX for trend strength.
-Targets 15-25 trades/year per symbol (60-100 total over 4 years).
+12h KAMA + RSI + Chop Filter (v1)
+- KAMA(10) direction from 12h close (trend filter)
+- RSI(14) from 12h (momentum filter: long if RSI > 50, short if RSI < 50)
+- Chop(14) from 1d (regime filter: trade only if Chop > 61.8 [range])
+- Position size: 0.25
+- Target: 15-25 trades/year per symbol (60-100 total over 4 years)
 """
 
 import numpy as np
@@ -12,102 +14,124 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Calculate weekly EMA (50-period)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Calculate KAMA(10) from 12h close
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 10:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    close_12h = df_12h['close'].values
+    # Efficiency Ratio
+    change = np.abs(np.diff(close_12h, prepend=close_12h[0]))
+    volatility = np.sum(np.abs(np.diff(close_12h)), axis=0)  # placeholder, will compute properly below
     
-    # Calculate weekly ADX (14-period)
-    if len(df_1w) < 30:
+    # Proper ER calculation
+    price_change = np.abs(np.diff(close_12h, n=10))  # 10-period change
+    abs_sum = np.sum(np.abs(np.diff(close_12h)), axis=0)  # placeholder
+    
+    # Recompute properly
+    change_10 = np.abs(np.diff(close_12h, n=10))
+    sum_abs = np.zeros_like(close_12h)
+    for i in range(1, len(close_12h)):
+        sum_abs[i] = sum_abs[i-1] + np.abs(close_12h[i] - close_12h[i-1])
+    er = np.where(sum_abs > 0, change_10 / sum_abs, 0)
+    
+    # Smoothing constants
+    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
+    kama = np.full_like(close_12h, np.nan)
+    kama[9] = close_12h[9]  # seed
+    for i in range(10, len(close_12h)):
+        kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
+    
+    # Calculate RSI(14) from 12h
+    delta = np.diff(close_12h, prepend=close_12h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Calculate Chop(14) from 1d
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # True Range
-    tr1 = np.abs(high_1w[1:] - low_1w[1:])
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Directional Movement
-    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
-                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
-                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
+    # Max/Min over 14 periods
+    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # Smoothed values
-    tr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_plus_14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus_14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    chop = np.where((max_high - min_low) > 0, 
+                    100 * np.log10(atr.sum() / (max_high - min_low)) / np.log10(14), 
+                    50)
+    # Fix chop calculation
+    chop = np.full_like(close_1d, 50.0)
+    for i in range(13, len(close_1d)):
+        tr_sum = np.nansum(tr[i-13:i+1])
+        range_14 = max_high[i] - min_low[i]
+        if range_14 > 0:
+            chop[i] = 100 * np.log10(tr_sum / range_14) / np.log10(14)
     
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_14 / (tr_14 + 1e-10)
-    di_minus = 100 * dm_minus_14 / (tr_14 + 1e-10)
+    # Align indicators to 12h
+    kama_aligned = align_htf_to_ltf(prices, df_12h, kama)
+    rsi_aligned = align_htf_to_ltf(prices, df_12h, rsi)
     
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx_1w = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Calculate 30-period average volume
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Align chop to 12h (need to align from 1d to 12h)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25
     
-    for i in range(60, n):
-        # Get aligned indicators
-        ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)[i]
-        adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)[i]
-        vol_ma_30_aligned = vol_ma_30[i]  # already LTF
-        
-        # Check for NaN values
-        if (np.isnan(ema_50_aligned) or np.isnan(adx_1w_aligned) or 
-            np.isnan(vol_ma_30_aligned)):
+    for i in range(30, n):
+        # Skip if any value is NaN
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(chop_aligned[i])):
             continue
         
-        # Volume confirmation (> 1.5x average)
-        volume_confirm = volume[i] > 1.5 * vol_ma_30_aligned
+        # Chop filter: only trade in ranging markets (Chop > 61.8)
+        chop_filter = chop_aligned[i] > 61.8
         
-        # ADX trend filter (> 25)
-        trend_filter = adx_1w_aligned > 25
+        if not chop_filter:
+            continue
         
         if position == 0:  # No position - look for entries
-            if volume_confirm and trend_filter:
-                # Long: price crosses above EMA
-                if close[i] > ema_50_aligned and close[i-1] <= ema_50_aligned:
-                    position = 1
-                    signals[i] = position_size
-                # Short: price crosses below EMA
-                elif close[i] < ema_50_aligned and close[i-1] >= ema_50_aligned:
-                    position = -1
-                    signals[i] = -position_size
-        elif position == 1:  # Long position - exit when price crosses below EMA
-            if close[i] < ema_50_aligned and close[i-1] >= ema_50_aligned:
+            # Long: price > KAMA and RSI > 50
+            if close[i] > kama_aligned[i] and rsi_aligned[i] > 50:
+                position = 1
+                signals[i] = position_size
+            # Short: price < KAMA and RSI < 50
+            elif close[i] < kama_aligned[i] and rsi_aligned[i] < 50:
+                position = -1
+                signals[i] = -position_size
+        elif position == 1:  # Long position - exit when price < KAMA or RSI < 50
+            if close[i] < kama_aligned[i] or rsi_aligned[i] < 50:
                 position = 0
                 signals[i] = 0.0
-        elif position == -1:  # Short position - exit when price crosses above EMA
-            if close[i] > ema_50_aligned and close[i-1] <= ema_50_aligned:
+        elif position == -1:  # Short position - exit when price > KAMA or RSI > 50
+            if close[i] > kama_aligned[i] or rsi_aligned[i] > 50:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "1d_1wEMA50_1wADX25_Volume1.5x_v1"
-timeframe = "1d"
+name = "12h_KAMA_RSI_Chop_v1"
+timeframe = "12h"
 leverage = 1.0
