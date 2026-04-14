@@ -1,3 +1,7 @@
+# 6H_Pivot_S3R3_Breakout_VolATR_Filter
+# Hypothesis: Price breaking through key daily support/resistance (S3/R3) with volume and volatility confirmation captures institutional breakout moves in both bull and bear markets. The daily pivot levels provide meaningful reference points, while volume and ATR filters ensure trades occur during genuine momentum shifts rather than noise.
+# Timeframe: 6h balances noise reduction with sufficient trade frequency (target: 12-37 trades/year).
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -30,16 +34,14 @@ def generate_signals(prices):
     high_close[0] = high_low[0]
     low_close[0] = high_low[0]
     tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    tr_series = pd.Series(tr)
+    atr = tr_series.rolling(window=14, min_periods=14).mean().values
     
     # Calculate 6-hour Donchian channels (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    for i in range(20, n):
-        donchian_high[i] = high_series.iloc[i-20:i].max()
-        donchian_low[i] = low_series.iloc[i-20:i].min()
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
     signals = np.zeros(n)
     position = 0
@@ -72,26 +74,26 @@ def generate_signals(prices):
             r3_1d = align_htf_to_ltf(prices, df_1d, r3_array)[i]
             
             # Volume filter: current volume > 1.5x 5-period average
-            vol_ma = np.mean(volume[i-5:i]) if i >= 5 else volume[i]
+            vol_ma = np.mean(volume[max(0, i-5):i]) if i >= 5 else volume[i]
             
             # Volatility filter: current ATR > 30th percentile of last 50 periods
             vol_filter = True
             if i >= 50:
-                vol_percentile = np.percentile(atr[max(0, i-50):i+1], 30)
+                vol_percentile = np.percentile(tr[max(0, i-50):i+1], 30)
                 vol_filter = atr[i] > vol_percentile
             
             if position == 0:
                 # Long: Price breaks above R3 with volume and volatility filter
                 if (close[i] > r3_1d and close[i-1] <= r3_1d and 
                     volume[i] > vol_ma * 1.5 and 
-                    close[i] > donchian_high[i-1] and  # Additional breakout confirmation
+                    close[i] > donchian_high[i] and  # Additional breakout confirmation
                     vol_filter):
                     position = 1
                     signals[i] = position_size
                 # Short: Price breaks below S3 with volume and volatility filter
                 elif (close[i] < s3_1d and close[i-1] >= s3_1d and 
                       volume[i] > vol_ma * 1.5 and 
-                      close[i] < donchian_low[i-1] and  # Additional breakdown confirmation
+                      close[i] < donchian_low[i] and  # Additional breakdown confirmation
                       vol_filter):
                     position = -1
                     signals[i] = -position_size
