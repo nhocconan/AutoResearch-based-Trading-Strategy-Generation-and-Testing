@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h momentum with 4h trend filter and 1d volume regime
-# Long when 1h RSI crosses above 50, price > 4h EMA20, and 1d volume > 1.5x 20-day average
-# Short when 1h RSI crosses below 50, price < 4h EMA20, and 1d volume > 1.5x 20-day average
-# Exit when RSI reaches opposite extreme (70 for long, 30 for short)
-# Uses volume regime to filter low-activity periods and 4h EMA for trend alignment
-# Target: 60-150 total trades over 4 years (15-37/year) with controlled frequency
+# Hypothesis: 6h price action with weekly trend filter and volume confirmation
+# Long when price breaks above 6h resistance with volume spike and weekly bullish trend
+# Short when price breaks below 6h support with volume spike and weekly bearish trend
+# Exit on 6h midline cross
+# Uses weekly trend to avoid counter-trend trades in bear markets
+# Target: 50-150 total trades over 4 years (12-37/year)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,76 +20,74 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Session filter: 08-20 UTC (precomputed)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # Load 6h and weekly data ONCE before loop
+    df_6h = get_htf_data(prices, '6h')
+    df_weekly = get_htf_data(prices, '1w')
     
-    # 1h RSI (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate 6h support/resistance levels (20-period lookback)
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    resistance = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    support = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    midline = (resistance + support) / 2
     
-    # Load 4h and 1d data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    # Calculate weekly EMA for trend filter (21-period)
+    close_weekly = df_weekly['close'].values
+    ema_weekly = pd.Series(close_weekly).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # 4h EMA20 for trend filter
-    close_4h = df_4h['close'].values
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    # Calculate 6h volume average (20-period)
+    vol_6h = df_6h['volume'].values
+    vol_ma_6h = pd.Series(vol_6h).rolling(window=20, min_periods=20).mean().values
     
-    # 1d volume average (20-period)
-    vol_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Align indicators to 6h timeframe
+    resistance_aligned = align_htf_to_ltf(prices, df_6h, resistance)
+    support_aligned = align_htf_to_ltf(prices, df_6h, support)
+    midline_aligned = align_htf_to_ltf(prices, df_6h, midline)
+    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
+    vol_ma_6h_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_6h)
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 40  # for RSI and 20-period averages
+    start = 60  # for 20-period calculations
     
     for i in range(start, n):
-        # Skip if any critical data is NaN or outside session
-        if (np.isnan(rsi[i]) or np.isnan(ema_20_4h_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i]) or hours[i] < 8 or hours[i] > 20):
+        # Skip if any critical data is NaN
+        if (np.isnan(resistance_aligned[i]) or np.isnan(support_aligned[i]) or 
+            np.isnan(ema_weekly_aligned[i]) or np.isnan(vol_ma_6h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        rsi_now = rsi[i]
-        rsi_prev = rsi[i-1]
         price = close[i]
-        vol_1d_current = volume[i]
+        vol_6h_current = volume[i]  # Current 6h volume
         
         if position == 0:
-            # Long setup: RSI crosses above 50, price > 4h EMA20, high volume regime
-            if (rsi_prev <= 50 and rsi_now > 50 and
-                price > ema_20_4h_aligned[i] and
-                vol_1d_current > 1.5 * vol_ma_20_1d_aligned[i]):
+            # Long setup: break above resistance with volume spike and weekly bullish trend
+            if (price > resistance_aligned[i] and 
+                vol_6h_current > 1.8 * vol_ma_6h_aligned[i] and  # Volume spike
+                price > ema_weekly_aligned[i]):                    # Price above weekly EMA for bullish trend
                 position = 1
                 signals[i] = position_size
-            # Short setup: RSI crosses below 50, price < 4h EMA20, high volume regime
-            elif (rsi_prev >= 50 and rsi_now < 50 and
-                  price < ema_20_4h_aligned[i] and
-                  vol_1d_current > 1.5 * vol_ma_20_1d_aligned[i]):
+            # Short setup: break below support with volume spike and weekly bearish trend
+            elif (price < support_aligned[i] and 
+                  vol_6h_current > 1.8 * vol_ma_6h_aligned[i] and  # Volume spike
+                  price < ema_weekly_aligned[i]):                    # Price below weekly EMA for bearish trend
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI reaches 70 (overbought)
-            if rsi_now >= 70:
+            # Exit long: price breaks below midline
+            if price < midline_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: RSI reaches 30 (oversold)
-            if rsi_now <= 30:
+            # Exit short: price breaks above midline
+            if price > midline_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -97,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_RSI50_Cross_4hEMA20_1dVolRegime"
-timeframe = "1h"
+name = "6h_Resistance_Support_Volume_WeeklyTrend"
+timeframe = "6h"
 leverage = 1.0
