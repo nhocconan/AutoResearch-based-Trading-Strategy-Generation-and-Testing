@@ -3,79 +3,91 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1w trend filter + volume confirmation
-# Long when price breaks above Donchian high in uptrend, short when breaks below Donchian low in downtrend
-# Trend: 1w EMA50 slope (rising/falling)
-# Volume: > 1.5x 20-period average
-# Designed for 100-150 trades over 4 years with controlled frequency
+# Hypothesis: Weekly Donchian breakout with daily volume and ATR filter
+# Long when price breaks above weekly Donchian high + volume surge + ATR filter
+# Short when price breaks below weekly Donchian low + volume surge + ATR filter
+# Exit when price reverses back into weekly Donchian channel or volatility drops
+# Designed for low frequency (~15-25 trades/year) with high conviction signals
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume average (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get weekly data ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # EMA50 on weekly
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Slope of EMA50: rising if current > previous
-    ema50_slope = np.diff(ema50_1w, prepend=ema50_1w[0]) > 0
+    # Weekly Donchian channels (20-period)
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    
+    # Calculate weekly Donchian high/low
+    donchian_high = pd.Series(high_weekly).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_weekly).rolling(window=20, min_periods=20).min().values
+    
+    # Align to daily timeframe
+    donchian_high_daily = align_htf_to_ltf(prices, df_weekly, donchian_high)
+    donchian_low_daily = align_htf_to_ltf(prices, df_weekly, donchian_low)
+    
+    # Daily volume average (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Daily ATR (14-period) for volatility filter
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_ma = pd.Series(atr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25
     
     for i in range(20, n):
-        # Get aligned 1w EMA50 slope
-        ema50_slope_aligned = align_htf_to_ltf(prices, df_1w, ema50_slope)[i]
-        
-        # Check for NaN values
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(ema50_slope_aligned)):
+        # Skip if any values are NaN
+        if (np.isnan(donchian_high_daily[i]) or np.isnan(donchian_low_daily[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(atr_ma[i])):
             continue
         
         # Volume confirmation (> 1.5x average)
-        volume_confirm = volume[i] > 1.5 * vol_ma[i]
+        volume_filter = volume[i] > 1.5 * vol_ma[i]
         
-        if position == 0:  # No position - look for entries
-            if volume_confirm:
-                # Uptrend: EMA50 rising -> look for long on breakout above Donchian high
-                if ema50_slope_aligned:
-                    if close[i] > donch_high[i]:
-                        position = 1
-                        signals[i] = position_size
-                # Downtrend: EMA50 falling -> look for short on breakdown below Donchian low
-                else:
-                    if close[i] < donch_low[i]:
-                        position = -1
-                        signals[i] = -position_size
-        elif position == 1:  # Long position - exit when price breaks below Donchian low
-            if close[i] < donch_low[i]:
+        # Volatility filter (ATR above average)
+        vol_filter = atr[i] > atr_ma[i]
+        
+        if position == 0:  # No position - look for breakouts
+            if volume_filter and vol_filter:
+                # Long breakout above weekly Donchian high
+                if close[i] > donchian_high_daily[i]:
+                    position = 1
+                    signals[i] = position_size
+                # Short breakout below weekly Donchian low
+                elif close[i] < donchian_low_daily[i]:
+                    position = -1
+                    signals[i] = -position_size
+        elif position == 1:  # Long position - exit on reversal or volatility drop
+            # Exit when price returns to weekly Donchian low or volatility drops
+            if close[i] < donchian_low_daily[i] or atr[i] < 0.8 * atr_ma[i]:
                 position = 0
                 signals[i] = 0.0
-        elif position == -1:  # Short position - exit when price breaks above Donchian high
-            if close[i] > donch_high[i]:
+        elif position == -1:  # Short position - exit on reversal or volatility drop
+            # Exit when price returns to weekly Donchian high or volatility drops
+            if close[i] > donchian_high_daily[i] or atr[i] < 0.8 * atr_ma[i]:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_Donchian_1wEMA50_Volume"
-timeframe = "12h"
+name = "1d_WeeklyDonchian_Breakout_Volume"
+timeframe = "1d"
 leverage = 1.0
