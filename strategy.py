@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h ADX trend strength with 4h/1d regime filter and volume confirmation
-# Uses ADX(14) > 25 to identify strong trends, filters with 4h/1d EMA direction
-# Volume > 1.5x average ensures institutional participation
-# Designed to work in both bull and bear markets by only taking strong trend trades
-# Target: 15-37 trades/year (60-150 total over 4 years) to minimize fee drag
+# Hypothesis: 4h Donchian Breakout with 1d ADX Trend Filter and Volume Spike
+# Uses Donchian Channel (20) for breakout entries in trending markets
+# 1d ADX (>25) ensures we only trade when strong trend is present
+# Volume confirmation (>1.5x average) filters for institutional participation
+# Designed to capture trend continuation moves while avoiding choppy markets
+# Target: 25-40 trades/year (100-160 total over 4 years) to minimize fee drag
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,52 +20,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h EMA data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    ema_20_4h = pd.Series(df_4h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
-    
-    # Load 1d EMA data ONCE before loop
+    # Load 1d ADX data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate ADX (14) on daily data
+    plus_dm = np.diff(df_1d['high'], prepend=df_1d['high'].iloc[0])
+    minus_dm = np.diff(df_1d['low'], prepend=df_1d['low'].iloc[0])
+    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
+    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
+    tr = np.maximum(
+        np.maximum(df_1d['high'] - df_1d['low'], 
+                   np.abs(df_1d['high'] - df_1d['close'].shift(1))),
+        np.abs(df_1d['low'] - df_1d['close'].shift(1))
+    )
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di_14 = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_14
+    minus_di_14 = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_14
+    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_1d = adx
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # ADX calculation (14-period)
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    tr = np.zeros(n)
-    
-    for i in range(1, n):
-        high_diff = high[i] - high[i-1]
-        low_diff = low[i-1] - low[i]
-        
-        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
-        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
-        
-        tr[i] = max(
-            high[i] - low[i],
-            abs(high[i] - close[i-1]),
-            abs(low[i] - close[i-1])
-        )
-    
-    # Smooth with Wilder's smoothing (alpha = 1/period)
-    def wilder_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(data[1:period])
-        # Wilder smoothing: today = (yesterday * (period-1) + today) / period
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    # Calculate smoothed +DM, -DM, and TR
-    atr = wilder_smooth(tr, 14)
-    plus_di = 100 * wilder_smooth(plus_dm, 14) / atr
-    minus_di = 100 * wilder_smooth(minus_dm, 14) / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilder_smooth(dx, 14)
+    # Donchian Channel (20)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: volume > 1.5x average volume (20-period)
     vol_series = pd.Series(volume)
@@ -72,51 +50,45 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations (ADX needs ~50 periods)
-    start = 60
+    # Start after enough data for calculations
+    start = 50  # for ADX and Donchian calculation
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(adx[i]) or np.isnan(ema_20_4h_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(avg_vol[i])):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         
-        # Trend strength: ADX > 25 indicates strong trend
-        strong_trend = adx[i] > 25
-        
-        # Multi-timeframe alignment: both 4h and 1d EMA agree on direction
-        uptrend_4h = price > ema_20_4h_aligned[i]
-        uptrend_1d = price > ema_50_1d_aligned[i]
-        downtrend_4h = price < ema_20_4h_aligned[i]
-        downtrend_1d = price < ema_50_1d_aligned[i]
+        # Trend filter: only trade when ADX > 25 (strong trend)
+        strong_trend = adx_1d_aligned[i] > 25
         
         if position == 0:
-            # Long: strong uptrend on both timeframes with volume confirmation
-            if strong_trend and uptrend_4h and uptrend_1d and vol > 1.5 * avg_vol[i]:
+            # Long: price breaks above Donchian high with volume filter and strong trend
+            if price > highest_high[i] and vol > 1.5 * avg_vol[i] and strong_trend:
                 position = 1
                 signals[i] = position_size
-            # Short: strong downtrend on both timeframes with volume confirmation
-            elif strong_trend and downtrend_4h and downtrend_1d and vol > 1.5 * avg_vol[i]:
+            # Short: price breaks below Donchian low with volume filter and strong trend
+            elif price < lowest_low[i] and vol > 1.5 * avg_vol[i] and strong_trend:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: trend weakens or reverses on either timeframe
-            if not (strong_trend and uptrend_4h and uptrend_1d):
+            # Exit long: price breaks below Donchian low (trend reversal)
+            if price < lowest_low[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: trend weakens or reverses on either timeframe
-            if not (strong_trend and downtrend_4h and downtrend_1d):
+            # Exit short: price breaks above Donchian high (trend reversal)
+            if price > highest_high[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -124,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_ADX_TrendStrength_4h1dEMA_Volume"
-timeframe = "1h"
+name = "4h_Donchian_Breakout_1dADX_Volume"
+timeframe = "4h"
 leverage = 1.0
