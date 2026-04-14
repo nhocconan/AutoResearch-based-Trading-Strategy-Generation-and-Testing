@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour RSI with 1-day ADX trend filter and volume confirmation
-# Long when RSI crosses above 30 (oversold) AND daily ADX > 25 (trending) AND volume > 1.5x 20-period average
-# Short when RSI crosses below 70 (overbought) AND daily ADX > 25 (trending) AND volume > 1.5x 20-period average
-# Exit when opposite RSI threshold is crossed
-# RSI identifies mean reversion, ADX confirms trend strength, volume validates momentum
-# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
+# Hypothesis: 4-hour Williams %R with 1-day ADX trend filter and volume confirmation
+# Long when Williams %R crosses above -80 (oversold) AND daily ADX > 25 (trending) AND volume > 1.5x 20-period average
+# Short when Williams %R crosses below -20 (overbought) AND daily ADX > 25 (trending) AND volume > 1.5x 20-period average
+# Exit when opposite Williams %R threshold is crossed
+# Williams %R identifies mean reversion, ADX confirms trend strength, volume validates momentum
+# Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,14 +23,10 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate RSI on 4h (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate Williams %R on 4h (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    willr = -100 * ((highest_high - close) / (highest_high - lowest_low + 1e-10))
     
     # Calculate ADX on 1d (14-period)
     high_1d = df_1d['high'].values
@@ -70,12 +66,12 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations (max of 14 for RSI/ADX + buffer)
+    # Start after enough data for calculations (max of 14 for Williams %R/ADX + buffer)
     start = 30
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(rsi[i]) or np.isnan(adx[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(willr[i]) or np.isnan(adx[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
@@ -83,33 +79,33 @@ def generate_signals(prices):
         adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
         adx_current = adx_aligned[i]
         
-        rsi_current = rsi[i]
+        willr_current = willr[i]
         vol = volume[i]
         vol_threshold = vol_avg[i] * 1.5
         
         if position == 0:
-            # Long setup: RSI crosses above 30 (oversold) + ADX > 25 (trending) + volume confirmation
-            if (rsi_current > 30 and rsi[i-1] <= 30 and 
+            # Long setup: Williams %R crosses above -80 (oversold) + ADX > 25 (trending) + volume confirmation
+            if (willr_current > -80 and willr[i-1] <= -80 and 
                 adx_current > 25 and vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: RSI crosses below 70 (overbought) + ADX > 25 (trending) + volume confirmation
-            elif (rsi_current < 70 and rsi[i-1] >= 70 and 
+            # Short setup: Williams %R crosses below -20 (overbought) + ADX > 25 (trending) + volume confirmation
+            elif (willr_current < -20 and willr[i-1] >= -20 and 
                   adx_current > 25 and vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI crosses below 70 (overbought)
-            if rsi_current < 70 and rsi[i-1] >= 70:
+            # Exit long: Williams %R crosses below -20 (overbought)
+            if willr_current < -20 and willr[i-1] >= -20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: RSI crosses above 30 (oversold)
-            if rsi_current > 30 and rsi[i-1] <= 30:
+            # Exit short: Williams %R crosses above -80 (oversold)
+            if willr_current > -80 and willr[i-1] <= -80:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -117,6 +113,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_RSI_1dADX_Trend_Volume"
+name = "4h_WilliamsR_1dADX_Trend_Volume"
 timeframe = "4h"
 leverage = 1.0
