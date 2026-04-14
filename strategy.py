@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_1d_KAMA_RSI_Trend_v1
-Hypothesis: On 12h timeframe, use KAMA direction for primary trend filter, RSI(14) for momentum confirmation, and 1d EMA50 for higher-timeframe trend alignment. Enter long when KAMA is rising (bullish), RSI > 55, and price > 1d EMA50. Enter short when KAMA is falling (bearish), RSI < 45, and price < 1d EMA50. This captures momentum in the direction of the higher timeframe trend while avoiding choppy markets. Designed for 12h to target ~20-30 trades/year, reducing fee drag and improving generalization to bear markets (2025+).
+4h_1d_Camarilla_Pivot_Volume_Trend_v1
+Hypothesis: On 4h timeframe, use 1d Camarilla pivot levels for mean reversion with volume confirmation and ADX trend filter.
+Buy when price touches S3 support with volume spike in a low-volatility regime (ADX < 25).
+Sell when price touches R3 resistance with volume spike in a low-volatility regime (ADX < 25).
+Exit when price reverts to the previous day's close (pivot point) or ADX rises above 25 indicating trend.
+Designed for 4h to capture reversals in ranging markets while avoiding trending conditions that cause false reversals.
+Works in both bull and bear markets by adapting to volatility regime.
 """
 
 import numpy as np
@@ -10,132 +15,162 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load 1d data for EMA trend filter
+    # Load 1d data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # Calculate 50-period EMA on 1d data
-    ema_50_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 50:
-        ema_50_1d[49] = np.mean(close_1d[:50])
-        for i in range(50, len(close_1d)):
-            ema_50_1d[i] = (close_1d[i] * 2 / (50 + 1)) + (ema_50_1d[i-1] * (49 / (50 + 1)))
     
-    # Calculate KAMA on 12h data (using close prices)
-    # ER (Efficiency Ratio) and SC (Smoothing Constant) with fast=2, slow=30
-    def calculate_kama(close, slow=30, fast=2):
-        n = len(close)
-        kama = np.full(n, np.nan)
-        if n < 2:
-            return kama
-        # Direction
-        direction = np.abs(close - np.roll(close, 1))
-        # Volatility (sum of absolute changes)
-        volatility = np.sum(np.abs(np.diff(close)))
-        # Avoid division by zero
-        er = np.where(volatility != 0, direction / volatility, 0)
-        # Smoothing constant
-        sc = np.square(er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1))
-        # Initialize
-        kama[0] = close[0]
-        for i in range(1, n):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        return kama
+    # Calculate Camarilla levels for each day
+    camarilla_s3 = np.full_like(close_1d, np.nan)
+    camarilla_r3 = np.full_like(close_1d, np.nan)
+    camarilla_pivot = np.full_like(close_1d, np.nan)
     
-    # We'll compute KAMA inside loop using available data up to i
-    # But to avoid look-ahead, we'll precompute what we can and use expanding window logic
-    # Instead, we compute KAMA incrementally in the loop
+    for i in range(len(close_1d)):
+        if i == 0 or np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(close_1d[i]):
+            continue
+        # Use previous day's data for today's levels
+        if i > 0:
+            phigh = high_1d[i-1]
+            plow = low_1d[i-1]
+            pclose = close_1d[i-1]
+            if not (np.isnan(phigh) or np.isnan(plow) or np.isnan(pclose)):
+                range_val = phigh - plow
+                camarilla_pivot[i] = (phigh + plow + pclose) / 3
+                camarilla_s3[i] = pclose - range_val * 1.1 / 2
+                camarilla_r3[i] = pclose + range_val * 1.1 / 2
     
-    # Align 1d EMA50 to 12h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Load 1d data for ADX calculation
+    if len(high_1d) < 14:
+        return np.zeros(n)
+    
+    # Calculate ADX on 1d data
+    plus_dm = np.zeros_like(high_1d)
+    minus_dm = np.zeros_like(high_1d)
+    tr = np.zeros_like(high_1d)
+    
+    for i in range(1, len(high_1d)):
+        if np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(high_1d[i-1]) or np.isnan(low_1d[i-1]):
+            continue
+        high_diff = high_1d[i] - high_1d[i-1]
+        low_diff = low_1d[i-1] - low_1d[i]
+        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
+        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
+        tr[i] = max(high_1d[i] - low_1d[i], 
+                   abs(high_1d[i] - high_1d[i-1]), 
+                   abs(low_1d[i] - low_1d[i-1]))
+    
+    # Smooth TR, +DM, -DM with Wilder's smoothing (alpha = 1/14)
+    atr = np.zeros_like(high_1d)
+    plus_di = np.zeros_like(high_1d)
+    minus_di = np.zeros_like(high_1d)
+    dx = np.zeros_like(high_1d)
+    adx = np.full_like(high_1d, np.nan)
+    
+    if len(high_1d) >= 14:
+        # Initial values
+        atr[13] = np.nansum(tr[1:14])
+        plus_dm_sum = np.nansum(plus_dm[1:14])
+        minus_dm_sum = np.nansum(minus_dm[1:14])
+        
+        for i in range(14, len(high_1d)):
+            if np.isnan(tr[i]) or np.isnan(plus_dm[i]) or np.isnan(minus_dm[i]):
+                atr[i] = atr[i-1]
+                plus_dm_sum = plus_dm_sum
+                minus_dm_sum = minus_dm_sum
+            else:
+                atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+                plus_dm_sum = (plus_dm_sum * 13 + plus_dm[i]) / 14
+                minus_dm_sum = (minus_dm_sum * 13 + minus_dm[i]) / 14
+            
+            if atr[i] > 0:
+                plus_di[i] = 100 * plus_dm_sum / atr[i]
+                minus_di[i] = 100 * minus_dm_sum / atr[i]
+                if plus_di[i] + minus_di[i] > 0:
+                    dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+        
+        # Calculate ADX as smoothed DX
+        if len(high_1d) >= 27:
+            adx[26] = np.nanmean(dx[14:27])
+            for i in range(27, len(high_1d)):
+                if np.isnan(dx[i]):
+                    adx[i] = adx[i-1]
+                else:
+                    adx[i] = (adx[i-1] * 13 + dx[i]) / 14
+    
+    # Align Camarilla levels and ADX to 4h timeframe
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    # KAMA state variables (updated each bar)
-    kama_prev = close[0]
-    er_prev = 0.0
-    # Constants
-    fast_sc = 2/(2+1)   # 0.6667
-    slow_sc = 2/(30+1)  # 0.0645
-    
-    for i in range(1, n):
-        # Update KAMA with data up to i
-        if i == 1:
-            direction = abs(close[i] - close[i-1])
-            volatility = direction  # first period
-            er = 1.0 if volatility != 0 else 0.0
+    for i in range(20, n):  # Start after enough data for alignment
+        # Skip if any critical data is NaN
+        if (np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or
+            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(adx_aligned[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Volume ratio: current 4h volume vs 20-period average
+        vol_ma_20 = np.full_like(volume, np.nan)
+        for j in range(19, len(volume)):
+            vol_ma_20[j] = np.mean(volume[j-19:j+1])
+        vol_ma_20_aligned = vol_ma_20  # Already on 4h timeframe
+        
+        if np.isnan(vol_ma_20_aligned[i]) or vol_ma_20_aligned[i] <= 0:
+            volume_ratio = 0
         else:
-            direction = abs(close[i] - close[i-1])
-            volatility = np.sum(np.abs(np.diff(close[:i+1])))  # sum from 0 to i
-            er = direction / volatility if volatility != 0 else 0.0
-        
-        sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-        kama_curr = kama_prev + sc * (close[i] - kama_prev)
-        
-        # KAMA direction: rising if current > previous
-        kama_rising = kama_curr > kama_prev
-        kama_falling = kama_curr < kama_prev
-        
-        # RSI(14) calculation
-        if i >= 14:
-            # Calculate RSI using last 14 periods
-            changes = np.diff(close[i-13:i+1])  # indices i-13 to i
-            gains = np.where(changes > 0, changes, 0)
-            losses = np.where(changes < 0, -changes, 0)
-            avg_gain = np.mean(gains)
-            avg_loss = np.mean(losses)
-            if avg_loss == 0:
-                rsi = 100.0
-            else:
-                rs = avg_gain / avg_loss
-                rsi = 100.0 - (100.0 / (1.0 + rs))
-        else:
-            rsi = 50.0  # neutral until enough data
-        
-        # Get aligned 1d EMA50 value
-        ema_50 = ema_50_1d_aligned[i]
+            volume_ratio = volume[i] / vol_ma_20_aligned[i]
         
         if position == 0:
-            # Long entry: KAMA rising, RSI > 55, price > 1d EMA50
-            if kama_rising and rsi > 55 and not np.isnan(ema_50) and close[i] > ema_50:
+            # Look for long entries: price touches S3 with volume spike in low volatility regime
+            if (close[i] <= camarilla_s3_aligned[i] * 1.001 and  # Allow small tolerance
+                volume_ratio > 1.8 and
+                adx_aligned[i] < 25):
                 position = 1
                 signals[i] = position_size
-            # Short entry: KAMA falling, RSI < 45, price < 1d EMA50
-            elif kama_falling and rsi < 45 and not np.isnan(ema_50) and close[i] < ema_50:
+            # Look for short entries: price touches R3 with volume spike in low volatility regime
+            elif (close[i] >= camarilla_r3_aligned[i] * 0.999 and  # Allow small tolerance
+                  volume_ratio > 1.8 and
+                  adx_aligned[i] < 25):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: KAMA turns falling (trend change)
-            if kama_falling:
+            # Exit long: price reaches pivot point or ADX rises indicating trend
+            if (close[i] >= camarilla_pivot_aligned[i] * 0.999 or
+                adx_aligned[i] >= 25):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: KAMA turns rising (trend change)
-            if kama_rising:
+            # Exit short: price reaches pivot point or ADX rises indicating trend
+            if (close[i] <= camarilla_pivot_aligned[i] * 1.001 or
+                adx_aligned[i] >= 25):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -position_size
-        
-        # Update for next iteration
-        kama_prev = kama_curr
-        er_prev = er
     
     return signals
 
-name = "12h_1d_KAMA_RSI_Trend_v1"
-timeframe = "12h"
+name = "4h_1d_Camarilla_Pivot_Volume_Trend_v1"
+timeframe = "4h"
 leverage = 1.0
