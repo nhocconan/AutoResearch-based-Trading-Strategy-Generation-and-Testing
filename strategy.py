@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour timeframe with 1-day Choppiness Index regime filter and 1-day ATR-based breakout.
-# The Choppiness Index identifies ranging (CHOP > 61.8) vs trending (CHOP < 38.2) markets.
-# In trending markets, we trade breakouts of the 1-day ATR-based channel (similar to Donchian but volatility-adjusted).
-# In ranging markets, we fade moves toward the 1-day VWAP with reversion to the mean.
-# This adaptive approach aims to reduce whipsaws in chop while capturing trends, suitable for 2021-2026 BTC/ETH markets.
-# Position size: 0.25. Target trades: 20-50 per year per symbol (80-200 total over 4 years).
+# Hypothesis: 4-hour Donchian(20) breakout with 12-hour KAMA(10) trend filter and volume confirmation.
+# The 12-hour KAMA adapts to market efficiency, reducing noise in choppy markets while following trends.
+# The Donchian(20) breakout captures momentum in the direction of the 12-hour KAMA trend.
+# Volume > 1.5x the 20-period average confirms institutional participation and reduces false breakouts.
+# Exit occurs when price crosses the 12-hour KAMA. This combination targets 20-40 trades per year per symbol.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,111 +19,94 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data ONCE for regime and signals
-    df_1d = get_htf_data(prices, '1d')
+    # Load 12h data ONCE for trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1d) < 30:  # Need enough for CHOP and ATR
+    # 12h KAMA(10) for trend filter
+    kama_len = 10
+    if len(df_12h) < kama_len:
         return np.zeros(n)
     
-    # Calculate 1-day Choppiness Index (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    atr_1d = np.zeros(len(df_1d))
-    tr = np.maximum(high_1d - low_1d, np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), np.abs(low_1d - np.roll(close_1d, 1))))
-    tr[0] = high_1d[0] - low_1d[0]  # First TR
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(df_12h['close'], prepend=df_12h['close'].iloc[0]))
+    volatility = np.abs(np.diff(df_12h['close'])).rolling(window=kama_len, min_periods=1).sum()
+    er = np.where(volatility != 0, change / volatility, 0)
     
-    # Avoid division by zero
-    atr_safe = np.where(atr_1d == 0, 1e-10, atr_1d)
-    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(sum_tr_14 / (atr_safe * 14)) / np.log10(14)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
     
-    # Calculate 1-day ATR-based channels (like Donchian but ATR-based)
-    atr_mult = 1.0
-    upper_channel = pd.Series(close_1d).rolling(window=20, min_periods=20).max().values + atr_mult * atr_1d
-    lower_channel = pd.Series(close_1d).rolling(window=20, min_periods=20).min().values - atr_mult * atr_1d
+    # Calculate KAMA
+    kama = np.zeros_like(df_12h['close'], dtype=float)
+    kama[0] = df_12h['close'].iloc[0]
+    for i in range(1, len(df_12h)):
+        kama[i] = kama[i-1] + sc[i] * (df_12h['close'].iloc[i] - kama[i-1])
     
-    # Calculate 1-day VWAP for mean reversion in ranging markets
-    typical_price = (high_1d + low_1d + close_1d) / 3.0
-    vwap = (pd.Series(typical_price * volume).rolling(window=20, min_periods=20).sum().values / 
-            pd.Series(volume).rolling(window=20, min_periods=20).sum().values.replace(0, 1e-10))
+    kama_12h = kama
+    kama_12h_aligned = align_htf_to_ltf(prices, df_12h, kama_12h)
     
-    # Align all 1D indicators to 12H timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    upper_channel_aligned = align_htf_to_ltf(prices, df_1d, upper_channel)
-    lower_channel_aligned = align_htf_to_ltf(prices, df_1d, lower_channel)
-    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap)
+    # Donchian channel (20 periods) on 4h
+    dc_len = 20
+    dc_upper = pd.Series(high).rolling(window=dc_len, min_periods=dc_len).max().shift(1).values
+    dc_lower = pd.Series(low).rolling(window=dc_len, min_periods=dc_len).min().shift(1).values
+    
+    # Volume confirmation: 1.5x average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(30, 20)
+    start = max(50, dc_len, 20)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(chop_aligned[i]) or 
-            np.isnan(upper_channel_aligned[i]) or
-            np.isnan(lower_channel_aligned[i]) or
-            np.isnan(vwap_aligned[i])):
+        if (np.isnan(dc_upper[i]) or 
+            np.isnan(dc_lower[i]) or
+            np.isnan(kama_12h_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        chop_val = chop_aligned[i]
+        # Trend filter: price relative to 12h KAMA
+        above_kama = close[i] > kama_12h_aligned[i]
+        below_kama = close[i] < kama_12h_aligned[i]
+        
+        # Volume confirmation: current volume > 1.5x average
+        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Determine regime: trending (CHOP < 38.2) or ranging (CHOP > 61.8)
-            if chop_val < 38.2:  # Trending market
-                # Breakout long: price above upper channel
-                if close[i] > upper_channel_aligned[i]:
-                    position = 1
-                    signals[i] = position_size
-                # Breakout short: price below lower channel
-                elif close[i] < lower_channel_aligned[i]:
-                    position = -1
-                    signals[i] = -position_size
-            elif chop_val > 61.8:  # Ranging market
-                # Mean reversion long: price near lower channel and below VWAP
-                if close[i] < lower_channel_aligned[i] * 1.02 and close[i] < vwap_aligned[i]:
-                    position = 1
-                    signals[i] = position_size
-                # Mean reversion short: price near upper channel and above VWAP
-                elif close[i] > upper_channel_aligned[i] * 0.98 and close[i] > vwap_aligned[i]:
-                    position = -1
-                    signals[i] = -position_size
+            # Enter long: Donchian breakout above + above 12h KAMA + volume
+            if (close[i] > dc_upper[i] and 
+                above_kama and 
+                volume_confirmed):
+                position = 1
+                signals[i] = position_size
+            # Enter short: Donchian breakdown below + below 12h KAMA + volume
+            elif (close[i] < dc_lower[i] and 
+                  below_kama and 
+                  volume_confirmed):
+                position = -1
+                signals[i] = -position_size
+            else:
+                signals[i] = 0.0
         elif position == 1:
-            # Exit long: based on regime
-            if chop_val < 38.2:  # Trending: exit on reversal below lower channel
-                if close[i] < lower_channel_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = position_size
-            else:  # Ranging: exit on mean reversion to VWAP
-                if close[i] >= vwap_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = position_size
+            # Exit long: price crosses below 12h KAMA
+            if close[i] < kama_12h_aligned[i]:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = position_size
         elif position == -1:
-            # Exit short: based on regime
-            if chop_val < 38.2:  # Trending: exit on reversal above upper channel
-                if close[i] > upper_channel_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -position_size
-            else:  # Ranging: exit on mean reversion to VWAP
-                if close[i] <= vwap_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -position_size
+            # Exit short: price crosses above 12h KAMA
+            if close[i] > kama_12h_aligned[i]:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -position_size
     
     return signals
 
-name = "12h_1d_CHOP_ATR_VWAP_Adaptive_v1"
-timeframe = "12h"
+name = "4h_12h_KAMA10_Donchian_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
