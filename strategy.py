@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator + 1d Elder Ray (Bull/Bear Power) with volume confirmation
-# Uses Williams Alligator (13,8,5 SMAs) on 6h to detect trend direction
-# Uses Elder Ray from 1d: Bull Power = High - EMA13, Bear Power = EMA13 - Low
-# In bullish alignment (Green > Red > Blue Alligator + Bull Power > 0): long bias
-# In bearish alignment (Blue > Red > Green Alligator + Bear Power > 0): short bias
-# Volume filter: require volume > 1.3x 20-period EMA to avoid false signals
-# Designed for ~15-30 trades/year with strong trend filtering for both bull and bear markets
+# Hypothesis: 12h Williams %R mean reversion with 1d trend filter and volume confirmation
+# Williams %R (14) identifies overbought/oversold conditions: > -20 = overbought, < -80 = oversold
+# In trending markets (price > 1d EMA50): fade extremes (sell at > -20, buy at < -80)
+# In ranging markets (price near 1d EMA50): mean revert at Bollinger Bands (20, 2)
+# Volume confirmation: require volume > 1.5x 20-period EMA to avoid false signals
+# Designed for 12-25 trades/year with proper risk control in both bull and bear markets
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,86 +20,86 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Williams Alligator on 6h (13,8,5 SMAs)
-    # Jaw (13-period), Teeth (8-period), Lips (5-period)
+    # Calculate Williams %R (14-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
     close_series = pd.Series(close)
-    jaw = close_series.rolling(window=13, min_periods=13).mean()  # Blue line
-    teeth = close_series.rolling(window=8, min_periods=8).mean()   # Red line
-    lips = close_series.rolling(window=5, min_periods=5).mean()    # Green line
     
-    # Calculate Elder Ray on 1d (Bull Power, Bear Power)
+    # Highest high and lowest low over 14 periods
+    highest_high = high_series.rolling(window=14, min_periods=14).max()
+    lowest_low = low_series.rolling(window=14, min_periods=14).min()
+    
+    # Williams %R: -100 * (highest_high - close) / (highest_high - lowest_low)
+    willr = -100 * (highest_high - close_series) / (highest_high - lowest_low)
+    willr = willr.replace([np.inf, -np.inf], np.nan).fillna(-50).values  # Handle division by zero
+    
+    # Calculate 1d EMA (50-period) for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 55:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # EMA13 for Elder Ray
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Bull Power = High - EMA13, Bear Power = EMA13 - Low
-    bull_power = high_1d - ema13_1d
-    bear_power = ema13_1d - low_1d
+    # Bollinger Bands (20, 2) on 12h for ranging market entries
+    sma_20 = close_series.rolling(window=20, min_periods=20).mean()
+    std_20 = close_series.rolling(window=20, min_periods=20).std()
+    bb_upper = sma_20 + 2 * std_20
+    bb_lower = sma_20 - 2 * std_20
     
     # Volume moving average for confirmation (20-period EMA)
     vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Align 1d indicators to 6s timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw.values)[0]  # We'll get the aligned arrays properly below
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth.values)[0]
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips.values)[0]
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power, additional_delay_bars=0)[0]  # Elder Ray uses same bar
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power, additional_delay_bars=0)[0]
-    
-    # Properly get all aligned arrays
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw.values)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth.values)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips.values)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25
     
     for i in range(20, n):
-        # Skip if any values are NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or np.isnan(vol_ma[i])):
+        # Get aligned 1d EMA
+        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)[i]
+        
+        if np.isnan(willr[i]) or np.isnan(ema_1d_aligned) or np.isnan(vol_ma[i]) or \
+           np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
             continue
         
-        # Volume confirmation (1.3x average)
-        volume_confirm = volume[i] > 1.3 * vol_ma[i]
+        # Volume confirmation (1.5x average)
+        volume_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Williams Alligator alignment check
-        # Bullish: Lips > Teeth > Jaw (Green > Red > Blue)
-        bullish_alignment = (lips_aligned[i] > teeth_aligned[i]) and (teeth_aligned[i] > jaw_aligned[i])
-        # Bearish: Jaw > Teeth > Lips (Blue > Red > Green)
-        bearish_alignment = (jaw_aligned[i] > teeth_aligned[i]) and (teeth_aligned[i] > lips_aligned[i])
+        # Market regime: trending if price > 1d EMA50, ranging if near EMA50
+        price_vs_ema = (close[i] - ema_1d_aligned) / ema_1d_aligned
+        is_trending = abs(price_vs_ema) > 0.02  # >2% deviation from EMA = trending
+        is_ranging = abs(price_vs_ema) <= 0.02   # Within 2% of EMA = ranging
         
-        # Elder Ray confirmation
-        bullish_power = bull_power_aligned[i] > 0
-        bearish_power = bear_power_aligned[i] > 0
-        
-        # Entry conditions
-        if position == 0 and bullish_alignment and bullish_power and volume_confirm:
-            position = 1
-            signals[i] = position_size
-        elif position == 0 and bearish_alignment and bearish_power and volume_confirm:
-            position = -1
-            signals[i] = -position_size
-        # Exit conditions: when alignment breaks or power fades
-        elif position == 1 and (not bullish_alignment or not bullish_power):
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and (not bearish_alignment or not bearish_power):
-            position = 0
-            signals[i] = 0.0
+        if is_trending:  # Trending market - fade Williams %R extremes
+            if position == 0 and willr[i] < -80 and volume_confirm:  # Oversold -> buy
+                position = 1
+                signals[i] = position_size
+            elif position == 0 and willr[i] > -20 and volume_confirm:  # Overbought -> sell
+                position = -1
+                signals[i] = -position_size
+            elif position == 1 and willr[i] > -50:  # Exit on mean reversion
+                position = 0
+                signals[i] = 0.0
+            elif position == -1 and willr[i] < -50:  # Exit on mean reversion
+                position = 0
+                signals[i] = 0.0
+        elif is_ranging:  # Ranging market - mean revert at Bollinger Bands
+            if position == 0 and close[i] < bb_lower[i] and volume_confirm:
+                position = 1
+                signals[i] = position_size
+            elif position == 0 and close[i] > bb_upper[i] and volume_confirm:
+                position = -1
+                signals[i] = -position_size
+            elif position == 1 and close[i] > sma_20[i]:  # Exit at mean
+                position = 0
+                signals[i] = 0.0
+            elif position == -1 and close[i] < sma_20[i]:  # Exit at mean
+                position = 0
+                signals[i] = 0.0
+        # In between: no clear regime, no action
     
     return signals
 
-name = "6h_Alligator_ElderRay_Volume"
-timeframe = "6h"
+name = "12h_WilliamsR_1dTrend_BB_Volume"
+timeframe = "12h"
 leverage = 1.0
