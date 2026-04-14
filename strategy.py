@@ -3,11 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy combining 1d Donchian breakout with 1w RSI trend filter and volume confirmation.
-# Long when price breaks above 1d Donchian upper channel (20-period) with 1w RSI > 50 and volume > 1.5x average.
-# Short when price breaks below 1d Donchian lower channel with 1w RSI < 50 and volume confirmation.
-# Exit when price returns to 1d midpoint or RSI crosses 50 in opposite direction.
-# Designed for low trade frequency (12-37/year) to minimize fee drag and work in both bull and bear markets.
+# Hypothesis: 4h strategy using 12h Donchian breakout with volume and ADX filter.
+# Long when price breaks above 12h Donchian high (20) with ADX > 20 and volume > 1.5x average.
+# Short when price breaks below 12h Donchian low (20) with ADX > 20 and volume > 1.5x average.
+# Exit when price returns to 12h Donchian midpoint.
+# Uses 12h for structure to avoid noise, 4h for execution.
+# Designed to work in both bull and bear markets by filtering for trending conditions (ADX > 20).
+# Target: 20-30 trades/year per symbol (80-120 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,43 +21,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for Donchian channels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load 12h data ONCE for Donchian channels and ADX
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 1d Donchian channels (20-period)
-    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate Donchian channels (20-period) on 12h
+    donch_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     donch_mid = (donch_high + donch_low) / 2
     
-    # Load 1w data ONCE for RSI trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
-        return np.zeros(n)
+    # Calculate ADX (14) on 12h
+    # True Range
+    tr1 = np.abs(high_12h[1:] - low_12h[1:])
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
-    close_1w = df_1w['close'].values
+    # Directional Movement
+    up_move = np.concatenate([[np.nan], high_12h[1:] - high_12h[:-1]])
+    down_move = np.concatenate([[np.nan], low_12h[:-1] - low_12h[1:]])
     
-    # Calculate RSI(14) on 1w
-    delta = np.diff(close_1w, prepend=np.nan)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / avg_loss
-    rs = np.where(avg_loss == 0, 100, rs)
-    rsi_1w = 100 - (100 / (1 + rs))
+    # Smoothed values
+    tr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_dm_14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    minus_dm_14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Align indicators to lower timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
-    donch_mid_aligned = align_htf_to_ltf(prices, df_1d, donch_mid)
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # Directional Indicators
+    plus_di = 100 * plus_dm_14 / tr_14
+    minus_di = 100 * minus_dm_14 / tr_14
+    
+    # DX and ADX
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Align indicators to 4h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_12h, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_12h, donch_low)
+    donch_mid_aligned = align_htf_to_ltf(prices, df_12h, donch_mid)
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
     # Volume confirmation: 1.5x average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -65,14 +77,14 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(20, 14)  # Need Donchian and RSI
+    start = max(30, 20)  # Need Donchian and ADX
     
     for i in range(start, n):
         # Skip if any critical data is NaN
         if (np.isnan(donch_high_aligned[i]) or 
             np.isnan(donch_low_aligned[i]) or
             np.isnan(donch_mid_aligned[i]) or
-            np.isnan(rsi_1w_aligned[i]) or
+            np.isnan(adx_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -80,38 +92,35 @@ def generate_signals(prices):
         # Volume confirmation
         volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
-        # Trend filter: RSI > 50 for uptrend, < 50 for downtrend
-        uptrend = rsi_1w_aligned[i] > 50
-        downtrend = rsi_1w_aligned[i] < 50
+        # Trend filter: ADX > 20 indicates trending market
+        trending = adx_aligned[i] > 20
         
         if position == 0:
             # Look for Donchian breakouts
-            # Long: price breaks above Donchian high AND uptrend
+            # Long: price breaks above Donchian high AND trending AND volume confirmed
             if (close[i] > donch_high_aligned[i] and 
-                uptrend and 
+                trending and 
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below Donchian low AND downtrend
+            # Short: price breaks below Donchian low AND trending AND volume confirmed
             elif (close[i] < donch_low_aligned[i] and 
-                  downtrend and 
+                  trending and 
                   volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to Donchian mid or RSI crosses below 50
-            if (close[i] <= donch_mid_aligned[i] or 
-                rsi_1w_aligned[i] <= 50):
+            # Exit long: price returns to Donchian midpoint
+            if close[i] <= donch_mid_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to Donchian mid or RSI crosses above 50
-            if (close[i] >= donch_mid_aligned[i] or 
-                rsi_1w_aligned[i] >= 50):
+            # Exit short: price returns to Donchian midpoint
+            if close[i] >= donch_mid_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -119,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_DonchianBreakout_1wRSI_Volume_v1"
-timeframe = "12h"
+name = "4h_12h_Donchian_Breakout_ADX_Volume"
+timeframe = "4h"
 leverage = 1.0
