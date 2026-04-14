@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h RSI(14) mean reversion with weekly pivot rejection
-# Uses weekly pivot points to identify institutional support/resistance
-# RSI extremes (30/70) near weekly pivot levels trigger mean-reversion trades
-# Works in bull/bear by fading extreme moves at key weekly levels
+# Hypothesis: 12h Camarilla pivot breakout with daily volume confirmation and volatility filter
+# Uses Camarilla levels from daily timeframe for institutional-grade support/resistance
+# Breakouts above/below H3/L3 levels with volume surge trigger entries
+# Works in bull/bear by using volatility filter to avoid false breakouts in low volatility
 # Target: 50-150 total trades over 4 years (12-37/year)
 
 def generate_signals(prices):
@@ -17,93 +17,84 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for pivot points
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get daily data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    r1_1w = 2 * pivot_1w - low_1w
-    s1_1w = 2 * pivot_1w - high_1w
-    r2_1w = pivot_1w + (high_1w - low_1w)
-    s2_1w = pivot_1w - (high_1w - low_1w)
-    r3_1w = high_1w + 2 * (pivot_1w - low_1w)
-    s3_1w = low_1w - 2 * (high_1w - pivot_1w)
+    # Calculate Camarilla pivot levels from previous day
+    # H4 = Close + 1.5 * (High - Low)
+    # H3 = Close + 1.0 * (High - Low)
+    # H2 = Close + 0.5 * (High - Low)
+    # H1 = Close + 0.25 * (High - Low)
+    # L1 = Close - 0.25 * (High - Low)
+    # L2 = Close - 0.5 * (High - Low)
+    # L3 = Close - 1.0 * (High - Low)
+    # L4 = Close - 1.5 * (High - Low)
     
-    # Align weekly pivot levels to 6h timeframe
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
-    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    daily_range = high_1d - low_1d
+    camarilla_h3 = close_1d + 1.0 * daily_range
+    camarilla_l3 = close_1d - 1.0 * daily_range
     
-    # Calculate RSI(14) on 6h data
-    close_series = pd.Series(close)
-    delta = close_series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Align Camarilla levels to 12h timeframe (use previous day's levels)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    
+    # Volume confirmation: volume > 2.0x average volume (48-period = 24h on 12h timeframe)
+    vol_series = pd.Series(volume)
+    avg_vol = vol_series.rolling(window=48, min_periods=48).mean().shift(1).values
+    
+    # Volatility filter: ATR(24) > 0.5 * ATR(96) to ensure sufficient volatility
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], 
+                         np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_24 = pd.Series(tr).rolling(window=24, min_periods=24).mean().values
+    atr_96 = pd.Series(tr).rolling(window=96, min_periods=96).mean().values
+    vol_filter = atr_24 > (0.5 * atr_96)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for RSI calculation
-    start = 14
+    # Start after enough data for calculations
+    start = 96  # for ATR and volume averages
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(rsi_values[i]) or np.isnan(pivot_1w_aligned[i]) or 
-            np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(avg_vol[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        rsi_val = rsi_values[i]
-        pivot = pivot_1w_aligned[i]
-        r1 = r1_1w_aligned[i]
-        s1 = s1_1w_aligned[i]
-        r2 = r2_1w_aligned[i]
-        s2 = s2_1w_aligned[i]
-        r3 = r3_1w_aligned[i]
-        s3 = s3_1w_aligned[i]
+        vol = volume[i]
         
         if position == 0:
-            # Long: RSI oversold (<30) and price near weekly support (S1/S2/S3)
-            if (rsi_val < 30 and 
-                (abs(price - s1) / price < 0.01 or 
-                 abs(price - s2) / price < 0.015 or 
-                 abs(price - s3) / price < 0.02)):
+            # Long: price breaks above Camarilla H3 with volume filter AND volatility filter
+            if (price > camarilla_h3_aligned[i] and vol > 2.0 * avg_vol[i] and vol_filter[i]):
                 position = 1
                 signals[i] = position_size
-            # Short: RSI overbought (>70) and price near weekly resistance (R1/R2/R3)
-            elif (rsi_val > 70 and 
-                  (abs(price - r1) / price < 0.01 or 
-                   abs(price - r2) / price < 0.015 or 
-                   abs(price - r3) / price < 0.02)):
+            # Short: price breaks below Camarilla L3 with volume filter AND volatility filter
+            elif (price < camarilla_l3_aligned[i] and vol > 2.0 * avg_vol[i] and vol_filter[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI returns to neutral (40-60) or reaches weekly resistance
-            if (rsi_val >= 40 and rsi_val <= 60) or price >= r1:
+            # Exit long: price breaks below Camarilla L3
+            if price < camarilla_l3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: RSI returns to neutral (40-60) or reaches weekly support
-            if (rsi_val >= 40 and rsi_val <= 60) or price <= s1:
+            # Exit short: price breaks above Camarilla H3
+            if price > camarilla_h3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -111,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_RSI_WeeklyPivot_MeanReversion"
-timeframe = "6h"
+name = "12h_Camarilla_Pivot_Volume_Volatility"
+timeframe = "12h"
 leverage = 1.0
