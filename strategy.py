@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h trading using 1-week high/low breakout with volume confirmation and ADX trend filter
-# Weekly high/low from 1w data provides key institutional levels on longer timeframe
-# Breakout above weekly high or below weekly low captures strong momentum moves
-# Volume > 1.5x average confirms institutional participation
-# ADX > 25 ensures we only trade in trending markets, avoiding whipsaws in ranging conditions
-# Works in both bull and bear markets as breakouts occur in both directions
-# Target: 15-25 trades/year per symbol (60-100 total over 4 years)
+# Hypothesis: 4h 1-day Bollinger Band squeeze breakout with volume confirmation and ATR-based exit
+# Bollinger Band squeeze indicates low volatility and potential breakout
+# Breakout above upper band or below lower band with volume > 1.5x average confirms institutional participation
+# ATR-based exit provides adaptive risk management
+# Works in bull/bear as Bollinger Bands adapt to volatility
+# Target: 20-30 trades/year per symbol (80-120 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,65 +20,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE for weekly high/low
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Load 1d data ONCE for ADX calculation
+    # Load 1d data ONCE for Bollinger Bands
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly high/low from prior week (using 1w data)
-    # Weekly high/low from previous completed week
-    if len(df_1w) < 1:
+    # Calculate Bollinger Bands on 1d close (20 period, 2 std dev)
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Get prior week's high/low (excluding current incomplete week)
-    prev_week_high = df_1w['high'].shift(1).values
-    prev_week_low = df_1w['low'].shift(1).values
-    
-    # Align weekly high/low to 12h timeframe
-    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, prev_week_high)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, prev_week_low)
-    
-    # Calculate ADX (14) on 1d for trend strength
-    if len(df_1d) < 14:
-        return np.zeros(n)
-    
-    # True Range
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
     
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    upper_bb = sma_20 + (2 * std_20)
+    lower_bb = sma_20 - (2 * std_20)
     
-    # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
+    # Align Bollinger Bands to 4h timeframe
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # 4h ATR for volatility-based exit (14 period)
+    atr_period = 14
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
     
-    # Smoothed values (Wilder's smoothing)
-    def wilders_smoothing(values, period):
-        smoothed = np.zeros_like(values)
-        smoothed[period-1] = np.nansum(values[:period])
-        for i in range(period, len(values)):
-            smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + values[i]
-        return smoothed
-    
-    atr_14 = wilders_smoothing(tr, 14)
-    plus_di_14 = 100 * wilders_smoothing(plus_dm, 14) / atr_14
-    minus_di_14 = 100 * wilders_smoothing(minus_dm, 14) / atr_14
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
-    adx = wilders_smoothing(dx, 14)
-    
-    # Align ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume confirmation: 1.5x average volume
+    # Volume confirmation: 1.5x average volume (20 period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -87,48 +54,59 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(50, 20)  # Need enough for volume MA
+    start = max(50, 20, 20)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(weekly_high_aligned[i]) or 
-            np.isnan(weekly_low_aligned[i]) or
-            np.isnan(adx_aligned[i]) or
+        if (np.isnan(upper_bb_aligned[i]) or 
+            np.isnan(lower_bb_aligned[i]) or
+            np.isnan(atr[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x average
-        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
-        
-        # Trend filter: ADX > 25 indicates trending market
-        trending = adx_aligned[i] > 25
+        # Bollinger Band squeeze: bandwidth < 20th percentile of past 50 periods
+        if i >= 50:
+            bb_width = upper_bb_aligned[i] - lower_bb_aligned[i]
+            past_widths = []
+            for j in range(max(start, i-50), i):
+                if not np.isnan(upper_bb_aligned[j]) and not np.isnan(lower_bb_aligned[j]):
+                    past_widths.append(upper_bb_aligned[j] - lower_bb_aligned[j])
+            if len(past_widths) >= 10:
+                width_threshold = np.percentile(past_widths, 20)
+                squeeze = bb_width < width_threshold
+            else:
+                squeeze = False
+        else:
+            squeeze = False
         
         if position == 0:
-            # Enter long: break above weekly high + volume + trending
-            if (close[i] > weekly_high_aligned[i] and 
-                volume_confirmed and 
-                trending):
+            # Enter long: price breaks above upper BB + squeeze + volume confirmation
+            if (close[i] > upper_bb_aligned[i] and 
+                squeeze and 
+                volume[i] > 1.5 * vol_ma[i]):
                 position = 1
                 signals[i] = position_size
-            # Enter short: break below weekly low + volume + trending
-            elif (close[i] < weekly_low_aligned[i] and 
-                  volume_confirmed and 
-                  trending):
+            # Enter short: price breaks below lower BB + squeeze + volume confirmation
+            elif (close[i] < lower_bb_aligned[i] and 
+                  squeeze and 
+                  volume[i] > 1.5 * vol_ma[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to weekly low or breaks below it
-            if close[i] < weekly_low_aligned[i]:
+            # Exit long: price returns to middle band or ATR-based stop
+            middle_bb = sma_20_aligned[i] if 'sma_20_aligned' in locals() else (upper_bb_aligned[i] + lower_bb_aligned[i]) / 2
+            if close[i] < middle_bb or close[i] < (entry_price - 1.5 * atr[i]) if 'entry_price' in locals() else False:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to weekly high or breaks above it
-            if close[i] > weekly_high_aligned[i]:
+            # Exit short: price returns to middle band or ATR-based stop
+            middle_bb = sma_20_aligned[i] if 'sma_20_aligned' in locals() else (upper_bb_aligned[i] + lower_bb_aligned[i]) / 2
+            if close[i] > middle_bb or close[i] > (entry_price + 1.5 * atr[i]) if 'entry_price' in locals() else False:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -136,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1w_HighLow_Breakout_Volume_ADX_v1"
-timeframe = "12h"
+name = "4h_1d_Bollinger_Squeeze_Breakout_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
