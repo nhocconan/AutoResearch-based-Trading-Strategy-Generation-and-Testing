@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Choppiness Index regime filter with Donchian breakout and volume confirmation
-# In high chop (range): mean-reversion at Donchian bands (sell at upper, buy at lower)
-# In low chop (trend): trend-following breakouts (buy breakout, sell breakdown)
-# Volume > 1.5x average confirms breakout strength
-# This adapts to market regime, reducing false breakouts in ranges and capturing trends
-# Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost
+# Hypothesis: 12-hour Donchian breakout with weekly trend filter (EMA200) and volume confirmation
+# Long when price breaks above Donchian(20) high AND price > weekly EMA200 AND volume > 1.5x 20-period average
+# Short when price breaks below Donchian(20) low AND price < weekly EMA200 AND volume > 1.5x 20-period average
+# Exit when price crosses back inside the Donchian channel (opposite band)
+# This captures strong trending moves with volume confirmation while avoiding counter-trend trades
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,35 +20,17 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for Choppiness Index
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop for EMA200 trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate Donchian channels on 4h (20-period high/low)
+    # Calculate Donchian channels on 12h (20-period high/low)
     high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Choppiness Index on daily (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    
-    # Avoid division by zero
-    range_14 = highest_high_14 - lowest_low_14
-    range_14 = np.where(range_14 == 0, 1e-10, range_14)
-    
-    chop = 100 * np.log10(atr14 / range_14) / np.log10(14)
-    chop[np.isnan(chop)] = 50  # neutral when undefined
-    
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Calculate weekly EMA200 for trend filter
+    close_1w = df_1w['close'].values
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
     # Calculate volume average for confirmation (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -57,59 +39,41 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations
-    start = max(30, 20)  # Donchian needs 20, chop needs extra
+    # Start after enough data for calculations (20 for Donchian + 200 for weekly EMA + buffer)
+    start = 220
     
     for i in range(start, n):
         # Skip if any critical data is NaN
         if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(chop_aligned[i]) or np.isnan(vol_avg[i])):
+            np.isnan(ema200_1w_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         vol_threshold = vol_avg[i] * 1.5
-        chop_val = chop_aligned[i]
         
         if position == 0:
-            # Determine regime: chop > 61.8 = range (mean revert), chop < 38.2 = trend (trend follow)
-            if chop_val > 61.8:
-                # Range regime: mean reversion at Donchian bands
-                if price <= low_20[i] and vol > vol_threshold:  # near lower band -> buy
-                    position = 1
-                    signals[i] = position_size
-                elif price >= high_20[i] and vol > vol_threshold:  # near upper band -> sell
-                    position = -1
-                    signals[i] = -position_size
-                else:
-                    signals[i] = 0.0
+            # Long setup: breakout above Donchian high + above weekly EMA200 + volume confirmation
+            if (price > high_20[i] and price > ema200_1w_aligned[i] and vol > vol_threshold):
+                position = 1
+                signals[i] = position_size
+            # Short setup: breakdown below Donchian low + below weekly EMA200 + volume confirmation
+            elif (price < low_20[i] and price < ema200_1w_aligned[i] and vol > vol_threshold):
+                position = -1
+                signals[i] = -position_size
             else:
-                # Trend regime: breakout follow
-                if price > high_20[i] and vol > vol_threshold:  # upward breakout
-                    position = 1
-                    signals[i] = position_size
-                elif price < low_20[i] and vol > vol_threshold:  # downward breakdown
-                    position = -1
-                    signals[i] = -position_size
-                else:
-                    signals[i] = 0.0
-        elif position == 1:
-            # Exit long: opposite band touch or regime shift against position
-            if chop_val > 61.8 and price >= high_20[i]:  # in range, hit upper band -> exit
-                position = 0
                 signals[i] = 0.0
-            elif chop_val < 38.2 and price < low_20[i]:  # in trend, break below lower band -> exit
+        elif position == 1:
+            # Exit long: price falls back below Donchian low (opposite band)
+            if price < low_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: opposite band touch or regime shift against position
-            if chop_val > 61.8 and price <= low_20[i]:  # in range, hit lower band -> exit
-                position = 0
-                signals[i] = 0.0
-            elif chop_val < 38.2 and price > high_20[i]:  # in trend, break above upper band -> exit
+            # Exit short: price rises back above Donchian high (opposite band)
+            if price > high_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -117,6 +81,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Chop_Donchian_Volume_Regime"
-timeframe = "4h"
+name = "12h_Donchian_1wEMA200_Volume"
+timeframe = "12h"
 leverage = 1.0
