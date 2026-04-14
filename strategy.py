@@ -13,9 +13,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data once for pivot levels and volatility
+    # Load daily data once
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    # Load weekly data once for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
     # Daily ATR(14) for volatility filter
@@ -35,11 +40,6 @@ def generate_signals(prices):
     h_minus_l_1d = high_1d - low_1d
     r2_1d = pivot_1d + h_minus_l_1d
     s2_1d = pivot_1d - h_minus_l_1d
-    
-    # Load weekly data once for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
     
     # Weekly EMA(21) for trend
     close_1w = df_1w['close'].values
