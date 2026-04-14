@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour strategy using 1-day Keltner Channel breakout with volume confirmation and 1-week ADX trend filter.
-Long when price closes above upper KC (20,2) with volume > 1.5x average and 1-week ADX > 25.
-Short when price closes below lower KC (20,2) with volume > 1.5x average and 1-week ADX > 25.
-Exit when price returns to middle KC or 1-week ADX < 20.
+Hypothesis: 4-hour strategy using 1-day Williams %R reversal signals with 1-week ADX trend filter.
+Long when daily Williams %R crosses above -80 (oversold) with ADX > 25.
+Short when daily Williams %R crosses below -20 (overbought) with ADX > 25.
+Exit when Williams %R returns to -50 (neutral) or ADX < 20.
+Williams %R identifies reversal points in extended moves; ADX filters for trending conditions.
 Designed for low turnover: ~20-30 trades/year per symbol to minimize fee drag.
-Uses proven Keltner breakout with ADX trend filter to work in trending markets while avoiding chop.
 """
 
 import numpy as np
@@ -22,36 +22,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data once for Keltner Channels
+    # Load 1-day data once for Williams %R
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1-day Keltner Channels (20,2)
-    kc_period = 20
-    kc_mult = 2
+    # Calculate Williams %R (14)
+    wr_period = 14
     
-    # Typical Price
-    tp = (high_1d + low_1d + close_1d) / 3
+    # Highest high and lowest low over period
+    highest_high = pd.Series(high_1d).rolling(window=wr_period, min_periods=wr_period).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=wr_period, min_periods=wr_period).min().values
     
-    # EMA of Typical Price (middle line)
-    ema_tp = pd.Series(tp).ewm(span=kc_period, adjust=False, min_periods=kc_period).mean().values
-    
-    # ATR
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
-    atr = pd.Series(tr).ewm(span=kc_period, adjust=False, min_periods=kc_period).mean().values
-    
-    upper = ema_tp + kc_mult * atr
-    lower = ema_tp - kc_mult * atr
-    middle = ema_tp
+    # Williams %R: -100 * (HH - Close) / (HH - LL)
+    wr = np.where((highest_high - lowest_low) != 0,
+                  -100 * (highest_high - close_1d) / (highest_high - lowest_low),
+                  -50)  # Neutral when range is zero
     
     # Load 1-week data for ADX trend filter
     df_1w = get_htf_data(prices, '1w')
@@ -100,21 +90,19 @@ def generate_signals(prices):
     position_size = 0.25
     
     for i in range(50, n):
-        # 1-day index (6 bars per day for 4h timeframe? Wait: 24h/4h = 6 bars per day)
-        # Actually: 4h timeframe means 6 bars per 24h day
+        # 1-day index (6 bars per day for 4h timeframe)
         idx_1d = i // 6
-        if idx_1d < kc_period:
+        if idx_1d < wr_period:
             continue
         
-        # Use previous 1d values to avoid look-ahead (previous completed bar)
+        # Use previous 1d values to avoid look-ahead
         prev_idx = idx_1d - 1
         if prev_idx < 0:
             continue
             
-        # Get Keltner Channels from previous 1d bar
-        upper_prev = upper[prev_idx] if prev_idx < len(upper) else upper[-1]
-        lower_prev = lower[prev_idx] if prev_idx < len(lower) else lower[-1]
-        middle_prev = middle[prev_idx] if prev_idx < len(middle) else middle[-1]
+        # Get Williams %R from previous 1d bar
+        wr_prev = wr[prev_idx] if prev_idx < len(wr) else wr[-1]
+        wr_prev2 = wr[prev_idx-1] if prev_idx-1 >= 0 else wr[0]  # For crossover detection
         
         # 1-week index (42 bars per week for 4h timeframe: 7*6=42)
         idx_1w = i // 42
@@ -129,46 +117,47 @@ def generate_signals(prices):
         # Get ADX from previous 1w bar
         adx_prev = adx[prev_idx_1w] if prev_idx_1w < len(adx) else adx[-1]
         
-        if np.isnan(upper_prev) or np.isnan(lower_prev) or np.isnan(middle_prev) or np.isnan(adx_prev):
+        if np.isnan(wr_prev) or np.isnan(wr_prev2) or np.isnan(adx_prev):
             continue
         
-        # Create arrays for alignment (using previous values)
-        upper_arr = np.full(len(df_1d), upper_prev)
-        lower_arr = np.full(len(df_1d), lower_prev)
-        middle_arr = np.full(len(df_1d), middle_prev)
+        # Create arrays for alignment
+        wr_arr = np.full(len(df_1d), wr_prev)
+        wr_prev2_arr = np.full(len(df_1d), wr_prev2)
         adx_arr = np.full(len(df_1w), adx_prev)
         
-        upper_4h = align_htf_to_ltf(prices, df_1d, upper_arr)[i]
-        lower_4h = align_htf_to_ltf(prices, df_1d, lower_arr)[i]
-        middle_4h = align_htf_to_ltf(prices, df_1d, middle_arr)[i]
+        wr_4h = align_htf_to_ltf(prices, df_1d, wr_arr)[i]
+        wr_prev2_4h = align_htf_to_ltf(prices, df_1d, wr_prev2_arr)[i]
         adx_4h = align_htf_to_ltf(prices, df_1w, adx_arr)[i]
         
+        if np.isnan(wr_4h) or np.isnan(wr_prev2_4h) or np.isnan(adx_4h):
+            continue
+        
         if position == 0:
-            # Long: price closes above upper KC + volume surge + 1w trending (ADX > 25)
-            if (close[i] > upper_4h and 
+            # Long: Williams %R crosses above -80 (oversold reversal) + volume surge + ADX > 25
+            if (wr_prev2_4h <= -80 and wr_4h > -80 and  # Crossover above -80
                 volume[i] > vol_ma[i] * 1.5 and
                 adx_4h > 25):
                 position = 1
                 signals[i] = position_size
-            # Short: price closes below lower KC + volume surge + 1w trending (ADX > 25)
-            elif (close[i] < lower_4h and 
+            # Short: Williams %R crosses below -20 (overbought reversal) + volume surge + ADX > 25
+            elif (wr_prev2_4h >= -20 and wr_4h < -20 and  # Crossover below -20
                   volume[i] > vol_ma[i] * 1.5 and
                   adx_4h > 25):
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
-            # Exit: price returns to middle KC or 1w trend weakens (ADX < 20)
-            if close[i] < middle_4h or adx_4h < 20:
+            # Exit: Williams %R returns to -50 (neutral) or ADX < 20
+            if wr_4h >= -50 or adx_4h < 20:
                 position = 0
                 signals[i] = 0.0
         elif position == -1:
-            # Exit: price returns to middle KC or 1w trend weakens (ADX < 20)
-            if close[i] > middle_4h or adx_4h < 20:
+            # Exit: Williams %R returns to -50 (neutral) or ADX < 20
+            if wr_4h <= -50 or adx_4h < 20:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_1d_Keltner_Breakout_1wADX"
+name = "4h_1d_WilliamsR_1wADX"
 timeframe = "4h"
 leverage = 1.0
