@@ -16,22 +16,27 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA(20) for trend filter
-    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    # Calculate 1d Donchian channels (20-period) for breakout signals
+    high_series = pd.Series(df_1d['high'])
+    low_series = pd.Series(df_1d['low'])
+    donch_high = high_series.rolling(window=20, min_periods=20).max().values
+    donch_low = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian levels to 12h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
     
     # Calculate 1d ATR(14) for volatility filter and position sizing
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    close_series = pd.Series(close)
     tr1 = high_series - low_series
-    tr2 = abs(high_series - close_series.shift(1))
-    tr3 = abs(low_series - close_series.shift(1))
+    tr2 = abs(high_series - close.shift(1))
+    tr3 = abs(low_series - close.shift(1))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
+    atr_14 = tr.rolling(window=14, min_periods=14).mean().values
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Calculate 24-period average volume for confirmation (1d * 24 = 24h = 1 day)
-    vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Calculate 1d average volume for confirmation
+    vol_avg_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
     signals = np.zeros(n)
     position = 0
@@ -42,47 +47,48 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_20_1d_aligned[i]) or 
-            np.isnan(atr[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(donch_high_aligned[i]) or 
+            np.isnan(donch_low_aligned[i]) or 
+            np.isnan(atr_14_aligned[i]) or 
+            np.isnan(vol_avg_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         
-        # ATR-based volatility filter: avoid extremely low volatility periods
-        atr_ratio = atr[i] / price if price > 0 else 0
+        # Volatility filter: avoid extremely low volatility periods
+        atr_ratio = atr_14_aligned[i] / price if price > 0 else 0
         vol_filter = atr_ratio > 0.003  # Minimum 0.3% ATR relative to price
         
-        # Volume confirmation: current volume > 1.5x average
-        vol_confirm = vol > (vol_avg[i] * 1.5) if not np.isnan(vol_avg[i]) else False
+        # Volume confirmation: current volume > 1.5x average daily volume
+        vol_confirm = vol > (vol_avg_aligned[i] * 1.5) if not np.isnan(vol_avg_aligned[i]) else False
         
-        # Trend filter: price > 1d EMA20 for long, price < 1d EMA20 for short
-        trend_filter_long = price > ema_20_1d_aligned[i]
-        trend_filter_short = price < ema_20_1d_aligned[i]
+        # Breakout signals: price breaks above/below 1d Donchian channels
+        breakout_long = price > donch_high_aligned[i]
+        breakout_short = price < donch_low_aligned[i]
         
         if position == 0:
-            # Long setup: price above 1d EMA20 + volume confirmation + volatility filter
-            if (trend_filter_long and vol_confirm and vol_filter):
+            # Long entry: bullish breakout + volume confirmation + volatility filter
+            if breakout_long and vol_confirm and vol_filter:
                 position = 1
                 signals[i] = position_size
-            # Short setup: price below 1d EMA20 + volume confirmation + volatility filter
-            elif (trend_filter_short and vol_confirm and vol_filter):
+            # Short entry: bearish breakout + volume confirmation + volatility filter
+            elif breakout_short and vol_confirm and vol_filter:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below 1d EMA20
-            if price < ema_20_1d_aligned[i]:
+            # Exit long: price breaks below lower Donchian channel
+            if price < donch_low_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above 1d EMA20
-            if price > ema_20_1d_aligned[i]:
+            # Exit short: price breaks above upper Donchian channel
+            if price > donch_high_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -90,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dEMA20_Volume_Filter"
-timeframe = "4h"
+name = "12h_1dDonchian20_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
