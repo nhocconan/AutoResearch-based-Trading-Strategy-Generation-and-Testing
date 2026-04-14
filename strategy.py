@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,13 +15,21 @@ def generate_signals(prices):
     
     # Load daily data (HTF) once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    
+    # Calculate daily EMA200 for trend filter (1d)
+    ema200_1d = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 200:
+        ema200_1d[199] = np.mean(close_1d[:200])
+        for i in range(200, len(df_1d)):
+            ema200_1d[i] = (close_1d[i] * 2 + ema200_1d[i-1] * 198) / 200
+    
+    ema200_12h = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
     # Calculate daily ATR for volatility filter (14-period)
     tr = np.zeros(len(df_1d))
@@ -41,23 +49,6 @@ def generate_signals(prices):
     
     atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate daily EMA200 for trend filter (1d)
-    ema200_1d = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 200:
-        ema200_1d[199] = np.mean(close_1d[:200])
-        for i in range(200, len(df_1d)):
-            ema200_1d[i] = (close_1d[i] * 2 + ema200_1d[i-1] * 198) / 200
-    
-    ema200_12h = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    
-    # Calculate volume moving average (20-period) for daily volume
-    vol_ma_20_1d = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 20:
-        for i in range(19, len(df_1d)):
-            vol_ma_20_1d[i] = np.mean(volume_1d[i-19:i+1])
-    
-    vol_ma_20_12h = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    
     # Calculate 12-hour Donchian channels (20-period) for entry signals
     donch_high = np.full(n, np.nan)
     donch_low = np.full(n, np.nan)
@@ -75,8 +66,7 @@ def generate_signals(prices):
         if (np.isnan(atr_12h[i]) or
             np.isnan(ema200_12h[i]) or
             np.isnan(donch_high[i]) or
-            np.isnan(donch_low[i]) or
-            np.isnan(vol_ma_20_12h[i])):
+            np.isnan(donch_low[i])):
             signals[i] = 0.0
             continue
         
@@ -84,15 +74,6 @@ def generate_signals(prices):
         if atr_12h[i] < 0.003 * close[i]:
             signals[i] = 0.0
             continue
-        
-        # Volume ratio: current volume vs 20-period average
-        if vol_ma_20_12h[i] <= 0:
-            volume_ratio = 0
-        else:
-            volume_ratio = volume[i] / vol_ma_20_12h[i]
-        
-        # Volume threshold: require significant spike
-        vol_threshold = 2.0
         
         # Calculate daily pivot levels based on previous day's range
         prev_high = high_1d[i-1] if i > 0 else high_1d[0]
@@ -109,12 +90,12 @@ def generate_signals(prices):
         s4_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s4))[i]
         
         if position == 0:
-            # Long: Price breaks above 12h Donchian high with volume confirmation and above daily EMA200
-            if close[i] > donch_high[i] and volume_ratio > vol_threshold and close[i] > ema200_12h[i]:
+            # Long: Price breaks above 12h Donchian high with above daily EMA200
+            if close[i] > donch_high[i] and close[i] > ema200_12h[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below 12h Donchian low with volume confirmation and below daily EMA200
-            elif close[i] < donch_low[i] and volume_ratio > vol_threshold and close[i] < ema200_12h[i]:
+            # Short: Price breaks below 12h Donchian low with below daily EMA200
+            elif close[i] < donch_low[i] and close[i] < ema200_12h[i]:
                 position = -1
                 signals[i] = -position_size
             else:
@@ -136,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Donchian_EMA200_Volume"
+name = "12h_1d_Donchian_EMA200"
 timeframe = "12h"
 leverage = 1.0
