@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Donchian channel breakout with volume confirmation.
-# 1d Donchian(20) breakout provides clear trend-following entry points.
-# Volume confirmation (>2x 20-period average) filters false breakouts.
-# Exit when price returns to opposite Donchian band or volume drops below average.
-# Designed for 12h timeframe to reduce trade frequency and minimize fee drag.
-# Works in both bull and bear markets by capturing strong directional moves.
+# Hypothesis: 4h strategy using 1d Williams %R for mean reversion with 4h RSI filter and volume confirmation.
+# Williams %R identifies overbought/oversold conditions on the daily timeframe.
+# RSI(14) on 4h confirms momentum alignment to avoid fighting the trend.
+# Volume confirmation (>1.3x 20-period average) ensures institutional participation.
+# Works in both bull and bear markets by fading extremes only when momentum confirms.
+# Target: 20-30 trades/year per symbol (80-120 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,24 +20,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for Donchian channels
+    # Load 1d data ONCE for Williams %R
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate Donchian channels on 1d data
+    # Calculate Williams %R on 1d data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    donchian_period = 20
-    upper_channel = pd.Series(high_1d).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    lower_channel = pd.Series(low_1d).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    # Highest high and lowest low over 14 periods
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # Align Donchian channels to 12h timeframe
-    upper_channel_aligned = align_htf_to_ltf(prices, df_1d, upper_channel)
-    lower_channel_aligned = align_htf_to_ltf(prices, df_1d, lower_channel)
+    # Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    # Handle division by zero (when highest_high == lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Volume confirmation: 2x average volume
+    # Load 4h data ONCE for RSI
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 14:
+        return np.zeros(n)
+    
+    # Calculate RSI on 4h data
+    close_4h = df_4h['close'].values
+    delta = np.diff(close_4h, prepend=close_4h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / np.where(avg_loss == 0, 1, avg_loss)  # Avoid division by zero
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Align indicators to 4h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    rsi_aligned = align_htf_to_ltf(prices, df_4h, rsi)
+    
+    # Volume confirmation: 1.3x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -45,43 +67,47 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = donchian_period  # Need Donchian channels and volume MA
+    start = max(20, 14)  # Need volume MA and indicators
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(upper_channel_aligned[i]) or 
-            np.isnan(lower_channel_aligned[i]) or
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(rsi_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
-        volume_confirmed = volume[i] > 2.0 * vol_ma[i]
+        volume_confirmed = volume[i] > 1.3 * vol_ma[i]
         
         if position == 0:
-            # Look for Donchian channel breakouts
-            # Long: price breaks above upper Donchian channel
-            if (close[i] > upper_channel_aligned[i] and volume_confirmed):
+            # Look for mean reversion opportunities
+            # Long: Williams %R oversold (< -80) AND RSI shows bullish momentum (> 50)
+            if (williams_r_aligned[i] < -80 and 
+                rsi_aligned[i] > 50 and 
+                volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below lower Donchian channel
-            elif (close[i] < lower_channel_aligned[i] and volume_confirmed):
+            # Short: Williams %R overbought (> -20) AND RSI shows bearish momentum (< 50)
+            elif (williams_r_aligned[i] > -20 and 
+                  rsi_aligned[i] < 50 and 
+                  volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to lower Donchian channel or volume drops
-            if (close[i] < lower_channel_aligned[i] or 
-                volume[i] < vol_ma[i]):
+            # Exit long: Williams %R returns to neutral area or momentum fades
+            if (williams_r_aligned[i] > -50 or 
+                rsi_aligned[i] < 50):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to upper Donchian channel or volume drops
-            if (close[i] > upper_channel_aligned[i] or 
-                volume[i] < vol_ma[i]):
+            # Exit short: Williams %R returns to neutral area or momentum fades
+            if (williams_r_aligned[i] < -50 or 
+                rsi_aligned[i] > 50):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -89,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1dDonchian_Breakout_VolumeFilter_v1"
-timeframe = "12h"
+name = "4h_1dWilliamsR_4hRSI_VolumeFilter_v1"
+timeframe = "4h"
 leverage = 1.0
