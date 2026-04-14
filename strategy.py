@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-1h_4h_1d_PriceAction_Volume_Trend_v1
-Hypothesis: On 1h timeframe, use 4h price action (higher highs/lows) and 1d trend (EMA50) for directional bias, 
-with volume confirmation for entry timing. Long when: price makes higher high on 4h, above 1d EMA50, 
-and volume spike. Short when: price makes lower low on 4h, below 1d EMA50, and volume spike. 
-Exit on opposite signal or volume dry-up. Works in bull/bear by following 4h structure and 1d trend.
-Designed to avoid overtrading: uses higher timeframe for direction, 1h only for timing.
-Target: 15-35 trades/year.
+6h_1W_Pivot_Trend_v1
+Hypothesis: On 6h timeframe, use weekly pivot points (PP, R1, S1) from the previous week for trend-following breakouts with volume confirmation.
+Buy when price breaks above weekly R1 with volume > 1.5x 20-period average.
+Sell when price breaks below weekly S1 with volume > 1.5x 20-period average.
+Exit when price returns to weekly PP (mean reversion) or opposite breakout occurs.
+Uses weekly timeframe for structure, 6f for execution - avoids whipsaws in ranging markets while capturing trends.
+Works in bull markets (breakouts continuation) and bear markets (breakdown continuations).
 """
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,95 +23,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Load 4h data for structure (higher highs/lows)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Load weekly data for pivot points
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 2:
         return np.zeros(n)
     
-    # Calculate 4h higher highs and lower lows
-    hh_4h = np.full_like(df_4h['close'], np.nan)  # Higher high
-    ll_4h = np.full_like(df_4h['close'], np.nan)  # Lower low
+    high_w = df_w['high'].values
+    low_w = df_w['low'].values
+    close_w = df_w['close'].values
     
-    for i in range(2, len(df_4h)):
-        if (np.isnan(df_4h['high'].iloc[i]) or np.isnan(df_4h['low'].iloc[i]) or
-            np.isnan(df_4h['high'].iloc[i-1]) or np.isnan(df_4h['low'].iloc[i-1]) or
-            np.isnan(df_4h['high'].iloc[i-2]) or np.isnan(df_4h['low'].iloc[i-2])):
+    # Calculate weekly pivot points: PP = (H+L+C)/3, R1 = 2*PP - L, S1 = 2*PP - H
+    pivot_w = np.full_like(close_w, np.nan)
+    r1_w = np.full_like(close_w, np.nan)
+    s1_w = np.full_like(close_w, np.nan)
+    
+    for i in range(1, len(close_w)):  # Start from 1 to use previous week
+        if np.isnan(high_w[i-1]) or np.isnan(low_w[i-1]) or np.isnan(close_w[i-1]):
             continue
-        # Higher high: current high > previous high AND previous high > high two bars ago
-        if (df_4h['high'].iloc[i] > df_4h['high'].iloc[i-1] and 
-            df_4h['high'].iloc[i-1] > df_4h['high'].iloc[i-2]):
-            hh_4h.iloc[i] = df_4h['high'].iloc[i]
-        # Lower low: current low < previous low AND previous low < low two bars ago
-        if (df_4h['low'].iloc[i] < df_4h['low'].iloc[i-1] and 
-            df_4h['low'].iloc[i-1] < df_4h['low'].iloc[i-2]):
-            ll_4h.iloc[i] = df_4h['low'].iloc[i]
+        phigh = high_w[i-1]
+        plow = low_w[i-1]
+        pclose = close_w[i-1]
+        pivot_w[i] = (phigh + plow + pclose) / 3
+        r1_w[i] = 2 * pivot_w[i] - plow
+        s1_w[i] = 2 * pivot_w[i] - phigh
     
-    # Load 1d data for trend (EMA50)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Align weekly pivot points to 6h timeframe
+    pivot_w_aligned = align_htf_to_ltf(prices, df_w, pivot_w)
+    r1_w_aligned = align_htf_to_ltf(prices, df_w, r1_w)
+    s1_w_aligned = align_htf_to_ltf(prices, df_w, s1_w)
     
-    # Calculate 1d EMA50
-    close_1d = df_1d['close']
-    ema_50 = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align all indicators to 1h timeframe
-    hh_4h_aligned = align_htf_to_ltf(prices, df_4h, hh_4h.values)
-    ll_4h_aligned = align_htf_to_ltf(prices, df_4h, ll_4h.values)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
-    
-    # Volume spike detection (20-period average)
+    # Volume average (20-period)
     vol_ma_20 = np.full_like(volume, np.nan)
     for i in range(19, len(volume)):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
-    vol_ratio = np.where(vol_ma_20 > 0, volume / vol_ma_20, 0)
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
-    for i in range(50, n):
-        # Skip if not in trading session or missing data
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-        if (np.isnan(hh_4h_aligned[i]) or np.isnan(ll_4h_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ratio[i])):
+    for i in range(20, n):  # Start after enough data for volume MA
+        # Skip if any critical data is NaN
+        if (np.isnan(pivot_w_aligned[i]) or np.isnan(r1_w_aligned[i]) or 
+            np.isnan(s1_w_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions
+        if vol_ma_20[i] <= 0:
+            volume_ratio = 0
+        else:
+            volume_ratio = volume[i] / vol_ma_20[i]
+        
         if position == 0:
-            # Long: 4h higher high, above 1d EMA50, volume spike
-            if (not np.isnan(hh_4h_aligned[i]) and 
-                close[i] > ema_50_aligned[i] and 
-                vol_ratio[i] > 2.0):
+            # Look for long breakout: price breaks above R1 with volume confirmation
+            if (close[i] > r1_w_aligned[i] and volume_ratio > 1.5):
                 position = 1
                 signals[i] = position_size
-            # Short: 4h lower low, below 1d EMA50, volume spike
-            elif (not np.isnan(ll_4h_aligned[i]) and 
-                  close[i] < ema_50_aligned[i] and 
-                  vol_ratio[i] > 2.0):
+            # Look for short breakdown: price breaks below S1 with volume confirmation
+            elif (close[i] < s1_w_aligned[i] and volume_ratio > 1.5):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: opposite signal (lower low) or volume dry-up
-            if (not np.isnan(ll_4h_aligned[i]) and 
-                close[i] < ema_50_aligned[i]) or vol_ratio[i] < 0.5:
+            # Exit long: price returns to pivot point or breakdown occurs
+            if (close[i] <= pivot_w_aligned[i] or 
+                (close[i] < s1_w_aligned[i] and volume_ratio > 1.5)):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: opposite signal (higher high) or volume dry-up
-            if (not np.isnan(hh_4h_aligned[i]) and 
-                close[i] > ema_50_aligned[i]) or vol_ratio[i] < 0.5:
+            # Exit short: price returns to pivot point or breakout occurs
+            if (close[i] >= pivot_w_aligned[i] or 
+                (close[i] > r1_w_aligned[i] and volume_ratio > 1.5)):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -119,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4h_1d_PriceAction_Volume_Trend_v1"
-timeframe = "1h"
+name = "6h_1W_Pivot_Trend_v1"
+timeframe = "6h"
 leverage = 1.0
