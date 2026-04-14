@@ -21,7 +21,7 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    vol_1d = df_1d['volume'].values
+    volume_1d = df_1d['volume'].values
     
     # Calculate 20-period high and low for Donchian channel (daily)
     donchian_high_20 = np.full_like(close_1d, np.nan)
@@ -34,6 +34,13 @@ def generate_signals(prices):
     
     donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
     donchian_low_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
+    
+    # Calculate 20-period volume average (daily)
+    vol_ma_20 = np.full_like(volume_1d, np.nan)
+    if len(volume_1d) >= 20:
+        for i in range(19, len(volume_1d)):
+            vol_ma_20[i] = np.mean(volume_1d[i-19:i+1])
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     # Calculate 14-period ADX for trend strength (daily)
     # Calculate True Range
@@ -88,18 +95,20 @@ def generate_signals(prices):
     
     adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
     
-    # Calculate 20-period volume average (daily)
-    vol_ma_20 = np.full_like(vol_1d, np.nan)
-    if len(vol_1d) >= 20:
-        for i in range(19, len(vol_1d)):
-            vol_ma_20[i] = np.mean(vol_1d[i-19:i+1])
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Precompute session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position size
+    position_size = 0.20  # 20% position size
     
     for i in range(50, n):
+        # Session filter: only trade between 08:00-20:00 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            signals[i] = 0.0
+            continue
+        
         # Skip if any critical data is NaN
         if (np.isnan(donchian_high_20_aligned[i]) or 
             np.isnan(donchian_low_20_aligned[i]) or 
@@ -108,7 +117,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 4h volume vs 20-period daily average volume
+        # Volume ratio: current 1h volume vs 20-period daily average volume
         if vol_ma_20_aligned[i] <= 0:
             volume_ratio = 0
         else:
@@ -148,6 +157,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Donchian20_ADX25_Volume"
-timeframe = "4h"
+name = "1h_1d_Donchian20_ADX25_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
