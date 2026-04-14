@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian(20) breakout with 1-day EMA(20) trend filter and volume confirmation.
-# The 1-day EMA(20) adapts to both bull and bear markets, ensuring trades follow the dominant trend.
+# Hypothesis: 4-hour Donchian(20) breakout with 1-day RSI(14) trend filter and volume confirmation.
+# The 1-day RSI(14) > 50 indicates bullish bias, < 50 indicates bearish bias, ensuring trades follow the dominant trend.
 # The Donchian(20) breakout captures momentum in the direction of the 1-day trend.
 # Volume > 1.5x the 20-period average confirms institutional participation and reduces false breakouts.
-# Exit occurs when price returns to the 1-day EMA(20) or breaks the opposite Donchian band.
-# This combination aims for 10-25 trades per year per symbol (40-100 total over 4 years), staying within the optimal range to minimize fee drag.
+# Exit occurs when price returns to the 1-day RSI(50) level or breaks the opposite Donchian band.
+# This combination aims for 20-40 trades per year per symbol (80-160 total over 4 years), staying within the optimal range to minimize fee drift.
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,15 +23,19 @@ def generate_signals(prices):
     # Load 1d data ONCE for trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d EMA(20) for trend filter
-    ema_len = 20
-    if len(df_1d) < ema_len:
+    # 1d RSI(14) for trend filter
+    rsi_len = 14
+    if len(df_1d) < rsi_len:
         return np.zeros(n)
     
-    ema_1d = pd.Series(df_1d['close']).ewm(span=ema_len, adjust=False, min_periods=ema_len).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    delta = pd.Series(df_1d['close']).diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=rsi_len, min_periods=rsi_len).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=rsi_len, min_periods=rsi_len).mean()
+    rs = gain / loss
+    rsi_1d = (100 - (100 / (1 + rs))).values
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Donchian channel (20 periods) on 12h
+    # Donchian channel (20 periods) on 4h
     dc_len = 20
     dc_upper = pd.Series(high).rolling(window=dc_len, min_periods=dc_len).max().shift(1).values
     dc_lower = pd.Series(low).rolling(window=dc_len, min_periods=dc_len).min().shift(1).values
@@ -50,43 +54,43 @@ def generate_signals(prices):
         # Skip if any critical data is NaN
         if (np.isnan(dc_upper[i]) or 
             np.isnan(dc_lower[i]) or
-            np.isnan(ema_1d_aligned[i]) or
+            np.isnan(rsi_1d_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to 1d EMA20
-        above_ema = close[i] > ema_1d_aligned[i]
-        below_ema = close[i] < ema_1d_aligned[i]
+        # Trend filter: RSI relative to 50
+        bullish = rsi_1d_aligned[i] > 50
+        bearish = rsi_1d_aligned[i] < 50
         
         # Volume confirmation: current volume > 1.5x average
         volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Enter long: Donchian breakout above + above 1d EMA + volume
+            # Enter long: Donchian breakout above + bullish 1d RSI + volume
             if (close[i] > dc_upper[i] and 
-                above_ema and 
+                bullish and 
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Enter short: Donchian breakdown below + below 1d EMA + volume
+            # Enter short: Donchian breakdown below + bearish 1d RSI + volume
             elif (close[i] < dc_lower[i] and 
-                  below_ema and 
+                  bearish and 
                   volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to 1d EMA or breaks below Donchian lower
-            if close[i] < ema_1d_aligned[i] or close[i] < dc_lower[i]:
+            # Exit long: price returns to 50 RSI level or breaks below Donchian lower
+            if rsi_1d_aligned[i] < 50 or close[i] < dc_lower[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to 1d EMA or breaks above Donchian upper
-            if close[i] > ema_1d_aligned[i] or close[i] > dc_upper[i]:
+            # Exit short: price returns to 50 RSI level or breaks above Donchian upper
+            if rsi_1d_aligned[i] > 50 or close[i] > dc_upper[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -94,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_EMA20_Donchian_Volume_v1"
-timeframe = "12h"
+name = "4h_1d_RSI14_Donchian_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
