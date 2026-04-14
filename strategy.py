@@ -1,11 +1,3 @@
-# 12h_1w_1d_S3R3_Pivot_Breakout_With_Volume_Confirmation
-# Hypothesis: Price breaking daily S3/R3 levels with volume confirmation on 12h timeframe
-# captures institutional order flow during extreme price rejection. Works in both bull/bear
-# markets because S3/R3 act as dynamic support/resistance based on previous day's range.
-# Volume filter ensures only significant breakouts trigger trades, reducing false signals.
-# 12h timeframe balances trade frequency (target 15-30/year) with sufficient signal clarity.
-# Weekly trend filter (EMA50) avoids counter-trend trades in strong trends.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
