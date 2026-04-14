@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Donchian(20) breakout with 1-week EMA(21) trend filter and volume confirmation.
-# The 1-week EMA(21) adapts to both bull and bear markets, ensuring trades follow the dominant long-term trend.
-# The Donchian(20) breakout captures momentum in the direction of the 1-week trend.
-# Volume > 1.5x the 20-period average confirms institutional participation and reduces false breakouts.
-# Exit occurs when price returns to the 1-week EMA(21) or breaks the opposite Donchian band.
-# Target: 20-30 trades per year per symbol (80-120 total over 4 years), staying within optimal range to minimize fee drag.
+# Hypothesis: 12-hour Camarilla pivot breakout with 1-day volume confirmation and chop filter.
+# Camarilla levels from daily provide institutional support/resistance zones.
+# Breakout above H3 or below L3 with volume > 2x average captures institutional moves.
+# Choppiness index < 38.2 ensures we only trade in trending markets, avoiding whipsaws in ranges.
+# Position size: 0.25 (25%). Target: 20-40 trades/year per symbol (80-160 total over 4 years).
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,23 +19,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-week data ONCE for trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE for Camarilla and chop
+    df_1d = get_htf_data(prices, '1d')
     
-    # 1-week EMA(21) for trend filter
-    ema_len = 21
-    if len(df_1w) < ema_len:
+    # Calculate Camarilla levels from previous day
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    ema_1w = pd.Series(df_1w['close']).ewm(span=ema_len, adjust=False, min_periods=ema_len).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Previous day's OHLC
+    ph = df_1d['high'].shift(1).values  # previous high
+    pl = df_1d['low'].shift(1).values   # previous low
+    pc = df_1d['close'].shift(1).values # previous close
     
-    # Donchian channel (20 periods) on 6h
-    dc_len = 20
-    dc_upper = pd.Series(high).rolling(window=dc_len, min_periods=dc_len).max().shift(1).values
-    dc_lower = pd.Series(low).rolling(window=dc_len, min_periods=dc_len).min().shift(1).values
+    # Camarilla levels
+    range_ = ph - pl
+    h3 = pc + (range_ * 1.1 / 6)
+    l3 = pc - (range_ * 1.1 / 6)
+    h4 = pc + (range_ * 1.1 / 2)
+    l4 = pc - (range_ * 1.1 / 2)
     
-    # Volume confirmation: 1.5x average volume
+    # Align Camarilla levels to 12h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    
+    # Choppiness Index (14-period) on daily
+    atr = np.maximum(np.maximum(df_1d['high'] - df_1d['low'], 
+                               abs(df_1d['high'] - df_1d['close'].shift(1))),
+                      abs(df_1d['low'] - df_1d['close'].shift(1)))
+    atr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    true_range_sum = pd.Series(df_1d['high'] - df_1d['low']).rolling(window=14, min_periods=14).sum().values
+    chop = 100 * np.log10(atr_sum / true_range_sum) / np.log10(14)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Volume confirmation: 2x average volume on 12h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -44,49 +61,45 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(50, dc_len, 20)
+    start = max(30, 20)  # Need Camarilla (2 days) + vol MA (20)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(dc_upper[i]) or 
-            np.isnan(dc_lower[i]) or
-            np.isnan(ema_1w_aligned[i]) or
+        if (np.isnan(h3_aligned[i]) or 
+            np.isnan(l3_aligned[i]) or
+            np.isnan(chop_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to 1-week EMA21
-        above_ema = close[i] > ema_1w_aligned[i]
-        below_ema = close[i] < ema_1w_aligned[i]
-        
-        # Volume confirmation: current volume > 1.5x average
-        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
+        # Only trade in trending markets (chop < 38.2)
+        trending = chop_aligned[i] < 38.2
         
         if position == 0:
-            # Enter long: Donchian breakout above + above 1-week EMA + volume
-            if (close[i] > dc_upper[i] and 
-                above_ema and 
-                volume_confirmed):
+            # Enter long: break above H3 with volume
+            if (close[i] > h3_aligned[i] and 
+                volume[i] > 2.0 * vol_ma[i] and
+                trending):
                 position = 1
                 signals[i] = position_size
-            # Enter short: Donchian breakdown below + below 1-week EMA + volume
-            elif (close[i] < dc_lower[i] and 
-                  below_ema and 
-                  volume_confirmed):
+            # Enter short: break below L3 with volume
+            elif (close[i] < l3_aligned[i] and 
+                  volume[i] > 2.0 * vol_ma[i] and
+                  trending):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to 1-week EMA or breaks below Donchian lower
-            if close[i] < ema_1w_aligned[i] or close[i] < dc_lower[i]:
+            # Exit long: return to H3 or break below L3
+            if close[i] < h3_aligned[i] or close[i] < l3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to 1-week EMA or breaks above Donchian upper
-            if close[i] > ema_1w_aligned[i] or close[i] > dc_upper[i]:
+            # Exit short: return to L3 or break above H3
+            if close[i] > l3_aligned[i] or close[i] > h3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -94,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_EMA21_Donchian_Volume_v1"
-timeframe = "6h"
+name = "12h_1d_Camarilla_Volume_Chop_v1"
+timeframe = "12h"
 leverage = 1.0
