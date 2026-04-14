@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy combining 1d volatility breakout with 1w RSI trend filter.
-# Uses volatility-adjusted breakout levels based on prior day's range and ATR, providing adaptive support/resistance.
-# Long when price breaks above volatility-adjusted resistance with 1w RSI > 50 (uptrend) and volume confirmation.
-# Short when price breaks below volatility-adjusted support with 1w RSI < 50 (downtrend) and volume confirmation.
+# Hypothesis: 4h strategy using 1d ATR-based volatility breakout with 1w RSI trend filter and volume confirmation.
+# Long when price breaks above prior day's high + ATR with 1w RSI > 55 (strong uptrend) and volume > 1.5x average.
+# Short when price breaks below prior day's low - ATR with 1w RSI < 45 (strong downtrend) and volume > 1.5x average.
 # Exit when price returns to prior day's close or RSI crosses 50 in opposite direction.
-# Designed to work in both bull and bear markets by adapting to volatility and using RSI for trend confirmation.
-# Target: 20-25 trades/year per symbol (80-100 total over 4 years) to minimize fee drag.
+# Uses tighter RSI thresholds (45/55) to reduce trades and improve quality. Position size 0.25 to manage drawdown.
+# Designed to work in both bull and bear markets by using volatility-adjusted breakouts and RSI for trend strength.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,7 +20,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for volatility-adjusted levels
+    # Load 1d data ONCE for volatility breakout levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -40,11 +39,11 @@ def generate_signals(prices):
     atr_period = 14
     atr_1d = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
     
-    # Volatility-adjusted support/resistance: prior day's high/low ± 0.5 * ATR
-    var_resistance = np.roll(high_1d, 1) + 0.5 * np.roll(atr_1d, 1)
-    var_support = np.roll(low_1d, 1) - 0.5 * np.roll(atr_1d, 1)
-    var_resistance[0] = np.nan
-    var_support[0] = np.nan
+    # Volatility breakout levels: prior day's high/low ± ATR
+    breakout_high = np.roll(high_1d, 1) + np.roll(atr_1d, 1)
+    breakout_low = np.roll(low_1d, 1) - np.roll(atr_1d, 1)
+    breakout_high[0] = np.nan
+    breakout_low[0] = np.nan
     
     # Prior 1d close for exit condition
     prior_close_1d = np.roll(close_1d, 1)
@@ -69,8 +68,8 @@ def generate_signals(prices):
     rsi_1w = 100 - (100 / (1 + rs))
     
     # Align indicators to lower timeframe
-    var_resistance_aligned = align_htf_to_ltf(prices, df_1d, var_resistance)
-    var_support_aligned = align_htf_to_ltf(prices, df_1d, var_support)
+    breakout_high_aligned = align_htf_to_ltf(prices, df_1d, breakout_high)
+    breakout_low_aligned = align_htf_to_ltf(prices, df_1d, breakout_low)
     prior_close_1d_aligned = align_htf_to_ltf(prices, df_1d, prior_close_1d)
     rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
@@ -82,12 +81,12 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(20, 14)  # Need VAR and RSI
+    start = max(20, 14)  # Need breakout levels and RSI
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(var_resistance_aligned[i]) or 
-            np.isnan(var_support_aligned[i]) or
+        if (np.isnan(breakout_high_aligned[i]) or 
+            np.isnan(breakout_low_aligned[i]) or
             np.isnan(prior_close_1d_aligned[i]) or
             np.isnan(rsi_1w_aligned[i]) or
             np.isnan(vol_ma[i])):
@@ -97,21 +96,21 @@ def generate_signals(prices):
         # Volume confirmation
         volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
-        # Trend filter: RSI > 50 for uptrend, < 50 for downtrend
-        uptrend = rsi_1w_aligned[i] > 50
-        downtrend = rsi_1w_aligned[i] < 50
+        # Trend filter: RSI > 55 for strong uptrend, < 45 for strong downtrend
+        strong_uptrend = rsi_1w_aligned[i] > 55
+        strong_downtrend = rsi_1w_aligned[i] < 45
         
         if position == 0:
-            # Look for volatility-adjusted breakouts
-            # Long: price breaks above VAR resistance AND uptrend
-            if (close[i] > var_resistance_aligned[i] and 
-                uptrend and 
+            # Look for volatility breakouts with strong trend
+            # Long: price breaks above breakout_high AND strong uptrend
+            if (close[i] > breakout_high_aligned[i] and 
+                strong_uptrend and 
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below VAR support AND downtrend
-            elif (close[i] < var_support_aligned[i] and 
-                  downtrend and 
+            # Short: price breaks below breakout_low AND strong downtrend
+            elif (close[i] < breakout_low_aligned[i] and 
+                  strong_downtrend and 
                   volume_confirmed):
                 position = -1
                 signals[i] = -position_size
@@ -136,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_VolatilityAdjustedBreakout_1wRSI_v1"
+name = "4h_VolatilityBreakout_RSI45_55_v1"
 timeframe = "4h"
 leverage = 1.0
