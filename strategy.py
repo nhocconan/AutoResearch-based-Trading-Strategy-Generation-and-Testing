@@ -21,12 +21,11 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
     # Calculate daily EMA50 for trend filter
     close_1d_series = pd.Series(close_1d)
     ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align daily EMA50 to daily timeframe (already daily, but for consistency)
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # Calculate daily ATR (14-period) for volatility filter
@@ -40,15 +39,28 @@ def generate_signals(prices):
         atr_1d[13] = np.mean(tr[:14])
         for i in range(14, len(df_1d)):
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
-    
-    # Align daily ATR to daily timeframe
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     # Calculate daily volume moving average (20-period) for volume filter
-    volume_1d = df_1d['volume'].values
     volume_1d_series = pd.Series(volume_1d)
     volume_ma_1d = volume_1d_series.rolling(window=20, min_periods=20).mean().values
     volume_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
+    
+    # Calculate RSI(14) for mean reversion
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.full_like(gain, np.nan)
+    avg_loss = np.full_like(loss, np.nan)
+    if len(gain) >= 14:
+        avg_gain[13] = np.mean(gain[1:14])
+        avg_loss[13] = np.mean(loss[1:14])
+        for i in range(14, len(gain)):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     signals = np.zeros(n)
     position = 0
@@ -56,7 +68,7 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical data is NaN
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or np.isnan(volume_ma_1d_aligned[i]):
+        if np.isnan(ema50_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or np.isnan(volume_ma_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]):
             continue
         
         # Skip low volatility periods (ATR < 0.3% of price)
@@ -89,27 +101,27 @@ def generate_signals(prices):
             r3_1d = align_htf_to_ltf(prices, df_1d, r3_array)[i]
             
             if position == 0:
-                # Long: Price rejects S3 with volume and above EMA50 (bullish trend)
-                if low[i] <= s3_1d and close[i] > s3_1d and volume[i] > volume_ma_1d_aligned[i] and close[i] > ema50_1d_aligned[i]:
+                # Long: Price rejects S3 with volume, above EMA50, and RSI < 40 (oversold)
+                if low[i] <= s3_1d and close[i] > s3_1d and volume[i] > volume_ma_1d_aligned[i] and close[i] > ema50_1d_aligned[i] and rsi_1d_aligned[i] < 40:
                     position = 1
                     signals[i] = position_size
-                # Short: Price rejects R3 with volume and below EMA50 (bearish trend)
-                elif high[i] >= r3_1d and close[i] < r3_1d and volume[i] > volume_ma_1d_aligned[i] and close[i] < ema50_1d_aligned[i]:
+                # Short: Price rejects R3 with volume, below EMA50, and RSI > 60 (overbought)
+                elif high[i] >= r3_1d and close[i] < r3_1d and volume[i] > volume_ma_1d_aligned[i] and close[i] < ema50_1d_aligned[i] and rsi_1d_aligned[i] > 60:
                     position = -1
                     signals[i] = -position_size
             elif position == 1:
-                # Exit: Price breaks S3 again or trend changes (price below EMA50)
-                if low[i] <= s3_1d or close[i] < ema50_1d_aligned[i]:
+                # Exit: Price breaks S3 again or trend changes (price below EMA50) or RSI > 70 (overbought)
+                if low[i] <= s3_1d or close[i] < ema50_1d_aligned[i] or rsi_1d_aligned[i] > 70:
                     position = 0
                     signals[i] = 0.0
             elif position == -1:
-                # Exit: Price breaks R3 again or trend changes (price above EMA50)
-                if high[i] >= r3_1d or close[i] > ema50_1d_aligned[i]:
+                # Exit: Price breaks R3 again or trend changes (price above EMA50) or RSI < 30 (oversold)
+                if high[i] >= r3_1d or close[i] > ema50_1d_aligned[i] or rsi_1d_aligned[i] < 30:
                     position = 0
                     signals[i] = 0.0
     
     return signals
 
-name = "1d_Pivot_S3R3_Rejection_Volume_EMA50_Filter_v2"
+name = "1d_Pivot_S3R3_Rejection_Volume_EMA50_RSI_Filter_v3"
 timeframe = "1d"
 leverage = 1.0
