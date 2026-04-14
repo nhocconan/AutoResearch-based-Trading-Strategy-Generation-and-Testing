@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,7 +22,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 60-day rolling 10th percentile of ATR(14) for volatility regime filter
+    # Calculate daily ATR (14-period)
     tr = np.zeros(len(df_1d))
     tr[0] = high_1d[0] - low_1d[0]
     for i in range(1, len(df_1d)):
@@ -38,101 +38,89 @@ def generate_signals(prices):
         for i in range(14, len(df_1d)):
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # Calculate 60-day rolling 10th percentile of ATR (volatility regime)
-    atr_percentile = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 60:
-        for i in range(59, len(df_1d)):
-            window = atr_1d[i-59:i+1]
-            valid = window[~np.isnan(window)]
-            if len(valid) >= 10:
-                atr_percentile[i] = np.percentile(valid, 10)
+    atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    atr_percentile_6h = align_htf_to_ltf(prices, df_1d, atr_percentile)
-    atr_6h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Calculate daily volatility filter (ATR > 1.5% of price)
+    vol_filter_1d = np.zeros(len(df_1d))
+    for i in range(len(df_1d)):
+        if not np.isnan(atr_1d[i]) and close_1d[i] > 0:
+            vol_filter_1d[i] = atr_1d[i] / close_1d[i] > 0.015
+        else:
+            vol_filter_1d[i] = False
+    vol_filter_12h = align_htf_to_ltf(prices, df_1d, vol_filter_1d.astype(float))
     
-    # Calculate 6h RSI(14) for mean reversion entries
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate daily pivot levels based on previous day's range
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d[0] = high_1d[0]
+    prev_low_1d[0] = low_1d[0]
+    prev_close_1d[0] = close_1d[0]
+    prev_range_1d = prev_high_1d - prev_low_1d
     
-    avg_gain = np.full(n, np.nan)
-    avg_loss = np.full(n, np.nan)
-    if n >= 14:
-        avg_gain[13] = np.mean(gain[:14])
-        avg_loss[13] = np.mean(loss[:14])
-        for i in range(14, n):
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Camarilla-style pivot levels (R3/S3)
+    r3_1d = prev_close_1d + (prev_range_1d * 1.1 / 4)
+    s3_1d = prev_close_1d - (prev_range_1d * 1.1 / 4)
     
-    rs = np.divide(avg_gain, avg_loss, out=np.full(n, np.nan), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # Align to 12h timeframe
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3_1d)
     
-    # Calculate 60-day rolling 10th percentile of 1d RSI for regime filter
-    rsi_1d = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 14:
-        delta_1d = np.diff(close_1d, prepend=close_1d[0])
-        gain_1d = np.where(delta_1d > 0, delta_1d, 0)
-        loss_1d = np.where(delta_1d < 0, -delta_1d, 0)
-        avg_gain_1d = np.full(len(df_1d), np.nan)
-        avg_loss_1d = np.full(len(df_1d), np.nan)
-        avg_gain_1d[13] = np.mean(gain_1d[:14])
-        avg_loss_1d[13] = np.mean(loss_1d[:14])
-        for i in range(14, len(df_1d)):
-            avg_gain_1d[i] = (avg_gain_1d[i-1] * 13 + gain_1d[i]) / 14
-            avg_loss_1d[i] = (avg_loss_1d[i-1] * 13 + loss_1d[i]) / 14
-        rs_1d = np.divide(avg_gain_1d, avg_loss_1d, out=np.full(len(df_1d), np.nan), where=avg_loss_1d!=0)
-        rsi_1d = 100 - (100 / (1 + rs_1d))
-    
-    rsi_1d_percentile = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 60:
-        for i in range(59, len(df_1d)):
-            window = rsi_1d[i-59:i+1]
-            valid = window[~np.isnan(window)]
-            if len(valid) >= 10:
-                rsi_1d_percentile[i] = np.percentile(valid, 10)
-    
-    rsi_1d_percentile_6h = align_htf_to_ltf(prices, df_1d, rsi_1d_percentile)
+    # Calculate 12-hour Donchian channels (20-period)
+    donch_high = np.full(n, np.nan)
+    donch_low = np.full(n, np.nan)
+    if n >= 20:
+        for i in range(19, n):
+            donch_high[i] = np.max(high[i-19:i+1])
+            donch_low[i] = np.min(low[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if any critical data is NaN
-        if (np.isnan(atr_percentile_6h[i]) or
-            np.isnan(atr_6h[i]) or
-            np.isnan(rsi[i]) or
-            np.isnan(rsi_1d_percentile_6h[i])):
+        if (np.isnan(atr_12h[i]) or
+            np.isnan(donch_high[i]) or
+            np.isnan(donch_low[i]) or
+            np.isnan(r3_12h[i]) or
+            np.isnan(s3_12h[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility regime filter: only trade when current ATR > 10th percentile of 60-day ATR
-        if atr_6h[i] <= atr_percentile_6h[i]:
-            signals[i] = 0.0
-            continue
-        
-        # Mean reversion regime filter: only trade when 1d RSI < 10th percentile of 60-day RSI (oversold conditions)
-        if rsi_1d_percentile_6h[i] > 30:  # Avoid extremely oversold conditions that may persist
+        # Skip low volatility periods (ATR < 1.5% of price)
+        if vol_filter_12h[i] < 0.5:
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: RSI < 30 (oversold) in high volatility regime
-            if rsi[i] < 30:
+            # Long: Price breaks above 12h Donchian high AND above S3
+            if close[i] > donch_high[i] and close[i] > s3_12h[i]:
                 position = 1
                 signals[i] = position_size
+            # Short: Price breaks below 12h Donchian low AND below R3
+            elif close[i] < donch_low[i] and close[i] < r3_12h[i]:
+                position = -1
+                signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: RSI > 70 (overbought) or volatility drops below regime threshold
-            if rsi[i] > 70 or atr_6h[i] <= atr_percentile_6h[i]:
+            # Exit: Price falls back below 12h Donchian low OR below S3
+            if close[i] < donch_low[i] or close[i] < s3_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
+        elif position == -1:
+            # Exit: Price rises back above 12h Donchian high OR above R3
+            if close[i] > donch_high[i] or close[i] > r3_12h[i]:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -position_size
     
     return signals
 
-name = "6h_1d_VolRegime_MeanReversion_RSI"
-timeframe = "6h"
+name = "12h_1d_Camarilla_R3S3_Breakout_Donchian_VolFilter_v2"
+timeframe = "12h"
 leverage = 1.0
