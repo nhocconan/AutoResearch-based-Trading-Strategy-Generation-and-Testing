@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4-hour price breaking above/below 1-week Donchian Channel (20) with volume above 1.5x 12-period average and 1-day ADX > 25.
-Trades in direction of 1-week trend to avoid counter-trend whipsaws. Uses tight entry conditions to limit trades (~20-40/year).
+Hypothesis: 4-hour price breaking above/below 1-week Donchian Channel (10) with volume above 1.5x 12-period average and 1-day ADX > 20.
+Trades in direction of 1-week trend to avoid counter-trend whipsaws. Uses tighter Donchian period (10) and lower ADX threshold (20) to increase signal frequency while maintaining quality.
+Target: 30-60 trades/year per symbol.
 """
 
 import numpy as np
@@ -18,9 +19,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1-week Donchian Channel (20-period)
+    # Calculate 1-week Donchian Channel (10-period) for more frequent signals
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 10:
         return np.zeros(n)
     
     high_1w = df_1w['high'].values
@@ -28,8 +29,8 @@ def generate_signals(prices):
     close_1w = df_1w['close'].values
     
     # Upper and lower bands
-    upper_dc = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    lower_dc = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    upper_dc = pd.Series(high_1w).rolling(window=10, min_periods=10).max().values
+    lower_dc = pd.Series(low_1w).rolling(window=10, min_periods=10).min().values
     
     # Middle line for trend
     mid_dc = (upper_dc + lower_dc) / 2
@@ -94,8 +95,8 @@ def generate_signals(prices):
         # Volume confirmation (> 1.5x average)
         volume_confirm = volume[i] > 1.5 * vol_ma_12_aligned
         
-        # ADX trend filter (> 25)
-        trend_filter = adx_1d_aligned > 25
+        # ADX trend filter (> 20)
+        trend_filter = adx_1d_aligned > 20
         
         if position == 0:  # No position - look for entries
             if volume_confirm and trend_filter:
@@ -118,6 +119,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1wDC_1dADX_Volume"
+name = "4h_1wDC10_1dADX20_Volume"
 timeframe = "4h"
 leverage = 1.0
