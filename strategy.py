@@ -3,14 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot (R3/S3) breakout with volume confirmation and ADX trend filter.
-# Uses only 3 conditions: price breaks R3/S3, volume > 1.5x average, ADX > 25.
-# Works in bull/bear by capturing breakouts with institutional volume in trending markets.
-# Target: 20-40 trades/year to avoid fee drag.
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,87 +13,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for Camarilla calculation (HTF)
+    # Load daily data for pivot calculation (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate previous day's Camarilla levels (using close of previous day)
-    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), etc.
-    # We use previous day's data to avoid look-ahead
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close[0] = close_1d[0]  # first day uses its own close
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
+    # Calculate daily pivot points (standard formula)
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
+    r2 = pivot + (high_1d - low_1d)
+    s2 = pivot - (high_1d - low_1d)
     
-    diff = prev_high - prev_low
-    r3 = prev_close + 1.1 * diff
-    s3 = prev_close - 1.1 * diff
-    r4 = prev_close + 1.5 * diff
-    s4 = prev_close - 1.5 * diff
+    # Align pivot levels to 4h timeframe
+    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    r2_4h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_4h = align_htf_to_ltf(prices, df_1d, s2)
     
-    # Align Camarilla levels to 4h timeframe
-    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
-    r4_4h = align_htf_to_ltf(prices, df_1d, r4)
-    s4_4h = align_htf_to_ltf(prices, df_1d, s4)
+    # Calculate 14-period daily ATR for volatility filter
+    tr = np.zeros(len(df_1d))
+    tr[0] = high_1d[0] - low_1d[0]
+    for i in range(1, len(df_1d)):
+        tr[i] = max(
+            high_1d[i] - low_1d[i],
+            abs(high_1d[i] - close_1d[i-1]),
+            abs(low_1d[i] - close_1d[i-1])
+        )
     
-    # Calculate 14-period ADX on 1d for trend strength
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = high[0] - low[0]  # first period
-        
-        # Directional Movement
-        up_move = high - np.roll(high, 1)
-        down_move = np.roll(low, 1) - low
-        up_move[0] = 0
-        down_move[0] = 0
-        
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-        
-        # Smoothed values
-        atr = np.zeros_like(tr)
-        plus_dm_sm = np.zeros_like(plus_dm)
-        minus_dm_sm = np.zeros_like(minus_dm)
-        
-        if len(tr) >= period:
-            atr[period-1] = np.mean(tr[:period])
-            plus_dm_sm[period-1] = np.mean(plus_dm[:period])
-            minus_dm_sm[period-1] = np.mean(minus_dm[:period])
-            
-            for i in range(period, len(tr)):
-                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-                plus_dm_sm[i] = (plus_dm_sm[i-1] * (period-1) + plus_dm[i]) / period
-                minus_dm_sm[i] = (minus_dm_sm[i-1] * (period-1) + minus_dm[i]) / period
-        
-        # Avoid division by zero
-        plus_di = np.where(atr != 0, 100 * plus_dm_sm / atr, 0)
-        minus_di = np.where(atr != 0, 100 * minus_dm_sm / atr, 0)
-        
-        dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-        
-        # Smoothed DX (ADX)
-        adx = np.full_like(dx, np.nan)
-        if len(dx) >= period:
-            adx[2*period-2] = np.mean(dx[period-1:2*period-1])
-            for i in range(2*period-1, len(dx)):
-                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
+    atr_1d = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 14:
+        atr_1d[13] = np.mean(tr[:14])
+        for i in range(14, len(df_1d)):
+            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_4h = align_htf_to_ltf(prices, df_1d, adx_1d)
+    atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     # Volume spike detection (20-period average on 4h)
     vol_ma_20 = np.full_like(volume, np.nan)
@@ -106,15 +60,86 @@ def generate_signals(prices):
         for i in range(19, len(volume)):
             vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
+    # Calculate 14-period ADX on 4h for trend strength
+    # TR calculation
+    tr_4h = np.zeros(n)
+    tr_4h[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr_4h[i] = max(
+            high[i] - low[i],
+            abs(high[i] - close[i-1]),
+            abs(low[i] - close[i-1])
+        )
+    
+    # +DM and -DM
+    up_move = np.zeros(n)
+    down_move = np.zeros(n)
+    for i in range(1, n):
+        up_move[i] = high[i] - high[i-1]
+        down_move[i] = low[i-1] - low[i]
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed TR, +DM, -DM
+    atr_4h_smooth = np.full(n, np.nan)
+    plus_dm_smooth = np.full(n, np.nan)
+    minus_dm_smooth = np.full(n, np.nan)
+    
+    if n >= 14:
+        atr_4h_smooth[13] = np.mean(tr_4h[:14])
+        plus_dm_smooth[13] = np.mean(plus_dm[:14])
+        minus_dm_smooth[13] = np.mean(minus_dm[:14])
+        for i in range(14, n):
+            atr_4h_smooth[i] = (atr_4h_smooth[i-1] * 13 + tr_4h[i]) / 14
+            plus_dm_smooth[i] = (plus_dm_smooth[i-1] * 13 + plus_dm[i]) / 14
+            minus_dm_smooth[i] = (minus_dm_smooth[i-1] * 13 + minus_dm[i]) / 14
+    
+    # DI+ and DI-
+    plus_di = np.full(n, np.nan)
+    minus_di = np.full(n, np.nan)
+    for i in range(14, n):
+        if atr_4h_smooth[i] > 0:
+            plus_di[i] = 100 * plus_dm_smooth[i] / atr_4h_smooth[i]
+            minus_di[i] = 100 * minus_dm_smooth[i] / atr_4h_smooth[i]
+    
+    # DX and ADX
+    dx = np.full(n, np.nan)
+    for i in range(14, n):
+        di_sum = plus_di[i] + minus_di[i]
+        if di_sum > 0:
+            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
+    
+    adx = np.full(n, np.nan)
+    if n >= 28:  # Need 14+14 for ADX
+        adx[27] = np.mean(dx[14:28])
+        for i in range(28, n):
+            adx[i] = (adx[i-1] * 13 + dx[i]) / 14
+    
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position size
+    position_size = 0.25  # 25% position size for lower drawdown
     
-    for i in range(50, n):  # start after warmup period
+    for i in range(100, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or 
-            np.isnan(r4_4h[i]) or np.isnan(s4_4h[i]) or
-            np.isnan(adx_4h[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(pivot_4h[i]) or 
+            np.isnan(r1_4h[i]) or
+            np.isnan(s1_4h[i]) or
+            np.isnan(r2_4h[i]) or
+            np.isnan(s2_4h[i]) or
+            np.isnan(atr_4h[i]) or
+            np.isnan(vol_ma_20[i]) or
+            np.isnan(adx[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Skip low volatility periods (ATR < 0.8% of price)
+        if atr_4h[i] < 0.008 * close[i]:
+            signals[i] = 0.0
+            continue
+        
+        # Skip weak trend periods (ADX < 25)
+        if adx[i] < 25:
             signals[i] = 0.0
             continue
         
@@ -124,27 +149,30 @@ def generate_signals(prices):
         else:
             volume_ratio = volume[i] / vol_ma_20[i]
         
+        # Volume threshold: require significant spike
+        vol_threshold = 2.0
+        
         if position == 0:
-            # Long: Price breaks above R3 with volume confirmation and ADX > 25
-            if (close[i] > r3_4h[i] and volume_ratio > 1.5 and adx_4h[i] > 25):
+            # Long: Price breaks above R2 with volume confirmation AND strong trend
+            if (close[i] > r2_4h[i] and volume_ratio > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below S3 with volume confirmation and ADX > 25
-            elif (close[i] < s3_4h[i] and volume_ratio > 1.5 and adx_4h[i] > 25):
+            # Short: Price breaks below S2 with volume confirmation AND strong trend
+            elif (close[i] < s2_4h[i] and volume_ratio > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below S3 or ADX drops below 20 (trend weakening)
-            if close[i] < s3_4h[i] or adx_4h[i] < 20:
+            # Exit: Price falls back below S1 OR trend weakens
+            if close[i] < s1_4h[i] or adx[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above R3 or ADX drops below 20
-            if close[i] > r3_4h[i] or adx_4h[i] < 20:
+            # Exit: Price rises back above R1 OR trend weakens
+            if close[i] > r1_4h[i] or adx[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -152,6 +180,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_R3S3_Volume_ADX"
+name = "4h_1d_Pivot_R2S2_Breakout_Volume_ADX"
 timeframe = "4h"
 leverage = 1.0
