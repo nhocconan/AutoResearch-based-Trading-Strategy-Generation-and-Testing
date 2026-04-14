@@ -91,6 +91,24 @@ def generate_signals(prices):
         for i in range(9, n):
             volume_ma[i] = np.mean(volume[i-9:i+1])
     
+    # Calculate daily pivot levels (standard formula)
+    pivot = (high_1d + low_1d + close_1d) / 3
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
+    r2 = pivot + (high_1d - low_1d)
+    s2 = pivot - (high_1d - low_1d)
+    r3 = high_1d + 2 * (pivot - low_1d)
+    s3 = low_1d - 2 * (high_1d - pivot)
+    
+    # Align pivot levels to 6h timeframe
+    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
+    r2_6h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_6h = align_htf_to_ltf(prices, df_1d, s2)
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
@@ -101,7 +119,14 @@ def generate_signals(prices):
             np.isnan(donch_high[i]) or
             np.isnan(donch_low[i]) or
             np.isnan(adx_6h[i]) or
-            np.isnan(volume_ma[i])):
+            np.isnan(volume_ma[i]) or
+            np.isnan(pivot_6h[i]) or
+            np.isnan(r1_6h[i]) or
+            np.isnan(s1_6h[i]) or
+            np.isnan(r2_6h[i]) or
+            np.isnan(s2_6h[i]) or
+            np.isnan(r3_6h[i]) or
+            np.isnan(s3_6h[i])):
             signals[i] = 0.0
             continue
         
@@ -120,45 +145,27 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Calculate pivot levels based on previous day's range
-        prev_high = high_1d[i-1] if i > 0 else high_1d[0]
-        prev_low = low_1d[i-1] if i > 0 else low_1d[0]
-        prev_close = close_1d[i-1] if i > 0 else close_1d[0]
-        prev_range = prev_high - prev_low
-        
-        # Pivot levels for reversal at extremes
-        r3 = prev_close + (prev_range * 1.1 / 4)  # Resistance 3
-        s3 = prev_close - (prev_range * 1.1 / 4)  # Support 3
-        r4 = prev_close + (prev_range * 1.1 / 2)  # Resistance 4
-        s4 = prev_close - (prev_range * 1.1 / 2)  # Support 4
-        
-        # Align to 6h timeframe
-        r3_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r3))[i]
-        s3_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i]
-        r4_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r4))[i]
-        s4_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s4))[i]
-        
         if position == 0:
-            # Long: Price breaks above 6h Donchian high AND above S3 (support hold) AND ADX > 20
-            if close[i] > donch_high[i] and close[i] > s3_6h and adx_6h[i] > 20:
+            # Long: Price breaks above daily pivot AND above S1 (support hold) AND ADX > 20
+            if close[i] > pivot_6h[i] and close[i] > s1_6h[i] and adx_6h[i] > 20:
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below 6h Donchian low AND below R3 (resistance hold) AND ADX > 20
-            elif close[i] < donch_low[i] and close[i] < r3_6h and adx_6h[i] > 20:
+            # Short: Price breaks below daily pivot AND below R1 (resistance hold) AND ADX > 20
+            elif close[i] < pivot_6h[i] and close[i] < r1_6h[i] and adx_6h[i] > 20:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below 6h Donchian low OR below S4 OR ADX < 15
-            if close[i] < donch_low[i] or close[i] < s4_6h or adx_6h[i] < 15:
+            # Exit: Price falls back below daily pivot OR below S2 OR ADX < 15
+            if close[i] < pivot_6h[i] or close[i] < s2_6h[i] or adx_6h[i] < 15:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above 6h Donchian high OR above R4 OR ADX < 15
-            if close[i] > donch_high[i] or close[i] > r4_6h or adx_6h[i] < 15:
+            # Exit: Price rises back above daily pivot OR above R2 OR ADX < 15
+            if close[i] > pivot_6h[i] or close[i] > r2_6h[i] or adx_6h[i] < 15:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -166,6 +173,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Pivot_S3R3_Donchian10_Volume_ADX_Filter"
+name = "6h_1d_Pivot_S1R1_Donchian10_Volume_ADX_Filter"
 timeframe = "6h"
 leverage = 1.0
