@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Bollinger Band breakout with daily RSI filter and volume confirmation
-# Bollinger Bands provide dynamic volatility-based support/resistance. Breakouts with volume
-# and daily RSI filter (RSI > 60 for longs, RSI < 40 for shorts) capture strong momentum
-# while avoiding false breakouts in low volatility. Works in bull/bear by using RSI to
-# filter for momentum direction. Target: 50-150 total trades over 4 years (12-37/year).
+# Hypothesis: 4h Donchian breakout with 1d ADX trend filter and volume confirmation
+# Donchian(20) provides clear breakout levels. ADX(14) > 25 filters for trending markets.
+# Volume confirmation ensures institutional participation. Works in bull/bear by
+# only taking breakouts in the direction of the 1d ADX trend (ADX > 25 and +DI > -DI for long,
+# ADX > 25 and -DI > +DI for short). Target: 20-50 total trades over 4 years (5-12/year).
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,56 +19,76 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for RSI filter
+    # Get daily data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily RSI(14) for trend filter
-    def calculate_rsi(prices, period=14):
-        delta = np.diff(prices)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.zeros_like(prices)
-        avg_loss = np.zeros_like(prices)
-        avg_gain[period] = np.mean(gain[:period])
-        avg_loss[period] = np.mean(loss[:period])
-        for i in range(period + 1, len(prices)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+    # Calculate ADX(14), +DI, -DI on daily timeframe
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = np.abs(high - low)
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]  # First value
+        
+        # Directional Movement
+        up_move = high - np.roll(high, 1)
+        down_move = np.roll(low, 1) - low
+        up_move[0] = 0
+        down_move[0] = 0
+        
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+        
+        # Smoothed values
+        def smooth(values, period):
+            smoothed = np.zeros_like(values)
+            smoothed[period-1] = np.nansum(values[:period])
+            for i in range(period, len(values)):
+                smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + values[i]
+            return smoothed
+        
+        atr = smooth(tr, period)
+        plus_di = 100 * smooth(plus_dm, period) / atr
+        minus_di = 100 * smooth(minus_dm, period) / atr
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        adx = smooth(dx, period)
+        
+        return adx, plus_di, minus_di
     
-    rsi_14_1d = calculate_rsi(close_1d, 14)
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
+    adx_1d, plus_di_1d, minus_di_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    plus_di_1d_aligned = align_htf_to_ltf(prices, df_1d, plus_di_1d)
+    minus_di_1d_aligned = align_htf_to_ltf(prices, df_1d, minus_di_1d)
     
-    # Calculate Bollinger Bands (20, 2) on 4h
-    bb_period = 20
-    bb_std = 2
-    close_series = pd.Series(close)
-    bb_mid = close_series.rolling(window=bb_period, min_periods=bb_period).mean()
-    bb_std_dev = close_series.rolling(window=bb_period, min_periods=bb_period).std()
-    bb_upper = bb_mid + (bb_std_dev * bb_std)
-    bb_lower = bb_mid - (bb_std_dev * bb_std)
-    bb_mid = bb_mid.values
-    bb_upper = bb_upper.values
-    bb_lower = bb_lower.values
+    # Donchian channels (20-period) on 4h
+    lookback = 20
+    donchian_high = np.full_like(high, np.nan)
+    donchian_low = np.full_like(low, np.nan)
     
-    # Volume confirmation: volume > 1.5x average volume (24-period)
+    for i in range(lookback, n):
+        donchian_high[i] = np.max(high[i-lookback:i])
+        donchian_low[i] = np.min(low[i-lookback:i])
+    
+    # Volume confirmation: volume > 1.5x average volume (20-period)
     vol_series = pd.Series(volume)
-    avg_vol = vol_series.rolling(window=24, min_periods=24).mean().shift(1).values
+    avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(bb_period, 24) + 1
+    start = max(20, 20)  # Donchian lookback and volume average
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or
-            np.isnan(rsi_14_1d_aligned[i]) or np.isnan(avg_vol[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(adx_1d_aligned[i]) or np.isnan(plus_di_1d_aligned[i]) or
+            np.isnan(minus_di_1d_aligned[i]) or np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
         
@@ -76,28 +96,32 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long: price breaks above upper BB with volume filter AND daily RSI > 60
-            if (price > bb_upper[i] and vol > 1.5 * avg_vol[i] and 
-                rsi_14_1d_aligned[i] > 60):
+            # Long: price breaks above Donchian high with volume filter AND ADX trend up
+            if (price > donchian_high[i] and 
+                adx_1d_aligned[i] > 25 and 
+                plus_di_1d_aligned[i] > minus_di_1d_aligned[i] and
+                vol > 1.5 * avg_vol[i]):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below lower BB with volume filter AND daily RSI < 40
-            elif (price < bb_lower[i] and vol > 1.5 * avg_vol[i] and 
-                  rsi_14_1d_aligned[i] < 40):
+            # Short: price breaks below Donchian low with volume filter AND ADX trend down
+            elif (price < donchian_low[i] and 
+                  adx_1d_aligned[i] > 25 and 
+                  minus_di_1d_aligned[i] > plus_di_1d_aligned[i] and
+                  vol > 1.5 * avg_vol[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below middle BB
-            if price < bb_mid[i]:
+            # Exit long: price breaks below Donchian low OR ADX trend weakens
+            if price < donchian_low[i] or adx_1d_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above middle BB
-            if price > bb_mid[i]:
+            # Exit short: price breaks above Donchian high OR ADX trend weakens
+            if price > donchian_high[i] or adx_1d_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -105,6 +129,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Bollinger_Breakout_Daily_RSI_Volume"
+name = "4h_Donchian_ADX_Trend_Volume"
 timeframe = "4h"
 leverage = 1.0
