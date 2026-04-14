@@ -18,51 +18,51 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Daily ATR (14)
+    # Daily Donchian channel (20)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
+    upper_dc_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_dc_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Daily ATR (14) for stop sizing
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
     tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Daily Donchian channel (20)
-    upper_dc_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_dc_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Daily volatility regime filter: ATR ratio
+    atr_ma_50_1d = pd.Series(atr_14_1d).rolling(window=50, min_periods=50).mean().values
+    atr_ratio_1d = atr_14_1d / np.where(atr_ma_50_1d > 0, atr_ma_50_1d, np.nan)
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25
+    position_size = 0.25  # 25% position size
     
     for i in range(100, n):
         # Get aligned daily indicators
-        atr_14_1d_i = align_htf_to_ltf(prices, df_1d, atr_14_1d)[i]
         upper_dc_20_i = align_htf_to_ltf(prices, df_1d, upper_dc_20)[i]
         lower_dc_20_i = align_htf_to_ltf(prices, df_1d, lower_dc_20)[i]
+        atr_ratio_1d_i = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)[i]
         
-        if np.isnan(atr_14_1d_i) or np.isnan(upper_dc_20_i) or np.isnan(lower_dc_20_i):
+        if np.isnan(upper_dc_20_i) or np.isnan(lower_dc_20_i) or np.isnan(atr_ratio_1d_i):
             continue
         
-        # Volatility filter: ATR below 50-period average (low vol regime)
-        atr_ma_50_1d = pd.Series(atr_14_1d).rolling(window=50, min_periods=50).mean().values
-        atr_ma_50_1d_i = align_htf_to_ltf(prices, df_1d, atr_ma_50_1d)[i]
-        if np.isnan(atr_ma_50_1d_i):
-            continue
-        low_vol = atr_14_1d_i < 0.7 * atr_ma_50_1d_i  # Below 70% of MA
+        # Volatility filter: only trade when ATR ratio < 0.8 (low volatility regime)
+        low_vol = atr_ratio_1d_i < 0.8
         
-        # Volume spike filter (1.5x median volume)
-        vol_median = np.nanmedian(volume[:i+1])  # Use historical median
-        volume_spike = volume[i] > 1.5 * vol_median
+        # Volume spike filter (2x median volume)
+        vol_median = np.nanmedian(volume[:i+1])
+        volume_spike = volume[i] > 2.0 * vol_median
         
-        # Long: break above upper Donchian with volume in low vol
+        # Long: break above upper Donchian with volume spike in low vol
         if position == 0 and low_vol and volume_spike:
             if close[i] > upper_dc_20_i:
                 position = 1
                 signals[i] = position_size
-            # Short: break below lower Donchian with volume in low vol
+            # Short: break below lower Donchian with volume spike in low vol
             elif close[i] < lower_dc_20_i:
                 position = -1
                 signals[i] = -position_size
@@ -79,6 +79,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_LowVol_Volume"
+name = "12h_Donchian_Breakout_LowVol_Volume_Spike"
 timeframe = "12h"
 leverage = 1.0
