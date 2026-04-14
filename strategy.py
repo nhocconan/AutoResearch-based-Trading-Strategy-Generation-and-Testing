@@ -1,3 +1,8 @@
+# 12h_1d_Camarilla_R4S4_Breakout_Volume
+# Hypothesis: Camarilla R4/S4 levels act as strong support/resistance on daily charts. 
+# Breakouts with volume confirmation and trend filter (EMA200) capture strong moves in both bull and bear markets.
+# Uses 12h timeframe for lower frequency and reduced fee drag.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -136,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Donchian_EMA200_Volume"
+name = "12h_1d_Camarilla_R4S4_Breakout_Volume"
 timeframe = "12h"
 leverage = 1.0
