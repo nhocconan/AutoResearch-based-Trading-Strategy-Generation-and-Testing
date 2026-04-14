@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 12-hour Exponential Moving Average (EMA50) as trend filter
-# with 4-hour Relative Strength Index (RSI) for mean-reversion entries.
-# - Long when price is above 12h EMA50 (bullish trend) and 4h RSI < 30 (oversold)
-# - Short when price is below 12h EMA50 (bearish trend) and 4h RSI > 70 (overbought)
+# Hypothesis: 12h strategy using 1-day linear regression slope as trend filter and 12-hour RSI for mean-reversion entries.
+# - Long when price is above 1-day linear regression trend (bullish) and 12h RSI < 30 (oversold)
+# - Short when price is below 1-day linear regression trend (bearish) and 12h RSI > 70 (overbought)
 # - Volume confirmation: current volume > 1.5x 20-period average to ensure participation
-# - Uses 12h EMA50 for robust trend filtering that adapts to longer-term trends
+# - Uses 1-day linear regression for robust trend filtering that adapts to price direction
 # - RSI(14) provides mean-reversion signals within the trend context
-# - Target: 75-200 total trades over 4 years (19-50/year) for optimal balance
+# - Target: 50-150 total trades over 4 years (12-37/year) for optimal balance
 # - Position size 0.25 for balanced risk exposure
 
 def generate_signals(prices):
@@ -23,15 +22,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data once before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 1d data once before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 12h EMA50
-    ema_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1-day linear regression slope and intercept
+    close_1d = df_1d['close'].values
+    n_1d = len(close_1d)
+    x = np.arange(n_1d)
+    # Calculate slope and intercept using least squares
+    sum_x = np.sum(x)
+    sum_y = np.sum(close_1d)
+    sum_xy = np.sum(x * close_1d)
+    sum_x2 = np.sum(x * x)
     
-    # Calculate 4h RSI(14)
+    slope = np.full(n_1d, np.nan)
+    intercept = np.full(n_1d, np.nan)
+    
+    # Calculate for each point with sufficient history
+    for i in range(19, n_1d):  # Need at least 20 points for regression
+        # Use last 20 points for regression
+        start_idx = i - 19
+        x_subset = x[start_idx:i+1]
+        y_subset = close_1d[start_idx:i+1]
+        n_sub = len(x_subset)
+        
+        sum_x_sub = np.sum(x_subset)
+        sum_y_sub = np.sum(y_subset)
+        sum_xy_sub = np.sum(x_subset * y_subset)
+        sum_x2_sub = np.sum(x_subset * x_subset)
+        
+        denominator = n_sub * sum_x2_sub - sum_x_sub * sum_x_sub
+        if denominator != 0:
+            slope[i] = (n_sub * sum_xy_sub - sum_x_sub * sum_y_sub) / denominator
+            intercept[i] = (sum_y_sub - slope[i] * sum_x_sub) / n_sub
+    
+    # Calculate linear regression values (trend line)
+    lr_values = slope * x + intercept
+    
+    # Calculate 12h RSI(14)
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -50,50 +80,51 @@ def generate_signals(prices):
     
     for i in range(60, n):
         # Skip if any critical data is NaN
-        if np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or np.isnan(ema_12h).any():
+        if np.isnan(rsi[i]) or np.isnan(vol_ma[i]):
             continue
         
-        # Get 12h index for current 4h bar
-        # 12h = 3 * 4h bars
-        idx_12h = i // 3
-        if idx_12h < 1:
+        # Get 1d index for current 12h bar (12h = 0.5 * 1d)
+        idx_1d = i // 2
+        if idx_1d < 20:  # Need sufficient 1d data for regression
             continue
             
-        # Previous 12h EMA50 (to avoid look-ahead)
-        ema_prev = ema_12h[idx_12h-1]
+        # Previous 1d linear regression value (to avoid look-ahead)
+        lr_prev = lr_values[idx_1d-1]
+        if np.isnan(lr_prev):
+            continue
         
-        # Create arrays for alignment (constant values for the 12h period)
-        ema_arr = np.full(len(df_12h), ema_prev)
+        # Create arrays for alignment (constant values for the 1d period)
+        lr_arr = np.full(len(df_1d), lr_prev)
         
-        # Align to 4h timeframe
-        ema_4h = align_htf_to_ltf(prices, df_12h, ema_arr)[i]
+        # Align to 12h timeframe
+        lr_12h = align_htf_to_ltf(prices, df_1d, lr_arr)[i]
         
         if position == 0:
-            # Long: price above 12h EMA50 + RSI oversold + volume confirmation
-            if (close[i] > ema_4h and  # price above 12h EMA50
+            # Long: price above 1d LR trend + RSI oversold + volume confirmation
+            if (close[i] > lr_12h and  # price above 1d linear regression
                 rsi[i] < 30 and  # RSI oversold
                 volume[i] > vol_ma[i] * 1.5):  # volume confirmation
                 position = 1
                 signals[i] = position_size
-            # Short: price below 12h EMA50 + RSI overbought + volume confirmation
-            elif (close[i] < ema_4h and  # price below 12h EMA50
+            # Short: price below 1d LR trend + RSI overbought + volume confirmation
+            elif (close[i] < lr_12h and  # price below 1d linear regression
                   rsi[i] > 70 and  # RSI overbought
                   volume[i] > vol_ma[i] * 1.5):  # volume confirmation
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
-            # Exit: RSI overbought or price below 12h EMA50
-            if rsi[i] > 70 or close[i] < ema_4h:
+            # Exit: RSI overbought or price below 1d LR trend
+            if rsi[i] > 70 or close[i] < lr_12h:
                 position = 0
                 signals[i] = 0.0
         elif position == -1:
-            # Exit: RSI oversold or price above 12h EMA50
-            if rsi[i] < 30 or close[i] > ema_4h:
+            # Exit: RSI oversold or price above 1d LR trend
+            if rsi[i] < 30 or close[i] > lr_12h:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_12h_EMA50_RSI_MeanReversion"
-timeframe = "4h"
+name = "12h_1d_LinearRegression_RSI_MeanReversion"
+timeframe = "12h"
 leverage = 1.0
