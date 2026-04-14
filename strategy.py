@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h KAMA trend filter + 1d RSI mean reversion + volume confirmation
-# Long when KAMA indicates uptrend + RSI < 30 (oversold) + volume > 1.5x avg
-# Short when KAMA indicates downtrend + RSI > 70 (overbought) + volume > 1.5x avg
-# Exit when RSI crosses 50 in opposite direction
-# KAMA adapts to market noise, reducing whipsaw in ranging markets
-# RSI provides mean-reversion entries in both bull and bear markets
-# Volume confirmation ensures institutional participation
-# Target: 50-150 trades over 4 years with controlled frequency
+# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and 1d ADX trend filter
+# Long when price breaks above 20-period Donchian high + 1d volume > 1.5x avg + 1d ADX > 25
+# Short when price breaks below 20-period Donchian low + 1d volume > 1.5x avg + 1d ADX > 25
+# Exit when price crosses the 20-period Donchian midpoint
+# Donchian channels provide clear breakout levels, volume confirms institutional interest,
+# ADX ensures trending conditions to avoid whipsaws in ranging markets
+# Target: 20-50 trades over 4 years with controlled frequency
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,74 +17,109 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h KAMA (ER=10, smoothing=2,30)
-    # Calculate Efficiency Ratio
-    change = np.abs(np.diff(close, n=10, prepend=close[:10]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0)
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # Calculate KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # 4h Donchian channels (20-period)
+    def donchian_channels(high, low, window):
+        upper = np.full_like(high, np.nan)
+        lower = np.full_like(high, np.nan)
+        for i in range(window-1, len(high)):
+            upper[i] = np.max(high[i-window+1:i+1])
+            lower[i] = np.min(low[i-window+1:i+1])
+        return upper, lower
     
-    # Volume average (20-period)
+    donchian_upper, donchian_lower = donchian_channels(high, low, 20)
+    donchian_mid = (donchian_upper + donchian_lower) / 2
+    
+    # 4h volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1d RSI (14-period)
+    # 1d data for volume and ADX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
+    # 1d volume average (20-period)
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # 1d ADX (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
+    
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_14 / (tr_14 + 1e-10)
+    di_minus = 100 * dm_minus_14 / (tr_14 + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25
     
     for i in range(30, n):
-        # Get aligned 1d RSI
-        rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)[i]
+        # Get aligned 1d indicators
+        vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)[i]
+        adx_aligned = align_htf_to_ltf(prices, df_1d, adx)[i]
         
         # Check for NaN values
-        if (np.isnan(kama[i]) or np.isnan(vol_ma[i]) or np.isnan(rsi_aligned)):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(vol_ma_1d_aligned) or np.isnan(adx_aligned)):
             continue
         
-        # Volume confirmation (> 1.5x average)
-        volume_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation (> 1.5x average on both timeframes)
+        volume_confirm_4h = volume[i] > 1.5 * vol_ma[i]
+        volume_confirm_1d = vol_1d[i] > 1.5 * vol_ma_1d_aligned if i < len(vol_1d) else False
+        volume_confirm = volume_confirm_4h and volume_confirm_1d
+        
+        # ADX trend filter (> 25)
+        trend_filter = adx_aligned > 25
         
         if position == 0:  # No position - look for entries
-            if volume_confirm:
-                # Long: KAMA uptrend (price > KAMA) + RSI oversold
-                if close[i] > kama[i] and rsi_aligned < 30:
+            if volume_confirm and trend_filter:
+                # Long: break above Donchian upper
+                if close[i] > donchian_upper[i]:
                     position = 1
                     signals[i] = position_size
-                # Short: KAMA downtrend (price < KAMA) + RSI overbought
-                elif close[i] < kama[i] and rsi_aligned > 70:
+                # Short: break below Donchian lower
+                elif close[i] < donchian_lower[i]:
                     position = -1
                     signals[i] = -position_size
-        elif position == 1:  # Long position - exit when RSI crosses above 50
-            if rsi_aligned > 50:
+        elif position == 1:  # Long position - exit when price crosses below midpoint
+            if close[i] < donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
-        elif position == -1:  # Short position - exit when RSI crosses below 50
-            if rsi_aligned < 50:
+        elif position == -1:  # Short position - exit when price crosses above midpoint
+            if close[i] > donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_KAMA_RSI_MeanRev_Volume"
-timeframe = "12h"
+name = "4h_Donchian_1dVolume_ADX"
+timeframe = "4h"
 leverage = 1.0
