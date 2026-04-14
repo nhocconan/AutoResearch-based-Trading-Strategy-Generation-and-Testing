@@ -3,102 +3,131 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy with 1w RSI trend filter and 1d Williams %R mean reversion
-# 1w RSI > 50 indicates bullish long-term trend (favor longs), < 50 indicates bearish (favor shorts)
-# 1d Williams %R below -80 indicates oversold, above -20 indicates overbought
-# Combines trend filter with mean reversion to avoid counter-trend trades in strong moves
-# Uses weekly trend context to improve daily mean reversion edges in both bull and bear markets
-# Designed for low trade frequency (target: 15-25 trades/year) to minimize fee drag
+# Hypothesis: 4h Donchian breakout with volume confirmation and ADX trend filter
+# Uses 4h Donchian(20) breakouts with volume > 1.5x average volume
+# Only takes breakouts in direction of 1d ADX trend (ADX > 25)
+# Exit when price returns to Donchian midpoint or opposite breakout
+# Works in both bull and bear markets: trend filter ensures we trade with higher timeframe trend
+# Volume confirmation reduces false breakouts
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load 1w data ONCE for RSI
-    df_1w = get_htf_data(prices, '1w')
+    # Load 4h data ONCE for Donchian channels
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate 1w RSI (14 periods)
-    rsi_len = 14
-    close_1w = df_1w['close'].values
+    # Calculate 4h Donchian channels (20 periods)
+    donch_len = 20
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Price changes
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Upper and lower bands
+    upper = pd.Series(high_4h).rolling(window=donch_len, min_periods=donch_len).max().values
+    lower = pd.Series(low_4h).rolling(window=donch_len, min_periods=donch_len).min().values
     
-    # Smoothed averages
-    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_len, adjust=False, min_periods=rsi_len).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_len, adjust=False, min_periods=rsi_len).mean().values
+    # Align Donchian to 4h timeframe (no additional alignment needed as we're already in 4h)
+    # But we need to align to lower timeframe if we were using different timeframe
+    # Since we're using 4h data for 4h signals, we can use directly
+    upper_4h = upper
+    lower_4h = lower
     
-    # Relative Strength
-    rs = avg_gain / avg_loss
-    rs = np.where(avg_loss == 0, 0, rs)
+    # Load 1d data ONCE for ADX trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # RSI
-    rsi_1w = 100 - (100 / (1 + rs))
+    # Calculate 1d ADX (14 periods)
+    adx_len = 14
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align RSI to 1d timeframe
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Calculate 1d Williams %R (14 periods)
-    willr_len = 14
-    highest_high = pd.Series(high).rolling(window=willr_len, min_periods=willr_len).max().values
-    lowest_low = pd.Series(low).rolling(window=willr_len, min_periods=willr_len).min().values
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_minus = np.concatenate([[np.nan], dm_minus])
     
-    # Williams %R
-    willr = -100 * (highest_high - close) / (highest_high - lowest_low)
-    willr = np.where((highest_high - lowest_low) == 0, -50, willr)
+    # Smoothed values
+    tr_sum = pd.Series(tr).rolling(window=adx_len, min_periods=adx_len).sum().values
+    dm_plus_sum = pd.Series(dm_plus).rolling(window=adx_len, min_periods=adx_len).sum().values
+    dm_minus_sum = pd.Series(dm_minus).rolling(window=adx_len, min_periods=adx_len).sum().values
+    
+    # Directional Indicators
+    plus_di = 100 * dm_plus_sum / tr_sum
+    minus_di = 100 * dm_minus_sum / tr_sum
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=adx_len, min_periods=adx_len).mean().values
+    
+    # Align ADX to 4h timeframe
+    adx_4h_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Volume average for confirmation (20-period)
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(50, rsi_len, willr_len)
+    start = max(donch_len, adx_len, 20) + 1
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(rsi_1w_aligned[i]) or 
-            np.isnan(willr[i])):
+        if (np.isnan(upper_4h[i]) or 
+            np.isnan(lower_4h[i]) or 
+            np.isnan(adx_4h_aligned[i]) or 
+            np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: 1w RSI > 50 bullish, < 50 bearish
-        bullish_trend = rsi_1w_aligned[i] > 50
-        bearish_trend = rsi_1w_aligned[i] < 50
+        price = close[i]
+        vol = volume[i]
         
-        # Mean reversion signals from Williams %R
-        oversold = willr[i] < -80
-        overbought = willr[i] > -20
+        # Trend filter: ADX > 25 indicates trending market
+        trending = adx_4h_aligned[i] > 25
+        
+        # Volume confirmation: volume > 1.5x average
+        vol_confirmed = vol > 1.5 * vol_avg[i]
         
         if position == 0:
-            # Enter long: bullish weekly trend + daily oversold
-            if bullish_trend and oversold:
+            # Enter long: price breaks above upper Donchian + trend + volume
+            if price > upper_4h[i] and trending and vol_confirmed:
                 position = 1
                 signals[i] = position_size
-            # Enter short: bearish weekly trend + daily overbought
-            elif bearish_trend and overbought:
+            # Enter short: price breaks below lower Donchian + trend + volume
+            elif price < lower_4h[i] and trending and vol_confirmed:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Williams %R crosses above -50 (mean reversion complete) 
-            # or weekly trend turns bearish
-            if willr[i] > -50 or not bullish_trend:
+            # Exit long: price returns to Donchian midpoint OR opposite breakout
+            midpoint = (upper_4h[i] + lower_4h[i]) / 2
+            if price < midpoint or price < lower_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Williams %R crosses below -50 (mean reversion complete) 
-            # or weekly trend turns bullish
-            if willr[i] < -50 or not bearish_trend:
+            # Exit short: price returns to Donchian midpoint OR opposite breakout
+            midpoint = (upper_4h[i] + lower_4h[i]) / 2
+            if price > midpoint or price > upper_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -106,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1wRSI_1dWR_MeanReversion_v1"
-timeframe = "1d"
+name = "4h_Donchian_Volume_ADX_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
