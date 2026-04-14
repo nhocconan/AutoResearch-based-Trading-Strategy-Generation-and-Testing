@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Camarilla pivot levels from daily data with volume confirmation and 1-week trend filter
-# Long when price touches Camarilla L3 level with volume >1.3x 24-period average and price above 1w EMA50
-# Short when price touches Camarilla H3 level with volume >1.3x 24-period average and price below 1w EMA50
-# Exit when price crosses Camarilla L4/H4 levels or reaches opposite H3/L3 level
-# Uses 12-hour timeframe to capture swing trades with lower frequency to minimize fee drag
-# Camarilla levels provide institutional support/resistance, volume confirms institutional interest
-# Weekly EMA50 filter ensures alignment with higher timeframe trend to avoid counter-trend trades
-# Target: 50-150 total trades over 4 years (12-37/year) for optimal balance of opportunity and fee efficiency
+# Hypothesis: 4-hour Camarilla Pivot Reversal with 12-hour trend filter and volume confirmation
+# Long when price touches L3 support with volume >1.3x average and price above 12h EMA60
+# Short when price touches H3 resistance with volume >1.3x average and price below 12h EMA60
+# Exit when price crosses the 4h Camarilla pivot point (PP)
+# Camarilla levels: PP=(H+L+C)/3, H3=PP+(H-L)*1.1/2, L3=PP-(H-L)*1.1/2
+# 12-hour EMA60 provides trend context to avoid counter-trend trades
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,92 +21,77 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily and weekly data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
+    # Load 4h and 12h data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate Camarilla pivot levels from daily data
-    # Based on previous day's high, low, close
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 4h Camarilla pivot levels
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    pivot = (high_4h + low_4h + close_4h) / 3
+    range_hl = high_4h - low_4h
+    H3 = pivot + range_hl * 1.1 / 2
+    L3 = pivot - range_hl * 1.1 / 2
     
-    # Camarilla levels calculation
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # L3 = C - (Range * 1.1 / 4)
-    # H3 = C + (Range * 1.1 / 4)
-    # L4 = C - (Range * 1.1 / 2)
-    # H4 = C + (Range * 1.1 / 2)
-    pivot = (high_1d + low_1d + close_1d) / 3
-    rang = high_1d - low_1d
-    camarilla_l3 = close_1d - (rang * 1.1 / 4)
-    camarilla_h3 = close_1d + (rang * 1.1 / 4)
-    camarilla_l4 = close_1d - (rang * 1.1 / 2)
-    camarilla_h4 = close_1d + (rang * 1.1 / 2)
+    # Calculate 12h EMA60
+    close_12h = df_12h['close'].values
+    ema_60_12h = pd.Series(close_12h).ewm(span=60, min_periods=60, adjust=False).mean().values
     
-    # Calculate 1-week EMA50
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Calculate 4h volume average (20-period)
+    vol_4h = df_4h['volume'].values
+    vol_ma_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate volume average (24-period for 12h timeframe = 12 days)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    
-    # Align indicators to 12h timeframe
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)  # Volume MA aligned via daily
+    # Align indicators to 4h timeframe
+    H3_aligned = align_htf_to_ltf(prices, df_4h, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_4h, L3)
+    pivot_aligned = align_htf_to_ltf(prices, df_4h, pivot)
+    ema_60_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_60_12h)
+    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 60  # for 24-period volume MA and EMA50
+    start = 60  # for 60-period EMA and pivot calculation
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(camarilla_l3_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l4_aligned[i]) or np.isnan(camarilla_h4_aligned[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(ema_60_12h_aligned[i]) or 
+            np.isnan(vol_ma_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_current = volume[i]
+        vol_4h_current = volume[i]
         
         if position == 0:
-            # Long setup: price touches Camarilla L3 with volume confirmation and above weekly EMA50
-            if (price <= camarilla_l3_aligned[i] * 1.001 and  # Allow small slippage
-                price >= camarilla_l4_aligned[i] * 0.999 and   # But above L4 to avoid false signals
-                vol_current > 1.3 * vol_ma_aligned[i] and      # Volume confirmation
-                price > ema_50_1w_aligned[i]):                 # Above weekly EMA50 for bullish bias
+            # Long setup: touch L3 support with volume confirmation and price above 12h EMA60
+            if (price <= L3_aligned[i] * 1.002 and  # Allow small tolerance for touch
+                vol_4h_current > 1.3 * vol_ma_4h_aligned[i] and  # Volume confirmation
+                price > ema_60_12h_aligned[i]):                 # Price above 12h EMA60 for bullish bias
                 position = 1
                 signals[i] = position_size
-            # Short setup: price touches Camarilla H3 with volume confirmation and below weekly EMA50
-            elif (price >= camarilla_h3_aligned[i] * 0.999 and   # Allow small slippage
-                  price <= camarilla_h4_aligned[i] * 1.001 and   # But below H4 to avoid false signals
-                  vol_current > 1.3 * vol_ma_aligned[i] and      # Volume confirmation
-                  price < ema_50_1w_aligned[i]):                 # Below weekly EMA50 for bearish bias
+            # Short setup: touch H3 resistance with volume confirmation and price below 12h EMA60
+            elif (price >= H3_aligned[i] * 0.998 and   # Allow small tolerance for touch
+                  vol_4h_current > 1.3 * vol_ma_4h_aligned[i] and  # Volume confirmation
+                  price < ema_60_12h_aligned[i]):               # Price below 12h EMA60 for bearish bias
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses L4 or reaches H3 level
-            if (price < camarilla_l4_aligned[i] * 0.999 or 
-                price > camarilla_h3_aligned[i] * 1.001):
+            # Exit long: price crosses above pivot point
+            if price > pivot_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses H4 or reaches L3 level
-            if (price > camarilla_h4_aligned[i] * 1.001 or 
-                price < camarilla_l3_aligned[i] * 0.999):
+            # Exit short: price crosses below pivot point
+            if price < pivot_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -115,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_Daily_WeeklyEMA50_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_12hEMA60_Volume"
+timeframe = "4h"
 leverage = 1.0
