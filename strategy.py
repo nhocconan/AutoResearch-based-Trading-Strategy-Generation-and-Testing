@@ -13,36 +13,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h and daily data once before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load 1d data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_12h) < 30 or len(df_1d) < 30:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Calculate 12h ATR for volatility filter
-    high_low = high - low
-    high_close = np.abs(high - np.roll(close, 1))
-    low_close = np.abs(low - np.roll(close, 1))
-    high_close[0] = high_low[0]
-    low_close[0] = high_low[0]
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    tr_series = pd.Series(tr)
-    atr = tr_series.rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate 6h Donchian channels (20-period) - breakout levels
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().shift(1).values
-    
-    # Calculate daily volatility (ATR) for regime detection
+    # Calculate daily ATR for volatility regime
     high_low_1d = high_1d - low_1d
     high_close_1d = np.abs(high_1d - np.roll(close_1d, 1))
     low_close_1d = np.abs(low_1d - np.roll(close_1d, 1))
@@ -55,13 +35,19 @@ def generate_signals(prices):
     # Calculate daily ATR percentile for regime filter (trending vs ranging)
     atr_percentile = pd.Series(atr_1d).rolling(window=50, min_periods=50).quantile(0.5).values
     
+    # Calculate 6h Donchian channels (20-period) - breakout levels
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().shift(1).values
+    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25
     
     for i in range(100, n):
         # Skip if any critical data is NaN
-        if np.isnan(atr[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(atr_percentile[i]):
+        if np.isnan(atr_1d[i]) or np.isnan(atr_percentile[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
             continue
         
         # Get previous day's data for pivot calculation
