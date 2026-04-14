@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with volume confirmation and ATR-based stoploss
-# Long when price breaks above 4h Donchian channel (20-period) with volume spike
-# Short when price breaks below 4h Donchian channel with volume spike
-# Exit when price crosses the Donchian midline (10-period average)
-# Volume confirmation: current volume > 2.0 * 20-period average volume
-# Target: 20-40 trades per year (80-160 over 4 years) to minimize fee drag
+# Hypothesis: Daily price action with weekly trend filter and volume confirmation
+# Long when price breaks above daily resistance with volume spike and weekly bullish trend
+# Short when price breaks below daily support with volume spike and weekly bearish trend
+# Exit on daily midline cross
+# Uses weekly trend to avoid counter-trend trades in bear markets
+# Target: 30-100 trades total over 4 years (7-25/year)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,78 +20,74 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Load daily and weekly data ONCE before loop
+    df_daily = get_htf_data(prices, '1d')
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate 4h Donchian channel (20-period high/low)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # Calculate daily support/resistance levels (20-period lookback)
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    resistance = pd.Series(high_daily).rolling(window=20, min_periods=20).max().values
+    support = pd.Series(low_daily).rolling(window=20, min_periods=20).min().values
+    midline = (resistance + support) / 2
     
-    # Calculate 4h ATR (14-period) for stoploss
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.concatenate([[high_4h[0]], high_4h[:-1]]))
-    tr3 = np.abs(low_4h - np.concatenate([[low_4h[0]], low_4h[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate weekly EMA for trend filter (21-period)
+    close_weekly = df_weekly['close'].values
+    ema_weekly = pd.Series(close_weekly).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Calculate 4h volume average (20-period)
-    vol_4h = df_4h['volume'].values
-    vol_ma_4h = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
+    # Calculate daily volume average (20-period)
+    vol_daily = df_daily['volume'].values
+    vol_ma_daily = pd.Series(vol_daily).rolling(window=20, min_periods=20).mean().values
     
-    # Align indicators to lower timeframe (assumes 15m input, but works generically)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_4h, donchian_mid)
-    atr_aligned = align_htf_to_ltf(prices, df_4h, atr)
-    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
+    # Align indicators to daily timeframe
+    resistance_aligned = align_htf_to_ltf(prices, df_daily, resistance)
+    support_aligned = align_htf_to_ltf(prices, df_daily, support)
+    midline_aligned = align_htf_to_ltf(prices, df_daily, midline)
+    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
+    vol_ma_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_ma_daily)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
-    atr_multiplier = 2.0  # ATR stoploss multiplier
     
     # Start after enough data for calculations
-    start = 30  # for 20-period calculations
+    start = 60  # for 20-period calculations
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(donchian_mid_aligned[i]) or np.isnan(atr_aligned[i]) or 
-            np.isnan(vol_ma_4h_aligned[i])):
+        if (np.isnan(resistance_aligned[i]) or np.isnan(support_aligned[i]) or 
+            np.isnan(ema_weekly_aligned[i]) or np.isnan(vol_ma_daily_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_current = volume[i]
+        vol_daily_current = volume[i]  # Current daily volume
         
         if position == 0:
-            # Long setup: break above Donchian high with volume spike
-            if (price > donchian_high_aligned[i] and 
-                vol_current > 2.0 * vol_ma_4h_aligned[i]):
+            # Long setup: break above resistance with volume spike and weekly bullish trend
+            if (price > resistance_aligned[i] and 
+                vol_daily_current > 1.8 * vol_ma_daily_aligned[i] and  # Volume spike
+                price > ema_weekly_aligned[i]):                    # Price above weekly EMA for bullish trend
                 position = 1
                 signals[i] = position_size
-            # Short setup: break below Donchian low with volume spike
-            elif (price < donchian_low_aligned[i] and 
-                  vol_current > 2.0 * vol_ma_4h_aligned[i]):
+            # Short setup: break below support with volume spike and weekly bearish trend
+            elif (price < support_aligned[i] and 
+                  vol_daily_current > 1.8 * vol_ma_daily_aligned[i] and  # Volume spike
+                  price < ema_weekly_aligned[i]):                    # Price below weekly EMA for bearish trend
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below midline OR stoploss hit
-            if (price < donchian_mid_aligned[i] or 
-                price < (donchian_high_aligned[i] - atr_multiplier * atr_aligned[i])):
+            # Exit long: price breaks below midline
+            if price < midline_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above midline OR stoploss hit
-            if (price > donchian_mid_aligned[i] or 
-                price > (donchian_low_aligned[i] + atr_multiplier * atr_aligned[i])):
+            # Exit short: price breaks above midline
+            if price > midline_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -99,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_Volume_ATR_Stop"
-timeframe = "4h"
+name = "1d_Resistance_Support_Volume_WeeklyTrend"
+timeframe = "1d"
 leverage = 1.0
