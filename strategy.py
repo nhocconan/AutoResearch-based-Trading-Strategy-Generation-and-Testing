@@ -8,12 +8,12 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for weekly pivot levels
+    # Get daily data for weekly pivot levels
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -35,7 +35,7 @@ def generate_signals(prices):
     r2 = pp + (high_1d - low_1d)
     s2 = pp - (high_1d - low_1d)
     
-    # Align pivot levels to 4h timeframe
+    # Align pivot levels to 1d timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
@@ -45,26 +45,24 @@ def generate_signals(prices):
     vol_series = pd.Series(volume)
     avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
-    # ATR(14) for stop loss
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # 1-week trend filter: use 50-period EMA on weekly data
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
-    entry_price = 0.0
     
     # Start after enough data for calculations
-    start = 20  # for volume calculation
+    start = 50  # for weekly EMA calculation
     
     for i in range(start, n):
         # Skip if any critical data is NaN
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
             np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(avg_vol[i]) or np.isnan(atr[i])):
+            np.isnan(avg_vol[i]) or np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -72,25 +70,19 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long: price breaks above R2 with volume confirmation
-            if price > r2_aligned[i] and vol > 1.5 * avg_vol[i]:
+            # Long: price breaks above R2 with volume confirmation AND above weekly EMA50
+            if price > r2_aligned[i] and vol > 1.5 * avg_vol[i] and price > ema_50_1w_aligned[i]:
                 position = 1
-                entry_price = price
                 signals[i] = position_size
-            # Short: price breaks below S2 with volume confirmation
-            elif price < s2_aligned[i] and vol > 1.5 * avg_vol[i]:
+            # Short: price breaks below S2 with volume confirmation AND below weekly EMA50
+            elif price < s2_aligned[i] and vol > 1.5 * avg_vol[i] and price < ema_50_1w_aligned[i]:
                 position = -1
-                entry_price = price
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Exit long: price breaks below S1
             if price < s1_aligned[i]:
-                position = 0
-                signals[i] = 0.0
-            # Stop loss: 2 * ATR below entry
-            elif price < entry_price - 2.0 * atr[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -100,15 +92,11 @@ def generate_signals(prices):
             if price > r1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
-            # Stop loss: 2 * ATR above entry
-            elif price > entry_price + 2.0 * atr[i]:
-                position = 0
-                signals[i] = 0.0
             else:
                 signals[i] = -position_size
     
     return signals
 
-name = "4h_1d_Pivot_Breakout_Weekly"
-timeframe = "4h"
+name = "1d_1w_Pivot_Breakout_WeeklyTrend"
+timeframe = "1d"
 leverage = 1.0
