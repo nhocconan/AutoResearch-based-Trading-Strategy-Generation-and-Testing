@@ -3,15 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian breakout with weekly trend filter and volume confirmation
-# Works in bull markets by capturing breakouts; works in bear markets by avoiding counter-trend trades
-# Uses weekly trend to filter direction, reducing false signals in choppy markets
-# Volume confirmation ensures breakouts have conviction
-# Target: 20-40 trades/year to minimize fee drag while capturing significant moves
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,98 +13,125 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data (HTF) for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    
-    # Calculate 20-week EMA for weekly trend
-    if len(close_1w) < 20:
-        return np.zeros(n)
-    
-    ema20_1w = np.full_like(close_1w, np.nan)
-    alpha = 2 / (20 + 1)
-    for i in range(len(close_1w)):
-        if i == 0:
-            ema20_1w[i] = close_1w[i]
-        elif np.isnan(ema20_1w[i-1]):
-            ema20_1w[i] = close_1w[i]
-        else:
-            ema20_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema20_1w[i-1]
-    
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
-    
-    # Load daily data for Donchian channels
+    # Load daily data (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 20-day Donchian channels
-    high_20 = np.full_like(high_1d, np.nan)
-    low_20 = np.full_like(low_1d, np.nan)
+    # Calculate 20-day ATR for volatility (more stable than 10-day)
+    if len(high_1d) < 20:
+        return np.zeros(n)
     
-    for i in range(19, len(high_1d)):
-        high_20[i] = np.max(high_1d[i-19:i+1])
-        low_20[i] = np.min(low_1d[i-19:i+1])
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr0 = np.array([np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])])
+    tr = np.concatenate([tr0, np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    atr20 = np.full_like(close_1d, np.nan)
+    for i in range(19, len(tr)):
+        if i == 19:
+            atr20[i] = np.mean(tr[0:20])
+        else:
+            atr20[i] = (atr20[i-1] * 19 + tr[i]) / 20
     
-    # Calculate 20-day average volume for confirmation
-    vol_ma_20 = np.full_like(volume, np.nan)
-    for i in range(19, len(volume)):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    atr20_aligned = align_htf_to_ltf(prices, df_1d, atr20)
+    
+    # Calculate 50-day SMA for trend
+    if len(close_1d) < 50:
+        return np.zeros(n)
+    
+    sma50_1d = np.full_like(close_1d, np.nan)
+    for i in range(49, len(close_1d)):
+        sma50_1d[i] = np.mean(close_1d[i-49:i+1])
+    
+    sma50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
+    
+    # Calculate 20-day RSI for momentum (smoother than 14-day)
+    if len(close_1d) < 20:
+        return np.zeros(n)
+    
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.full_like(close_1d, np.nan)
+    avg_loss = np.full_like(close_1d, np.nan)
+    
+    if len(close_1d) >= 20:
+        avg_gain[19] = np.mean(gain[1:20])
+        avg_loss[19] = np.mean(loss[1:20])
+        for i in range(20, len(close_1d)):
+            avg_gain[i] = (avg_gain[i-1] * 19 + gain[i]) / 20
+            avg_loss[i] = (avg_loss[i-1] * 19 + loss[i]) / 20
+    
+    rs = np.full_like(close_1d, np.nan)
+    rsi20 = np.full_like(close_1d, np.nan)
+    for i in range(19, len(close_1d)):
+        if avg_loss[i] > 0:
+            rs[i] = avg_gain[i] / avg_loss[i]
+            rsi20[i] = 100 - (100 / (1 + rs[i]))
+        else:
+            rsi20[i] = 100 if avg_gain[i] > 0 else 0
+    
+    rsi20_aligned = align_htf_to_ltf(prices, df_1d, rsi20)
+    
+    # Calculate 48-period volume moving average for confirmation
+    vol_ma_48 = np.full_like(volume, np.nan)
+    for i in range(47, len(volume)):
+        vol_ma_48[i] = np.mean(volume[i-47:i+1])
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema20_1w_aligned[i]) or 
-            np.isnan(high_20_aligned[i]) or 
-            np.isnan(low_20_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(atr20_aligned[i]) or 
+            np.isnan(sma50_1d_aligned[i]) or 
+            np.isnan(rsi20_aligned[i]) or
+            np.isnan(vol_ma_48[i])):
             signals[i] = 0.0
             continue
         
-        if vol_ma_20[i] <= 0:
+        # Volume ratio: current 4h volume vs 48-period average
+        if vol_ma_48[i] <= 0:
             volume_ratio = 0
         else:
-            volume_ratio = volume[i] / vol_ma_20[i]
+            volume_ratio = volume[i] / vol_ma_48[i]
         
         if position == 0:
-            # Long: Price breaks above 20-day high + above weekly EMA + volume surge
-            if (close[i] > high_20_aligned[i] and
-                close[i] > ema20_1w_aligned[i] and
+            # Long: Price above 50-day SMA + RSI > 50 + volume surge
+            if (close[i] > sma50_1d_aligned[i] and
+                rsi20_aligned[i] > 50 and
                 volume_ratio > 2.0):
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below 20-day low + below weekly EMA + volume surge
-            elif (close[i] < low_20_aligned[i] and
-                  close[i] < ema20_1w_aligned[i] and
+            # Short: Price below 50-day SMA + RSI < 50 + volume surge
+            elif (close[i] < sma50_1d_aligned[i] and
+                  rsi20_aligned[i] < 50 and
                   volume_ratio > 2.0):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price crosses below 20-day low OR below weekly EMA
-            if (close[i] < low_20_aligned[i] or 
-                close[i] < ema20_1w_aligned[i]):
+            # Exit: Price crosses below 50-day SMA OR RSI < 40
+            if (close[i] < sma50_1d_aligned[i] or 
+                rsi20_aligned[i] < 40):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price crosses above 20-day high OR above weekly EMA
-            if (close[i] > high_20_aligned[i] or 
-                close[i] > ema20_1w_aligned[i]):
+            # Exit: Price crosses above 50-day SMA OR RSI > 60
+            if (close[i] > sma50_1d_aligned[i] or 
+                rsi20_aligned[i] > 60):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -118,6 +139,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_Donchian_WeeklyEMA_Volume_Filter"
-timeframe = "1d"
+name = "4h_1d_SMA50_RSI20_Volume_Filter"
+timeframe = "4h"
 leverage = 1.0
