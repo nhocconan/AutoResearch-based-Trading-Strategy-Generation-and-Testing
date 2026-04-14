@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w ADX trend filter and Donchian(20) breakout with volume confirmation.
-# 1w ADX > 25 filters for strong trending markets to avoid whipsaws in ranging conditions.
-# Donchian(20) breakout on 1d provides entry with price channel structure.
-# Volume confirmation (>1.5x 20-period average) reduces false breakouts.
-# Exit when price returns to the midpoint of the Donchian channel or trend weakens (ADX < 20).
-# Designed to work in both bull and bear markets by using 1w trend filter to avoid counter-trend trades.
-# Target: 10-20 trades/year per symbol (40-80 total over 4 years) to minimize fee drag.
+# Hypothesis: 12h strategy using 1d KAMA direction with 12h RSI and volume confirmation.
+# 1d KAMA provides adaptive trend direction that avoids whipsaws in ranging markets.
+# 12h RSI (14) identifies overbought/oversold conditions for entry in trend direction.
+# Volume confirmation (>1.5x 20-period average) filters weak breakouts.
+# Exit when RSI returns to neutral (50) or trend reverses.
+# Designed for low trade frequency (~15-25 trades/year) to minimize fee drag.
+# Works in both bull and bear markets by using 1d trend filter to avoid counter-trend trades.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,121 +21,125 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE for ADX calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Calculate ADX on 1w data
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # True Range
-    tr1 = np.abs(high_1w[1:] - low_1w[1:])
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
-    
-    # Directional Movement
-    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
-                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
-                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smoothed values
-    tr_period = 14
-    atr = pd.Series(tr).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / atr
-    di_minus = 100 * dm_minus_smooth / atr
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
-    
-    # Load 1d data ONCE for Donchian channels
+    # Load 1d data ONCE for KAMA calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Donchian Channels on 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate KAMA on 1d data
+    close_1d = df_1d['close'].values
     
-    dc_period = 20
-    upper_channel = pd.Series(high_1d).rolling(window=dc_period, min_periods=dc_period).max().values
-    lower_channel = pd.Series(low_1d).rolling(window=dc_period, min_periods=dc_period).min().values
-    middle_channel = (upper_channel + lower_channel) / 2.0
+    # Efficiency Ratio
+    change = np.abs(np.diff(close_1d))
+    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0) if len(close_1d) > 1 else 0
+    # Calculate ER properly
+    er = np.zeros_like(close_1d)
+    for i in range(1, len(close_1d)):
+        if i >= 10:  # ER period
+            direction = np.abs(close_1d[i] - close_1d[i-10])
+            volatility = np.sum(np.abs(np.diff(close_1d[i-10:i+1])))
+            er[i] = direction / volatility if volatility != 0 else 0
     
-    # Align indicators to 1d timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    upper_channel_aligned = align_htf_to_ltf(prices, df_1d, upper_channel)
-    lower_channel_aligned = align_htf_to_ltf(prices, df_1d, lower_channel)
-    middle_channel_aligned = align_htf_to_ltf(prices, df_1d, middle_channel)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # Volume confirmation: 1.5x average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # KAMA calculation
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    
+    # Load 12h data ONCE for RSI and volume
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    
+    # Calculate RSI on 12h data
+    close_12h = df_12h['close'].values
+    delta = np.diff(close_12h)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Average gain/loss
+    avg_gain = np.zeros_like(close_12h)
+    avg_loss = np.zeros_like(close_12h)
+    rsi_period = 14
+    
+    # Initial average
+    if len(gain) >= rsi_period:
+        avg_gain[rsi_period] = np.mean(gain[1:rsi_period+1])
+        avg_loss[rsi_period] = np.mean(loss[1:rsi_period+1])
+        
+        # Subsequent averages
+        for i in range(rsi_period+1, len(close_12h)):
+            avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
+            avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
+    
+    # Calculate RSI
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume moving average
+    vol_12h = df_12h['volume'].values
+    vol_ma = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
+    
+    # Align indicators to 12h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    rsi_aligned = align_htf_to_ltf(prices, df_12h, rsi)
+    vol_ma_aligned = align_htf_to_ltf(prices, df_12h, vol_ma)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(20, 20)  # Need DC and volume MA
+    start = max(30, 20)  # Need KAMA and RSI warmup
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(adx_aligned[i]) or 
-            np.isnan(upper_channel_aligned[i]) or
-            np.isnan(lower_channel_aligned[i]) or
-            np.isnan(middle_channel_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(kama_aligned[i]) or 
+            np.isnan(rsi_aligned[i]) or
+            np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
-        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
+        volume_confirmed = volume[i] > 1.5 * vol_ma_aligned[i]
         
-        # Trend filter: ADX > 25 indicates strong trending market
-        trending = adx_aligned[i] > 25
+        # Trend filter: price above/below KAMA
+        bullish_trend = close[i] > kama_aligned[i]
+        bearish_trend = close[i] < kama_aligned[i]
         
         if position == 0:
-            # Look for Donchian channel breakouts
-            # Only trade in trending markets
-            
-            # Long: price breaks above upper Donchian channel AND trending market
-            if (close[i] > upper_channel_aligned[i] and 
-                trending and 
+            # Look for RSI extreme entries in trend direction
+            # Long: RSI < 30 (oversold) AND bullish trend AND volume
+            if (rsi_aligned[i] < 30 and 
+                bullish_trend and 
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below lower Donchian channel AND trending market
-            elif (close[i] < lower_channel_aligned[i] and 
-                  trending and 
+            # Short: RSI > 70 (overbought) AND bearish trend AND volume
+            elif (rsi_aligned[i] > 70 and 
+                  bearish_trend and 
                   volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to middle Donchian channel or trend weakens
-            if (close[i] <= middle_channel_aligned[i] or 
-                adx_aligned[i] < 20):  # Trend weakening
+            # Exit long: RSI returns to neutral (50) or trend reverses
+            if (rsi_aligned[i] >= 50 or 
+                close[i] <= kama_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to middle Donchian channel or trend weakens
-            if (close[i] >= middle_channel_aligned[i] or 
-                adx_aligned[i] < 20):  # Trend weakening
+            # Exit short: RSI returns to neutral (50) or trend reverses
+            if (rsi_aligned[i] <= 50 or 
+                close[i] >= kama_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -143,6 +147,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1wADX_1dDC_Breakout_VolumeFilter_v1"
-timeframe = "1d"
+name = "12h_1dKAMA_12hRSI_VolumeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
