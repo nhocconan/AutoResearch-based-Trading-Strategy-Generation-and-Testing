@@ -1,14 +1,15 @@
-#!/usr/bin/env python3
+# ============================================================================
+# 4h_Camilla_Signal: Camarilla Pivot Reversal with Daily Volume Spike
+# ============================================================================
+# Hypothesis: Camarilla pivot levels on daily timeframe provide high-probability
+# reversal zones. Price retracing to these levels with volume confirmation offers
+# mean-reversion entries in both bull and bear markets. Uses daily volume spike
+# for confirmation and exits on opposite pivot touch. Target: 20-40 trades/year.
+# ============================================================================
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 12-hour Camarilla pivot breakout with daily volume confirmation and weekly trend filter
-# Long when price breaks above 12h Camarilla resistance level with volume spike and weekly bullish trend
-# Short when price breaks below 12h Camarilla support level with volume spike and weekly bearish trend
-# Exit when price crosses the Camarilla pivot point
-# Uses weekly EMA trend filter to avoid counter-trend trades in bear markets
-# Target: 15-35 trades per symbol over 4 years (~4-9/year) to minimize fee drag on 12h timeframe
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,94 +21,79 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h and daily data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load daily data ONCE before loop
     df_daily = get_htf_data(prices, '1d')
-    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate 12h Camarilla pivot levels (based on previous 12h bar)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate Camarilla pivot levels from daily OHLC
+    # Formula: R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4), etc.
+    # S1 = C - ((H-L) * 1.1/6), S2 = C - ((H-L) * 1.1/4), S3 = C - ((H-L) * 1.1/2)
+    daily_close = df_daily['close'].values
+    daily_high = df_daily['high'].values
+    daily_low = df_daily['low'].values
     
-    # Camarilla levels calculation (based on previous period's range)
-    # Resistance levels
-    camarilla_r4 = close_12h + 1.1 * (high_12h - low_12h) * 1.1 / 2
-    camarilla_r3 = close_12h + 1.1 * (high_12h - low_12h) * 1.1 / 4
-    camarilla_r2 = close_12h + 1.1 * (high_12h - low_12h) * 1.1 / 6
-    camarilla_r1 = close_12h + 1.1 * (high_12h - low_12h) * 1.1 / 12
-    # Pivot point
-    camarilla_pivot = (high_12h + low_12h + close_12h) / 3
-    # Support levels
-    camarilla_s1 = close_12h - 1.1 * (high_12h - low_12h) * 1.1 / 12
-    camarilla_s2 = close_12h - 1.1 * (high_12h - low_12h) * 1.1 / 6
-    camarilla_s3 = close_12h - 1.1 * (high_12h - low_12h) * 1.1 / 4
-    camarilla_s4 = close_12h - 1.1 * (high_12h - low_12h) * 1.1 / 2
+    # Calculate pivot levels
+    hl_range = daily_high - daily_low
+    camarilla_s3 = daily_close - (hl_range * 1.1 / 2)   # Strong support
+    camarilla_s2 = daily_close - (hl_range * 1.1 / 4)   # Support
+    camarilla_s1 = daily_close - (hl_range * 1.1 / 6)   # Weak support
+    camarilla_r1 = daily_close + (hl_range * 1.1 / 6)   # Weak resistance
+    camarilla_r2 = daily_close + (hl_range * 1.1 / 4)   # Resistance
+    camarilla_r3 = daily_close + (hl_range * 1.1 / 2)   # Strong resistance
     
     # Calculate daily volume average (20-period)
     vol_daily = df_daily['volume'].values
     vol_ma_daily = pd.Series(vol_daily).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate weekly EMA for trend filter (21-period)
-    close_weekly = df_weekly['close'].values
-    ema_weekly = pd.Series(close_weekly).ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # Align indicators to 12h timeframe
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r4)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
-    camarilla_r2_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r2)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r1)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_12h, camarilla_pivot)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s1)
-    camarilla_s2_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s2)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s4)
+    # Align Camarilla levels to 4h timeframe
+    s3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_s3)
+    s2_aligned = align_htf_to_ltf(prices, df_daily, camarilla_s2)
+    s1_aligned = align_htf_to_ltf(prices, df_daily, camarilla_s1)
+    r1_aligned = align_htf_to_ltf(prices, df_daily, camarilla_r1)
+    r2_aligned = align_htf_to_ltf(prices, df_daily, camarilla_r2)
+    r3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_r3)
     vol_ma_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_ma_daily)
-    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations (20 for volume MA)
-    start = 40  # conservative start
+    # Start after enough data for calculations
+    start = 40  # for 20-period volume MA
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(vol_ma_daily_aligned[i]) or 
-            np.isnan(ema_weekly_aligned[i])):
+        if (np.isnan(s3_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(vol_ma_daily_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_12h_current = volume[i]  # Current 12h volume
+        vol_current = volume[i]  # Current 4h volume
         
         if position == 0:
-            # Long setup: break above Camarilla R1 with volume spike and weekly bullish trend
-            if (price > camarilla_r1_aligned[i] and 
-                vol_12h_current > 1.8 * vol_ma_daily_aligned[i] and  # Volume spike
-                price > ema_weekly_aligned[i]):                    # Price above weekly EMA for bullish trend
+            # Long setup: price touches S3 with volume spike (strong support bounce)
+            if (price <= s3_aligned[i] * 1.002 and  # Allow small buffer for wicks
+                vol_current > 2.0 * vol_ma_daily_aligned[i]):  # Significant volume spike
                 position = 1
                 signals[i] = position_size
-            # Short setup: break below Camarilla S1 with volume spike and weekly bearish trend
-            elif (price < camarilla_s1_aligned[i] and 
-                  vol_12h_current > 1.8 * vol_ma_daily_aligned[i] and  # Volume spike
-                  price < ema_weekly_aligned[i]):                    # Price below weekly EMA for bearish trend
+            # Short setup: price touches R3 with volume spike (strong resistance rejection)
+            elif (price >= r3_aligned[i] * 0.998 and  # Allow small buffer for wicks
+                  vol_current > 2.0 * vol_ma_daily_aligned[i]):  # Significant volume spike
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below Camarilla pivot
-            if price < camarilla_pivot_aligned[i]:
+            # Exit long: price touches R1 (weak resistance) or stops working
+            if price >= r1_aligned[i] * 0.998:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above Camarilla pivot
-            if price > camarilla_pivot_aligned[i]:
+            # Exit short: price touches S1 (weak support) or stops working
+            if price <= s1_aligned[i] * 1.002:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -115,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_Pivot_WeeklyTrend_Volume"
-timeframe = "12h"
+name = "4h_Camilla_Signal"
+timeframe = "4h"
 leverage = 1.0
