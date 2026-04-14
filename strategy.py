@@ -50,30 +50,20 @@ def generate_signals(prices):
     rs = np.where(avg_loss != 0, avg_gain / avg_loss, np.inf)
     rsi_1d = 100 - (100 / (1 + rs))
     
-    # Calculate daily EMA (20-period)
-    close_1d_series = pd.Series(close_1d)
-    ema_20_1d = close_1d_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    
     # Calculate daily ADX (14-period) - Wilder's smoothing
     plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
                        np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
     minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
                         np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    # Pad to same length
     plus_dm = np.concatenate([[0], plus_dm])
     minus_dm = np.concatenate([[0], minus_dm])
     
     tr_14 = tr
-    plus_di_14 = np.full(len(df_1d), np.nan)
-    minus_di_14 = np.full(len(df_1d), np.nan)
-    dx_14 = np.full(len(df_1d), np.nan)
+    plus_dm_smooth = np.full(len(df_1d), np.nan)
+    minus_dm_smooth = np.full(len(df_1d), np.nan)
+    tr_smooth = np.full(len(df_1d), np.nan)
     
     if len(df_1d) >= 14:
-        # Smooth +DM, -DM, TR
-        plus_dm_smooth = np.full(len(df_1d), np.nan)
-        minus_dm_smooth = np.full(len(df_1d), np.nan)
-        tr_smooth = np.full(len(df_1d), np.nan)
-        
         plus_dm_smooth[13] = np.sum(plus_dm[1:15])
         minus_dm_smooth[13] = np.sum(minus_dm[1:15])
         tr_smooth[13] = np.sum(tr[1:15])
@@ -96,7 +86,6 @@ def generate_signals(prices):
     # Align indicators to 4h timeframe
     atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
     rsi_4h = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    ema_20_4h = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     adx_4h = align_htf_to_ltf(prices, df_1d, adx_14)
     
     # Calculate 4-hour Donchian channels (20-period)
@@ -122,7 +111,6 @@ def generate_signals(prices):
         if (np.isnan(atr_4h[i]) or
             np.isnan(donch_high[i]) or
             np.isnan(donch_low[i]) or
-            np.isnan(ema_20_4h[i]) or
             np.isnan(rsi_4h[i]) or
             np.isnan(volume_ma[i]) or
             np.isnan(adx_4h[i])):
@@ -159,26 +147,26 @@ def generate_signals(prices):
         s4_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s4))[i]
         
         if position == 0:
-            # Long: Price breaks above 4h Donchian high AND above S4 AND ADX > 25 AND RSI > 50 AND price above daily EMA20
-            if close[i] > donch_high[i] and close[i] > s4_4h and adx_4h[i] > 25 and rsi_4h[i] > 50 and close[i] > ema_20_4h[i]:
+            # Long: Price breaks above 4h Donchian high AND above S4 AND ADX > 25 AND RSI > 50
+            if close[i] > donch_high[i] and close[i] > s4_4h and adx_4h[i] > 25 and rsi_4h[i] > 50:
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below 4h Donchian low AND below R4 AND ADX > 25 AND RSI < 50 AND price below daily EMA20
-            elif close[i] < donch_low[i] and close[i] < r4_4h and adx_4h[i] > 25 and rsi_4h[i] < 50 and close[i] < ema_20_4h[i]:
+            # Short: Price breaks below 4h Donchian low AND below R4 AND ADX > 25 AND RSI < 50
+            elif close[i] < donch_low[i] and close[i] < r4_4h and adx_4h[i] > 25 and rsi_4h[i] < 50:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below 4h Donchian low OR below S4 OR ADX < 20 OR RSI < 50 OR price below daily EMA20
-            if close[i] < donch_low[i] or close[i] < s4_4h or adx_4h[i] < 20 or rsi_4h[i] < 50 or close[i] < ema_20_4h[i]:
+            # Exit: Price falls back below 4h Donchian low OR below S4 OR ADX < 20 OR RSI < 50
+            if close[i] < donch_low[i] or close[i] < s4_4h or adx_4h[i] < 20 or rsi_4h[i] < 50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above 4h Donchian high OR above R4 OR ADX < 20 OR RSI > 50 OR price above daily EMA20
-            if close[i] > donch_high[i] or close[i] > r4_4h or adx_4h[i] < 20 or rsi_4h[i] > 50 or close[i] > ema_20_4h[i]:
+            # Exit: Price rises back above 4h Donchian high OR above R4 OR ADX < 20 OR RSI > 50
+            if close[i] > donch_high[i] or close[i] > r4_4h or adx_4h[i] < 20 or rsi_4h[i] > 50:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -186,6 +174,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_R4S4_RSI50_EMA20_ADX_Filter_Volume"
+name = "4h_1d_Camarilla_R4S4_RSI50_ADX_Filter_Volume"
 timeframe = "4h"
 leverage = 1.0
