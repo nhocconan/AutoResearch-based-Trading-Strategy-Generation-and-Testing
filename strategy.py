@@ -12,10 +12,6 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = pd.to_datetime(prices['open_time'])
-    
-    # Pre-compute hour for session filter (08-20 UTC)
-    hours = open_time.dt.hour.values
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
@@ -45,16 +41,14 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.20  # 20% position size (conservative for 1h)
+    position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
     start = 100
     
     for i in range(start, n):
-        # Session filter: only trade 08-20 UTC
-        if hours[i] < 8 or hours[i] > 20:
-            signals[i] = 0.0
-            continue
+        price = close[i]
+        vol = volume[i]
         
         # Skip if any critical data is NaN
         if (np.isnan(atr[i]) or 
@@ -62,9 +56,6 @@ def generate_signals(prices):
             np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
-        
-        price = close[i]
-        vol = volume[i]
         
         # Calculate average volume for confirmation (20-period)
         vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().iloc[i]
@@ -111,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_1dEMA50_Volume_RSI_Filter"
-timeframe = "1h"
+name = "12h_1dEMA50_Volume_RSI_Filter"
+timeframe = "12h"
 leverage = 1.0
