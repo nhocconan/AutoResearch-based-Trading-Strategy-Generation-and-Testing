@@ -23,7 +23,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate daily ATR (14-period)
+    # Calculate daily ATR (14-period) with proper handling
     high_low = high_1d - low_1d
     high_close = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
     low_close = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
@@ -35,7 +35,7 @@ def generate_signals(prices):
         for i in range(14, len(df_1d)):
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # Calculate daily RSI (14-period)
+    # Calculate daily RSI (14-period) with proper handling
     delta = np.diff(close_1d, prepend=close_1d[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
