@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using daily volatility breakout with weekly trend filter.
-# Long when price breaks above daily high of past 20 periods with weekly EMA alignment and volume confirmation.
-# Short when price breaks below daily low of past 20 periods with weekly EMA alignment and volume confirmation.
-# Exit when price returns to daily midpoint or weekly EMA slope changes direction.
-# Uses daily range breakout for structure, weekly EMA for trend filter, volume for confirmation.
-# Target: 20-30 trades/year per symbol (80-120 total over 4 years) to minimize fee drag.
+# Hypothesis: 12h strategy combining 1d Donchian breakout with 1w EMA trend filter and volume confirmation.
+# Long when price breaks above daily Donchian upper with weekly EMA alignment (price > EMA) and volume > 1.5x average.
+# Short when price breaks below daily Donchian lower with weekly EMA alignment (price < EMA) and volume > 1.5x average.
+# Exit when price returns to daily Donchian midpoint.
+# Uses daily Donchian for structure, weekly EMA for trend filter, volume for confirmation.
+# Target: 15-30 trades/year per symbol (60-120 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,7 +20,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE for volatility breakout
+    # Load daily data ONCE for Donchian channels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -29,10 +29,10 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily high/low of past 20 periods
-    daily_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    daily_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    daily_mid = (daily_high + daily_low) / 2
+    # Calculate daily Donchian channels (20-day)
+    donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_upper + donchian_lower) / 2
     
     # Load weekly data ONCE for EMA trend filter
     df_1w = get_htf_data(prices, '1w')
@@ -45,9 +45,9 @@ def generate_signals(prices):
     ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     # Align indicators to lower timeframe
-    daily_high_aligned = align_htf_to_ltf(prices, df_1d, daily_high)
-    daily_low_aligned = align_htf_to_ltf(prices, df_1d, daily_low)
-    daily_mid_aligned = align_htf_to_ltf(prices, df_1d, daily_mid)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid)
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Volume confirmation: 1.5x average volume
@@ -58,13 +58,13 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(20, 20)  # Need daily range and EMA
+    start = max(20, 20)  # Need Donchian and EMA
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(daily_high_aligned[i]) or 
-            np.isnan(daily_low_aligned[i]) or
-            np.isnan(daily_mid_aligned[i]) or
+        if (np.isnan(donchian_upper_aligned[i]) or 
+            np.isnan(donchian_lower_aligned[i]) or
+            np.isnan(donchian_mid_aligned[i]) or
             np.isnan(ema_1w_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
@@ -78,15 +78,15 @@ def generate_signals(prices):
         price_below_ema = close[i] < ema_1w_aligned[i]
         
         if position == 0:
-            # Look for breakouts
-            # Long: price breaks above daily high AND price above weekly EMA
-            if (close[i] > daily_high_aligned[i] and 
+            # Look for Donchian breakouts
+            # Long: price breaks above Donchian upper AND price above weekly EMA
+            if (close[i] > donchian_upper_aligned[i] and 
                 price_above_ema and 
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below daily low AND price below weekly EMA
-            elif (close[i] < daily_low_aligned[i] and 
+            # Short: price breaks below Donchian lower AND price below weekly EMA
+            elif (close[i] < donchian_lower_aligned[i] and 
                   price_below_ema and 
                   volume_confirmed):
                 position = -1
@@ -94,17 +94,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to daily midpoint or price crosses below weekly EMA
-            if (close[i] <= daily_mid_aligned[i] or 
-                close[i] < ema_1w_aligned[i]):
+            # Exit long: price returns to Donchian midpoint
+            if close[i] <= donchian_mid_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to daily midpoint or price crosses above weekly EMA
-            if (close[i] >= daily_mid_aligned[i] or 
-                close[i] > ema_1w_aligned[i]):
+            # Exit short: price returns to Donchian midpoint
+            if close[i] >= donchian_mid_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -112,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyRangeBreakout_WeeklyEMA_VolumeFilter_v1"
-timeframe = "4h"
+name = "12h_1dDonchian_1wEMA_VolumeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
