@@ -74,24 +74,24 @@ def generate_signals(prices):
         
         if position == 0:
             # Long setup: volatility filter + not in squeeze + momentum filter
-            if (vol_filter and not bb_squeeze and rsi_filter):
+            if vol_filter and not bb_squeeze and rsi_filter:
                 position = 1
                 signals[i] = position_size
             # Short setup: volatility filter + not in squeeze + momentum filter
-            elif (vol_filter and not bb_squeeze and rsi_filter):
+            elif vol_filter and not bb_squeeze and rsi_filter:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Bollinger Band squeeze detected (mean reversion setup)
+            # Exit long: Bollinger Band squeeze detected
             if bb_squeeze:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Bollinger Band squeeze detected (mean reversion setup)
+            # Exit short: Bollinger Band squeeze detected
             if bb_squeeze:
                 position = 0
                 signals[i] = 0.0
@@ -100,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dATR_RSI_BBWidth_Exit_v1"
-timeframe = "4h"
+name = "1d_volatility_breakout_rsi_filter_v1"
+timeframe = "1d"
 leverage = 1.0
