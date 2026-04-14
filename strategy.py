@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,143 +13,127 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load weekly data (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # Calculate 20-period high and low for Donchian channel (daily)
-    donchian_high_20 = np.full_like(close_1d, np.nan)
-    donchian_low_20 = np.full_like(close_1d, np.nan)
+    # Calculate 50-period EMA for weekly trend
+    if len(close_1w) >= 50:
+        ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    else:
+        ema_50_1w = np.full_like(close_1w, np.nan)
     
-    if len(close_1d) >= 20:
-        for i in range(19, len(close_1d)):
-            donchian_high_20[i] = np.max(high_1d[i-19:i+1])
-            donchian_low_20[i] = np.min(low_1d[i-19:i+1])
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
-    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
+    # Calculate weekly ATR (14-period)
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1w[0] = tr1[0]
     
-    # Calculate 20-period volume average (daily)
-    vol_ma_20 = np.full_like(volume_1d, np.nan)
-    if len(volume_1d) >= 20:
-        for i in range(19, len(volume_1d)):
-            vol_ma_20[i] = np.mean(volume_1d[i-19:i+1])
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    atr_14_1w = np.full_like(close_1w, np.nan)
+    if len(close_1w) >= 14:
+        atr_14_1w[13] = np.mean(tr_1w[1:15])
+        for i in range(15, len(close_1w)):
+            atr_14_1w[i] = (atr_14_1w[i-1] * 13 + tr_1w[i]) / 14
     
-    # Calculate 14-period ADX for trend strength (daily)
-    # Calculate True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    atr_14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_14_1w)
     
-    # Calculate +DM and -DM
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    # Calculate weekly RSI (14-period)
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Smooth TR, DM+, DM- using Wilder's smoothing (14-period)
-    atr_14 = np.full_like(close_1d, np.nan)
-    dm_plus_14 = np.full_like(close_1d, np.nan)
-    dm_minus_14 = np.full_like(close_1d, np.nan)
+    avg_gain = np.full_like(close_1w, np.nan)
+    avg_loss = np.full_like(close_1w, np.nan)
+    if len(close_1w) >= 14:
+        avg_gain[13] = np.mean(gain[1:15])
+        avg_loss[13] = np.mean(loss[1:15])
+        for i in range(15, len(close_1w)):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    if len(close_1d) >= 14:
-        atr_14[13] = np.mean(tr[1:15])
-        dm_plus_14[13] = np.mean(dm_plus[1:15])
-        dm_minus_14[13] = np.mean(dm_minus[1:15])
-        
-        for i in range(15, len(close_1d)):
-            atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
-            dm_plus_14[i] = (dm_plus_14[i-1] * 13 + dm_plus[i]) / 14
-            dm_minus_14[i] = (dm_minus_14[i-1] * 13 + dm_minus[i]) / 14
+    rsi_14_1w = np.full_like(close_1w, np.nan)
+    for i in range(14, len(close_1w)):
+        if avg_loss[i] > 0:
+            rs = avg_gain[i] / avg_loss[i]
+            rsi_14_1w[i] = 100 - (100 / (1 + rs))
+        else:
+            rsi_14_1w[i] = 100
     
-    # Calculate DI+ and DI-
-    di_plus = np.full_like(close_1d, np.nan)
-    di_minus = np.full_like(close_1d, np.nan)
+    rsi_14_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_14_1w)
     
-    for i in range(14, len(close_1d)):
-        if atr_14[i] > 0:
-            di_plus[i] = (dm_plus_14[i] / atr_14[i]) * 100
-            di_minus[i] = (dm_minus_14[i] / atr_14[i]) * 100
+    # Calculate 6-period RSI for entry timing
+    delta_6 = np.diff(close, prepend=close[0])
+    gain_6 = np.where(delta_6 > 0, delta_6, 0)
+    loss_6 = np.where(delta_6 < 0, -delta_6, 0)
     
-    # Calculate DX and ADX
-    dx = np.full_like(close_1d, np.nan)
-    adx_14 = np.full_like(close_1d, np.nan)
+    avg_gain_6 = np.full_like(close, np.nan)
+    avg_loss_6 = np.full_like(close, np.nan)
+    if len(close) >= 6:
+        avg_gain_6[5] = np.mean(gain_6[1:7])
+        avg_loss_6[5] = np.mean(loss_6[1:7])
+        for i in range(7, len(close)):
+            avg_gain_6[i] = (avg_gain_6[i-1] * 5 + gain_6[i]) / 6
+            avg_loss_6[i] = (avg_loss_6[i-1] * 5 + loss_6[i]) / 6
     
-    for i in range(14, len(close_1d)):
-        if di_plus[i] + di_minus[i] > 0:
-            dx[i] = (np.abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i])) * 100
-    
-    if len(close_1d) >= 28:
-        adx_14[27] = np.mean(dx[14:28])
-        for i in range(28, len(close_1d)):
-            adx_14[i] = (adx_14[i-1] * 13 + dx[i]) / 14
-    
-    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
-    
-    # Precompute session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    rsi_6 = np.full_like(close, np.nan)
+    for i in range(6, len(close)):
+        if avg_loss_6[i] > 0:
+            rs = avg_gain_6[i] / avg_loss_6[i]
+            rsi_6[i] = 100 - (100 / (1 + rs))
+        else:
+            rsi_6[i] = 100
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.20  # 20% position size
+    position_size = 0.25
     
-    for i in range(50, n):
-        # Session filter: only trade between 08:00-20:00 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
-        
+    for i in range(100, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high_20_aligned[i]) or 
-            np.isnan(donchian_low_20_aligned[i]) or 
-            np.isnan(adx_14_aligned[i]) or 
-            np.isnan(vol_ma_20_aligned[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(atr_14_1w_aligned[i]) or 
+            np.isnan(rsi_14_1w_aligned[i]) or 
+            np.isnan(rsi_6[i])):
             signals[i] = 0.0
             continue
-        
-        # Volume ratio: current 1h volume vs 20-period daily average volume
-        if vol_ma_20_aligned[i] <= 0:
-            volume_ratio = 0
-        else:
-            volume_ratio = volume[i] / vol_ma_20_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above Donchian high + ADX > 25 + volume surge
-            if (close[i] > donchian_high_20_aligned[i] and
-                adx_14_aligned[i] > 25 and
-                volume_ratio > 2.0):
+            # Long: Weekly uptrend (price > EMA50), not overbought (RSI < 60), RSI(6) oversold bounce
+            if (close[i] > ema_50_1w_aligned[i] and
+                rsi_14_1w_aligned[i] < 60 and
+                rsi_6[i] < 30):
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below Donchian low + ADX > 25 + volume surge
-            elif (close[i] < donchian_low_20_aligned[i] and
-                  adx_14_aligned[i] > 25 and
-                  volume_ratio > 2.0):
+            # Short: Weekly downtrend (price < EMA50), not oversold (RSI > 40), RSI(6) overbought bounce
+            elif (close[i] < ema_50_1w_aligned[i] and
+                  rsi_14_1w_aligned[i] > 40 and
+                  rsi_6[i] > 70):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price breaks below Donchian low OR ADX < 20
-            if (close[i] < donchian_low_20_aligned[i] or 
-                adx_14_aligned[i] < 20):
+            # Exit: Weekly trend breaks or RSI(6) overbought
+            if (close[i] < ema_50_1w_aligned[i] or 
+                rsi_14_1w_aligned[i] > 70 or
+                rsi_6[i] > 70):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price breaks above Donchian high OR ADX < 20
-            if (close[i] > donchian_high_20_aligned[i] or 
-                adx_14_aligned[i] < 20):
+            # Exit: Weekly trend breaks or RSI(6) oversold
+            if (close[i] > ema_50_1w_aligned[i] or 
+                rsi_14_1w_aligned[i] < 30 or
+                rsi_6[i] < 30):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -157,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_1d_Donchian20_ADX25_Volume_Session"
-timeframe = "1h"
+name = "6h_1w_EMA50_RSI14_RSI6"
+timeframe = "6h"
 leverage = 1.0
