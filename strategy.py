@@ -38,14 +38,11 @@ def generate_signals(prices):
     atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     atr_20_aligned = align_htf_to_ltf(prices, df_1d, atr_20)
     
-    # Calculate 12-hour Donchian channels (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
+    # Calculate 12-hour Donchian channels (20-period) - vectorized
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    for i in range(20, n):
-        donchian_high[i] = high_series.iloc[i-20:i].max()
-        donchian_low[i] = low_series.iloc[i-20:i].min()
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0
