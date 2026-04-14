@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with volume confirmation and 1d ADX trend filter
-# Donchian(20) breakout captures trend continuation on 12h chart
+# Hypothesis: 4h Donchian breakout with volume confirmation and ADX trend filter
+# Donchian(20) breakout captures trend continuation
 # Volume > 1.5x average confirms breakout strength
-# 1d ADX > 25 ensures we only trade in trending markets on higher timeframe
+# ADX > 25 ensures we only trade in trending markets
 # Works in bull markets (breakouts up) and bear markets (breakouts down)
-# Low turnover expected: ~15-30 trades/year per symbol (targeting 60-120 total over 4 years)
+# Low turnover expected: ~20-40 trades/year per symbol
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,27 +20,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for ADX
-    df_1d = get_htf_data(prices, '1d')
+    # Load 4h data ONCE for ADX
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate 1d ADX (14 periods)
+    # Calculate 4h ADX (14 periods)
     adx_len = 14
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
     # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr1 = high_4h[1:] - low_4h[1:]
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
     # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_plus = np.where((high_4h[1:] - high_4h[:-1]) > (low_4h[:-1] - low_4h[1:]), 
+                       np.maximum(high_4h[1:] - high_4h[:-1], 0), 0)
     dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_minus = np.where((low_4h[:-1] - low_4h[1:]) > (high_4h[1:] - high_4h[:-1]), 
+                        np.maximum(low_4h[:-1] - low_4h[1:], 0), 0)
     dm_minus = np.concatenate([[np.nan], dm_minus])
     
     # Smoothed values
@@ -56,15 +56,15 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = pd.Series(dx).rolling(window=adx_len, min_periods=adx_len).mean().values
     
-    # Align ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
     
-    # Calculate Donchian channels (20 periods) on 12h
+    # Calculate Donchian channels (20 periods)
     donch_len = 20
     upper_channel = pd.Series(high).rolling(window=donch_len, min_periods=donch_len).max().values
     lower_channel = pd.Series(low).rolling(window=donch_len, min_periods=donch_len).min().values
     
-    # Calculate volume average (20 periods) on 12h
+    # Calculate volume average (20 periods)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -83,7 +83,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: 1d ADX > 25 indicates trending market on higher timeframe
+        # Trend filter: ADX > 25 indicates trending market
         trending = adx_aligned[i] > 25
         
         # Volume confirmation: current volume > 1.5x average
@@ -123,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Volume_ADX_Trend_v1"
-timeframe = "12h"
+name = "4h_Donchian_Volume_ADX_Trend_v1"
+timeframe = "4h"
 leverage = 1.0
