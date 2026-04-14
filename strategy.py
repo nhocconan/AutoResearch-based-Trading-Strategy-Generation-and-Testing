@@ -1,4 +1,9 @@
-#!/usr/bin/env python3
+# 4h_1d_S1R1_Breakout_Vol_VolatilityFilter_v3
+# Hypothesis: Price breaking S1/R1 pivot levels from prior day with volume confirmation and volatility filter
+# captures breakout moves in both bull and bear markets. Low trade frequency due to strict conditions
+# (breakout + volume + volatility) reduces fee drag. Volatility filter ensures trades occur during
+# high-momentum periods, avoiding chop.
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
