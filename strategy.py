@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12h price breaking above/below 1-day Donchian(20) channel with volume above 1.5x 24-period average and 1-day ADX > 25.
+Hypothesis: 12h price breaks above/below 1-day Donchian(20) channel with volume above 1.5x 24-period average and 1-day ADX > 25.
 Trades in direction of daily trend to avoid counter-trend whipsaws. Uses Donchian for clear breakout signals and ADX for trend strength.
 Targets 12-37 trades/year per symbol (48-148 total over 4 years).
 """
@@ -26,7 +26,6 @@ def generate_signals(prices):
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
     # Donchian upper and lower bands
     upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
@@ -40,6 +39,7 @@ def generate_signals(prices):
     tr1 = np.abs(high_1d[1:] - low_1d[1:])
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    close_1d = df_1d['close'].values
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
     # Directional Movement
