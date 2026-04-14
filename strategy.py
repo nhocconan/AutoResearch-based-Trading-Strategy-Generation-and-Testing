@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -93,7 +93,15 @@ def generate_signals(prices):
     position = 0
     position_size = 0.20
     
+    # Pre-calculate hour filter
+    hours = prices.index.hour
+    
     for i in range(20, n):
+        # Session filter: 08-20 UTC
+        if not (8 <= hours[i] <= 20):
+            signals[i] = 0.0
+            continue
+            
         # Skip if any critical data is NaN
         if (np.isnan(atr_1h[i]) or
             np.isnan(donch_high[i]) or
