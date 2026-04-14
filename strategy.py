@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 12h Supertrend for trend direction and 1d Chandelier Exit for stop.
-# Long when price crosses above Chandelier Exit long level with Supertrend uptrend.
-# Short when price crosses below Chandelier Exit short level with Supertrend downtrend.
-# Exit when price crosses back below/above Chandelier Exit short/long level.
-# Chandelier Exit uses ATR to set dynamic stops, reducing whipsaw in volatile markets.
-# Supertrend filters trend direction to avoid counter-trend trades.
-# Target: 20-25 trades/year per symbol (80-100 total over 4 years) to minimize fee drag.
+# Hypothesis: 12h strategy using 1d Donchian breakout with 1w ADX trend filter and volume confirmation.
+# Long when price breaks above 1d Donchian high (20) with 1w ADX > 25 (trending) and volume > 1.5x 20-period average.
+# Short when price breaks below 1d Donchian low (20) with 1w ADX > 25 and volume confirmation.
+# Exit when price returns to 1d midpoint or ADX < 20 (trend weakening).
+# Designed to capture strong trends while avoiding false breakouts in ranging markets.
+# Target: 20-30 trades/year per symbol (80-120 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,58 +18,9 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load 12h data ONCE for Supertrend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Calculate True Range and ATR for Supertrend (ATR=10)
-    tr1 = np.abs(high_12h[1:] - low_12h[1:])
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
-    
-    atr_period = 10
-    atr_12h = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
-    
-    # Supertrend calculation
-    hl2 = (high_12h + low_12h) / 2
-    upper_band = hl2 + (3.0 * atr_12h)
-    lower_band = hl2 - (3.0 * atr_12h)
-    
-    # Initialize Supertrend
-    supertrend = np.full_like(close_12h, np.nan)
-    dir_12h = np.full_like(close_12h, np.nan)  # 1 for uptrend, -1 for downtrend
-    
-    # First valid value
-    start_idx = atr_period
-    if start_idx < len(close_12h):
-        supertrend[start_idx] = upper_band[start_idx]
-        dir_12h[start_idx] = 1  # start in uptrend
-    
-    for i in range(start_idx + 1, len(close_12h)):
-        if supertrend[i-1] == upper_band[i-1]:
-            if close_12h[i] <= upper_band[i]:
-                supertrend[i] = upper_band[i]
-                dir_12h[i] = 1
-            else:
-                supertrend[i] = lower_band[i]
-                dir_12h[i] = -1
-        else:
-            if close_12h[i] >= lower_band[i]:
-                supertrend[i] = lower_band[i]
-                dir_12h[i] = -1
-            else:
-                supertrend[i] = upper_band[i]
-                dir_12h[i] = 1
-    
-    # Load 1d data ONCE for Chandelier Exit
+    # Load 1d data ONCE for Donchian channels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -79,69 +29,110 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate True Range and ATR for Chandelier Exit (ATR=22, multiplier=3.0)
-    tr1_d = np.abs(high_1d[1:] - low_1d[1:])
-    tr2_d = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3_d = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_d = np.maximum(tr1_d, np.maximum(tr2_d, tr3_d))
-    tr_d = np.concatenate([[np.nan], tr_d])
+    # Calculate Donchian channels (20-period) on 1d
+    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high + donch_low) / 2
     
-    atr_period_d = 22
-    atr_1d = pd.Series(tr_d).ewm(span=atr_period_d, adjust=False, min_periods=atr_period_d).mean().values
+    # Load 1w data ONCE for ADX trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
     
-    # Chandelier Exit calculation
-    # Long exit: highest high - ATR * multiplier
-    # Short exit: lowest low + ATR * multiplier
-    highest_high = np.maximum.accumulate(high_1d)
-    lowest_low = np.minimum.accumulate(low_1d)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    chandelier_long = highest_high - (3.0 * atr_1d)
-    chandelier_short = lowest_low + (3.0 * atr_1d)
+    # Calculate ADX (14) on 1w
+    # True Range
+    tr1 = np.abs(high_1w[1:] - low_1w[1:])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
+    
+    # Directional Movement
+    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smoothed values
+    tr14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_plus14 = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus14 = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus14 / tr14
+    di_minus = 100 * dm_minus14 / tr14
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     # Align indicators to lower timeframe
-    dir_12h_aligned = align_htf_to_ltf(prices, df_12h, dir_12h)
-    chandelier_long_aligned = align_htf_to_ltf(prices, df_1d, chandelier_long)
-    chandelier_short_aligned = align_htf_to_ltf(prices, df_1d, chandelier_short)
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    donch_mid_aligned = align_htf_to_ltf(prices, df_1d, donch_mid)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Volume confirmation: 1.5x average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(20, 22)  # Need Supertrend and Chandelier Exit
+    start = max(30, 20)  # Need ADX and Donchian
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(dir_12h_aligned[i]) or 
-            np.isnan(chandelier_long_aligned[i]) or
-            np.isnan(chandelier_short_aligned[i])):
+        if (np.isnan(donch_high_aligned[i]) or 
+            np.isnan(donch_low_aligned[i]) or
+            np.isnan(donch_mid_aligned[i]) or
+            np.isnan(adx_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Volume confirmation
+        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
+        
+        # Trend filter: ADX > 25 indicates strong trend
+        trending = adx_aligned[i] > 25
+        weak_trend = adx_aligned[i] < 20  # Exit when trend weakens
+        
         if position == 0:
-            # Look for Chandelier breakouts
-            # Long: price crosses above Chandelier long level AND Supertrend uptrend
-            if (close[i] > chandelier_long_aligned[i] and 
-                dir_12h_aligned[i] > 0):
+            # Look for Donchian breakouts
+            # Long: price breaks above Donchian high AND trending
+            if (close[i] > donch_high_aligned[i] and 
+                trending and 
+                volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: price crosses below Chandelier short level AND Supertrend downtrend
-            elif (close[i] < chandelier_short_aligned[i] and 
-                  dir_12h_aligned[i] < 0):
+            # Short: price breaks below Donchian low AND trending
+            elif (close[i] < donch_low_aligned[i] and 
+                  trending and 
+                  volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below Chandelier short level
-            if close[i] < chandelier_short_aligned[i]:
+            # Exit long: price returns to midpoint or trend weakens
+            if (close[i] <= donch_mid_aligned[i] or 
+                weak_trend):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above Chandelier long level
-            if close[i] > chandelier_long_aligned[i]:
+            # Exit short: price returns to midpoint or trend weakens
+            if (close[i] >= donch_mid_aligned[i] or 
+                weak_trend):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -149,6 +140,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Supertrend_Chandelier_Exit_v1"
-timeframe = "4h"
+name = "12h_1dDonchian_1wADX_VolumeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
