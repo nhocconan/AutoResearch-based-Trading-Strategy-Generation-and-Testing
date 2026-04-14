@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian Channel breakout with 1-day ATR filter and volume confirmation
-# Long when price breaks above 20-period Donchian upper band AND ATR(14) > 1.5x 50-period average ATR AND volume > 1.5x 20-period average volume
-# Short when price breaks below 20-period Donchian lower band AND ATR(14) > 1.5x 50-period average ATR AND volume > 1.5x 20-period average volume
+# Hypothesis: 12-hour Donchian Channel breakout with 1-day ADX trend filter and volume confirmation
+# Long when price breaks above 20-period Donchian upper band AND ADX(14) > 25 (trending) AND volume > 1.5x 20-period average volume
+# Short when price breaks below 20-period Donchian lower band AND ADX(14) > 25 AND volume > 1.5x 20-period average volume
 # Exit when price crosses back inside the Donchian Channel (opposite band)
-# Uses Donchian channels to capture breakouts, ATR filter to ensure volatility regime, volume for confirmation
+# Uses ADX to filter for trending markets only, reducing whipsaws in ranging periods
 # Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
 
 def generate_signals(prices):
@@ -20,7 +20,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for ATR filter
+    # Load 1d data ONCE before loop for ADX filter
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate Donchian Channel on 12h (20-period)
@@ -29,7 +29,7 @@ def generate_signals(prices):
     upper_donchian = high_series.rolling(window=20, min_periods=20).max().values
     lower_donchian = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Calculate ATR on 1d for volatility filter
+    # Calculate ADX on 1d for trend filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -41,8 +41,26 @@ def generate_signals(prices):
     tr1[0] = high_1d[0] - low_1d[0]  # First period
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_50_avg = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
     # Calculate volume average for confirmation (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,37 +69,32 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations (50 for ATR average + buffer)
+    # Start after enough data for calculations (50 for ADX + buffer)
     start = 60
     
     for i in range(start, n):
         # Skip if any critical data is NaN
         if (np.isnan(upper_donchian[i]) or np.isnan(lower_donchian[i]) or 
-            np.isnan(atr_14[i]) or np.isnan(atr_50_avg[i]) or 
-            np.isnan(vol_avg[i])):
+            np.isnan(adx[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        atr_current = atr_14[i]
-        atr_threshold = atr_50_avg[i] * 1.5
+        adx_value = adx[i]
         vol = volume[i]
         vol_threshold = vol_avg[i] * 1.5
         
-        # Get ATR values aligned to 12h timeframe
-        atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-        atr_50_avg_aligned = align_htf_to_ltf(prices, df_1d, atr_50_avg)
-        
-        atr_current_aligned = atr_14_aligned[i]
-        atr_threshold_aligned = atr_50_avg_aligned[i] * 1.5
+        # Get ADX values aligned to 12h timeframe
+        adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+        adx_value_aligned = adx_aligned[i]
         
         if position == 0:
-            # Long setup: price breaks above upper Donchian + ATR filter + volume confirmation
-            if (price > upper_donchian[i] and atr_current_aligned > atr_threshold_aligned and vol > vol_threshold):
+            # Long setup: price breaks above upper Donchian + ADX trend filter + volume confirmation
+            if (price > upper_donchian[i] and adx_value_aligned > 25 and vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: price breaks below lower Donchian + ATR filter + volume confirmation
-            elif (price < lower_donchian[i] and atr_current_aligned > atr_threshold_aligned and vol > vol_threshold):
+            # Short setup: price breaks below lower Donchian + ADX trend filter + volume confirmation
+            elif (price < lower_donchian[i] and adx_value_aligned > 25 and vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
@@ -103,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_1dATR_Volume"
+name = "12h_Donchian_1dADX_Volume"
 timeframe = "12h"
 leverage = 1.0
