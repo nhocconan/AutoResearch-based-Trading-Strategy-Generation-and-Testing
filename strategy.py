@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h price crossing above/below 1-day Exponential Moving Average (50) with volume above 1.3x 20-period average and 1-day ADX > 25.
-Trades in direction of daily trend to avoid counter-trend whipsaws. Uses EMA for smoother trend following.
-Targets 25-35 trades/year per symbol (100-140 total over 4 years).
+Hypothesis: 4h price crossing above/below 1-day Simple Moving Average (50) with volume above 1.5x 20-period average and 1-day ADX > 20.
+Trades in direction of daily trend to avoid counter-trend whipsaws. Uses SMA for clearer trend.
+Targets 20-30 trades/year per symbol (80-120 total over 4 years).
 """
 
 import numpy as np
@@ -19,13 +19,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1-day EMA (50-period)
+    # Calculate 1-day SMA (50-period)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    sma_50 = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
     
     # Calculate 1-day ADX (14-period)
     if len(df_1d) < 30:
@@ -71,42 +71,42 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Get aligned indicators
-        ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)[i]
+        sma_50_aligned = align_htf_to_ltf(prices, df_1d, sma_50)[i]
         adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)[i]
         vol_ma_20_aligned = vol_ma_20[i]  # already LTF
         
         # Check for NaN values
-        if (np.isnan(ema_50_aligned) or np.isnan(adx_1d_aligned) or 
+        if (np.isnan(sma_50_aligned) or np.isnan(adx_1d_aligned) or 
             np.isnan(vol_ma_20_aligned)):
             continue
         
-        # Volume confirmation (> 1.3x average)
-        volume_confirm = volume[i] > 1.3 * vol_ma_20_aligned
+        # Volume confirmation (> 1.5x average)
+        volume_confirm = volume[i] > 1.5 * vol_ma_20_aligned
         
-        # ADX trend filter (> 25)
-        trend_filter = adx_1d_aligned > 25
+        # ADX trend filter (> 20)
+        trend_filter = adx_1d_aligned > 20
         
         if position == 0:  # No position - look for entries
             if volume_confirm and trend_filter:
-                # Long: price crosses above EMA and trending up
-                if close[i] > ema_50_aligned and close[i-1] <= ema_50_aligned:
+                # Long: price crosses above SMA and trending up
+                if close[i] > sma_50_aligned and close[i-1] <= sma_50_aligned:
                     position = 1
                     signals[i] = position_size
-                # Short: price crosses below EMA and trending down
-                elif close[i] < ema_50_aligned and close[i-1] >= ema_50_aligned:
+                # Short: price crosses below SMA and trending down
+                elif close[i] < sma_50_aligned and close[i-1] >= sma_50_aligned:
                     position = -1
                     signals[i] = -position_size
-        elif position == 1:  # Long position - exit when price crosses below EMA
-            if close[i] < ema_50_aligned and close[i-1] >= ema_50_aligned:
+        elif position == 1:  # Long position - exit when price crosses below SMA
+            if close[i] < sma_50_aligned and close[i-1] >= sma_50_aligned:
                 position = 0
                 signals[i] = 0.0
-        elif position == -1:  # Short position - exit when price crosses above EMA
-            if close[i] > ema_50_aligned and close[i-1] <= ema_50_aligned:
+        elif position == -1:  # Short position - exit when price crosses above SMA
+            if close[i] > sma_50_aligned and close[i-1] <= sma_50_aligned:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_1dEMA50_1dADX25_Volume_v1"
+name = "4h_1dSMA50_1dADX20_Volume_v1"
 timeframe = "4h"
 leverage = 1.0
