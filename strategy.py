@@ -4,6 +4,13 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
+    """
+    Hypothesis: In 6h timeframe, price respects 1-day pivot levels (S3/R3) as dynamic support/resistance.
+    Breakouts above R3 with volume confirmation indicate bullish momentum.
+    Breakdowns below S3 with volume confirmation indicate bearish momentum.
+    Uses 1-day ATR as volatility filter to avoid low-volatility whipsaws.
+    Works in both bull and bear markets by following breakouts from key daily levels.
+    """
     n = len(prices)
     if n < 50:
         return np.zeros(n)
@@ -13,39 +20,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Load daily data (HTF) once before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly ATR (14-period) - Wilder's smoothing
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    high_low = high_1w - low_1w
-    high_close = np.abs(high_1w - np.concatenate([[close_1w[0]], close_1w[:-1]]))
-    low_close = np.abs(low_1w - np.concatenate([[close_1w[0]], close_1w[:-1]]))
+    # Calculate 1-day ATR (14-period) for volatility filter
+    high_low = high_1d - low_1d
+    high_close = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    low_close = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
     tr = np.maximum(high_low, np.maximum(high_close, low_close))
     
-    atr_1w = np.full(len(df_1w), np.nan)
-    if len(df_1w) >= 14:
-        atr_1w[13] = np.mean(tr[:14])
-        for i in range(14, len(df_1w)):
-            atr_1w[i] = (atr_1w[i-1] * 13 + tr[i]) / 14
+    atr_1d = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 14:
+        atr_1d[13] = np.mean(tr[:14])
+        for i in range(14, len(df_1d)):
+            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # Align ATR to daily timeframe
-    atr_daily = align_htf_to_ltf(prices, df_1w, atr_1w)
+    # Calculate 1-day pivot points (standard formula)
+    pivot = (high_1d + low_1d + close_1d) / 3
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
+    r2 = pivot + (high_1d - low_1d)
+    s2 = pivot - (high_1d - low_1d)
+    r3 = high_1d + 2 * (pivot - low_1d)
+    s3 = low_1d - 2 * (high_1d - pivot)
     
-    # Calculate daily Donchian channels (20-period)
-    donch_high = np.full(n, np.nan)
-    donch_low = np.full(n, np.nan)
-    if n >= 20:
-        for i in range(19, n):
-            donch_high[i] = np.max(high[i-19:i+1])
-            donch_low[i] = np.min(low[i-19:i+1])
+    # Align S3 and R3 to 6h timeframe (these are our key levels)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
     
-    # Calculate daily volume moving average (20-period)
+    # Align ATR to 6h timeframe for volatility filter
+    atr_6h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # Calculate 6-hour volume moving average (20-period)
     volume_ma = np.full(n, np.nan)
     if n >= 20:
         for i in range(19, n):
@@ -57,44 +69,42 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical data is NaN
-        if (np.isnan(atr_daily[i]) or
-            np.isnan(donch_high[i]) or
-            np.isnan(donch_low[i]) or
-            np.isnan(volume_ma[i])):
+        if (np.isnan(s3_6h[i]) or np.isnan(r3_6h[i]) or 
+            np.isnan(atr_6h[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Skip low volatility periods (ATR < 0.3% of price)
-        if atr_daily[i] / close[i] < 0.003:
+        # Volatility filter: avoid low-volatility periods (ATR < 0.4% of price)
+        if atr_6h[i] / close[i] < 0.004:
             signals[i] = 0.0
             continue
         
-        # Skip low volume periods (volume < 70% of 20-period MA)
-        if volume[i] < 0.7 * volume_ma[i]:
+        # Volume filter: require volume > 60% of 20-period MA
+        if volume[i] < 0.6 * volume_ma[i]:
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: Price breaks above daily Donchian high AND volatility expansion
-            if close[i] > donch_high[i]:
+            # Long: Price breaks above R3 with volume confirmation
+            if close[i] > r3_6h[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below daily Donchian low AND volatility expansion
-            elif close[i] < donch_low[i]:
+            # Short: Price breaks below S3 with volume confirmation
+            elif close[i] < s3_6h[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below daily Donchian low OR volatility contraction
-            if close[i] < donch_low[i] or atr_daily[i] / close[i] < 0.002:
+            # Exit: Price falls back below S3 (failed breakout) or volatility drops
+            if close[i] < s3_6h[i] or atr_6h[i] / close[i] < 0.003:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above daily Donchian high OR volatility contraction
-            if close[i] > donch_high[i] or atr_daily[i] / close[i] < 0.002:
+            # Exit: Price rises back above R3 (failed breakdown) or volatility drops
+            if close[i] > r3_6h[i] or atr_6h[i] / close[i] < 0.003:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -102,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_ATR_Donchian20_VolumeFilter"
-timeframe = "1d"
+name = "6h_1d_Pivot_S3R3_Breakout_Volume_Filter"
+timeframe = "6h"
 leverage = 1.0
