@@ -13,7 +13,11 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for pivot points
+    # Pre-calculate hour filter (8-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Load daily data for pivot points (once before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -41,12 +45,12 @@ def generate_signals(prices):
             resistance1[i] = r1
             support1[i] = s1
     
-    # Align 1d indicators to 6h timeframe
-    pivot_point_6h = align_htf_to_ltf(prices, df_1d, pivot_point)
-    resistance1_6h = align_htf_to_ltf(prices, df_1d, resistance1)
-    support1_6h = align_htf_to_ltf(prices, df_1d, support1)
+    # Align 1d indicators to 1h timeframe
+    pivot_point_1h = align_htf_to_ltf(prices, df_1d, pivot_point)
+    resistance1_1h = align_htf_to_ltf(prices, df_1d, resistance1)
+    support1_1h = align_htf_to_ltf(prices, df_1d, support1)
     
-    # Volume spike detection on 6h bars
+    # Volume spike detection on 1h bars
     vol_ma_20 = np.full_like(volume, np.nan)
     if len(volume) >= 20:
         for i in range(19, len(volume)):
@@ -54,18 +58,19 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position size
+    position_size = 0.20  # 20% position size
     
     for i in range(50, n):
-        # Skip if any critical data is NaN
-        if (np.isnan(pivot_point_6h[i]) or 
-            np.isnan(resistance1_6h[i]) or
-            np.isnan(support1_6h[i]) or
-            np.isnan(vol_ma_20[i])):
+        # Skip if any critical data is NaN or outside session
+        if (np.isnan(pivot_point_1h[i]) or 
+            np.isnan(resistance1_1h[i]) or
+            np.isnan(support1_1h[i]) or
+            np.isnan(vol_ma_20[i]) or
+            not in_session[i]):
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 6h volume vs 20-period average
+        # Volume ratio: current 1h volume vs 20-period average
         if vol_ma_20[i] <= 0:
             volume_ratio = 0
         else:
@@ -73,25 +78,25 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: Price closes above S1 with volume spike
-            if (close[i] > support1_6h[i] and volume_ratio > 2.0):
+            if (close[i] > support1_1h[i] and volume_ratio > 2.0):
                 position = 1
                 signals[i] = position_size
             # Short: Price closes below R1 with volume spike
-            elif (close[i] < resistance1_6h[i] and volume_ratio > 2.0):
+            elif (close[i] < resistance1_1h[i] and volume_ratio > 2.0):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Exit: Price closes below pivot
-            if close[i] < pivot_point_6h[i]:
+            if close[i] < pivot_point_1h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
             # Exit: Price closes above pivot
-            if close[i] > pivot_point_6h[i]:
+            if close[i] > pivot_point_1h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -99,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Pivot_S1R1_Volume"
-timeframe = "6h"
+name = "1h_1d_Pivot_S1R1_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
