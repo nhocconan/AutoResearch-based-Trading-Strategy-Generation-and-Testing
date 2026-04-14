@@ -3,91 +3,88 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bull/Bear Power with 1-day EMA filter
-# Elder Ray's Bull/Bear Power: measures buying/selling pressure relative to EMA
-# Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
-# Long when Bull Power > 0 AND Bear Power rising AND price > EMA(50) from 1d
-# Short when Bear Power < 0 AND Bull Power falling AND price < EMA(50) from 1d
-# Exit when power crosses zero or price crosses EMA(50)
-# Works in both bull and bear markets by measuring institutional strength
-# Target: 80-160 total trades over 4 years (20-40/year)
+# Hypothesis: 12h Camarilla pivot long at L3 with volume confirmation and weekly trend filter
+# Long when price touches L3 (Camarilla support) AND volume > 1.5x average AND weekly EMA200 trending up
+# Exit when price reaches H3 (Camarilla resistance) or closes below L3
+# Camarilla levels provide precise intraday support/resistance, volume confirms institutional interest,
+# weekly trend ensures alignment with higher timeframe momentum. Designed for 12h timeframe to balance opportunity and cost.
+# Target: 50-150 total trades over 4 years (12-37/year)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA filter
+    # Load daily data ONCE before loop for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate EMA(13) for Bull/Bear Power (6h)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean()
+    # Calculate weekly EMA200 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean()
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    # Bull Power = High - EMA(13)
-    bull_power = high - ema13
-    # Bear Power = Low - EMA(13)
-    bear_power = low - ema13
+    # Calculate Camarilla levels from previous day
+    # Camarilla: H4 = close + 1.1*(high-low)/2, H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4
+    # We'll use previous day's high, low, close
+    prev_high = df_1d['high'].shift(1).values  # Previous day high
+    prev_low = df_1d['low'].shift(1).values    # Previous day low
+    prev_close = df_1d['close'].shift(1).values # Previous day close
     
-    # Calculate EMA(50) from 1d for trend filter
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean()
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate Camarilla levels
+    rng = prev_high - prev_low
+    L3 = prev_close - 1.1 * rng / 4
+    H3 = prev_close + 1.1 * rng / 4
+    
+    # Align Camarilla levels to 12h timeframe
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    
+    # Calculate volume average for confirmation (20-period)
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 50
+    start = 50  # Need enough data for weekly EMA200
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(L3_aligned[i]) or np.isnan(H3_aligned[i]) or 
+            np.isnan(ema_200_1w_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
-        bp = bull_power[i]
-        bep = bear_power[i]
-        price = close[i]
-        ema50 = ema50_1d_aligned[i]
+        close_val = close[i]
+        vol = volume[i]
+        vol_threshold = vol_avg[i] * 1.5
         
         if position == 0:
-            # Long setup: Bull Power positive AND Bear Power rising AND price above 1d EMA50
-            if (bp > 0 and 
-                i > start and bep > bear_power[i-1] and 
-                price > ema50):
+            # Long setup: price touches L3 (within 0.5%) AND volume confirmation AND weekly uptrend
+            if (abs(close_val - L3_aligned[i]) / L3_aligned[i] < 0.005 and 
+                vol > vol_threshold and 
+                close_val > ema_200_1w_aligned[i]):
                 position = 1
                 signals[i] = position_size
-            # Short setup: Bear Power negative AND Bull Power falling AND price below 1d EMA50
-            elif (bep < 0 and 
-                  i > start and bp < bull_power[i-1] and 
-                  price < ema50):
-                position = -1
-                signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Bull Power turns negative OR price below 1d EMA50
-            if bp <= 0 or price < ema50:
+            # Exit long: price reaches H3 or closes below L3
+            if close_val >= H3_aligned[i] or close_val < L3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
-        elif position == -1:
-            # Exit short: Bear Power turns positive OR price above 1d EMA50
-            if bep >= 0 or price > ema50:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = -position_size
     
     return signals
 
-name = "6h_BullBearPower_1dEMA50_Filter"
-timeframe = "6h"
+name = "12h_Camarilla_L3_Long_WeeklyTrend"
+timeframe = "12h"
 leverage = 1.0
