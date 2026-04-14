@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,7 +22,7 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Calculate 1d True Range
+    # Calculate daily True Range
     high_low = high_1d - low_1d
     high_close = np.abs(high_1d - np.roll(close_1d, 1))
     low_close = np.abs(low_1d - np.roll(close_1d, 1))
@@ -34,11 +34,6 @@ def generate_signals(prices):
     tr_series = pd.Series(tr)
     atr = tr_series.rolling(window=14, min_periods=14).mean().values
     
-    # ATR percentile (70th) over 30 days for volatility filter
-    atr_series = pd.Series(atr)
-    atr_percentile = atr_series.rolling(window=30, min_periods=30).quantile(0.7).values
-    volatility_filter = atr > atr_percentile
-    
     # 12h volume filter: current volume > 1.3x 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
@@ -49,25 +44,31 @@ def generate_signals(prices):
     donchian_high = high_series.rolling(window=20, min_periods=20).max().shift(1).values
     donchian_low = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
+    # Calculate daily volatility as ATR normalized by price
+    daily_volatility = atr / close_1d
+    daily_vol_series = pd.Series(daily_volatility)
+    # Use 70th percentile of daily volatility over 30 days as threshold
+    vol_threshold = daily_vol_series.rolling(window=30, min_periods=30).quantile(0.7).values
+    # Align volatility threshold to 12h timeframe
+    vol_threshold_12h = align_htf_to_ltf(prices, df_1d, vol_threshold)
+    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25
     
-    for i in range(60, n):
+    for i in range(30, n):
         # Skip if any critical data is NaN
         if np.isnan(atr[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
-           np.isnan(vol_ma[i]) or np.isnan(volatility_filter[i]):
+           np.isnan(vol_ma[i]) or np.isnan(vol_threshold_12h[i]):
             continue
         
-        # Get previous day's data for volatility-based threshold
+        # Get previous day's data for volatility-based S1/R1 levels
         if i >= 1:
             prev_close = close_1d[i-1]
-            prev_high = high_1d[i-1]
-            prev_low = low_1d[i-1]
+            prev_atr = atr[i-1]  # Previous day's ATR
             
-            # Calculate volatility-adjusted threshold
-            daily_range = prev_high - prev_low
-            threshold = daily_range * 0.5  # 50% of daily range
+            # Calculate volatility-adjusted threshold (0.5 * ATR)
+            threshold = prev_atr * 0.5
             
             # Calculate dynamic S1/R1 levels based on volatility
             s1 = prev_close - threshold
@@ -81,16 +82,16 @@ def generate_signals(prices):
             r1_12h = align_htf_to_ltf(prices, df_1d, r1_array)[i]
             
             if position == 0:
-                # Long: Price breaks above r1 with volume and in volatile regime
+                # Long: Price breaks above r1 with volume and high volatility regime
                 if (close[i] > r1_12h and close[i-1] <= r1_12h and 
                     volume[i] > vol_ma[i] * 1.3 and 
-                    volatility_filter[i]):
+                    daily_volatility[i] > vol_threshold_12h[i]):
                     position = 1
                     signals[i] = position_size
-                # Short: Price breaks below s1 with volume and in volatile regime
+                # Short: Price breaks below s1 with volume and high volatility regime
                 elif (close[i] < s1_12h and close[i-1] >= s1_12h and 
                       volume[i] > vol_ma[i] * 1.3 and 
-                      volatility_filter[i]):
+                      daily_volatility[i] > vol_threshold_12h[i]):
                     position = -1
                     signals[i] = -position_size
             elif position == 1:
@@ -106,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_VolatilityAdjusted_S1R1_Breakout_Volume_v1"
+name = "12h_1d_VolatilityAdjusted_S1R1_Breakout_Volume_v2"
 timeframe = "12h"
 leverage = 1.0
