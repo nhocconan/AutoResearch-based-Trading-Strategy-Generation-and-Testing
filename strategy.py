@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index + 1d EMA200 Trend Filter + Volume Confirmation
-# Elder Ray measures bull/bear power relative to EMA13. In trending markets,
-# we go long when bull power > 0 and price > 1d EMA200, short when bear power < 0 and price < 1d EMA200.
-# Volume confirmation ensures breakouts have participation. Works in bull/bear by following the trend.
-# Target: 50-150 total trades over 4 years (12-37/year)
+# Hypothesis: 4h Camarilla Pivot Breakout + Volume Spike + ADX Trend Filter
+# Camarilla levels provide statistically significant support/resistance levels
+# Breakouts above/below key levels (H4/L4) with volume confirmation and ADX > 25
+# Trend filter ensures we trade only in trending markets, avoiding false breakouts
+# Works in bull/bear by capturing breakouts in the direction of the trend
+# Target: 75-200 total trades over 4 years (19-50/year)
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,19 +20,59 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Elder Ray components (13-period EMA for reference)
-    close_series = pd.Series(close)
-    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    bull_power = high - ema13
-    bear_power = low - ema13
-    
-    # 1d EMA200 for trend filter
+    # Daily data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    ema200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Volume confirmation: volume > 1.5x average volume (20-period)
+    # Calculate Camarilla levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Camarilla multipliers
+    H4 = close_1d + 1.5 * (high_1d - low_1d)  # Resistance level 4
+    L4 = close_1d - 1.5 * (high_1d - low_1d)  # Support level 4
+    H3 = close_1d + 1.25 * (high_1d - low_1d)  # Resistance level 3
+    L3 = close_1d - 1.25 * (high_1d - low_1d)  # Support level 3
+    
+    # Align to 4h timeframe (one-day delay for previous day's levels)
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    
+    # ADX calculation (14-period)
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Directional Movement
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    # Directional Indicators
+    di_plus = np.where(tr14 != 0, 100 * dm_plus14 / tr14, 0)
+    di_minus = np.where(tr14 != 0, 100 * dm_minus14 / tr14, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Volume confirmation: volume > 2x average volume (20-period)
     vol_series = pd.Series(volume)
     avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
@@ -40,44 +81,50 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(50, 200)  # for EMA200
+    start = 35  # for ADX calculation
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(ema200_1d_aligned[i]) or np.isnan(avg_vol[i])):
+        if (np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or
+            np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
+            np.isnan(adx[i]) or np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         
-        # Trend filter: price must be on correct side of 1d EMA200
-        if ema200_1d_aligned[i] <= 0:  # invalid EMA
-            signals[i] = 0.0
+        # Trend filter: only trade when ADX > 25 (trending market)
+        if adx[i] < 25:
+            # In weak trend/ranging market, stay flat
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
             continue
-            
+        
         if position == 0:
-            # Long: bull power positive AND price above 1d EMA200 with volume
-            if bull_power[i] > 0 and price > ema200_1d_aligned[i] and vol > 1.5 * avg_vol[i]:
+            # Long: price breaks above H4 with volume filter
+            if price > H4_aligned[i] and vol > 2.0 * avg_vol[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: bear power negative AND price below 1d EMA200 with volume
-            elif bear_power[i] < 0 and price < ema200_1d_aligned[i] and vol > 1.5 * avg_vol[i]:
+            # Short: price breaks below L4 with volume filter
+            elif price < L4_aligned[i] and vol > 2.0 * avg_vol[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: bear power turns negative OR price drops below EMA200
-            if bear_power[i] < 0 or price < ema200_1d_aligned[i]:
+            # Exit long: price breaks below L3 (reversal signal)
+            if price < L3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: bull power turns positive OR price rises above EMA200
-            if bull_power[i] > 0 or price > ema200_1d_aligned[i]:
+            # Exit short: price breaks above H3 (reversal signal)
+            if price > H3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -85,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_ElderRay_1dEMA200_VolumeFilter"
-timeframe = "6h"
+name = "4h_Camarilla_Volume_ADX_Filter"
+timeframe = "4h"
 leverage = 1.0
