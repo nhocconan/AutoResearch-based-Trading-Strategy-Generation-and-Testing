@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy combining 1d volatility-adjusted breakout levels with 1w RSI trend filter.
-# Uses dynamic support/resistance based on prior day's range adjusted by ATR, providing adaptive breakout levels.
-# Long when price breaks above volatility-adjusted resistance with 1w RSI > 50 (uptrend) and volume confirmation.
-# Short when price breaks below volatility-adjusted support with 1w RSI < 50 (downtrend) and volume confirmation.
-# Exit when price returns to prior day's close or RSI crosses 50 in opposite direction.
-# Designed to work in both bull and bear markets by adapting to volatility and using RSI for trend confirmation.
-# Target: 20-25 trades/year per symbol (80-100 total over 4 years) to minimize fee drag.
+# Hypothesis: 6h strategy combining 1d Donchian breakout with 1w ADX trend filter.
+# Long when price breaks above 1d Donchian high with 1w ADX > 25 (strong trend) and volume confirmation.
+# Short when price breaks below 1d Donchian low with 1w ADX > 25 (strong trend) and volume confirmation.
+# Exit when price returns to 1d close or ADX falls below 20 (trend weakening).
+# Designed to work in both bull and bear markets by using ADX to filter for strong trends only.
+# Target: 25-35 trades/year per symbol (100-140 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,7 +20,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for volatility-adjusted levels
+    # Load 1d data ONCE for Donchian levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -30,49 +29,58 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate True Range and ATR on 1d
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
-    
-    atr_period = 14
-    atr_1d = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
-    
-    # Volatility-adjusted support/resistance: prior day's high/low ± 0.5 * ATR
-    var_resistance = np.roll(high_1d, 1) + 0.5 * np.roll(atr_1d, 1)
-    var_support = np.roll(low_1d, 1) - 0.5 * np.roll(atr_1d, 1)
-    var_resistance[0] = np.nan
-    var_support[0] = np.nan
+    # Calculate 20-period Donchian channels on 1d
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
     # Prior 1d close for exit condition
     prior_close_1d = np.roll(close_1d, 1)
     prior_close_1d[0] = np.nan
     
-    # Load 1w data ONCE for RSI trend filter
+    # Load 1w data ONCE for ADX trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate RSI(14) on 1w
-    delta = np.diff(close_1w, prepend=np.nan)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate ADX(14) on 1w
+    # True Range
+    tr1 = np.abs(high_1w[1:] - low_1w[1:])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / avg_loss
-    rs = np.where(avg_loss == 0, 100, rs)
-    rsi_1w = 100 - (100 / (1 + rs))
+    # Directional Movement
+    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smoothed values
+    atr_1w = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / atr_1w
+    di_minus = 100 * dm_minus_smooth / atr_1w
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    dx = np.where((di_plus + di_minus) == 0, 0, dx)
+    adx_1w = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     # Align indicators to lower timeframe
-    var_resistance_aligned = align_htf_to_ltf(prices, df_1d, var_resistance)
-    var_support_aligned = align_htf_to_ltf(prices, df_1d, var_support)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     prior_close_1d_aligned = align_htf_to_ltf(prices, df_1d, prior_close_1d)
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
     # Volume confirmation: 1.5x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -82,14 +90,14 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(20, 14)  # Need VAR and RSI
+    start = max(20, 30)  # Need Donchian and ADX
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(var_resistance_aligned[i]) or 
-            np.isnan(var_support_aligned[i]) or
+        if (np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or
             np.isnan(prior_close_1d_aligned[i]) or
-            np.isnan(rsi_1w_aligned[i]) or
+            np.isnan(adx_1w_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
@@ -97,38 +105,38 @@ def generate_signals(prices):
         # Volume confirmation
         volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
-        # Trend filter: RSI > 50 for uptrend, < 50 for downtrend
-        uptrend = rsi_1w_aligned[i] > 50
-        downtrend = rsi_1w_aligned[i] < 50
+        # Trend filter: ADX > 25 for strong trend
+        strong_trend = adx_1w_aligned[i] > 25
+        weak_trend = adx_1w_aligned[i] < 20
         
         if position == 0:
-            # Look for volatility-adjusted breakouts
-            # Long: price breaks above VAR resistance AND uptrend
-            if (close[i] > var_resistance_aligned[i] and 
-                uptrend and 
+            # Look for Donchian breakouts
+            # Long: price breaks above Donchian high AND strong trend
+            if (close[i] > donchian_high_aligned[i] and 
+                strong_trend and 
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below VAR support AND downtrend
-            elif (close[i] < var_support_aligned[i] and 
-                  downtrend and 
+            # Short: price breaks below Donchian low AND strong trend
+            elif (close[i] < donchian_low_aligned[i] and 
+                  strong_trend and 
                   volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to prior 1d close or RSI crosses below 50
+            # Exit long: price returns to prior 1d close or trend weakens
             if (close[i] <= prior_close_1d_aligned[i] or 
-                rsi_1w_aligned[i] <= 50):
+                weak_trend):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to prior 1d close or RSI crosses above 50
+            # Exit short: price returns to prior 1d close or trend weakens
             if (close[i] >= prior_close_1d_aligned[i] or 
-                rsi_1w_aligned[i] >= 50):
+                weak_trend):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -136,6 +144,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_VolatilityAdjustedBreakout_1wRSI_v1"
-timeframe = "4h"
+name = "6h_1dDonchian_1wADX_TrendFilter_v1"
+timeframe = "6h"
 leverage = 1.0
