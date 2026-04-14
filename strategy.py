@@ -32,7 +32,7 @@ def generate_signals(prices):
         for i in range(50, len(df_12h)):
             ema_50_12h[i] = (close_12h[i] - ema_50_12h[i-1]) * multiplier + ema_50_12h[i-1]
     
-    # Align 12h EMA50 to 12h timeframe (already aligned, but ensure proper alignment)
+    # Align 12h EMA50 to 12h timeframe
     ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # Calculate daily ATR (14-period) for volatility filter
