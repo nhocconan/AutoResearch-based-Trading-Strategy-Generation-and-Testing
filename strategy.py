@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -13,7 +13,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points and ATR
+    # Get 1d data for pivot points and ATR
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -45,7 +45,7 @@ def generate_signals(prices):
     r2 = pp + (prev_day_high - prev_day_low)
     s2 = pp - (prev_day_high - prev_day_low)
     
-    # Align daily pivot levels to 12h timeframe (use prior day's data)
+    # Align daily pivot levels to 4h timeframe (using prior day's data)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
@@ -61,7 +61,7 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(20, 14)  # for 20-period volume average and 14-period ATR
+    start = max(21, 20)  # for 21-period EMA and 20-period volume average
     
     for i in range(start, n):
         # Skip if any critical data is NaN
@@ -103,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Pivot_R2_S2_Volume"
-timeframe = "12h"
+name = "4h_1d_Daily_Pivot_Volume_Filter"
+timeframe = "4h"
 leverage = 1.0
