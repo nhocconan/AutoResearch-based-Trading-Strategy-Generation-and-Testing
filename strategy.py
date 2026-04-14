@@ -1,11 +1,11 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -13,61 +13,51 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get weekly data for trend filter
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate Camarilla pivot levels from previous day
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # Resistance levels: R1 = C + (H-L)*1.1/12, R2 = C + (H-L)*1.1/6, R3 = C + (H-L)*1.1/4, R4 = C + (H-L)*1.1/2
-    # Support levels: S1 = C - (H-L)*1.1/12, S2 = C - (H-L)*1.1/6, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # Calculate weekly EMA200 for trend direction
+    close_weekly = df_weekly['close'].values
+    ema200_weekly = pd.Series(close_weekly).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate resistance levels
-    R1 = close_1d + range_1d * 1.1 / 12
-    R2 = close_1d + range_1d * 1.1 / 6
-    R3 = close_1d + range_1d * 1.1 / 4
-    R4 = close_1d + range_1d * 1.1 / 2
+    # Align weekly EMA200 to daily timeframe (waits for weekly close)
+    ema200_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema200_weekly)
     
-    # Calculate support levels
-    S1 = close_1d - range_1d * 1.1 / 12
-    S2 = close_1d - range_1d * 1.1 / 6
-    S3 = close_1d - range_1d * 1.1 / 4
-    S4 = close_1d - range_1d * 1.1 / 2
+    # Calculate daily ATR for volatility filter
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    # Align pivot levels to 4h timeframe (previous day's levels available after daily close)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    atr = np.zeros_like(tr)
+    for i in range(len(tr)):
+        if i < 14:
+            atr[i] = np.nan
+        elif i == 14:
+            atr[i] = np.mean(tr[1:15])
+        else:
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
-    # Volume confirmation: volume > 1.5x average volume (20-period)
+    # Calculate daily Donchian channel (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume confirmation: volume > 1.8x average volume (30-period)
     vol_series = pd.Series(volume)
-    avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
-    
-    # Trend filter: 50-period EMA on 4h
-    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    avg_vol = vol_series.rolling(window=30, min_periods=30).mean().shift(1).values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(50, 20)  # 50 for EMA50, 20 for volume average
+    start = max(200, 30)  # 200 for weekly EMA, 30 for volume avg
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(R1_aligned[i]) or 
-            np.isnan(S1_aligned[i]) or np.isnan(ema50[i]) or 
+        if (np.isnan(ema200_weekly_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
             np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
@@ -76,26 +66,30 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long setup: price touches or breaks above S1 with volume confirmation and above EMA50
-            if price >= S1_aligned[i] and price <= S1_aligned[i] * 1.005 and vol > 1.5 * avg_vol[i] and price > ema50[i]:
+            # Long: price breaks above Donchian high + weekly uptrend + volume confirmation
+            if (price > highest_high[i] and 
+                price > ema200_weekly_aligned[i] and 
+                vol > 1.8 * avg_vol[i]):
                 position = 1
                 signals[i] = position_size
-            # Short setup: price touches or breaks below R1 with volume confirmation and below EMA50
-            elif price <= R1_aligned[i] and price >= R1_aligned[i] * 0.995 and vol > 1.5 * avg_vol[i] and price < ema50[i]:
+            # Short: price breaks below Donchian low + weekly downtrend + volume confirmation
+            elif (price < lowest_low[i] and 
+                  price < ema200_weekly_aligned[i] and 
+                  vol > 1.8 * avg_vol[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price reaches R2 (profit target) or breaks below S1 (stop loss)
-            if price >= R2_aligned[i] or price < S1_aligned[i]:
+            # Exit long: price breaks below Donchian low or trend changes
+            if price < lowest_low[i] or price < ema200_weekly_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price reaches S2 (profit target) or breaks above R1 (stop loss)
-            if price <= S2_aligned[i] or price > R1_aligned[i]:
+            # Exit short: price breaks above Donchian high or trend changes
+            if price > highest_high[i] or price > ema200_weekly_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -103,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_Pivot_Touch_Volume"
-timeframe = "4h"
+name = "1d_1w_Donchian_Trend_Volume_Filter"
+timeframe = "1d"
 leverage = 1.0
