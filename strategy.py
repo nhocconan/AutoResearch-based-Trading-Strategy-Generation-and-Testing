@@ -16,18 +16,11 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d Close for price channel
-    close_1d = df_1d['close'].values
+    # Calculate 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 1d Highest High and Lowest Low for Donchian channel (20 period)
-    highest_high_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).max().values
-    lowest_low_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian levels to 12h timeframe
-    highest_high_1d_aligned = align_htf_to_ltf(prices, df_1d, highest_high_1d)
-    lowest_low_1d_aligned = align_htf_to_ltf(prices, df_1d, lowest_low_1d)
-    
-    # Calculate 1d ATR(14) for volatility filter and stop loss
+    # Calculate 1d ATR(14) for volatility filter
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     close_series = pd.Series(close)
@@ -37,60 +30,78 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1d Volume moving average for volume confirmation
-    volume_1d = df_1d['volume'].values
-    volume_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
+    # Calculate 1d RSI(14) for momentum filter
+    delta = pd.Series(df_1d['close']).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = (100 - (100 / (1 + rs))).values
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
+    # Calculate 1d Bollinger Band width for squeeze detection
+    sma_20_1d = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).mean().values
+    std_20_1d = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).std().values
+    upper_bb_1d = sma_20_1d + (2 * std_20_1d)
+    lower_bb_1d = sma_20_1d - (2 * std_20_1d)
+    bb_width_1d = (upper_bb_1d - lower_bb_1d) / sma_20_1d
+    bb_width_1d_aligned = align_htf_to_ltf(prices, df_1d, bb_width_1d)
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position size
+    position_size = 0.20  # 20% position size
     
     # Start after enough data for calculations
     start = 50
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(highest_high_1d_aligned[i]) or 
-            np.isnan(lowest_low_1d_aligned[i]) or 
-            np.isnan(atr[i]) or
-            np.isnan(volume_ma_1d_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(atr[i]) or 
+            np.isnan(rsi_1d_aligned[i]) or
+            np.isnan(bb_width_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         
-        # Volatility filter: avoid extremely low volatility periods
+        # ATR-based volatility filter: avoid extremely low volatility periods
         atr_ratio = atr[i] / price if price > 0 else 0
         vol_filter = atr_ratio > 0.003  # Minimum 0.3% ATR relative to price
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_filter = vol > (1.5 * volume_ma_1d_aligned[i])
+        # Bollinger Band squeeze detection: bandwidth < 5%
+        bb_squeeze = bb_width_1d_aligned[i] < 0.05
+        
+        # Trend filter: price > 1d EMA50 for long, price < 1d EMA50 for short
+        trend_filter_long = price > ema_50_1d_aligned[i]
+        trend_filter_short = price < ema_50_1d_aligned[i]
+        
+        # Momentum filter: RSI between 30 and 70 to avoid extremes
+        rsi_filter = (rsi_1d_aligned[i] > 30) & (rsi_1d_aligned[i] < 70)
         
         if position == 0:
-            # Long setup: price breaks above 1d Donchian high + volume filter + volatility filter
-            if (price > highest_high_1d_aligned[i] and volume_filter and vol_filter):
+            # Long setup: price above 1d EMA50 + volatility filter + not in squeeze + momentum filter
+            if (trend_filter_long and vol_filter and not bb_squeeze and rsi_filter):
                 position = 1
                 signals[i] = position_size
-            # Short setup: price breaks below 1d Donchian low + volume filter + volatility filter
-            elif (price < lowest_low_1d_aligned[i] and volume_filter and vol_filter):
+            # Short setup: price below 1d EMA50 + volatility filter + not in squeeze + momentum filter
+            elif (trend_filter_short and vol_filter and not bb_squeeze and rsi_filter):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below 1d Donchian low or ATR-based stop
-            if (price < lowest_low_1d_aligned[i] or 
-                price < (highest_high_1d_aligned[i] - 2.0 * atr[i])):
+            # Exit long: price crosses below 1d EMA50
+            if price < ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above 1d Donchian high or ATR-based stop
-            if (price > highest_high_1d_aligned[i] or 
-                price > (lowest_low_1d_aligned[i] + 2.0 * atr[i])):
+            # Exit short: price crosses above 1d EMA50
+            if price > ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -98,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1dDonchian20_Volume_ATRStop_v1"
-timeframe = "12h"
+name = "1h_1dEMA50_BBWidth_RSI_Filter_v1"
+timeframe = "1h"
 leverage = 1.0
