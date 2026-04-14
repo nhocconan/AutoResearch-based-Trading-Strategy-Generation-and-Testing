@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe with 1-day Bollinger Band breakout + volume spike + low volatility filter
+# Hypothesis: 12h timeframe with 1-day Williams %R overbought/oversold + volume spike + low volatility filter
 # Targets: Fewer trades (20-50/year) to avoid fee drag, works in bull/bear via volatility regime filter
-# Entry: Price breaks above upper Bollinger Band (20,2) with 1.5x average volume in low volatility (ATR ratio < 0.6)
-# Exit: Price returns to middle Bollinger Band (20-day SMA)
+# Entry: Williams %R crosses below -80 (oversold) with 1.5x average volume in low volatility (ATR ratio < 0.6)
+# Exit: Williams %R crosses above -20 (overbought) for longs, crosses below -80 for shorts
 # Position size: 0.25 (25%) to manage drawdown
 
 def generate_signals(prices):
@@ -30,12 +30,10 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Daily Bollinger Bands (20,2)
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
-    middle_bb = sma_20
+    # Daily Williams %R (14)
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
     
     # Daily ATR (14)
     tr1 = high_1d - low_1d
@@ -57,13 +55,11 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Get aligned daily indicators
-        upper_bb_i = align_htf_to_ltf(prices, df_1d, upper_bb)[i]
-        lower_bb_i = align_htf_to_ltf(prices, df_1d, lower_bb)[i]
-        middle_bb_i = align_htf_to_ltf(prices, df_1d, middle_bb)[i]
+        williams_r_i = align_htf_to_ltf(prices, df_1d, williams_r)[i]
         atr_ratio_1d_i = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)[i]
         vol_ma_20_1d_i = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)[i]
         
-        if np.isnan(upper_bb_i) or np.isnan(lower_bb_i) or np.isnan(middle_bb_i) or np.isnan(atr_ratio_1d_i) or np.isnan(vol_ma_20_1d_i):
+        if np.isnan(williams_r_i) or np.isnan(atr_ratio_1d_i) or np.isnan(vol_ma_20_1d_i):
             continue
         
         # Volatility filter: only trade when ATR ratio < 0.6 (low volatility regime)
@@ -72,27 +68,27 @@ def generate_signals(prices):
         # Volume spike filter (1.5x daily average volume)
         volume_spike = volume[i] > 1.5 * vol_ma_20_1d_i
         
-        # Long: break above upper Bollinger Band with volume spike in low vol
+        # Long: Williams %R crosses below -80 (oversold) with volume spike in low vol
         if position == 0 and low_vol and volume_spike:
-            if close[i] > upper_bb_i:
+            if williams_r_i < -80:
                 position = 1
                 signals[i] = position_size
-            # Short: break below lower Bollinger Band with volume spike in low vol
-            elif close[i] < lower_bb_i:
+            # Short: Williams %R crosses above -20 (overbought) with volume spike in low vol
+            elif williams_r_i > -20:
                 position = -1
                 signals[i] = -position_size
         
-        # Exit: price returns to middle Bollinger Band
+        # Exit: Williams %R crosses above -20 for longs, below -80 for shorts
         elif position != 0:
-            if position == 1 and close[i] < middle_bb_i:
+            if position == 1 and williams_r_i > -20:
                 position = 0
                 signals[i] = 0.0
-            elif position == -1 and close[i] > middle_bb_i:
+            elif position == -1 and williams_r_i < -80:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_Bollinger_Breakout_LowVol_Volume_Spike_v1"
+name = "12h_WilliamsR_Oversold_Overbought_Volume_Spike_LowVol"
 timeframe = "12h"
 leverage = 1.0
