@@ -1,3 +1,10 @@
+# 4h_1d_CamillaBreakout_Volume_Confirm
+# Hypothesis: Camarilla pivot levels from 1d (H3/L3) act as strong intraday support/resistance.
+# A breakout above H3 or below L3 with volume confirmation (>1.5x average volume) captures
+# institutional breakout moves. Works in both bull (breakouts continue) and bear (false breakouts fade quickly,
+# but volume helps distinguish real breaks). Uses 4h timeframe to reduce trade frequency.
+# Target: 20-40 trades/year per symbol.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -13,42 +20,49 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily Donchian channels (20-period) - use previous bar's high/low
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
-    lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
+    # Calculate Camarilla levels from previous 1d bar
+    # H3 = close + 1.1*(high - low)/6
+    # L3 = close - 1.1*(high - low)/6
+    # We need the previous day's OHLC to calculate today's levels
+    # Since we're using 4h bars, we'll calculate daily levels and align
     
-    # Daily average volume (20-period) - previous bar
+    # Get 1d data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate typical Camarilla levels using previous day's data
+    # H3 = C + 1.1*(H-L)/6
+    # L3 = C - 1.1*(H-L)/6
+    # Where C, H, L are from previous day
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    # Avoid division by zero and handle NaN
+    hl_range = prev_high - prev_low
+    hl_range = np.where(hl_range == 0, 1e-10, hl_range)  # small value to avoid div by zero
+    
+    camarilla_h3 = prev_close + 1.1 * hl_range / 6
+    camarilla_l3 = prev_close - 1.1 * hl_range / 6
+    
+    # Align to 4h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    
+    # Volume confirmation: volume > 1.5x average volume (20-period)
     vol_series = pd.Series(volume)
     avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
-    # Daily ATR (14-period) for stop-loss
-    high_low = high - low
-    high_close = np.abs(high - np.roll(close, 1))
-    low_close = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    tr[0] = high_low[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().shift(1).values
-    
-    # Weekly EMA50 trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Weekly EMA200 trend filter (HTF)
-    ema_200_1w = pd.Series(df_1w['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
-    
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25
+    position_size = 0.25  # 25% position size
     
-    start = max(20, 200, 14)
+    # Start after enough data for calculations
+    start = max(20, 20)  # 20 for volume avg
+    
     for i in range(start, n):
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(avg_vol[i]) or np.isnan(atr[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(ema_200_1w_aligned[i])):
+        # Skip if any critical data is NaN
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
         
@@ -56,44 +70,33 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long: breakout above upper band + volume confirmation + price above weekly EMA200 (bullish trend)
-            if (price > upper[i] and vol > 2.0 * avg_vol[i] and 
-                price > ema_200_1w_aligned[i]):
+            # Long: breakout above H3 with volume confirmation
+            if price > camarilla_h3_aligned[i] and vol > 1.5 * avg_vol[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: breakout below lower band + volume confirmation + price below weekly EMA200 (bearish trend)
-            elif (price < lower[i] and vol > 2.0 * avg_vol[i] and 
-                  price < ema_200_1w_aligned[i]):
+            # Short: breakout below L3 with volume confirmation
+            elif price < camarilla_l3_aligned[i] and vol > 1.5 * avg_vol[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below lower band OR below weekly EMA200 OR stop-loss hit
-            if (price < lower[i] or price < ema_200_1w_aligned[i] or 
-                price < entry_price_long - 2.0 * atr[i]):
+            # Exit long: price closes back below L3 (mean reversion) or opposite signal
+            if price < camarilla_l3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price closes above upper band OR above weekly EMA200 OR stop-loss hit
-            if (price > upper[i] or price > ema_200_1w_aligned[i] or 
-                price > entry_price_short + 2.0 * atr[i]):
+            # Exit short: price closes back above H3 (mean reversion) or opposite signal
+            if price > camarilla_h3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -position_size
-        
-        # Track entry price for stop-loss calculation
-        if position != 0 and signals[i] != 0 and (i == start or signals[i-1] == 0):
-            if position == 1:
-                entry_price_long = close[i]
-            else:
-                entry_price_short = close[i]
     
     return signals
 
-name = "1d_1w_Donchian_Volume_EMA200Trend"
-timeframe = "1d"
+name = "4h_1d_CamillaBreakout_Volume_Confirm"
+timeframe = "4h"
 leverage = 1.0
