@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1d trend filter and volume confirmation
-# Uses Donchian(20) breakout on 12h timeframe for entry
+# Hypothesis: 4-hour Donchian breakout with 1-day trend filter and volume confirmation
+# Uses Donchian(20) breakout on 4h timeframe for entry
 # Daily ADX(14) > 25 to filter for trending markets on 1d
-# Volume > 1.3x 20-period EMA for confirmation
-# Designed for 12-37 trades/year with clear trend-following logic
+# Volume > 1.5x 20-period EMA for confirmation (higher threshold to reduce trades)
+# Designed for 20-50 trades/year with clear trend-following logic
 # Position size: 0.25 to balance return and drawdown
+# Works in bull markets via trend continuation and in bear markets via short signals
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,9 +21,9 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data once
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Load 4h data once
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
     # Load daily data once for trend filter
@@ -30,13 +31,13 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 12h Donchian channels (20-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # 4h Donchian channels (20-period)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
     # Calculate Donchian upper/lower bands
-    donch_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donch_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
     # Daily ADX for trend filter (14-period)
     high_1d = df_1d['high'].values
@@ -72,9 +73,9 @@ def generate_signals(prices):
     position_size = 0.25
     
     for i in range(20, n):  # Start after Donchian period
-        # Get aligned 12h Donchian levels
-        donch_high_i = align_htf_to_ltf(prices, df_12h, donch_high)[i]
-        donch_low_i = align_htf_to_ltf(prices, df_12h, donch_low)[i]
+        # Get aligned 4h Donchian levels
+        donch_high_i = align_htf_to_ltf(prices, df_4h, donch_high)[i]
+        donch_low_i = align_htf_to_ltf(prices, df_4h, donch_low)[i]
         
         # Get aligned daily ADX
         adx_1d_i = align_htf_to_ltf(prices, df_1d, adx_1d)[i]
@@ -82,8 +83,8 @@ def generate_signals(prices):
         if np.isnan(donch_high_i) or np.isnan(donch_low_i) or np.isnan(adx_1d_i) or np.isnan(vol_ma[i]):
             continue
         
-        # Volume confirmation (1.3x average)
-        volume_confirm = volume[i] > 1.3 * vol_ma[i]
+        # Volume confirmation (1.5x average - higher threshold to reduce trades)
+        volume_confirm = volume[i] > 1.5 * vol_ma[i]
         
         # Long: Price breaks above Donchian high + daily trend up + volume
         if position == 0 and close[i] > donch_high_i and adx_1d_i > 25 and volume_confirm:
@@ -104,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_DailyADX_Volume"
-timeframe = "12h"
+name = "4h_Donchian_DailyADX_Volume"
+timeframe = "4h"
 leverage = 1.0
