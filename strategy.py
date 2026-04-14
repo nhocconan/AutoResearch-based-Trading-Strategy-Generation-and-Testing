@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout + Volume Spike + ADX Trend Filter (1d)
-Long when price breaks above upper Donchian band with volume > 1.5x average and ADX > 25.
-Short when price breaks below lower Donchian band with volume > 1.5x average and ADX > 25.
-Exit when price crosses the middle Donchian band or ADX < 20.
-Designed for low turnover: ~20-30 trades/year per symbol.
+6h Weekly Ichimoku Cloud Filter + Daily Pivot Reversal
+Long when price is above weekly Ichimoku cloud and bounces from daily S1/S2 pivot.
+Short when price is below weekly Ichimoku cloud and bounces from daily R1/R2 pivot.
+Exit when price crosses the opposite pivot level or cloud is breached.
+Designed for low turnover: ~15-25 trades/year per symbol.
 """
 
 import numpy as np
@@ -19,103 +19,110 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Load 1-day data once for ADX
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load weekly data once for Ichimoku cloud
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 52:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_w = df_w['high'].values
+    low_w = df_w['low'].values
+    close_w = df_w['close'].values
     
-    # Calculate ADX (14)
-    adx_period = 14
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    # Ichimoku cloud (9, 26, 52)
+    tenkan_period = 9
+    kijun_period = 26
+    senkou_span_b_period = 52
     
-    # Directional movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan_sen = (pd.Series(high_w).rolling(window=tenkan_period, min_periods=tenkan_period).max() + 
+                  pd.Series(low_w).rolling(window=tenkan_period, min_periods=tenkan_period).min()) / 2
     
-    # Smoothed values
-    atr = pd.Series(tr).ewm(span=adx_period, adjust=False, min_periods=adx_period).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(span=adx_period, adjust=False, min_periods=adx_period).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(span=adx_period, adjust=False, min_periods=adx_period).mean().values
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun_sen = (pd.Series(high_w).rolling(window=kijun_period, min_periods=kijun_period).max() + 
+                 pd.Series(low_w).rolling(window=kijun_period, min_periods=kijun_period).min()) / 2
     
-    # Directional indicators
-    plus_di = 100 * dm_plus_smooth / atr
-    minus_di = 100 * dm_minus_smooth / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(span=adx_period, adjust=False, min_periods=adx_period).mean().values
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(kijun_period)
     
-    # Donchian channels (20)
-    donch_period = 20
-    upper = pd.Series(high).rolling(window=donch_period, min_periods=donch_period).max().values
-    lower = pd.Series(low).rolling(window=donch_period, min_periods=donch_period).min().values
-    middle = (upper + lower) / 2
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
+    senkou_span_b = (pd.Series(high_w).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).max() + 
+                     pd.Series(low_w).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).min()) / 2
+    senkou_span_b = senkou_span_b.shift(kijun_period)
     
-    # Volume filter: 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Daily pivot points (using previous day)
+    df_d = get_htf_data(prices, '1d')
+    if len(df_d) < 10:
+        return np.zeros(n)
+    
+    high_d = df_d['high'].values
+    low_d = df_d['low'].values
+    close_d = df_d['close'].values
+    
+    # Previous day's pivot levels
+    pivot = (high_d + low_d + close_d) / 3
+    r1 = 2 * pivot - low_d
+    s1 = 2 * pivot - high_d
+    r2 = pivot + (high_d - low_d)
+    s2 = pivot - (high_d - low_d)
+    
+    # Align Ichimoku components to 6h
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_w, tenkan_sen.values)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_w, kijun_sen.values)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_w, senkou_span_a.values)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_w, senkou_span_b.values)
+    
+    # Align daily pivot levels to 6h
+    pivot_aligned = align_htf_to_ltf(prices, df_d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_d, s2)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25
     
-    for i in range(30, n):
-        # 1-day index (6 bars per day for 4h timeframe)
-        idx_1d = i // 6
-        if idx_1d < 1:
-            continue
+    for i in range(52, n):
+        # Get current Ichimoku values
+        tenkan = tenkan_sen_aligned[i]
+        kijun = kijun_sen_aligned[i]
+        span_a = senkou_span_a_aligned[i]
+        span_b = senkou_span_b_aligned[i]
         
-        # Use previous 1d values to avoid look-ahead
-        prev_idx = idx_1d - 1
-        if prev_idx < 0:
-            continue
-            
-        # Get values from previous 1d bar
-        adx_prev = adx[prev_idx] if prev_idx < len(adx) else adx[-1]
+        # Cloud boundaries (using Senkou Span A and B)
+        cloud_top = max(span_a, span_b)
+        cloud_bottom = min(span_a, span_b)
         
-        if np.isnan(adx_prev):
-            continue
-        
-        # Create array for alignment
-        adx_arr = np.full(len(df_1d), adx_prev)
-        adx_4h = align_htf_to_ltf(prices, df_1d, adx_arr)[i]
-        
-        if np.isnan(adx_4h):
-            continue
+        # Get current daily pivot levels
+        piv = pivot_aligned[i]
+        r1_level = r1_aligned[i]
+        s1_level = s1_aligned[i]
+        r2_level = r2_aligned[i]
+        s2_level = s2_aligned[i]
         
         if position == 0:
-            # Long: Break above upper Donchian with volume spike and ADX > 25 (trending)
-            if close[i] > upper[i] and volume[i] > vol_ma[i] * 1.5 and adx_4h > 25:
+            # Long: Price above cloud AND bouncing from S1 or S2
+            if close[i] > cloud_top and (abs(close[i] - s1_level) < 0.005 * close[i] or abs(close[i] - s2_level) < 0.005 * close[i]):
                 position = 1
                 signals[i] = position_size
-            # Short: Break below lower Donchian with volume spike and ADX > 25 (trending)
-            elif close[i] < lower[i] and volume[i] > vol_ma[i] * 1.5 and adx_4h > 25:
+            # Short: Price below cloud AND bouncing from R1 or R2
+            elif close[i] < cloud_bottom and (abs(close[i] - r1_level) < 0.005 * close[i] or abs(close[i] - r2_level) < 0.005 * close[i]):
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
-            # Exit: Cross below middle Donchian or ADX < 20 (weak trend)
-            if close[i] < middle[i] or adx_4h < 20:
+            # Exit: Price crosses below cloud OR breaks below S1
+            if close[i] < cloud_bottom or close[i] < s1_level:
                 position = 0
                 signals[i] = 0.0
         elif position == -1:
-            # Exit: Cross above middle Donchian or ADX < 20 (weak trend)
-            if close[i] > middle[i] or adx_4h < 20:
+            # Exit: Price crosses above cloud OR breaks above R1
+            if close[i] > cloud_top or close[i] > r1_level:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian_Breakout_Volume_ADX"
-timeframe = "4h"
+name = "6h_WeeklyIchimoku_DailyPivot"
+timeframe = "6h"
 leverage = 1.0
