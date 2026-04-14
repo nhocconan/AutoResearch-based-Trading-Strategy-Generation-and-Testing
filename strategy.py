@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI with 4h Trend Filter and Volume Confirmation
-# Uses 1h RSI (14) for overbought/oversold signals in direction of 4h EMA (50)
-# Volume confirmation (>1.3x average) ensures institutional participation
-# Designed to work in both bull and bear markets by trading reversals in direction of 4h trend
-# Target: 60-150 total trades over 4 years = 15-37/year to minimize fee drag
+# Hypothesis: 6h Donchian Breakout with Weekly Pivot Direction and Volume Confirmation
+# Uses Donchian channel breakout (20-period) from 6h for entry signals
+# Weekly pivot points provide directional bias (price above weekly pivot = long bias, below = short bias)
+# Volume confirmation (>1.8x average) ensures institutional participation
+# Designed to work in both bull and bear markets by trading breakouts in direction of weekly trend
+# Target: 20-30 trades/year (80-120 total over 4 years) to minimize fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,67 +20,78 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop for EMA trend filter
-    df_4h = get_htf_data(prices, '4h')
+    # Load weekly data ONCE before loop for pivot points
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h EMA (50) for trend direction
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate weekly pivot points (standard formula)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate RSI (14) on 1h data
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
+    r2_1w = pivot_1w + (high_1w - low_1w)
+    s2_1w = pivot_1w - (high_1w - low_1w)
     
-    # Volume confirmation: volume > 1.3x average volume (20-period)
+    # Align weekly pivots to 6h timeframe
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
+    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
+    
+    # Calculate Donchian Channel (20-period) on 6h data
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper_channel = high_series.rolling(window=20, min_periods=20).max().values
+    lower_channel = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # Volume confirmation: volume > 1.8x average volume (20-period)
     vol_series = pd.Series(volume)
     avg_vol = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 30  # for RSI and volume
+    start = 20  # for Donchian Channel
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(rsi[i]) or np.isnan(ema_4h_aligned[i]) or np.isnan(avg_vol[i])):
+        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
+            np.isnan(pivot_1w_aligned[i]) or np.isnan(r2_1w_aligned[i]) or 
+            np.isnan(s2_1w_aligned[i]) or np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         
-        # Trend filter: only trade in direction of 4h EMA
-        above_ema = price > ema_4h_aligned[i]
+        # Weekly pivot bias: price above pivot = long bias, below = short bias
+        long_bias = price > pivot_1w_aligned[i]
+        short_bias = price < pivot_1w_aligned[i]
         
         if position == 0:
-            # Long: RSI oversold (<30) with volume filter and above 4h EMA
-            if rsi[i] < 30 and vol > 1.3 * avg_vol[i] and above_ema:
+            # Long: price breaks above upper channel with volume filter and long bias
+            if price > upper_channel[i] and vol > 1.8 * avg_vol[i] and long_bias:
                 position = 1
                 signals[i] = position_size
-            # Short: RSI overbought (>70) with volume filter and below 4h EMA
-            elif rsi[i] > 70 and vol > 1.3 * avg_vol[i] and not above_ema:
+            # Short: price breaks below lower channel with volume filter and short bias
+            elif price < lower_channel[i] and vol > 1.8 * avg_vol[i] and short_bias:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI overbought (>70) or price below 4h EMA
-            if rsi[i] > 70 or price < ema_4h_aligned[i]:
+            # Exit long: price breaks below pivot (trend change) or lower channel
+            if price < pivot_1w_aligned[i] or price < lower_channel[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: RSI oversold (<30) or price above 4h EMA
-            if rsi[i] < 30 or price > ema_4h_aligned[i]:
+            # Exit short: price breaks above pivot (trend change) or upper channel
+            if price > pivot_1w_aligned[i] or price > upper_channel[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -87,6 +99,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_RSI_4hEMA_Volume"
-timeframe = "1h"
+name = "6h_Donchian_Breakout_WeeklyPivot_Volume"
+timeframe = "6h"
 leverage = 1.0
