@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Choppiness Index regime filter combined with 1-day Williams %R mean reversion
-# Long when CHOPPINESS > 61.8 (range) AND Williams %R < -80 (oversold)
-# Short when CHOPPINESS > 61.8 (range) AND Williams %R > -20 (overbought)
-# Exit when Williams %R crosses back above -50 (for longs) or below -50 (for shorts)
-# Uses 12h chart for entries, 1d for regime filter, targeting 50-150 trades over 4 years
-# Works in both bull/bear markets by focusing on mean reversion in ranging conditions
+# Hypothesis: 6-hour Elder Ray + 12-hour EMA50 filter
+# Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+# Long when Bull Power > 0 AND price > 12h EMA50 (bullish momentum + trend)
+# Short when Bear Power < 0 AND price < 12h EMA50 (bearish momentum + trend)
+# Exit when Bull/Bear Power crosses zero (momentum reversal)
+# Uses momentum strength with trend filter to avoid whipsaws in choppy markets
+# Target: 50-150 total trades over 4 years (12-37/year) with position size 0.25
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,67 +20,58 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     
-    # Load daily data ONCE before loop for Williams %R and Choppiness Index
-    df_1d = get_htf_data(prices, '1d')
+    # Load 12h data ONCE before loop for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate Williams %R on daily: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    lookback = 14
-    highest_high = pd.Series(df_1d['high']).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(df_1d['low']).rolling(window=lookback, min_periods=lookback).min().values
-    williams_r = -100 * (highest_high - df_1d['close'].values) / (highest_high - lowest_low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid division by zero
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Calculate EMA13 for Elder Ray (13-period EMA of close)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate Choppiness Index on daily: measures ranging vs trending
-    # CHOP = 100 * log10(sum(ATR) / (max(high) - min(low))) / log10(lookback)
-    tr1 = pd.Series(df_1d['high']).rolling(window=1, min_periods=1).max() - pd.Series(df_1d['low']).rolling(window=1, min_periods=1).min()
-    tr2 = abs(pd.Series(df_1d['high']).rolling(window=1, min_periods=1).max() - pd.Series(df_1d['close']).shift(1))
-    tr3 = abs(pd.Series(df_1d['low']).rolling(window=1, min_periods=1).min() - pd.Series(df_1d['close']).shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=lookback, min_periods=lookback).sum().values
-    highest_high = pd.Series(df_1d['high']).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(df_1d['low']).rolling(window=lookback, min_periods=lookback).min().values
-    chop = 100 * np.log10(atr / (highest_high - lowest_low)) / np.log10(lookback)
-    chop = np.where((highest_high - lowest_low) == 0, 50, chop)  # avoid division by zero
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Calculate Elder Ray components
+    bull_power = high - ema13  # High - EMA13
+    bear_power = low - ema13   # Low - EMA13
+    
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations
-    start = lookback
+    # Start after enough data for calculations (13 for EMA13 + buffer)
+    start = 20
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema50_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        wr = williams_r_aligned[i]
-        chop_val = chop_aligned[i]
+        price = close[i]
         
         if position == 0:
-            # Long: ranging market + oversold
-            if chop_val > 61.8 and wr < -80:
+            # Long setup: positive Bull Power + price above 12h EMA50
+            if bull_power[i] > 0 and price > ema50_12h_aligned[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: ranging market + overbought
-            elif chop_val > 61.8 and wr > -20:
+            # Short setup: negative Bear Power + price below 12h EMA50
+            elif bear_power[i] < 0 and price < ema50_12h_aligned[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Williams %R crosses back above -50
-            if wr > -50:
+            # Exit long: Bull Power turns negative (momentum reversal)
+            if bull_power[i] <= 0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Williams %R crosses back below -50
-            if wr < -50:
+            # Exit short: Bear Power turns positive (momentum reversal)
+            if bear_power[i] >= 0:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -87,6 +79,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Chop_WilliamsR_MeanReversion"
-timeframe = "12h"
+name = "6h_ElderRay_12hEMA50"
+timeframe = "6h"
 leverage = 1.0
