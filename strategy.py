@@ -1,3 +1,11 @@
+#2025-06-24
+# Hypothesis: 12h timeframe with 1-day volatility-adjusted support/resistance levels.
+# Uses dynamic S1/R1 levels based on prior day's ATR (0.3x) for breakouts.
+# Filters: volume > 1.3x 24-period average AND volatility > 70th percentile of last 10 days.
+# Exits on reversal (price crosses back through S1/R1) or Donchian breakout failure.
+# Designed for fewer trades (target: 20-50/year) with volatility filtering to avoid chop.
+# Works in bull/bear by capturing volatility expansion breakouts regardless of direction.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
