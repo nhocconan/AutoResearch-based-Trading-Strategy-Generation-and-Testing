@@ -29,12 +29,12 @@ def generate_signals(prices):
     r2 = pivot + (high_1d - low_1d)
     s2 = pivot - (high_1d - low_1d)
     
-    # Align pivot levels to 4h timeframe
-    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    r2_4h = align_htf_to_ltf(prices, df_1d, r2)
-    s2_4h = align_htf_to_ltf(prices, df_1d, s2)
+    # Align pivot levels to 1h timeframe
+    pivot_1h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_1h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_1h = align_htf_to_ltf(prices, df_1d, s1)
+    r2_1h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_1h = align_htf_to_ltf(prices, df_1d, s2)
     
     # Calculate 14-period daily ATR for volatility filter
     tr = np.zeros(len(df_1d))
@@ -52,9 +52,9 @@ def generate_signals(prices):
         for i in range(14, len(df_1d)):
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr_1h = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Volume spike detection (20-period average on 4h)
+    # Volume spike detection (20-period average on 1h)
     vol_ma_20 = np.full_like(volume, np.nan)
     if len(volume) >= 20:
         for i in range(19, len(volume)):
@@ -62,26 +62,35 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position size for lower drawdown
+    position_size = 0.20  # 20% position size for lower drawdown
+    
+    # Pre-calculate session filter (8-20 UTC)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
     
     for i in range(100, n):
         # Skip if any critical data is NaN
-        if (np.isnan(pivot_4h[i]) or 
-            np.isnan(r1_4h[i]) or
-            np.isnan(s1_4h[i]) or
-            np.isnan(r2_4h[i]) or
-            np.isnan(s2_4h[i]) or
-            np.isnan(atr_4h[i]) or
+        if (np.isnan(pivot_1h[i]) or 
+            np.isnan(r1_1h[i]) or
+            np.isnan(s1_1h[i]) or
+            np.isnan(r2_1h[i]) or
+            np.isnan(s2_1h[i]) or
+            np.isnan(atr_1h[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Skip low volatility periods (ATR < 0.8% of price)
-        if atr_4h[i] < 0.008 * close[i]:
+        # Session filter: only trade between 8-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 4h volume vs 20-period average
+        # Skip low volatility periods (ATR < 0.8% of price)
+        if atr_1h[i] < 0.008 * close[i]:
+            signals[i] = 0.0
+            continue
+        
+        # Volume ratio: current 1h volume vs 20-period average
         if vol_ma_20[i] <= 0:
             volume_ratio = 0
         else:
@@ -92,25 +101,25 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: Price breaks above R2 with volume confirmation
-            if (close[i] > r2_4h[i] and volume_ratio > vol_threshold):
+            if (close[i] > r2_1h[i] and volume_ratio > vol_threshold):
                 position = 1
                 signals[i] = position_size
             # Short: Price breaks below S2 with volume confirmation
-            elif (close[i] < s2_4h[i] and volume_ratio > vol_threshold):
+            elif (close[i] < s2_1h[i] and volume_ratio > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Exit: Price falls back below S1
-            if close[i] < s1_4h[i]:
+            if close[i] < s1_1h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
             # Exit: Price rises back above R1
-            if close[i] > r1_4h[i]:
+            if close[i] > r1_1h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -118,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Pivot_R2S2_Breakout_Volume"
-timeframe = "4h"
+name = "1h_1d_Pivot_R2S2_Breakout_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
