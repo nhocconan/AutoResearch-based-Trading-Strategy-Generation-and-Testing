@@ -8,95 +8,75 @@ def generate_signals(prices):
     if n < 200:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 6h Donchian channels (20-period) - use previous bar's high/low
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
-    lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
-    
-    # 6h average volume (20-period) - previous bar
-    vol_series = pd.Series(volume)
-    avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
-    
-    # 6h EMA200 trend filter
-    ema_200_6h = pd.Series(close).ewm(span=200, min_periods=200, adjust=False).mean().values
-    
-    # 6h ATR (14-period) for stop-loss
-    high_low = high - low
-    high_close = np.abs(high - np.roll(close, 1))
-    low_close = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    tr[0] = high_low[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().shift(1).values
-    
-    # 1d EMA50 for trend filter (HTF)
+    # Load 1d data once
     df_1d = get_htf_data(prices, '1d')
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # 1d EMA200 for trend filter (HTF)
-    ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Calculate 30-period EMA on 1d
+    close_1d = df_1d['close'].values
+    ema_30 = pd.Series(close_1d).ewm(span=30, adjust=False, min_periods=30).mean().values
+    
+    # Calculate 14-period RSI on 1d
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    
+    # Calculate 20-period volume moving average (20*4h periods per day)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate 20-period Donchian channels
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25
+    position_size = 0.25  # 25% position size
     
-    start = max(20, 200, 14)
-    for i in range(start, n):
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(avg_vol[i]) or np.isnan(ema_200_6h[i]) or np.isnan(atr[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_200_1d_aligned[i])):
-            signals[i] = 0.0
+    for i in range(200, n):
+        # Get aligned indicators
+        ema_30_aligned = align_htf_to_ltf(prices, df_1d, ema_30)[i]
+        rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)[i]
+        vol_ma_20_val = vol_ma_20[i]  # already LTF
+        
+        # Check for NaN values
+        if (np.isnan(ema_30_aligned) or np.isnan(rsi_1d_aligned) or 
+            np.isnan(vol_ma_20_val) or np.isnan(high_20[i]) or np.isnan(low_20[i])):
             continue
         
-        price = close[i]
-        vol = volume[i]
+        # Volume confirmation (> 1.5x average)
+        volume_confirm = volume[i] > 1.5 * vol_ma_20_val
         
-        if position == 0:
-            # Long: breakout above upper band + volume confirmation + price above EMA200_6h + EMA50_1d > EMA200_1d (bullish)
-            if (price > upper[i] and vol > 2.0 * avg_vol[i] and 
-                price > ema_200_6h[i] and ema_50_1d_aligned[i] > ema_200_1d_aligned[i]):
-                position = 1
-                signals[i] = position_size
-            # Short: breakout below lower band + volume confirmation + price below EMA200_6h + EMA50_1d < EMA200_1d (bearish)
-            elif (price < lower[i] and vol > 2.0 * avg_vol[i] and 
-                  price < ema_200_6h[i] and ema_50_1d_aligned[i] < ema_200_1d_aligned[i]):
-                position = -1
-                signals[i] = -position_size
-            else:
-                signals[i] = 0.0
-        elif position == 1:
-            # Exit long: price closes below lower band OR below EMA200_6h OR stop-loss hit
-            if (price < lower[i] or price < ema_200_6h[i] or 
-                price < entry_price_long - 2.0 * atr[i]):
+        if position == 0:  # No position - look for entries
+            if volume_confirm:
+                # Long: Break above 20-period high + price above 1d EMA30 + RSI not overbought
+                if high[i] > high_20[i] and close[i] > ema_30_aligned and rsi_1d_aligned < 70:
+                    position = 1
+                    signals[i] = position_size
+                # Short: Break below 20-period low + price below 1d EMA30 + RSI not oversold
+                elif low[i] < low_20[i] and close[i] < ema_30_aligned and rsi_1d_aligned > 30:
+                    position = -1
+                    signals[i] = -position_size
+        elif position == 1:  # Long position - exit when price breaks below 20-period low
+            if low[i] < low_20[i]:
                 position = 0
                 signals[i] = 0.0
-            else:
-                signals[i] = position_size
-        elif position == -1:
-            # Exit short: price closes above upper band OR above EMA200_6h OR stop-loss hit
-            if (price > upper[i] or price > ema_200_6h[i] or 
-                price > entry_price_short + 2.0 * atr[i]):
+        elif position == -1:  # Short position - exit when price breaks above 20-period high
+            if high[i] > high_20[i]:
                 position = 0
                 signals[i] = 0.0
-            else:
-                signals[i] = -position_size
-        
-        # Track entry price for stop-loss calculation
-        if position != 0 and signals[i] != 0 and (i == start or signals[i-1] == 0):
-            if position == 1:
-                entry_price_long = close[i]
-            else:
-                entry_price_short = close[i]
     
     return signals
 
-name = "6h_1d_Donchian_Volume_EMA200Trend_EMA50Filter"
-timeframe = "6h"
+name = "4h_Donchian20_EMA30_RSI_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
