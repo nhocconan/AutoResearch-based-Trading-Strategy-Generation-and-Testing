@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,17 +13,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for 1D ATR and close
+    # Load daily data for Bollinger Bands and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 14-day ATR (daily)
-    if len(high_1d) < 15:
+    # Calculate 20-day ATR (daily) for volatility filter
+    if len(high_1d) < 21:
         return np.zeros(n)
     
     tr = np.zeros_like(high_1d)
@@ -33,10 +33,10 @@ def generate_signals(prices):
                    abs(low_1d[i] - low_1d[i-1]))
     
     atr_1d = np.full_like(high_1d, np.nan)
-    if len(high_1d) >= 15:
-        atr_1d[14] = np.mean(tr[1:15])
-        for i in range(15, len(high_1d)):
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
+    if len(high_1d) >= 21:
+        atr_1d[20] = np.mean(tr[1:21])
+        for i in range(21, len(high_1d)):
+            atr_1d[i] = (atr_1d[i-1] * 19 + tr[i]) / 20
     
     # Align daily ATR to 4h timeframe
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
@@ -52,7 +52,7 @@ def generate_signals(prices):
     # Align daily SMA to 4h timeframe
     sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, sma20_1d)
     
-    # Calculate 20-period standard deviation of daily close (volatility filter)
+    # Calculate 20-period standard deviation of daily close (volatility for Bollinger Bands)
     if len(close_1d) < 20:
         return np.zeros(n)
     
@@ -67,39 +67,17 @@ def generate_signals(prices):
     upper_bb_1d_aligned = sma20_1d_aligned + 2 * std20_1d_aligned
     lower_bb_1d_aligned = sma20_1d_aligned - 2 * std20_1d_aligned
     
-    # Calculate RSI(14) on 4h closes for momentum confirmation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.full_like(close, np.nan)
-    avg_loss = np.full_like(close, np.nan)
-    
-    # First average
-    if len(gain) >= 14:
-        avg_gain[13] = np.mean(gain[1:14])
-        avg_loss[13] = np.mean(loss[1:14])
-    
-    # Wilder smoothing
-    for i in range(14, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(close, np.nan), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
     signals = np.zeros(n)
     position = 0
-    position_size = 0.20  # Reduced to lower trade frequency
+    position_size = 0.25  # Position size: 25% of capital
     
     for i in range(30, n):
         # Skip if any critical data is NaN
         if (np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(sma20_1d_aligned[i]) or 
+            np.isnan(sma20_1d_aligned[i]) or
             np.isnan(std20_1d_aligned[i]) or
             np.isnan(upper_bb_1d_aligned[i]) or
-            np.isnan(lower_bb_1d_aligned[i]) or
-            np.isnan(rsi[i])):
+            np.isnan(lower_bb_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -114,34 +92,30 @@ def generate_signals(prices):
             volume_ratio = volume[i] / vol_ma_20[i]
         
         if position == 0:
-            # Long: price touches lower Bollinger Band with volume surge and RSI oversold
+            # Long: price touches lower Bollinger Band with volume surge
             if (close[i] <= lower_bb_1d_aligned[i] and 
-                volume_ratio > 3.0 and  # Increased threshold to reduce trades
-                rsi[i] < 25):           # More oversold threshold
+                volume_ratio > 4.0):  # High threshold to reduce trades
                 position = 1
                 signals[i] = position_size
-            # Short: price touches upper Bollinger Band with volume surge and RSI overbought
+            # Short: price touches upper Bollinger Band with volume surge
             elif (close[i] >= upper_bb_1d_aligned[i] and 
-                  volume_ratio > 3.0 and
-                  rsi[i] > 75):         # More overbought threshold
+                  volume_ratio > 4.0):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses above SMA(20) or volume dries up or RSI overbought
+            # Exit long: price crosses above SMA(20) or volume dries up
             if (close[i] > sma20_1d_aligned[i] or
-                volume_ratio < 0.5 or
-                rsi[i] > 70):
+                volume_ratio < 0.3):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses below SMA(20) or volume dries up or RSI oversold
+            # Exit short: price crosses below SMA(20) or volume dries up
             if (close[i] < sma20_1d_aligned[i] or
-                volume_ratio < 0.5 or
-                rsi[i] < 30):
+                volume_ratio < 0.3):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -149,6 +123,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Bollinger_Touch_Volume_RSI_v2"
+name = "4h_1d_Bollinger_Touch_Volume_v3"
 timeframe = "4h"
 leverage = 1.0
