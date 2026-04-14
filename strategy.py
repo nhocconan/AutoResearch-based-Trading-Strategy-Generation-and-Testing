@@ -1,16 +1,15 @@
+#%%
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w Bollinger Band squeeze + RSI mean reversion.
-# Bollinger Band width < 20th percentile indicates low volatility (squeeze).
-# When squeeze releases, price tends to revert to mean (20-day SMA).
-# Long when BB width expands from squeeze AND RSI < 40 (oversold) AND price > SMA20.
-# Short when BB width expands from squeeze AND RSI > 60 (overbought) AND price < SMA20.
-# Exit when RSI crosses 50 (mean) or BB width contracts back below squeeze threshold.
-# Designed to capture mean reversion after low volatility periods in both bull and bear markets.
-# Target: 15-25 trades/year per symbol (60-100 total over 4 years) to minimize fee drag.
+# Hypothesis: 6h strategy combining 12h Williams %R for overbought/oversold conditions
+# with 1d ADX for trend strength filtering. Williams %R identifies reversal points
+# in ranging markets, while ADX ensures we only trade when there's sufficient
+# momentum to sustain the move. This combination works in both bull and bear markets
+# by capturing mean reversion in ranges and momentum in trends.
+# Target: 60-120 total trades over 4 years (15-30/year) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,116 +19,125 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load 1d data ONCE for Bollinger Bands and RSI
+    # Load 12h data ONCE for Williams %R
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 14:
+        return np.zeros(n)
+    
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # Calculate Williams %R on 12h: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # Using 14-period lookback
+    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_12h) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    
+    # Load 1d data ONCE for ADX
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2
-    sma_20 = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).std().values
-    bb_upper = sma_20 + bb_std * std_20
-    bb_lower = sma_20 - bb_std * std_20
-    bb_width = bb_upper - bb_lower
+    # Calculate ADX components on 1d
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
-    # Calculate BB width percentile (lookback 50 days for squeeze threshold)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=10).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100 if len(x) > 0 else np.nan, raw=False
-    ).values
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Squeeze condition: BB width < 20th percentile
-    squeeze_threshold = 20
-    is_squeeze = bb_width_percentile < squeeze_threshold
+    # Smoothed values
+    tr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate RSI (14)
-    rsi_period = 14
-    delta = np.diff(close_1d, prepend=np.nan)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Directional Indicators
+    plus_di = 100 * dm_plus_14 / tr_14
+    minus_di = 100 * dm_minus_14 / tr_14
     
-    # Load 1w data ONCE for trend filter (optional - using 1w close > 50w EMA for bull bias)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # ADX
+    dx = np.where((plus_di + minus_di) != 0, 
+                  100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    close_1w = df_1w['close'].values
-    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Bull/bear regime: 1w close above/below 50-week EMA
-    bull_regime = np.zeros_like(close_1w, dtype=bool)
-    bear_regime = np.zeros_like(close_1w, dtype=bool)
-    bull_regime = close_1w > ema_50
-    bear_regime = close_1w < ema_50
+    # Align indicators to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    plus_di_aligned = align_htf_to_ltf(prices, df_1d, plus_di)
+    minus_di_aligned = align_htf_to_ltf(prices, df_1d, minus_di)
     
-    # Align indicators to lower timeframe
-    sma_20_aligned = align_htf_to_ltf(prices, df_1d, sma_20)
-    bb_width_percentile_aligned = align_htf_to_ltf(prices, df_1d, bb_width_percentile)
-    is_squeeze_aligned = align_htf_to_ltf(prices, df_1d, is_squeeze.astype(float))
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    bull_regime_aligned = align_htf_to_ltf(prices, df_1w, bull_regime.astype(float))
-    bear_regime_aligned = align_htf_to_ltf(prices, df_1w, bear_regime.astype(float))
+    # Volume confirmation: 1.3x average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(bb_period, rsi_period, 50)  # Need BB, RSI, and regime
+    start = max(30, 20)  # Need ADX and volume MA
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(sma_20_aligned[i]) or 
-            np.isnan(bb_width_percentile_aligned[i]) or
-            np.isnan(rsi_aligned[i]) or
-            np.isnan(bull_regime_aligned[i]) or
-            np.isnan(bear_regime_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or
+            np.isnan(plus_di_aligned[i]) or
+            np.isnan(minus_di_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Squeeze release: was in squeeze, now expanding
-        was_in_squeeze = i > start and is_squeeze_aligned[i-1]
-        is_expanding = bb_width_percentile_aligned[i] > bb_width_percentile_aligned[i-1]
-        squeeze_released = was_in_squeeze and is_expanding
+        # Volume confirmation
+        volume_confirmed = volume[i] > 1.3 * vol_ma[i]
+        
+        # Williams %R conditions: oversold (< -80) or overbought (> -20)
+        oversold = williams_r_aligned[i] < -80
+        overbought = williams_r_aligned[i] > -20
+        
+        # ADX trend strength: > 25 indicates strong trend
+        strong_trend = adx_aligned[i] > 25
+        
+        # Directional bias from DI crossover
+        bullish_bias = plus_di_aligned[i] > minus_di_aligned[i]
+        bearish_bias = minus_di_aligned[i] > plus_di_aligned[i]
         
         if position == 0:
-            # Look for mean reversion entries after squeeze release
-            # Long: squeeze released, RSI oversold, price above SMA20
-            if (squeeze_released and 
-                rsi_aligned[i] < 40 and 
-                close[i] > sma_20_aligned[i]):
+            # Long: oversold AND strong trend AND bullish bias AND volume
+            if (oversold and strong_trend and bullish_bias and volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: squeeze released, RSI overbought, price below SMA20
-            elif (squeeze_released and 
-                  rsi_aligned[i] > 60 and 
-                  close[i] < sma_20_aligned[i]):
+            # Short: overbought AND strong trend AND bearish bias AND volume
+            elif (overbought and strong_trend and bearish_bias and volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI crosses above 50 or BB width contracts back into squeeze
-            if (rsi_aligned[i] >= 50 or 
-                bb_width_percentile_aligned[i] < squeeze_threshold):
+            # Exit long: Williams %R returns to neutral (> -50) or trend weakens
+            if (williams_r_aligned[i] > -50 or adx_aligned[i] < 20):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: RSI crosses below 50 or BB width contracts back into squeeze
-            if (rsi_aligned[i] <= 50 or 
-                bb_width_percentile_aligned[i] < squeeze_threshold):
+            # Exit short: Williams %R returns to neutral (< -50) or trend weakens
+            if (williams_r_aligned[i] < -50 or adx_aligned[i] < 20):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -137,6 +145,7 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_BB_Squeeze_RSI_MeanReversion_v1"
-timeframe = "1d"
+name = "6h_12hWilliamsR_1dADX_VolumeFilter_v1"
+timeframe = "6h"
 leverage = 1.0
+#%%
