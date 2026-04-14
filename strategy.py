@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,13 +21,13 @@ def generate_signals(prices):
     daily_close = df_1d['close'].values
     daily_open = df_1d['open'].values
     
-    # Donchian channels (20-period)
+    # Donchian channels (25-period for slightly fewer signals)
     donch_high = np.full(n, np.nan)
     donch_low = np.full(n, np.nan)
     
-    for i in range(19, n):
-        donch_high[i] = np.max(high[i-19:i+1])
-        donch_low[i] = np.min(low[i-19:i+1])
+    for i in range(24, n):
+        donch_high[i] = np.max(high[i-24:i+1])
+        donch_low[i] = np.min(low[i-24:i+1])
     
     donch_mid = (donch_high + donch_low) / 2
     
@@ -55,7 +55,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25
     
-    for i in range(19, n):
+    for i in range(24, n):
         # Skip if any indicator not ready
         if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(donch_mid[i]) or np.isnan(vol_ma[i]):
             continue
@@ -89,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian_Breakout_Volume_DailyTrend"
+name = "4h_Donchian_Breakout_Volume_DailyTrend_v2"
 timeframe = "4h"
 leverage = 1.0
