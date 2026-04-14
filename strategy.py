@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d ADX trend filter and volume confirmation
-# Breakouts above Donchian(20) high or below Donchian(20) low capture momentum
-# 1d ADX(14) > 25 filters for trending markets where breakouts are more reliable
-# Volume > 1.5x 20-period EMA confirms institutional participation
-# Target: 20-50 trades/year with trend-following logic suited for 2025 bear/range conditions
-# Stops via opposite Donchian band touch to avoid whipsaws
+# Hypothesis: 4h Williams %R with 1d ADX trend filter and volume confirmation
+# Williams %R(14) identifies overbought/oversold conditions for mean reversion
+# 1d ADX(14) > 25 filters for trending markets where mean reversion fails
+# Volume > 1.5x 20-period EMA confirms participation when mean reverting
+# Target: 20-40 trades/year with mean-reversion logic suited for 2025 range-bound conditions
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,11 +19,12 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
-    # Calculate 1d ADX (14-period) for trend filter (high ADX = trending)
+    # Calculate 1d ADX (14-period) for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -63,41 +63,41 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25
     
-    for i in range(20, n):
+    for i in range(14, n):
         # Get aligned 1d ADX
         adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)[i]
         
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
-           np.isnan(adx_1d_aligned) or np.isnan(vol_ma[i]):
+        if np.isnan(williams_r[i]) or np.isnan(adx_1d_aligned) or \
+           np.isnan(vol_ma[i]):
             continue
         
         # Volume confirmation (1.5x average)
         volume_confirm = volume[i] > 1.5 * vol_ma[i]
-        # Trend filter: ADX > 25 indicates trending market (better for breakouts)
+        # Trend filter: ADX > 25 indicates trending market (avoid mean reversion in trends)
         trending = adx_1d_aligned > 25
         
-        if position == 0:  # No position - look for breakout entries
-            # Long breakout: price breaks above Donchian high with volume in trending market
-            if close[i] > donchian_high[i] and volume_confirm and trending:
+        if position == 0:  # No position - look for mean reversion entries
+            # Long: Williams %R oversold (< -80) in ranging market with volume
+            if williams_r[i] < -80 and not trending and volume_confirm:
                 position = 1
                 signals[i] = position_size
-            # Short breakout: price breaks below Donchian low with volume in trending market
-            elif close[i] < donchian_low[i] and volume_confirm and trending:
+            # Short: Williams %R overbought (> -20) in ranging market with volume
+            elif williams_r[i] > -20 and not trending and volume_confirm:
                 position = -1
                 signals[i] = -position_size
-        elif position == 1:  # Long position - exit at opposite Donchian band
-            # Exit if price breaks below Donchian low (failed breakout)
-            if close[i] < donchian_low[i]:
+        elif position == 1:  # Long position - exit when Williams %R returns to neutral
+            # Exit if Williams %R rises above -50 (return to neutral)
+            if williams_r[i] > -50:
                 position = 0
                 signals[i] = 0.0
-        elif position == -1:  # Short position - exit at opposite Donchian band
-            # Exit if price breaks above Donchian high (failed breakout)
-            if close[i] > donchian_high[i]:
+        elif position == -1:  # Short position - exit when Williams %R returns to neutral
+            # Exit if Williams %R falls below -50 (return to neutral)
+            if williams_r[i] < -50:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian_1dADX_TrendBreak"
+name = "4h_WilliamsR_1dADX_MeanReversion"
 timeframe = "4h"
 leverage = 1.0
