@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1-day volume-weighted average price (VWAP) as dynamic support/resistance
-# with 1-week MACD trend filter and volume confirmation.
-# Long when price crosses above 1-day VWAP with MACD bullish and volume > 2x average.
-# Short when price crosses below 1-day VWAP with MACD bearish and volume > 2x average.
-# Exit when price crosses back below/above VWAP or MACD reverses.
-# VWAP adapts to market structure, MACD filters trend direction, volume confirms breakout strength.
-# Designed for low trade frequency (target: 20-25 trades/year) to minimize fee drag in bear markets.
+# Hypothesis: 1d strategy using 1-week volatility-adjusted support/resistance with 1-week RSI trend filter.
+# Long when price breaks above weekly volatility-adjusted resistance with weekly RSI > 50 (uptrend) and volume confirmation.
+# Short when price breaks below weekly volatility-adjusted support with weekly RSI < 50 (downtrend) and volume confirmation.
+# Exit when price returns to prior week's close or RSI crosses 50 in opposite direction.
+# Designed to work in both bull and bear markets by adapting to volatility and using RSI for trend confirmation.
+# Target: 10-25 trades/year per symbol (40-100 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,98 +20,110 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for VWAP calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
-    
-    # Calculate typical price and VWAP for 1d
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
-    vp_1d = typical_price_1d * volume_1d
-    cum_vp_1d = np.nancumsum(vp_1d)
-    cum_vol_1d = np.nancumsum(volume_1d)
-    vwap_1d = np.divide(cum_vp_1d, cum_vol_1d, out=np.full_like(cum_vp_1d, np.nan), where=cum_vol_1d!=0)
-    
-    # Load 1w data ONCE for MACD trend filter
+    # Load 1w data ONCE for volatility-adjusted levels
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 35:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate MACD on 1w
-    ema_fast = pd.Series(close_1w).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema_slow = pd.Series(close_1w).ewm(span=26, adjust=False, min_periods=26).mean().values
-    macd_line = ema_fast - ema_slow
-    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
-    macd_hist = macd_line - signal_line
+    # Calculate True Range and ATR on 1w
+    tr1 = np.abs(high_1w[1:] - low_1w[1:])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
+    
+    atr_period = 14
+    atr_1w = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    
+    # Volatility-adjusted support/resistance: prior week's high/low ± 0.5 * ATR
+    var_resistance = np.roll(high_1w, 1) + 0.5 * np.roll(atr_1w, 1)
+    var_support = np.roll(low_1w, 1) - 0.5 * np.roll(atr_1w, 1)
+    var_resistance[0] = np.nan
+    var_support[0] = np.nan
+    
+    # Prior 1w close for exit condition
+    prior_close_1w = np.roll(close_1w, 1)
+    prior_close_1w[0] = np.nan
+    
+    # Load 1w data ONCE for RSI trend filter (same timeframe)
+    close_1w_for_rsi = df_1w['close'].values
+    
+    # Calculate RSI(14) on 1w
+    delta = np.diff(close_1w_for_rsi, prepend=np.nan)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / avg_loss
+    rs = np.where(avg_loss == 0, 100, rs)
+    rsi_1w = 100 - (100 / (1 + rs))
     
     # Align indicators to lower timeframe
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
-    macd_hist_aligned = align_htf_to_ltf(prices, df_1w, macd_hist)
+    var_resistance_aligned = align_htf_to_ltf(prices, df_1w, var_resistance)
+    var_support_aligned = align_htf_to_ltf(prices, df_1w, var_support)
+    prior_close_1w_aligned = align_htf_to_ltf(prices, df_1w, prior_close_1w)
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
-    # Volume confirmation: 2x average volume (higher threshold for fewer trades)
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Volume confirmation: 1.5x average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(50, 35)  # Need volume MA and MACD
+    start = max(20, 14)  # Need VAR and RSI
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(vwap_1d_aligned[i]) or 
-            np.isnan(macd_hist_aligned[i]) or
+        if (np.isnan(var_resistance_aligned[i]) or 
+            np.isnan(var_support_aligned[i]) or
+            np.isnan(prior_close_1w_aligned[i]) or
+            np.isnan(rsi_1w_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
-        volume_confirmed = volume[i] > 2.0 * vol_ma[i]
+        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
-        # MACD trend filter: hist > 0 for bullish, < 0 for bearish
-        macd_bullish = macd_hist_aligned[i] > 0
-        macd_bearish = macd_hist_aligned[i] < 0
+        # Trend filter: RSI > 50 for uptrend, < 50 for downtrend
+        uptrend = rsi_1w_aligned[i] > 50
+        downtrend = rsi_1w_aligned[i] < 50
         
         if position == 0:
-            # Look for VWAP crossovers
-            # Long: price crosses above VWAP with bullish MACD
-            if (close[i] > vwap_1d_aligned[i] and 
-                close[i-1] <= vwap_1d_aligned[i-1] and  # crossed above
-                macd_bullish and 
+            # Look for volatility-adjusted breakouts
+            # Long: price breaks above VAR resistance AND uptrend
+            if (close[i] > var_resistance_aligned[i] and 
+                uptrend and 
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: price crosses below VWAP with bearish MACD
-            elif (close[i] < vwap_1d_aligned[i] and 
-                  close[i-1] >= vwap_1d_aligned[i-1] and  # crossed below
-                  macd_bearish and 
+            # Short: price breaks below VAR support AND downtrend
+            elif (close[i] < var_support_aligned[i] and 
+                  downtrend and 
                   volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below VWAP or MACD turns bearish
-            if (close[i] < vwap_1d_aligned[i] and 
-                close[i-1] >= vwap_1d_aligned[i-1]) or \
-               macd_hist_aligned[i] <= 0:
+            # Exit long: price returns to prior 1w close or RSI crosses below 50
+            if (close[i] <= prior_close_1w_aligned[i] or 
+                rsi_1w_aligned[i] <= 50):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above VWAP or MACD turns bullish
-            if (close[i] > vwap_1d_aligned[i] and 
-                close[i-1] <= vwap_1d_aligned[i-1]) or \
-               macd_hist_aligned[i] >= 0:
+            # Exit short: price returns to prior 1w close or RSI crosses above 50
+            if (close[i] >= prior_close_1w_aligned[i] or 
+                rsi_1w_aligned[i] >= 50):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -120,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_VWAP_MACD_VolumeFilter_v1"
-timeframe = "4h"
+name = "1d_VolatilityAdjustedBreakout_1wRSI_v1"
+timeframe = "1d"
 leverage = 1.0
