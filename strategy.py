@@ -23,18 +23,18 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 20-period EMA for trend (daily)
-    if len(close_1d) < 20:
+    # Calculate 50-period EMA for trend (daily)
+    if len(close_1d) < 50:
         return np.zeros(n)
     
-    ema20_1d = np.full_like(close_1d, np.nan)
-    alpha = 2 / (20 + 1)
-    ema20_1d[0] = close_1d[0]
+    ema50_1d = np.full_like(close_1d, np.nan)
+    alpha = 2 / (50 + 1)
+    ema50_1d[0] = close_1d[0]
     for i in range(1, len(close_1d)):
-        ema20_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema20_1d[i-1]
+        ema50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema50_1d[i-1]
     
     # Align EMA to 4h timeframe
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # Calculate 14-period RSI for momentum (daily)
     if len(close_1d) < 14:
@@ -82,53 +82,58 @@ def generate_signals(prices):
     # Align ATR to 4h timeframe
     atr_20_aligned = align_htf_to_ltf(prices, df_1d, atr_20)
     
+    # Calculate 20-period volume average (daily)
+    vol_ma_20 = np.full_like(volume_1d, np.nan)
+    for i in range(19, len(volume_1d)):
+        vol_ma_20[i] = np.mean(volume_1d[i-19:i+1])
+    
+    # Align volume MA to 4h timeframe
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # Position size: 25% of capital
     
     for i in range(100, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema20_1d_aligned[i]) or 
+        if (np.isnan(ema50_1d_aligned[i]) or 
             np.isnan(rsi_14_aligned[i]) or
-            np.isnan(atr_20_aligned[i])):
+            np.isnan(atr_20_aligned[i]) or
+            np.isnan(vol_ma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Volume ratio: current period volume vs 20-period average
-        vol_ma_20 = np.full_like(volume, np.nan)
-        for j in range(19, len(volume)):
-            vol_ma_20[j] = np.mean(volume[j-19:j+1])
-        
-        if np.isnan(vol_ma_20[i]) or vol_ma_20[i] <= 0:
+        if vol_ma_20_aligned[i] <= 0:
             volume_ratio = 0
         else:
-            volume_ratio = volume[i] / vol_ma_20[i]
+            volume_ratio = volume[i] / vol_ma_20_aligned[i]
         
         if position == 0:
-            # Long: Price above EMA20 + RSI > 50 + volume surge
-            if (close[i] > ema20_1d_aligned[i] and
+            # Long: Price above EMA50 + RSI > 50 + volume surge
+            if (close[i] > ema50_1d_aligned[i] and
                 rsi_14_aligned[i] > 50 and
-                volume_ratio > 3.0):
+                volume_ratio > 2.0):
                 position = 1
                 signals[i] = position_size
-            # Short: Price below EMA20 + RSI < 50 + volume surge
-            elif (close[i] < ema20_1d_aligned[i] and
+            # Short: Price below EMA50 + RSI < 50 + volume surge
+            elif (close[i] < ema50_1d_aligned[i] and
                   rsi_14_aligned[i] < 50 and
-                  volume_ratio > 3.0):
+                  volume_ratio > 2.0):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Price crosses below EMA20
-            if close[i] < ema20_1d_aligned[i]:
+            # Exit long: Price crosses below EMA50
+            if close[i] < ema50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Price crosses above EMA20
-            if close[i] > ema20_1d_aligned[i]:
+            # Exit short: Price crosses above EMA50
+            if close[i] > ema50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -136,6 +141,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_EMA_RSI_Volume_v1"
+name = "4h_1d_EMA50_RSI_Volume_v1"
 timeframe = "4h"
 leverage = 1.0
