@@ -3,6 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 4h Choppiness Index regime filter + 1d Donchian breakout + volume confirmation.
+# In choppy markets (Chop > 61.8), mean-reversion at Donchian bands works; in trending (Chop < 38.2), breakouts work.
+# This adapts to both bull and bear markets by filtering regime. Target: 20-40 trades/year.
+# Uses 4h primary timeframe, 1d for Chop and Donchian, volume confirmation on 4h.
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -22,7 +27,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily ATR for volatility filter (14-period)
+    # Calculate daily True Range for Chop (14-period)
     tr = np.zeros(len(df_1d))
     tr[0] = high_1d[0] - low_1d[0]
     for i in range(1, len(df_1d)):
@@ -38,26 +43,41 @@ def generate_signals(prices):
         for i in range(14, len(df_1d)):
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Calculate Chop: 100 * log10(sum(TR,14) / (max(HH,14) - min(LL,14))) / log10(14)
+    sum_tr_14 = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 14:
+        sum_tr_14[13] = np.sum(tr[:14])
+        for i in range(14, len(df_1d)):
+            sum_tr_14[i] = sum_tr_14[i-1] - tr[i-14] + tr[i]
     
-    # Calculate daily EMA200 for trend filter (1d)
-    ema200_1d = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 200:
-        ema200_1d[199] = np.mean(close_1d[:200])
-        for i in range(200, len(df_1d)):
-            ema200_1d[i] = (close_1d[i] * 2 + ema200_1d[i-1] * 198) / 200
+    max_high_14 = np.full(len(df_1d), np.nan)
+    min_low_14 = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 14:
+        for i in range(13, len(df_1d)):
+            max_high_14[i] = np.max(high_1d[i-13:i+1])
+            min_low_14[i] = np.min(low_1d[i-13:i+1])
     
-    ema200_12h = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    chop_1d = np.full(len(df_1d), np.nan)
+    for i in range(13, len(df_1d)):
+        if max_high_14[i] > min_low_14[i] and sum_tr_14[i] > 0:
+            chop_1d[i] = 100 * np.log10(sum_tr_14[i] / (max_high_14[i] - min_low_14[i])) / np.log10(14)
+        else:
+            chop_1d[i] = 50  # neutral
     
-    # Calculate 12-hour Donchian channels (20-period) for entry signals
-    donch_high = np.full(n, np.nan)
-    donch_low = np.full(n, np.nan)
-    if n >= 20:
-        for i in range(19, n):
-            donch_high[i] = np.max(high[i-19:i+1])
-            donch_low[i] = np.min(low[i-19:i+1])
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # Calculate volume moving average (20-period)
+    # Calculate daily Donchian channels (20-period)
+    donch_high_1d = np.full(len(df_1d), np.nan)
+    donch_low_1d = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 20:
+        for i in range(19, len(df_1d)):
+            donch_high_1d[i] = np.max(high_1d[i-19:i+1])
+            donch_low_1d[i] = np.min(low_1d[i-19:i+1])
+    
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
+    
+    # Calculate 4h volume moving average (20-period)
     vol_ma_20 = np.full(n, np.nan)
     if n >= 20:
         for i in range(19, n):
@@ -67,20 +87,21 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25  # 25% position size
     
-    for i in range(200, n):
+    for i in range(200, n):  # start after warmup
         # Skip if any critical data is NaN
-        if (np.isnan(atr_12h[i]) or
-            np.isnan(ema200_12h[i]) or
-            np.isnan(donch_high[i]) or
-            np.isnan(donch_low[i]) or
+        if (np.isnan(chop_aligned[i]) or
+            np.isnan(donch_high_aligned[i]) or
+            np.isnan(donch_low_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Skip low volatility periods (ATR < 0.3% of price)
-        if atr_12h[i] < 0.003 * close[i]:
-            signals[i] = 0.0
-            continue
+        if atr_1d[13] > 0:  # ensure ATR is valid
+            atr_val = atr_1d[min(i // 16 + 1, len(atr_1d)-1)] if i // 16 + 1 < len(atr_1d) else atr_1d[-1]
+            if atr_val < 0.003 * close[i]:
+                signals[i] = 0.0
+                continue
         
         # Volume ratio: current volume vs 20-period average
         if vol_ma_20[i] <= 0:
@@ -88,51 +109,70 @@ def generate_signals(prices):
         else:
             volume_ratio = volume[i] / vol_ma_20[i]
         
-        # Volume threshold: require significant spike
-        vol_threshold = 2.0
-        
-        # Calculate daily pivot levels based on previous day's range
-        prev_high = high_1d[i-1] if i > 0 else high_1d[0]
-        prev_low = low_1d[i-1] if i > 0 else low_1d[0]
-        prev_close = close_1d[i-1] if i > 0 else close_1d[0]
-        prev_range = prev_high - prev_low
-        
-        # Camarilla-style pivot levels (R4/S4)
-        r4 = prev_close + (prev_range * 1.1 / 2)
-        s4 = prev_close - (prev_range * 1.1 / 2)
-        
-        # Align to 12h timeframe (no extra delay needed for daily pivot)
-        r4_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r4))[i]
-        s4_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s4))[i]
+        vol_threshold = 2.0  # require volume spike
         
         if position == 0:
-            # Long: Price breaks above 12h Donchian high with volume confirmation and above daily EMA200
-            if close[i] > donch_high[i] and volume_ratio > vol_threshold and close[i] > ema200_12h[i]:
-                position = 1
-                signals[i] = position_size
-            # Short: Price breaks below 12h Donchian low with volume confirmation and below daily EMA200
-            elif close[i] < donch_low[i] and volume_ratio > vol_threshold and close[i] < ema200_12h[i]:
-                position = -1
-                signals[i] = -position_size
+            # Chop > 61.8: range -> mean reversion at Donchian bands
+            # Chop < 38.2: trend -> breakout
+            if chop_aligned[i] > 61.8:
+                # Mean reversion: sell at Donchian high, buy at Donchian low
+                if close[i] < donch_low_aligned[i] and volume_ratio > vol_threshold:
+                    position = 1
+                    signals[i] = position_size
+                elif close[i] > donch_high_aligned[i] and volume_ratio > vol_threshold:
+                    position = -1
+                    signals[i] = -position_size
+                else:
+                    signals[i] = 0.0
+            elif chop_aligned[i] < 38.2:
+                # Trend following: breakout in direction of trend
+                if close[i] > donch_high_aligned[i] and volume_ratio > vol_threshold:
+                    position = 1
+                    signals[i] = position_size
+                elif close[i] < donch_low_aligned[i] and volume_ratio > vol_threshold:
+                    position = -1
+                    signals[i] = -position_size
+                else:
+                    signals[i] = 0.0
             else:
+                # Neutral chop: no trade
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below 12h Donchian low OR below daily EMA200
-            if close[i] < donch_low[i] or close[i] < ema200_12h[i]:
-                position = 0
-                signals[i] = 0.0
+            # Long exit: price crosses Donchian high (for trend) or low (for mean reversion)
+            # In trend: exit on breakout failure; in mean reversion: exit at opposite band
+            if chop_aligned[i] > 61.8:
+                # Mean reversion mode: exit at Donchian high
+                if close[i] > donch_high_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = position_size
             else:
-                signals[i] = position_size
+                # Trend mode: exit if price fails to hold above Donchian low
+                if close[i] < donch_low_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above 12h Donchian high OR above daily EMA200
-            if close[i] > donch_high[i] or close[i] > ema200_12h[i]:
-                position = 0
-                signals[i] = 0.0
+            # Short exit: price crosses Donchian low (for trend) or high (for mean reversion)
+            if chop_aligned[i] > 61.8:
+                # Mean reversion mode: exit at Donchian low
+                if close[i] < donch_low_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -position_size
             else:
-                signals[i] = -position_size
+                # Trend mode: exit if price fails to hold below Donchian high
+                if close[i] > donch_high_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -position_size
     
     return signals
 
-name = "12h_1d_Donchian_EMA200_Volume"
-timeframe = "12h"
+name = "4h_1d_Chop_Donchian_MeanRev_Trend"
+timeframe = "4h"
 leverage = 1.0
