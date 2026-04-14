@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Choppiness Index + 1-week RSI mean reversion with volume filter
-# Long when weekly RSI < 30 AND choppiness > 61.8 (ranging) AND volume > 1.5x average
-# Short when weekly RSI > 70 AND choppiness > 61.8 (ranging) AND volume > 1.5x average
-# Exit when RSI crosses back to neutral zone (40-60)
-# This captures mean reversion in ranging markets while avoiding trending periods
-# Target: 75-200 total trades over 4 years (19-50/year) with strict entry conditions
+# Hypothesis: Weekly Camarilla Pivot breakout with 1-week trend filter (EMA200) and volume confirmation
+# Long when price breaks above Camarilla H3 level AND price > weekly EMA200 AND volume > 2x 20-period average
+# Short when price breaks below Camarilla L3 level AND price < weekly EMA200 AND volume > 2x 20-period average
+# Exit when price crosses back inside the Camarilla H3-L3 range
+# Uses weekly timeframe for structure, daily for entry timing
+# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag while capturing major moves
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,30 +20,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for RSI
+    # Load weekly data ONCE before loop for Camarilla pivots and EMA200 trend filter
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate RSI on weekly close (14-period)
-    close_1w = df_1w['close'].values
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1w = 100 - (100 / (1 + rs))
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # Calculate weekly Camarilla pivot levels
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # H3 = Pivot + (Range * 1.1)
+    # L3 = Pivot - (Range * 1.1)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Calculate Choppiness Index on 4h (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10((atr_14 * 14) / (highest_high - lowest_low + 1e-10)) / np.log10(14)
+    pivot = (weekly_high + weekly_low + weekly_close) / 3
+    weekly_range = weekly_high - weekly_low
+    camarilla_h3 = pivot + (weekly_range * 1.1)
+    camarilla_l3 = pivot - (weekly_range * 1.1)
+    
+    # Align weekly Camarilla levels to daily timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
+    
+    # Calculate weekly EMA200 for trend filter
+    ema200_1w = pd.Series(weekly_close).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
     # Calculate volume average for confirmation (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,41 +52,41 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations
-    start = 30
+    # Start after enough data for calculations (200 for EMA200 + buffer)
+    start = 220
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(chop[i]) or np.isnan(rsi_1w_aligned[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(ema200_1w_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
+        price = close[i]
         vol = volume[i]
-        vol_threshold = vol_avg[i] * 1.5
-        rsi = rsi_1w_aligned[i]
+        vol_threshold = vol_avg[i] * 2.0
         
         if position == 0:
-            # Long setup: RSI oversold + ranging market + volume confirmation
-            if (rsi < 30 and chop[i] > 61.8 and vol > vol_threshold):
+            # Long setup: breakout above Camarilla H3 + above weekly EMA200 + volume confirmation
+            if (price > camarilla_h3_aligned[i] and price > ema200_1w_aligned[i] and vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: RSI overbought + ranging market + volume confirmation
-            elif (rsi > 70 and chop[i] > 61.8 and vol > vol_threshold):
+            # Short setup: breakdown below Camarilla L3 + below weekly EMA200 + volume confirmation
+            elif (price < camarilla_l3_aligned[i] and price < ema200_1w_aligned[i] and vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI returns to neutral or overbought
-            if rsi >= 40:
+            # Exit long: price falls back below Camarilla L3 (opposite side)
+            if price < camarilla_l3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: RSI returns to neutral or oversold
-            if rsi <= 60:
+            # Exit short: price rises back above Camarilla H3 (opposite side)
+            if price > camarilla_h3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -94,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Chop_WeeklyRSI_MeanReversion_Volume"
-timeframe = "4h"
+name = "1d_WeeklyCamarilla_EMA200_Volume"
+timeframe = "1d"
 leverage = 1.0
