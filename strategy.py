@@ -13,108 +13,120 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for pivot and volatility calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 15:
+    # Load weekly data for trend context
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Calculate daily pivot points (standard formula)
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
-    r3 = high_1d + 2 * (pivot - low_1d)
-    s3 = low_1d - 2 * (high_1d - pivot)
+    # Calculate weekly Supertrend (ATR=10, mult=3)
+    def calculate_supertrend(high, low, close, period=10, multiplier=3):
+        tr = np.zeros(len(high))
+        tr[0] = high[0] - low[0]
+        for i in range(1, len(high)):
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        atr = np.full(len(high), np.nan)
+        if len(high) >= period:
+            atr[period-1] = np.mean(tr[:period])
+            for i in range(period, len(high)):
+                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        hl2 = (high + low) / 2
+        upper = hl2 + multiplier * atr
+        lower = hl2 - multiplier * atr
+        
+        supertrend = np.full(len(high), np.nan)
+        direction = np.full(len(high), 1)  # 1 for uptrend, -1 for downtrend
+        
+        for i in range(period, len(high)):
+            if close[i] > upper[i-1]:
+                direction[i] = 1
+            elif close[i] < lower[i-1]:
+                direction[i] = -1
+            else:
+                direction[i] = direction[i-1]
+            
+            if direction[i] == 1:
+                supertrend[i] = max(lower[i], supertrend[i-1])
+            else:
+                supertrend[i] = min(upper[i], supertrend[i-1])
+        
+        return supertrend, direction
     
-    # Align pivot levels to 4h timeframe
-    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    r2_4h = align_htf_to_ltf(prices, df_1d, r2)
-    s2_4h = align_htf_to_ltf(prices, df_1d, s2)
-    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
+    supertrend_1w, trend_1w = calculate_supertrend(high_1w, low_1w, close_1w, 10, 3)
+    
+    # Align weekly Supertrend to daily timeframe
+    supertrend_1w_aligned = align_htf_to_ltf(prices, df_1w, supertrend_1w)
+    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
     
     # Calculate daily ATR for volatility filter
-    tr = np.zeros(len(df_1d))
-    tr[0] = high_1d[0] - low_1d[0]
-    for i in range(1, len(df_1d)):
-        tr[i] = max(
-            high_1d[i] - low_1d[i],
-            abs(high_1d[i] - close_1d[i-1]),
-            abs(low_1d[i] - close_1d[i-1])
-        )
+    tr = np.zeros(len(close))
+    tr[0] = high[0] - low[0]
+    for i in range(1, len(close)):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    atr_1d = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 14:
-        atr_1d[13] = np.mean(tr[:14])
-        for i in range(14, len(df_1d)):
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
+    atr = np.full(len(close), np.nan)
+    if len(close) >= 14:
+        atr[13] = np.mean(tr[:14])
+        for i in range(14, len(close)):
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
-    atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # Volume spike detection (20-period average on 4h)
-    vol_ma_20 = np.full_like(volume, np.nan)
-    if len(volume) >= 20:
-        for i in range(19, len(volume)):
-            vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    # Calculate daily EMA for trend filter
+    ema_period = 50
+    ema = np.full(len(close), np.nan)
+    if len(close) >= ema_period:
+        multiplier = 2 / (ema_period + 1)
+        ema[ema_period-1] = np.mean(close[:ema_period])
+        for i in range(ema_period, len(close)):
+            ema[i] = (close[i] * multiplier) + (ema[i-1] * (1 - multiplier))
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any critical data is NaN
-        if (np.isnan(pivot_4h[i]) or 
-            np.isnan(r1_4h[i]) or
-            np.isnan(s1_4h[i]) or
-            np.isnan(atr_4h[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(supertrend_1w_aligned[i]) or 
+            np.isnan(trend_1w_aligned[i]) or
+            np.isnan(atr[i]) or
+            np.isnan(ema[i])):
             signals[i] = 0.0
             continue
         
-        # Skip low volatility periods (ATR < 0.5% of price)
-        if atr_4h[i] < 0.005 * close[i]:
+        # Skip low volatility periods (ATR < 1% of price)
+        if atr[i] < 0.01 * close[i]:
             signals[i] = 0.0
             continue
-        
-        # Volume ratio: current 4h volume vs 20-period average
-        if vol_ma_20[i] <= 0:
-            volume_ratio = 0
-        else:
-            volume_ratio = volume[i] / vol_ma_20[i]
-        
-        # Volume threshold: require significant spike
-        vol_threshold = 2.0
         
         if position == 0:
-            # Long: Price breaks above R2 with volume confirmation
-            if (close[i] > r2_4h[i] and 
-                volume_ratio > vol_threshold):
+            # Long: Price above EMA50 AND weekly Supertrend uptrend
+            if (close[i] > ema[i] and 
+                trend_1w_aligned[i] == 1):
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below S2 with volume confirmation
-            elif (close[i] < s2_4h[i] and 
-                  volume_ratio > vol_threshold):
+            # Short: Price below EMA50 AND weekly Supertrend downtrend
+            elif (close[i] < ema[i] and 
+                  trend_1w_aligned[i] == -1):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below pivot
-            if close[i] < pivot_4h[i]:
+            # Exit: Price falls below EMA50 OR weekly trend turns down
+            if (close[i] < ema[i] or 
+                trend_1w_aligned[i] == -1):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above pivot
-            if close[i] > pivot_4h[i]:
+            # Exit: Price rises above EMA50 OR weekly trend turns up
+            if (close[i] > ema[i] or 
+                trend_1w_aligned[i] == 1):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -122,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Pivot_R2S2_Breakout"
-timeframe = "4h"
+name = "1d_WeeklySupertrend_EMA_Filter"
+timeframe = "1d"
 leverage = 1.0
