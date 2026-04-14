@@ -13,91 +13,76 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR and volume
+    # Get 12h data for Donchian channel and EMA
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # Calculate Donchian channel (20-period) on 12h data
+    high_12h_series = pd.Series(high_12h)
+    low_12h_series = pd.Series(low_12h)
+    donchian_high = high_12h_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_12h_series.rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian levels to primary timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    
+    # Calculate EMA(50) on 12h close for trend filter
+    close_12h_series = pd.Series(close_12h)
+    ema_50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Get 1d data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate ATR(14) on daily data
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = np.nan
-    tr2[0] = np.nan
-    tr3[0] = np.nan
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate 1d average volume (20-period)
+    volume_1d_series = pd.Series(volume_1d)
+    avg_volume_1d = volume_1d_series.rolling(window=20, min_periods=20).mean().values
     
-    tr_series = pd.Series(tr)
-    atr_14_1d = tr_series.rolling(window=14, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    
-    # Calculate average daily volume (20-period)
-    vol_series_1d = pd.Series(volume_1d)
-    avg_vol_1d = vol_series_1d.rolling(window=20, min_periods=20).mean().values
-    avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d)
-    
-    # Calculate 6-period RSI on 6h data
-    delta = np.diff(close, prepend=np.nan)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    gain_series = pd.Series(gain)
-    loss_series = pd.Series(loss)
-    avg_gain = gain_series.rolling(window=6, min_periods=6).mean().values
-    avg_loss = loss_series.rolling(window=6, min_periods=6).mean().values
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # Align average volume to primary timeframe
+    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 20  # for 20-period volume average
+    start = 50  # for 50-period EMA and 20-period Donchian
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(avg_vol_1d_aligned[i]) or 
-            np.isnan(rsi[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(avg_volume_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        atr = atr_14_1d_aligned[i]
-        avg_vol = avg_vol_1d_aligned[i]
         vol = volume[i]
-        rsi_val = rsi[i]
-        
-        # Dynamic thresholds based on volatility
-        vol_threshold = 2.0 * avg_vol  # Volume > 2x average
-        atr_stop = 1.5 * atr  # Stop distance
         
         if position == 0:
-            # Long: RSI < 30 (oversold) + volume spike + price near support
-            if (rsi_val < 30 and vol > vol_threshold and 
-                price > low[i] + 0.1 * (high[i] - low[i])):  # Not at absolute low
+            # Long: price breaks above Donchian high AND above 12h EMA50 with volume confirmation
+            if price > donchian_high_aligned[i] and price > ema_50_12h_aligned[i] and vol > 1.5 * avg_volume_1d_aligned[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: RSI > 70 (overbought) + volume spike + price near resistance
-            elif (rsi_val > 70 and vol > vol_threshold and 
-                  price < high[i] - 0.1 * (high[i] - low[i])):  # Not at absolute high
+            # Short: price breaks below Donchian low AND below 12h EMA50 with volume confirmation
+            elif price < donchian_low_aligned[i] and price < ema_50_12h_aligned[i] and vol > 1.5 * avg_volume_1d_aligned[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI > 50 or stop loss
-            if rsi_val > 50 or price < (entry_price := entry_price if 'entry_price' in locals() else price) - atr_stop:
+            # Exit long: price breaks below Donchian low
+            if price < donchian_low_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: RSI < 50 or stop loss
-            if rsi_val < 50 or price > (entry_price := entry_price if 'entry_price' in locals() else price) + atr_stop:
+            # Exit short: price breaks above Donchian high
+            if price > donchian_high_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -105,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_RSI_Volatility_Mean_Reversion"
-timeframe = "6h"
+name = "12h_Donchian_EMA_Volume"
+timeframe = "12h"
 leverage = 1.0
