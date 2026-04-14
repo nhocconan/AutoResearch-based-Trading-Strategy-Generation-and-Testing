@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -13,94 +13,90 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend context
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get 12h data for primary timeframe (price)
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate weekly EMA(20) for trend
-    close_1w_series = pd.Series(close_1w)
-    ema_1w = close_1w_series.ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Get daily data for pivot points
+    # Get 1d data for HTF context (trend and pivots)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily pivot points
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Calculate 12h EMA(34) for trend - using close prices
+    close_12h_series = pd.Series(close_12h)
+    ema_12h = close_12h_series.ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Pivot point: (H + L + C) / 3
-    pp = (prev_high + prev_low + prev_close) / 3
-    # Resistance and support levels
-    r1 = 2 * pp - prev_low
-    s1 = 2 * pp - prev_high
-    r2 = pp + (high_1d - low_1d)
-    s2 = pp - (high_1d - low_1d)
-    r3 = high_1d + 2 * (pp - prev_low)
-    s3 = low_1d - 2 * (prev_high - pp)
+    # Calculate 1d EMA(50) for HTF trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_1d = close_1d_series.ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Align pivot levels to 6h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Calculate 12h ATR(14) for volatility and stop loss
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
     
-    # Volume confirmation: volume > 1.8x average volume (20-period)
+    # Calculate 12h Donchian channels (20-period)
+    high_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    dc_high_aligned = align_htf_to_ltf(prices, df_12h, high_20)
+    dc_low_aligned = align_htf_to_ltf(prices, df_12h, low_20)
+    
+    # Volume confirmation: volume > 1.5x average volume (20-period)
     vol_series = pd.Series(volume)
     avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
     signals = np.zeros(n)
-    position = 0
-    position_size = 0.28  # 28% position size
+    position = 0  # 0: flat, 1: long, -1: short
+    position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 20  # for volume calculation
+    start = 50  # for EMA and ATR calculations
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(ema_1w_aligned[i]) or np.isnan(avg_vol[i])):
+        if (np.isnan(dc_high_aligned[i]) or np.isnan(dc_low_aligned[i]) or
+            np.isnan(ema_12h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or
+            np.isnan(atr_12h_aligned[i]) or np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        trend = ema_1w_aligned[i]
+        trend_12h = ema_12h_aligned[i]
+        trend_1d = ema_1d_aligned[i]
+        dc_high = dc_high_aligned[i]
+        dc_low = dc_low_aligned[i]
+        atr = atr_12h_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R2 with volume confirmation AND above weekly EMA
-            if price > r2_aligned[i] and vol > 1.8 * avg_vol[i] and price > trend:
+            # Long: price breaks above Donchian high with volume confirmation AND aligned trends
+            if price > dc_high and vol > 1.5 * avg_vol[i] and trend_12h > trend_1d:
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below S2 with volume confirmation AND below weekly EMA
-            elif price < s2_aligned[i] and vol > 1.8 * avg_vol[i] and price < trend:
+            # Short: price breaks below Donchian low with volume confirmation AND aligned trends
+            elif price < dc_low and vol > 1.5 * avg_vol[i] and trend_12h < trend_1d:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below S1 OR below weekly EMA
-            if price < s1_aligned[i] or price < trend:
+            # Exit long: price breaks below Donchian low OR trend reversal
+            if price < dc_low or trend_12h < trend_1d:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above R1 OR above weekly EMA
-            if price > r1_aligned[i] or price > trend:
+            # Exit short: price breaks above Donchian high OR trend reversal
+            if price > dc_high or trend_12h > trend_1d:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -108,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_1d_Pivot_Trend_Volume"
-timeframe = "6h"
+name = "12h_1d_Donchian_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
