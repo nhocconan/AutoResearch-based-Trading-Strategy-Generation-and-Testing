@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12-hour price crossing above/below 1-day VWAP with volume above 1.5x 12-period average and 1-day ADX > 25.
-Trades in direction of 1-day trend to avoid counter-trend whipsaws. Designed for low frequency (~15-30 trades/year).
+Hypothesis: 4-hour Donchian breakout with volume confirmation and 1-day ADX trend filter.
+Long on 20-period high break, short on 20-period low break, only when 1-day ADX > 25.
+Designed for low frequency (~20-40 trades/year) with strong trend following in both bull and bear markets.
 """
 
 import numpy as np
@@ -10,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,16 +19,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1-day VWAP
+    # Calculate 4-hour Donchian channels (20-period)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 1-day ADX (14-period) - HTF
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
-    vwap_1d = (typical_price_1d * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
-    vwap_1d = vwap_1d.values
-    
-    # Calculate 1-day ADX (14-period)
     if len(df_1d) < 30:
         return np.zeros(n)
     
@@ -62,51 +59,49 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
     adx_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 12-period average volume on 12h data
-    vol_ma_12 = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    # Calculate volume moving average (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Align HTF ADX to LTF
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25
     
-    for i in range(30, n):
-        # Get aligned indicators
-        vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)[i]
-        adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)[i]
-        vol_ma_12_aligned = vol_ma_12[i]  # already LTF
-        
-        # Check for NaN values
-        if (np.isnan(vwap_1d_aligned) or np.isnan(adx_1d_aligned) or 
-            np.isnan(vol_ma_12_aligned)):
+    for i in range(20, n):
+        # Skip if any values are NaN
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma[i])):
             continue
         
         # Volume confirmation (> 1.5x average)
-        volume_confirm = volume[i] > 1.5 * vol_ma_12_aligned
+        volume_confirm = volume[i] > 1.5 * vol_ma[i]
         
         # ADX trend filter (> 25)
-        trend_filter = adx_1d_aligned > 25
+        trend_filter = adx_1d_aligned[i] > 25
         
         if position == 0:  # No position - look for entries
             if volume_confirm and trend_filter:
-                # Long: price crosses above VWAP
-                if close[i] > vwap_1d_aligned and close[i-1] <= vwap_1d_aligned:
+                # Long: price breaks above Donchian high
+                if close[i] > donch_high[i]:
                     position = 1
                     signals[i] = position_size
-                # Short: price crosses below VWAP
-                elif close[i] < vwap_1d_aligned and close[i-1] >= vwap_1d_aligned:
+                # Short: price breaks below Donchian low
+                elif close[i] < donch_low[i]:
                     position = -1
                     signals[i] = -position_size
-        elif position == 1:  # Long position - exit when price crosses below VWAP
-            if close[i] < vwap_1d_aligned and close[i-1] >= vwap_1d_aligned:
+        elif position == 1:  # Long position - exit when price breaks below Donchian low
+            if close[i] < donch_low[i]:
                 position = 0
                 signals[i] = 0.0
-        elif position == -1:  # Short position - exit when price crosses above VWAP
-            if close[i] > vwap_1d_aligned and close[i-1] <= vwap_1d_aligned:
+        elif position == -1:  # Short position - exit when price breaks above Donchian high
+            if close[i] > donch_high[i]:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_VWAP_1dADX_Volume"
-timeframe = "12h"
+name = "4h_Donchian_1dADX_Volume"
+timeframe = "4h"
 leverage = 1.0
