@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h mean reversion in 4h trend using Bollinger Bands and RSI
-# Long when: 4h trend is up (close > EMA20_4h), price touches lower BB (1h), RSI < 30, volume > 1.5x avg
-# Short when: 4h trend is down (close < EMA20_4h), price touches upper BB (1h), RSI > 70, volume > 1.5x avg
-# Exit when RSI crosses 50 in opposite direction
-# Uses 4h for trend direction, 1h for entry timing and mean reversion signals
-# Target: 60-150 total trades over 4 years (15-37/year) to avoid fee drag
+# Hypothesis: 12h Williams %R with 1-day Bollinger Band squeeze filter
+# Long when Williams %R < -80 (oversold) AND Bollinger Band width < 50th percentile (squeeze) AND volume > 1.5x average
+# Short when Williams %R > -20 (overbought) AND Bollinger Band width < 50th percentile (squeeze) AND volume > 1.5x average
+# Exit when Williams %R crosses -50 in opposite direction
+# Williams %R identifies overbought/oversold conditions, Bollinger squeeze indicates low volatility primed for breakout,
+# volume confirms institutional participation. Designed to work in both trending and ranging markets.
+# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,77 +21,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop for trend direction
-    df_4h = get_htf_data(prices, '4h')
+    # Load 1d data ONCE before loop for Bollinger Band squeeze filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 20-period EMA on 4h for trend
-    ema_20_4h = pd.Series(df_4h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean()
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    # Calculate Williams %R on 12h (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
     
-    # Calculate Bollinger Bands on 1h (20-period, 2 std)
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean()
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std()
-    upper_bb = sma_20 + (2 * std_20)
-    lower_bb = sma_20 - (2 * std_20)
+    # Calculate Bollinger Bands on 1d (20-period, 2 std)
+    close_1d = df_1d['close'].values
+    sma_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean()
+    std_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std()
+    upper_bb = sma_20_1d + (2 * std_20_1d)
+    lower_bb = sma_20_1d - (2 * std_20_1d)
+    bb_width = upper_bb - lower_bb
     
-    # Calculate RSI on 1h (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate Bollinger Band width percentile (50-period lookback for median)
+    bb_width_median = pd.Series(bb_width).rolling(window=50, min_periods=50).median()
+    bb_squeeze = bb_width < bb_width_median  # True when width below median (squeeze condition)
     
     # Calculate volume average for confirmation (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations
+    # Start after enough data for calculations (max of 20 for Williams %R/SMA + buffer)
     start = 40
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_20_4h_aligned[i]) or np.isnan(sma_20[i]) or 
-            np.isnan(std_20[i]) or np.isnan(rsi[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(williams_r[i]) or 
+            np.isnan(bb_squeeze[i]) if i < len(bb_squeeze) else True or
+            np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
+        # Get Bollinger squeeze value aligned to 12h timeframe
+        bb_squeeze_aligned = align_htf_to_ltf(prices, df_1d, bb_squeeze.astype(float))
+        squeeze_active = bb_squeeze_aligned[i] > 0.5  # True if squeeze condition
+        
+        williams_r_val = williams_r[i]
         close_val = close[i]
-        sma_val = sma_20[i]
-        std_val = std_20[i]
-        upper_bb_val = upper_bb[i]
-        lower_bb_val = lower_bb[i]
-        rsi_val = rsi[i]
         vol = volume[i]
         vol_threshold = vol_avg[i] * 1.5
-        trend_up = close_val > ema_20_4h_aligned[i]
-        trend_down = close_val < ema_20_4h_aligned[i]
         
         if position == 0:
-            # Long setup: 4h trend up, price at lower BB, RSI oversold, volume confirmation
-            if (trend_up and close_val <= lower_bb_val and rsi_val < 30 and vol > vol_threshold):
+            # Long setup: Williams %R < -80 (oversold) AND Bollinger squeeze AND volume confirmation
+            if (williams_r_val < -80 and squeeze_active and vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: 4h trend down, price at upper BB, RSI overbought, volume confirmation
-            elif (trend_down and close_val >= upper_bb_val and rsi_val > 70 and vol > vol_threshold):
+            # Short setup: Williams %R > -20 (overbought) AND Bollinger squeeze AND volume confirmation
+            elif (williams_r_val > -20 and squeeze_active and vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI crosses above 50 (mean reversion complete)
-            if rsi_val > 50:
+            # Exit long: Williams %R crosses above -50
+            if williams_r_val > -50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: RSI crosses below 50 (mean reversion complete)
-            if rsi_val < 50:
+            # Exit short: Williams %R crosses below -50
+            if williams_r_val < -50:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -98,6 +96,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4hTrend_BB_RSI_MeanReversion"
-timeframe = "1h"
+name = "12h_Williams_R_BB_Squeeze"
+timeframe = "12h"
 leverage = 1.0
