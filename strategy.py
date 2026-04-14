@@ -3,116 +3,106 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1-day KAMA direction with RSI filter and volume confirmation
-# - Long when KAMA turns upward, RSI > 50, and volume > 1.5x 24-period average
-# - Short when KAMA turns downward, RSI < 50, and volume > 1.5x 24-period average
-# - KAMA adapts to market noise, reducing whipsaws in ranging markets
-# - Volume confirmation ensures breakouts have conviction
-# - RSI filter avoids extremes and focuses on momentum continuation
-# - Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
-# - Works in both bull and bear markets by adapting to volatility regimes
+# Hypothesis: 6h strategy using weekly pivot levels as support/resistance with volume confirmation
+# - Long when price rebounds from weekly S1/S2 with volume > 1.3x 50-period average and close > open
+# - Short when price reverses from weekly R1/R2 with volume > 1.3x 50-period average and close < open
+# - Uses weekly pivot levels as institutional reference points that work in both bull and bear markets
+# - Volume confirmation ensures institutional participation at key levels
+# - Target: 80-160 total trades over 4 years (20-40/year) to balance opportunity and cost
+# - Position size 0.25 for balanced risk exposure
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    open_price = prices['open'].values
     volume = prices['volume'].values
     
-    # Load 1d data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load weekly data once before loop
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    high_w = df_w['high'].values
+    low_w = df_w['low'].values
+    close_w = df_w['close'].values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average) on 1d
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close_1d, 10))  # 10-period net change
-    volatility = np.sum(np.abs(np.diff(close_1d, 1)), axis=1)  # 10-period sum of absolute changes
-    volatility = np.concatenate([np.full(9, np.nan), volatility])  # align with change
+    # Calculate weekly pivot points
+    pivot = (high_w + low_w + close_w) / 3
+    r1 = 2 * pivot - low_w
+    s1 = 2 * pivot - high_w
+    r2 = pivot + (high_w - low_w)
+    s2 = pivot - (high_w - low_w)
     
-    # Avoid division by zero
-    er = np.where(volatility != 0, change / volatility, 0)
-    
-    # Smoothing constants
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # fast=2, slow=30
-    
-    # Calculate KAMA
-    kama = np.full_like(close_1d, np.nan)
-    kama[9] = close_1d[9]  # start after 10 periods
-    for i in range(10, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    
-    # Calculate RSI (14-period) on 1d
-    delta = np.diff(close_1d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.full_like(close_1d, np.nan)
-    avg_loss = np.full_like(close_1d, np.nan)
-    
-    # Initial averages
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
-    
-    # Wilder's smoothing
-    for i in range(14, len(close_1d)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume filter: 24-period average (1 day of 12h bars)
+    # Volume filter: 50-period average
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=24, min_periods=24).mean().values
-    
-    # Align KAMA and RSI to 12h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    vol_ma = vol_series.rolling(window=50, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if any critical data is NaN
-        if np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(vol_ma[i]):
             continue
         
-        # Determine KAMA direction (upward/downward)
-        kama_dir = 1 if kama_aligned[i] > kama_aligned[i-1] else -1
+        # Get previous week's pivot levels for current week
+        idx_w = i // (7 * 24 * 60 // 6)  # Approximate weekly index from 6h bars
+        if idx_w < 1:
+            continue
+            
+        # Previous week's levels
+        piv_prev = pivot[idx_w-1]
+        r1_prev = r1[idx_w-1]
+        s1_prev = s1[idx_w-1]
+        r2_prev = r2[idx_w-1]
+        s2_prev = s2[idx_w-1]
+        
+        # Create arrays for alignment (constant values for the week)
+        pivot_arr = np.full(len(df_w), piv_prev)
+        r1_arr = np.full(len(df_w), r1_prev)
+        s1_arr = np.full(len(df_w), s1_prev)
+        r2_arr = np.full(len(df_w), r2_prev)
+        s2_arr = np.full(len(df_w), s2_prev)
+        
+        # Align to 6h timeframe
+        pivot_6h = align_htf_to_ltf(prices, df_w, pivot_arr)[i]
+        r1_6h = align_htf_to_ltf(prices, df_w, r1_arr)[i]
+        s1_6h = align_htf_to_ltf(prices, df_w, s1_arr)[i]
+        r2_6h = align_htf_to_ltf(prices, df_w, r2_arr)[i]
+        s2_6h = align_htf_to_ltf(prices, df_w, s2_arr)[i]
         
         if position == 0:
-            # Long: KAMA turning up, RSI > 50, volume confirmation
-            if (kama_dir == 1 and 
-                rsi_aligned[i] > 50 and
-                volume[i] > vol_ma[i] * 1.5):
+            # Long: Price near support with bullish candle and volume
+            if ((low[i] <= s1_6h * 1.005 or low[i] <= s2_6h * 1.005) and  # Near S1/S2
+                close[i] > open_price[i] and  # Bullish candle
+                volume[i] > vol_ma[i] * 1.3):  # Volume confirmation
                 position = 1
                 signals[i] = position_size
-            # Short: KAMA turning down, RSI < 50, volume confirmation
-            elif (kama_dir == -1 and 
-                  rsi_aligned[i] < 50 and
-                  volume[i] > vol_ma[i] * 1.5):
+            # Short: Price near resistance with bearish candle and volume
+            elif ((high[i] >= r1_6h * 0.995 or high[i] >= r2_6h * 0.995) and  # Near R1/R2
+                  close[i] < open_price[i] and  # Bearish candle
+                  volume[i] > vol_ma[i] * 1.3):  # Volume confirmation
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
-            # Exit: KAMA turns down or RSI < 40 (momentum fade)
-            if kama_dir == -1 or rsi_aligned[i] < 40:
+            # Exit: Price reaches pivot or opposite resistance
+            if close[i] >= pivot_6h or close[i] >= r1_6h:
                 position = 0
                 signals[i] = 0.0
         elif position == -1:
-            # Exit: KAMA turns up or RSI > 60 (momentum fade)
-            if kama_dir == 1 or rsi_aligned[i] > 60:
+            # Exit: Price reaches pivot or opposite support
+            if close[i] <= pivot_6h or close[i] <= s1_6h:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_1d_KAMA_RSI_Volume_Filter"
-timeframe = "12h"
+name = "6h_1w_PivotReversal_Volume"
+timeframe = "6h"
 leverage = 1.0
