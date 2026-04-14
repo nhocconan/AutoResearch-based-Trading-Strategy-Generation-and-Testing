@@ -13,100 +13,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for pivots and EMA50
+    # Load daily data for ATR and close
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Calculate daily EMA50 for trend
-    ema_50_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 50:
-        ema_50_1d[49] = np.mean(close_1d[:50])
-        for i in range(50, len(close_1d)):
-            ema_50_1d[i] = (close_1d[i] * 2 + ema_50_1d[i-1] * 48) / 50
+    # Calculate daily ATR(14)
+    def calculate_atr(high, low, close, period):
+        tr1 = np.abs(high - low)
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]  # First TR is just high-low
+        atr = np.full_like(close, np.nan)
+        if len(close) >= period:
+            atr[period-1] = np.mean(tr[:period])
+            for i in range(period, len(close)):
+                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        return atr
     
-    # Calculate daily pivot points (using prior day's OHLC)
-    pivot_point = np.full_like(close_1d, np.nan)
-    resistance1 = np.full_like(close_1d, np.nan)
-    support1 = np.full_like(close_1d, np.nan)
+    atr_14_1d = calculate_atr(high_1d, low_1d, close_1d, 14)
     
-    if len(close_1d) >= 2:
-        for i in range(1, len(close_1d)):
-            ph = high_1d[i-1]
-            pl = low_1d[i-1]
-            pc = close_1d[i-1]
-            
-            pp = (ph + pl + pc) / 3.0
-            r1 = 2 * pp - pl
-            s1 = 2 * pp - ph
-            
-            pivot_point[i] = pp
-            resistance1[i] = r1
-            support1[i] = s1
+    # Calculate daily SMA(200) for trend filter
+    sma_200_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 200:
+        for i in range(199, len(close_1d)):
+            sma_200_1d[i] = np.mean(close_1d[i-199:i+1])
     
-    # Align 1d indicators to 4h timeframe
-    ema_50_1d_4h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    pivot_point_4h = align_htf_to_ltf(prices, df_1d, pivot_point)
-    resistance1_4h = align_htf_to_ltf(prices, df_1d, resistance1)
-    support1_4h = align_htf_to_ltf(prices, df_1d, support1)
+    # Align 1d indicators to 12h timeframe
+    atr_14_1d_12h = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    sma_200_1d_12h = align_htf_to_ltf(prices, df_1d, sma_200_1d)
     
-    # Volume spike detection on 4h bars
-    vol_ma_20 = np.full_like(volume, np.nan)
-    if len(volume) >= 20:
-        for i in range(19, len(volume)):
-            vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    # Calculate ATR-based channel on 12h
+    atr_mult = 2.0
+    upper_channel = np.full(n, np.nan)
+    lower_channel = np.full(n, np.nan)
+    
+    for i in range(1, n):
+        upper_channel[i] = close[i-1] + atr_14_1d_12h[i-1] * atr_mult
+        lower_channel[i] = close[i-1] - atr_14_1d_12h[i-1] * atr_mult
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    for i in range(50, n):
+    for i in range(200, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_50_1d_4h[i]) or 
-            np.isnan(pivot_point_4h[i]) or 
-            np.isnan(resistance1_4h[i]) or 
-            np.isnan(support1_4h[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(atr_14_1d_12h[i-1]) or 
+            np.isnan(sma_200_1d_12h[i]) or
+            np.isnan(upper_channel[i]) or
+            np.isnan(lower_channel[i])):
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 4h volume vs 20-period average
-        if vol_ma_20[i] <= 0:
-            volume_ratio = 0
-        else:
-            volume_ratio = volume[i] / vol_ma_20[i]
-        
         if position == 0:
-            # Long: Price crosses above S1 with volume spike and above daily EMA50
-            if (close[i] > support1_4h[i] and
-                close[i] > ema_50_1d_4h[i] and
-                volume_ratio > 2.0):
+            # Long: Price breaks above upper channel AND above daily SMA200
+            if close[i] > upper_channel[i] and close[i] > sma_200_1d_12h[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: Price crosses below R1 with volume spike and below daily EMA50
-            elif (close[i] < resistance1_4h[i] and
-                  close[i] < ema_50_1d_4h[i] and
-                  volume_ratio > 2.0):
+            # Short: Price breaks below lower channel AND below daily SMA200
+            elif close[i] < lower_channel[i] and close[i] < sma_200_1d_12h[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price crosses below pivot or below daily EMA50
-            if (close[i] < pivot_point_4h[i] or 
-                close[i] < ema_50_1d_4h[i]):
+            # Exit: Price crosses below lower channel OR below daily SMA200
+            if close[i] < lower_channel[i] or close[i] < sma_200_1d_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price crosses above pivot or above daily EMA50
-            if (close[i] > pivot_point_4h[i] or 
-                close[i] > ema_50_1d_4h[i]):
+            # Exit: Price crosses above upper channel OR above daily SMA200
+            if close[i] > upper_channel[i] or close[i] > sma_200_1d_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -114,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Pivot_S1R1_EMA50_Volume"
-timeframe = "4h"
+name = "12h_1d_ATR_Channel_SMA200"
+timeframe = "12h"
 leverage = 1.0
