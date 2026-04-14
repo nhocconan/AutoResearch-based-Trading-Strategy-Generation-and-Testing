@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily RSI(14) with 1-week EMA(50) trend filter and volume confirmation.
-# RSI(14) provides mean-reversion signals: oversold (<30) for long, overbought (>70) for short.
-# The 1-week EMA(50) adapts to both bull and bear markets, ensuring trades follow the dominant trend.
-# Volume > 1.5x the 20-period average confirms institutional participation and reduces false signals.
-# Exit occurs when RSI returns to neutral (40-60 range) or opposite extreme is reached.
-# This combination aims for 10-25 trades per year per symbol (40-100 total over 4 years), staying within optimal range.
+# Hypothesis: 12-hour Donchian(20) breakout with 1-day EMA(50) trend filter and volume confirmation.
+# The 1-day EMA(50) adapts to both bull and bear markets, ensuring trades follow the dominant trend.
+# The Donchian(20) breakout captures momentum in the direction of the 1-day trend.
+# Volume > 1.5x the 20-period average confirms institutional participation and reduces false breakouts.
+# Exit occurs when price returns to the 1-day EMA(50) or breaks the opposite Donchian band.
+# This combination aims for 15-30 trades per year per symbol (60-120 total over 4 years), staying within the optimal range to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,31 +20,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE for trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # 1-week EMA(50) for trend filter
+    # 1d EMA(50) for trend filter
     ema_len = 50
-    if len(df_1w) < ema_len:
+    if len(df_1d) < ema_len:
         return np.zeros(n)
     
-    ema_1w = pd.Series(df_1w['close']).ewm(span=ema_len, adjust=False, min_periods=ema_len).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    ema_1d = pd.Series(df_1d['close']).ewm(span=ema_len, adjust=False, min_periods=ema_len).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Daily RSI(14)
-    rsi_len = 14
-    if len(close) < rsi_len + 1:
-        return np.zeros(n)
-    
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_len, adjust=False, min_periods=rsi_len).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_len, adjust=False, min_periods=rsi_len).mean().values
-    
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Donchian channel (20 periods) on 12h
+    dc_len = 20
+    dc_upper = pd.Series(high).rolling(window=dc_len, min_periods=dc_len).max().shift(1).values
+    dc_lower = pd.Series(low).rolling(window=dc_len, min_periods=dc_len).min().shift(1).values
     
     # Volume confirmation: 1.5x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,37 +44,33 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(60, rsi_len + 1, 20)
+    start = max(50, dc_len, 20)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(rsi[i]) or 
-            np.isnan(ema_1w_aligned[i]) or
+        if (np.isnan(dc_upper[i]) or 
+            np.isnan(dc_lower[i]) or
+            np.isnan(ema_1d_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to 1-week EMA50
-        above_ema = close[i] > ema_1w_aligned[i]
-        below_ema = close[i] < ema_1w_aligned[i]
+        # Trend filter: price relative to 1d EMA50
+        above_ema = close[i] > ema_1d_aligned[i]
+        below_ema = close[i] < ema_1d_aligned[i]
         
         # Volume confirmation: current volume > 1.5x average
         volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
-        # RSI conditions
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
-        rsi_neutral = (rsi[i] >= 40) & (rsi[i] <= 60)
-        
         if position == 0:
-            # Enter long: RSI oversold + above 1-week EMA + volume
-            if (rsi_oversold and 
+            # Enter long: Donchian breakout above + above 1d EMA + volume
+            if (close[i] > dc_upper[i] and 
                 above_ema and 
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Enter short: RSI overbought + below 1-week EMA + volume
-            elif (rsi_overbought and 
+            # Enter short: Donchian breakdown below + below 1d EMA + volume
+            elif (close[i] < dc_lower[i] and 
                   below_ema and 
                   volume_confirmed):
                 position = -1
@@ -92,15 +78,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI returns to neutral or becomes overbought
-            if rsi_neutral or rsi_overbought:
+            # Exit long: price returns to 1d EMA or breaks below Donchian lower
+            if close[i] < ema_1d_aligned[i] or close[i] < dc_lower[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: RSI returns to neutral or becomes oversold
-            if rsi_neutral or rsi_oversold:
+            # Exit short: price returns to 1d EMA or breaks above Donchian upper
+            if close[i] > ema_1d_aligned[i] or close[i] > dc_upper[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -108,6 +94,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_RSI_EMA50_Volume_v1"
-timeframe = "1d"
+name = "12h_1d_EMA50_Donchian_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
