@@ -57,6 +57,26 @@ def generate_signals(prices):
             vol_filter_1d[i] = False
     vol_filter_12h = align_htf_to_ltf(prices, df_1d, vol_filter_1d.astype(float))
     
+    # Calculate daily RSI (14-period)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.full(len(df_1d), np.nan)
+    avg_loss = np.full(len(df_1d), np.nan)
+    
+    if len(df_1d) >= 14:
+        avg_gain[13] = np.mean(gain[1:15])
+        avg_loss[13] = np.mean(loss[1:15])
+        
+        for i in range(14, len(df_1d)):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_12h = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
@@ -65,12 +85,18 @@ def generate_signals(prices):
         # Skip if any critical data is NaN
         if (np.isnan(atr_12h[i]) or
             np.isnan(donch_high[i]) or
-            np.isnan(donch_low[i])):
+            np.isnan(donch_low[i]) or
+            np.isnan(rsi_12h[i])):
             signals[i] = 0.0
             continue
         
         # Skip low volatility periods (ATR < 1.5% of price)
         if vol_filter_12h[i] < 0.5:
+            signals[i] = 0.0
+            continue
+        
+        # Skip overbought/oversold conditions
+        if rsi_12h[i] > 70 or rsi_12h[i] < 30:
             signals[i] = 0.0
             continue
         
@@ -89,12 +115,12 @@ def generate_signals(prices):
         s3_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i]
         
         if position == 0:
-            # Long: Price breaks above 12h Donchian high AND above S3
-            if close[i] > donch_high[i] and close[i] > s3_12h:
+            # Long: Price breaks above 12h Donchian high AND above S3 with RSI < 50
+            if close[i] > donch_high[i] and close[i] > s3_12h and rsi_12h[i] < 50:
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below 12h Donchian low AND below R3
-            elif close[i] < donch_low[i] and close[i] < r3_12h:
+            # Short: Price breaks below 12h Donchian low AND below R3 with RSI > 50
+            elif close[i] < donch_low[i] and close[i] < r3_12h and rsi_12h[i] > 50:
                 position = -1
                 signals[i] = -position_size
             else:
@@ -116,6 +142,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_R3S3_Breakout_Donchian_VolFilter"
+name = "12h_1d_RSI_Filter_Camarilla_R3S3_Donchian_Breakout"
 timeframe = "12h"
 leverage = 1.0
