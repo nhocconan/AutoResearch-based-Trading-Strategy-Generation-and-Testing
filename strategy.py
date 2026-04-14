@@ -16,25 +16,22 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d Donchian channels (20-period)
-    high_20 = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d Williams %R (14)
+    highest_high = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - df_1d['close']) / (highest_high - lowest_low + 1e-10)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # Calculate 1d ATR(14) for volatility filter
-    tr1 = pd.Series(df_1d['high']) - pd.Series(df_1d['low'])
-    tr2 = abs(pd.Series(df_1d['high']) - pd.Series(df_1d['close']).shift(1))
-    tr3 = abs(pd.Series(df_1d['low']) - pd.Series(df_1d['close']).shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14 = tr.rolling(window=14, min_periods=14).mean().values
-    
-    # Align HTF indicators to 6h timeframe
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    
-    # Calculate 6-day ATR for breakout threshold (to avoid noise)
-    atr_6d = pd.Series(atr_14).rolling(window=6, min_periods=6).mean().values
-    atr_6d_aligned = align_htf_to_ltf(prices, df_1d, atr_6d)
+    # Calculate 1d RSI(14)
+    delta = np.diff(df_1d['close'], prepend=df_1d['close'].iloc[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     signals = np.zeros(n)
     position = 0
@@ -45,39 +42,42 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(high_20_aligned[i]) or 
-            np.isnan(low_20_aligned[i]) or 
-            np.isnan(atr_6d_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(rsi_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # Breakout conditions with volatility filter
-        upper_break = price > high_20_aligned[i] + 0.5 * atr_6d_aligned[i]
-        lower_break = price < low_20_aligned[i] - 0.5 * atr_6d_aligned[i]
+        # Williams %R: oversold < -80, overbought > -20
+        wr = williams_r_aligned[i]
+        rsi = rsi_1d_aligned[i]
+        
+        # Mean reversion conditions
+        oversold = wr < -80
+        overbought = wr > -20
         
         if position == 0:
-            # Long breakout: price breaks above upper band with volatility filter
-            if upper_break:
+            # Long setup: oversold + RSI not extremely low (avoid catching falling knife)
+            if oversold and rsi > 30:
                 position = 1
                 signals[i] = position_size
-            # Short breakout: price breaks below lower band with volatility filter
-            elif lower_break:
+            # Short setup: overbought + RSI not extremely high
+            elif overbought and rsi < 70:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below lower Donchian band
-            if price < low_20_aligned[i]:
+            # Exit long: overbought OR RSI > 75 (strong momentum)
+            if overbought or rsi > 75:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above upper Donchian band
-            if price > high_20_aligned[i]:
+            # Exit short: oversold OR RSI < 25 (strong momentum)
+            if oversold or rsi < 25:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -85,6 +85,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1dDonchian20_VolFilter_Breakout_v1"
-timeframe = "6h"
+name = "12h_1dWilliamsR_RSI_MeanReversion_v1"
+timeframe = "12h"
 leverage = 1.0
