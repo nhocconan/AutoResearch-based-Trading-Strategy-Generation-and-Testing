@@ -13,32 +13,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA(8) for trend filter
-    ema_8_1w = pd.Series(df_1w['close']).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema_8_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_8_1w)
+    # Calculate 1d Close for price action
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate weekly ATR(14) for volatility filter
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    close_series = pd.Series(close)
+    # Calculate 1d ATR(14) for volatility and stop
+    high_series = pd.Series(high_1d)
+    low_series = pd.Series(low_1d)
+    close_series = pd.Series(close_1d)
     tr1 = high_series - low_series
     tr2 = abs(high_series - close_series.shift(1))
     tr3 = abs(low_series - close_series.shift(1))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
+    atr_1d = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Calculate weekly RSI(14) for momentum filter
-    delta = pd.Series(df_1w['close']).diff()
+    # Calculate 1d ADX(14) for trend strength
+    plus_dm = high_series.diff()
+    minus_dm = low_series.diff()
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0)
+    tr_14 = tr.rolling(window=14, min_periods=14).sum()
+    plus_di_14 = 100 * (plus_dm.rolling(window=14, min_periods=14).sum() / tr_14)
+    minus_di_14 = 100 * (minus_dm.rolling(window=14, min_periods=14).sum() / tr_14)
+    dx = (abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)) * 100
+    adx_1d = dx.rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate 1d RSI(14) for momentum
+    delta = close_series.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
     avg_gain = gain.rolling(window=14, min_periods=14).mean()
     avg_loss = loss.rolling(window=14, min_periods=14).mean()
     rs = avg_gain / avg_loss
-    rsi_1w = (100 - (100 / (1 + rs))).values
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    rsi_1d = (100 - (100 / (1 + rs))).values
+    
+    # Align 1d indicators to 4h
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     signals = np.zeros(n)
     position = 0
@@ -49,47 +65,49 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_8_1w_aligned[i]) or 
-            np.isnan(atr[i]) or 
-            np.isnan(rsi_1w_aligned[i])):
+        if (np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(adx_1d_aligned[i]) or
+            np.isnan(rsi_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         
-        # ATR-based volatility filter: avoid extremely low volatility periods
-        atr_ratio = atr[i] / price if price > 0 else 0
+        # Volatility filter: avoid extremely low volatility periods
+        atr_ratio = atr_1d_aligned[i] / price if price > 0 else 0
         vol_filter = atr_ratio > 0.003  # Minimum 0.3% ATR relative to price
         
-        # Trend filter: price > weekly EMA8 for long, price < weekly EMA8 for short
-        trend_filter_long = price > ema_8_1w_aligned[i]
-        trend_filter_short = price < ema_8_1w_aligned[i]
+        # Trend strength filter: ADX > 25 for trending market
+        trend_filter = adx_1d_aligned[i] > 25
         
         # Momentum filter: RSI between 30 and 70 to avoid extremes
-        rsi_filter = (rsi_1w_aligned[i] > 30) & (rsi_1w_aligned[i] < 70)
+        rsi_filter = (rsi_1d_aligned[i] > 30) & (rsi_1d_aligned[i] < 70)
         
         if position == 0:
-            # Long setup: price above weekly EMA8 + volatility filter + momentum filter
-            if (trend_filter_long and vol_filter and rsi_filter):
-                position = 1
-                signals[i] = position_size
-            # Short setup: price below weekly EMA8 + volatility filter + momentum filter
-            elif (trend_filter_short and vol_filter and rsi_filter):
-                position = -1
-                signals[i] = -position_size
+            # Entry conditions: volatility + trend strength + momentum
+            if vol_filter and trend_filter and rsi_filter:
+                # Simple momentum-based entry: long if RSI > 50, short if RSI < 50
+                if rsi_1d_aligned[i] > 50:
+                    position = 1
+                    signals[i] = position_size
+                elif rsi_1d_aligned[i] < 50:
+                    position = -1
+                    signals[i] = -position_size
+                else:
+                    signals[i] = 0.0
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below weekly EMA8
-            if price < ema_8_1w_aligned[i]:
+            # Exit: RSI crosses below 50 or volatility drops
+            if (rsi_1d_aligned[i] < 50) or (atr_ratio < 0.002):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above weekly EMA8
-            if price > ema_8_1w_aligned[i]:
+            # Exit: RSI crosses above 50 or volatility drops
+            if (rsi_1d_aligned[i] > 50) or (atr_ratio < 0.002):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -97,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1wEMA8_RSI_Filter_v1"
-timeframe = "1d"
+name = "4h_ADX_RSI_Volume_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
