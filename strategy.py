@@ -13,44 +13,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data (HTF) once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load weekly data (HTF) once before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # Calculate daily ATR (14-period) for volatility filter
-    tr = np.zeros(len(df_1d))
-    tr[0] = high_1d[0] - low_1d[0]
-    for i in range(1, len(df_1d)):
+    # Calculate weekly ATR (14-period) for volatility filter
+    tr = np.zeros(len(df_1w))
+    tr[0] = high_1w[0] - low_1w[0]
+    for i in range(1, len(df_1w)):
         tr[i] = max(
-            high_1d[i] - low_1d[i],
-            abs(high_1d[i] - close_1d[i-1]),
-            abs(low_1d[i] - close_1d[i-1])
+            high_1w[i] - low_1w[i],
+            abs(high_1w[i] - close_1w[i-1]),
+            abs(low_1w[i] - close_1w[i-1])
         )
     
-    atr_1d = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 14:
-        atr_1d[13] = np.mean(tr[:14])
-        for i in range(14, len(df_1d)):
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
+    atr_1w = np.full(len(df_1w), np.nan)
+    if len(df_1w) >= 14:
+        atr_1w[13] = np.mean(tr[:14])
+        for i in range(14, len(df_1w)):
+            atr_1w[i] = (atr_1w[i-1] * 13 + tr[i]) / 14
     
-    atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr_1d = align_htf_to_ltf(prices, df_1w, atr_1w)
     
-    # Calculate daily 20-period EMA for trend filter
-    ema20_1d = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 20:
-        ema20_1d[19] = np.mean(close_1d[:20])
-        for i in range(20, len(df_1d)):
-            ema20_1d[i] = (close_1d[i] * 2 + ema20_1d[i-1] * 18) / 20
+    # Calculate weekly 50-period EMA for trend filter
+    ema50_1w = np.full(len(df_1w), np.nan)
+    if len(df_1w) >= 50:
+        ema50_1w[49] = np.mean(close_1w[:50])
+        for i in range(50, len(df_1w)):
+            ema50_1w[i] = (close_1w[i] * 2 + ema50_1w[i-1] * 48) / 50
     
-    ema20_4h = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    ema50_1d = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Calculate 4-hour Donchian channels (20-period)
+    # Calculate daily Donchian channels (20-period)
     donch_high = np.full(n, np.nan)
     donch_low = np.full(n, np.nan)
     if n >= 20:
@@ -64,53 +64,39 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical data is NaN
-        if (np.isnan(atr_4h[i]) or
-            np.isnan(ema20_4h[i]) or
+        if (np.isnan(atr_1d[i]) or
+            np.isnan(ema50_1d[i]) or
             np.isnan(donch_high[i]) or
             np.isnan(donch_low[i])):
             signals[i] = 0.0
             continue
         
         # Skip low volatility periods (ATR < 0.5% of price)
-        if atr_4h[i] < 0.005 * close[i]:
+        if atr_1d[i] < 0.005 * close[i]:
             signals[i] = 0.0
             continue
         
-        # Calculate daily pivot levels based on previous day's range
-        prev_high = high_1d[i-1] if i > 0 else high_1d[0]
-        prev_low = low_1d[i-1] if i > 0 else low_1d[0]
-        prev_close = close_1d[i-1] if i > 0 else close_1d[0]
-        prev_range = prev_high - prev_low
-        
-        # Camarilla-style pivot levels (R3/S3)
-        r3 = prev_close + (prev_range * 1.1 / 4)
-        s3 = prev_close - (prev_range * 1.1 / 4)
-        
-        # Align to 4h timeframe
-        r3_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r3))[i]
-        s3_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i]
-        
         if position == 0:
-            # Long: Price breaks above 4h Donchian high with above daily EMA20
-            if close[i] > donch_high[i] and close[i] > ema20_4h[i]:
+            # Long: Price breaks above daily Donchian high with above weekly EMA50
+            if close[i] > donch_high[i] and close[i] > ema50_1d[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below 4h Donchian low with below daily EMA20
-            elif close[i] < donch_low[i] and close[i] < ema20_4h[i]:
+            # Short: Price breaks below daily Donchian low with below weekly EMA50
+            elif close[i] < donch_low[i] and close[i] < ema50_1d[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below 4h Donchian low OR below daily EMA20
-            if close[i] < donch_low[i] or close[i] < ema20_4h[i]:
+            # Exit: Price falls back below daily Donchian low OR below weekly EMA50
+            if close[i] < donch_low[i] or close[i] < ema50_1d[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above 4h Donchian high OR above daily EMA20
-            if close[i] > donch_high[i] or close[i] > ema20_4h[i]:
+            # Exit: Price rises back above daily Donchian high OR above weekly EMA50
+            if close[i] > donch_high[i] or close[i] > ema50_1d[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -118,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_R3S3_Breakout_EMA20"
-timeframe = "4h"
+name = "1d_1w_Donchian20_EMA50_Trend"
+timeframe = "1d"
 leverage = 1.0
