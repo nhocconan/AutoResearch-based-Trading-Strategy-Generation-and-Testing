@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,7 +22,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily ATR (14-period) for volatility filter
+    # Calculate daily ATR (14-period)
     tr = np.zeros(len(df_1d))
     tr[0] = high_1d[0] - low_1d[0]
     for i in range(1, len(df_1d)):
@@ -48,16 +48,7 @@ def generate_signals(prices):
             donch_high[i] = np.max(high[i-19:i+1])
             donch_low[i] = np.min(low[i-19:i+1])
     
-    # Calculate daily ATR-based volatility filter (ATR > 1.5% of price)
-    vol_filter_1d = np.zeros(len(df_1d))
-    for i in range(len(df_1d)):
-        if not np.isnan(atr_1d[i]) and close_1d[i] > 0:
-            vol_filter_1d[i] = atr_1d[i] / close_1d[i] > 0.015
-        else:
-            vol_filter_1d[i] = False
-    vol_filter_12h = align_htf_to_ltf(prices, df_1d, vol_filter_1d.astype(float))
-    
-    # Calculate daily ADX (14-period) for trend strength filter
+    # Calculate daily ADX (14-period)
     plus_dm = np.zeros(len(df_1d))
     minus_dm = np.zeros(len(df_1d))
     for i in range(1, len(df_1d)):
@@ -98,6 +89,15 @@ def generate_signals(prices):
             adx_14[i] = (adx_14[i-1] * 13 + dx_14[i]) / 14
     
     adx_12h = align_htf_to_ltf(prices, df_1d, adx_14)
+    
+    # Calculate daily volatility filter (ATR > 1.5% of price)
+    vol_filter_1d = np.zeros(len(df_1d))
+    for i in range(len(df_1d)):
+        if not np.isnan(atr_1d[i]) and close_1d[i] > 0:
+            vol_filter_1d[i] = atr_1d[i] / close_1d[i] > 0.015
+        else:
+            vol_filter_1d[i] = False
+    vol_filter_12h = align_htf_to_ltf(prices, df_1d, vol_filter_1d.astype(float))
     
     signals = np.zeros(n)
     position = 0
