@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,10 +13,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate daily ATR (14-period) for volatility and stop loss
+    # Calculate 12h EMA(21) for trend filter
+    ema_21_12h = pd.Series(df_12h['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_21_12h)
+    
+    # Calculate 12h RSI(14) for momentum filter
+    close_12h = pd.Series(df_12h['close'])
+    delta_12h = close_12h.diff()
+    gain_12h = delta_12h.where(delta_12h > 0, 0)
+    loss_12h = -delta_12h.where(delta_12h < 0, 0)
+    avg_gain_12h = gain_12h.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss_12h = loss_12h.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs_12h = avg_gain_12h / avg_loss_12h
+    rsi_12h = (100 - (100 / (1 + rs_12h))).values
+    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
+    
+    # Calculate 6h ATR(14) for volatility filter and position sizing
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     close_series = pd.Series(close)
@@ -26,75 +41,63 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Calculate daily EMA(50) for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Calculate weekly EMA(20) for higher timeframe trend
-    df_1w = get_htf_data(prices, '1w')
-    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Calculate RSI(14) for momentum
-    delta = close_series.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs)).values
+    # Calculate 60-period average volume for confirmation (6h * 10 = 60h ~ 2.5 days)
+    vol_avg = pd.Series(volume).rolling(window=60, min_periods=60).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 50
+    start = 100
     
     for i in range(start, n):
-        price = close[i]
-        vol = volume[i]
-        
         # Skip if any critical data is NaN
-        if (np.isnan(atr[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(ema_20_1w_aligned[i]) or 
-            np.isnan(rsi[i])):
+        if (np.isnan(ema_21_12h_aligned[i]) or 
+            np.isnan(rsi_12h_aligned[i]) or 
+            np.isnan(atr[i]) or 
+            np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().iloc[i]
-        vol_confirm = vol > (vol_avg * 1.5) if not np.isnan(vol_avg) else False
+        price = close[i]
+        vol = volume[i]
         
-        # Trend alignment: daily EMA50 > weekly EMA20 for bullish, < for bearish
-        daily_above_weekly = ema_50_1d_aligned[i] > ema_20_1w_aligned[i]
-        daily_below_weekly = ema_50_1d_aligned[i] < ema_20_1w_aligned[i]
+        # ATR-based volatility filter: avoid extremely low volatility periods
+        atr_ratio = atr[i] / price if price > 0 else 0
+        vol_filter = atr_ratio > 0.003  # Minimum 0.3% ATR relative to price
         
-        # Momentum filter: RSI between 40 and 60 to avoid extremes
-        rsi_filter = 40 <= rsi[i] <= 60
+        # Volume confirmation: current volume > 1.5x average
+        vol_confirm = vol > (vol_avg[i] * 1.5) if not np.isnan(vol_avg[i]) else False
+        
+        # Trend filter: price > 12h EMA21 for long, price < 12h EMA21 for short
+        trend_filter_long = price > ema_21_12h_aligned[i]
+        trend_filter_short = price < ema_21_12h_aligned[i]
+        
+        # Momentum filter: RSI between 40 and 60 to avoid extremes and chop
+        rsi_filter = 40 <= rsi_12h_aligned[i] <= 60
         
         if position == 0:
-            # Long setup: daily EMA above weekly EMA + volume confirmation + RSI filter
-            if daily_above_weekly and vol_confirm and rsi_filter:
+            # Long setup: price above 12h EMA21 + volume confirmation + volatility filter + RSI filter
+            if (trend_filter_long and vol_confirm and vol_filter and rsi_filter):
                 position = 1
                 signals[i] = position_size
-            # Short setup: daily EMA below weekly EMA + volume confirmation + RSI filter
-            elif daily_below_weekly and vol_confirm and rsi_filter:
+            # Short setup: price below 12h EMA21 + volume confirmation + volatility filter + RSI filter
+            elif (trend_filter_short and vol_confirm and vol_filter and rsi_filter):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: daily EMA crosses below weekly EMA OR stop loss hit
-            if daily_below_weekly or price < ema_50_1d_aligned[i] - 2.0 * atr[i]:
+            # Exit long: price crosses below 12h EMA21 OR RSI > 70 (overbought)
+            if price < ema_21_12h_aligned[i] or rsi_12h_aligned[i] > 70:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: daily EMA crosses above weekly EMA OR stop loss hit
-            if daily_above_weekly or price > ema_50_1d_aligned[i] + 2.0 * atr[i]:
+            # Exit short: price crosses above 12h EMA21 OR RSI < 30 (oversold)
+            if price > ema_21_12h_aligned[i] or rsi_12h_aligned[i] < 30:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -102,6 +105,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_EMA50_EMA20_WeeklyTrend_Filter"
-timeframe = "1d"
+name = "6h_12hEMA21_RSI_Volume_Filter"
+timeframe = "6h"
 leverage = 1.0
