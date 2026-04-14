@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d RSI mean reversion with volume spike and ADX trend filter.
-# Long when RSI(14) < 30 AND 4h volume > 1.5x 20-period average AND daily ADX > 25.
-# Short when RSI(14) > 70 AND 4h volume > 1.5x 20-period average AND daily ADX > 25.
-# Exit when RSI crosses back above 50 (long) or below 50 (short).
-# RSI captures overextended moves, volume confirms participation, ADX ensures trending environment.
-# Designed to work in both bull (buy dips) and bear (sell rallies) markets with controlled trade frequency.
+# Hypothesis: 4h strategy using 12h KAMA trend with 1d RSI mean reversion and volume confirmation.
+# Long when 12h KAMA is rising AND 1d RSI < 30 AND volume > 1.5x 20-period average.
+# Short when 12h KAMA is falling AND 1d RSI > 70 AND volume > 1.5x 20-period average.
+# Exit when RSI crosses 50 or KAMA trend reverses.
+# Combines trend following (KAMA) with mean reversion (RSI) to capture swings in both bull and bear markets.
+# Volume ensures participation, reducing false signals. Target: 25-40 trades/year per symbol.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,138 +20,115 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 4h RSI (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing for RSI
-    def wilders_rsi(gain, loss, period):
-        avg_gain = np.full_like(gain, np.nan)
-        avg_loss = np.full_like(loss, np.nan)
-        if len(gain) < period + 1:
-            return avg_gain, avg_loss
-        # First average: simple mean
-        avg_gain[period] = np.mean(gain[1:period+1])
-        avg_loss[period] = np.mean(loss[1:period+1])
-        # Subsequent: Wilder's smoothing
-        for i in range(period+1, len(gain)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
-    
-    rsi = wilders_rsi(gain, loss, 14)
-    
-    # Calculate 4h volume moving average (20-period)
-    vol_ma_20 = np.full_like(volume, np.nan)
-    for i in range(19, len(volume)):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
-    
-    # Load daily data ONCE for ADX
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 30:
+    # Load 12h data ONCE for KAMA
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
-    close_daily = df_daily['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate daily ADX (14-period)
-    # True Range
-    tr1 = high_daily[1:] - low_daily[1:]
-    tr2 = np.abs(high_daily[1:] - close_daily[:-1])
-    tr3 = np.abs(low_daily[1:] - close_daily[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate KAMA (10-period)
+    def kama(close, length=10):
+        # Efficiency Ratio
+        change = np.abs(np.diff(close, n=length))
+        volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)
+        er = np.divide(change, volatility, out=np.zeros_like(change, dtype=float), where=volatility!=0)
+        # Smoothing constants
+        sc = np.power(er * (2/(2+1) - 2/(30+1)) + 2/(30+1), 2)
+        # KAMA calculation
+        kama_out = np.full_like(close, np.nan)
+        kama_out[length-1] = close[length-1]
+        for i in range(length, len(close)):
+            kama_out[i] = kama_out[i-1] + sc[i-length] * (close[i] - kama_out[i-1])
+        return kama_out
     
-    # Directional Movement
-    dm_plus = np.where((high_daily[1:] - high_daily[:-1]) > (low_daily[:-1] - low_daily[1:]), 
-                       np.maximum(high_daily[1:] - high_daily[:-1], 0), 0)
-    dm_minus = np.where((low_daily[:-1] - low_daily[1:]) > (high_daily[1:] - high_daily[:-1]), 
-                        np.maximum(low_daily[:-1] - low_daily[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    kama_12h = kama(close_12h, 10)
+    kama_rising = np.zeros_like(kama_12h, dtype=bool)
+    kama_rising[1:] = kama_12h[1:] > kama_12h[:-1]
     
-    # Wilder's smoothing
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value: simple average (skip first element for DM)
-        result[period-1] = np.nanmean(data[1:period])  # Skip first element which is 0 for DM
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # Load 1d data ONCE for RSI and volume
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    tr_14 = wilders_smoothing(tr, 14)
-    dm_plus_14 = wilders_smoothing(dm_plus, 14)
-    dm_minus_14 = wilders_smoothing(dm_minus, 14)
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
+    # Calculate RSI (14-period)
+    def rsi(close, length=14):
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.zeros_like(close)
+        avg_loss = np.zeros_like(close)
+        avg_gain[length] = np.mean(gain[:length])
+        avg_loss[length] = np.mean(loss[:length])
+        for i in range(length+1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (length-1) + gain[i-1]) / length
+            avg_loss[i] = (avg_loss[i-1] * (length-1) + loss[i-1]) / length
+        rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+        rsi_out = 100 - (100 / (1 + rs))
+        return rsi_out
     
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = np.full_like(dx, np.nan)
-    # First ADX: simple average of first 14 DX values
-    valid_dx = dx[~np.isnan(dx)]
-    if len(valid_dx) >= 14:
-        adx[13] = np.mean(valid_dx[:14])
-        for i in range(14, len(dx)):
-            if not np.isnan(dx[i]):
-                adx[i] = (adx[i-1] * 13 + dx[i]) / 14
+    rsi_1d = rsi(close_1d, 14)
+    
+    # Calculate 20-period average volume
+    vol_ma_20 = np.full_like(volume_1d, np.nan)
+    for i in range(19, len(volume_1d)):
+        vol_ma_20[i] = np.mean(volume_1d[i-19:i+1])
     
     # Align indicators to 4h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), rsi)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, pd.DataFrame({'volume': volume}), vol_ma_20)
-    adx_aligned = align_htf_to_ltf(prices, df_daily, adx)
+    kama_rising_aligned = align_htf_to_ltf(prices, df_12h, kama_rising)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(30, 20)  # Need RSI and volume data
+    start = max(30, 20)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(rsi_aligned[i]) or 
+        if (np.isnan(rsi_1d_aligned[i]) or 
             np.isnan(vol_ma_20_aligned[i]) or
-            np.isnan(adx_aligned[i])):
+            np.isnan(kama_rising_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 4h volume vs 20-period average
-        volume_ratio = volume[i] / vol_ma_20_aligned[i] if vol_ma_20_aligned[i] > 0 else 0
+        # Volume ratio: current daily volume vs 20-day average
+        volume_ratio = volume_1d_aligned[i] / vol_ma_20_aligned[i] if vol_ma_20_aligned[i] > 0 else 0
         
         if position == 0:
-            # Look for mean reversion entries with volume confirmation and trend
-            # Long: RSI < 30 (oversold) AND volume > 1.5x average AND ADX > 25
-            if (rsi_aligned[i] < 30 and 
-                volume_ratio > 1.5 and 
-                adx_aligned[i] > 25):
+            # Look for mean reversion entries with trend and volume confirmation
+            # Long: KAMA rising AND RSI < 30 AND volume > 1.5x average
+            if (kama_rising_aligned[i] and 
+                rsi_1d_aligned[i] < 30 and 
+                volume_ratio > 1.5):
                 position = 1
                 signals[i] = position_size
-            # Short: RSI > 70 (overbought) AND volume > 1.5x average AND ADX > 25
-            elif (rsi_aligned[i] > 70 and 
-                  volume_ratio > 1.5 and 
-                  adx_aligned[i] > 25):
+            # Short: KAMA falling AND RSI > 70 AND volume > 1.5x average
+            elif ((not kama_rising_aligned[i]) and 
+                  rsi_1d_aligned[i] > 70 and 
+                  volume_ratio > 1.5):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI crosses back above 50 (mean reversion complete)
-            if rsi_aligned[i] > 50:
+            # Exit long: RSI crosses 50 or KAMA trend reverses
+            if (rsi_1d_aligned[i] > 50 or 
+                not kama_rising_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: RSI crosses back below 50 (mean reversion complete)
-            if rsi_aligned[i] < 50:
+            # Exit short: RSI crosses 50 or KAMA trend reverses
+            if (rsi_1d_aligned[i] < 50 or 
+                kama_rising_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -159,6 +136,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_RSI_MeanReversion_Volume_ADX_v1"
+name = "4h_12h_KAMA_1d_RSI_Volume_MeanReversion_v1"
 timeframe = "4h"
 leverage = 1.0
