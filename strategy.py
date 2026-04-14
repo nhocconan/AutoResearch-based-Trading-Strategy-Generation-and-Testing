@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h strategy using 1-day KAMA trend with RSI mean-reversion and 1-week ADX filter.
-Long when KAMA turns up, RSI < 35, and ADX > 20 (trending or ranging).
-Short when KAMA turns down, RSI > 65, and ADX > 20.
-Exit when RSI crosses 50 (mean reversion) or ADX < 15 (no trend).
-Designed for low turnover: ~15-25 trades/year per symbol to minimize fee drag.
+4h Camarilla Pivot (1d) + Volume Spike + Choppiness Regime (1d) for BTC/ETH.
+Long when price closes above H3 with volume > 2x avg and CHOP > 50 (range).
+Short when price closes below L3 with volume > 2x avg and CHOP > 50.
+Exit when price reaches H4/L4 or CHOP < 40 (trending).
+Designed for low turnover: ~20-30 trades/year per symbol.
 """
 
 import numpy as np
@@ -17,141 +17,118 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1-day data once for KAMA and RSI
+    # Load 1-day data once for Camarilla pivot and chop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate KAMA (10, 2, 30)
-    kama_period = 10
-    fast_ema = 2
-    slow_ema = 30
+    # Calculate Camarilla levels from previous day
+    close_prev = np.roll(close_1d, 1)
+    high_prev = np.roll(high_1d, 1)
+    low_prev = np.roll(low_1d, 1)
+    close_prev[0] = close_1d[0]
+    high_prev[0] = high_1d[0]
+    low_prev[0] = low_1d[0]
     
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_1d, kama_period))
-    abs_change = np.abs(np.diff(close_1d))
-    er = np.zeros(len(close_1d))
-    er[kama_period:] = change[kama_period:] / np.sum(np.lib.stride_tricks.sliding_window_view(abs_change, kama_period), axis=1)
-    er = np.where(np.isnan(er), 0, er)
+    range_prev = high_prev - low_prev
+    camarilla_h3 = close_prev + range_prev * 1.1 / 6
+    camarilla_l3 = close_prev - range_prev * 1.1 / 6
+    camarilla_h4 = close_prev + range_prev * 1.1 / 2
+    camarilla_l4 = close_prev - range_prev * 1.1 / 2
     
-    # Smoothing Constants
-    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1))**2
-    sc = np.where(np.isnan(sc), 0, sc)
-    
-    # KAMA
-    kama = np.zeros(len(close_1d))
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    
-    # Calculate RSI (14)
-    rsi_period = 14
-    delta = np.diff(close_1d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros(len(close_1d))
-    avg_loss = np.zeros(len(close_1d))
-    avg_gain[rsi_period] = np.mean(gain[:rsi_period])
-    avg_loss[rsi_period] = np.mean(loss[:rsi_period])
-    
-    for i in range(rsi_period+1, len(close_1d)):
-        avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i-1]) / rsi_period
-        avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i-1]) / rsi_period
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Load 1-week data for ADX trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate ADX (14)
-    adx_period = 14
-    
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    # Calculate Choppiness Index (14)
+    chop_period = 14
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    atr = np.zeros(len(close_1w))
-    atr[0] = tr[0]
-    for i in range(1, len(tr)):
-        atr[i] = (atr[i-1] * (adx_period-1) + tr[i]) / adx_period
     
-    # Directional Movement
-    up = high_1w - np.roll(high_1w, 1)
-    down = np.roll(low_1w, 1) - low_1w
-    plus_dm = np.where((up > down) & (up > 0), up, 0)
-    minus_dm = np.where((down > up) & (down > 0), down, 0)
+    atr = pd.Series(tr).ewm(span=chop_period, adjust=False, min_periods=chop_period).mean().values
+    sum_tr = pd.Series(tr).rolling(window=chop_period, min_periods=chop_period).sum().values
+    highest_high = pd.Series(high_1d).rolling(window=chop_period, min_periods=chop_period).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=chop_period, min_periods=chop_period).min().values
     
-    # Smoothed DM
-    plus_dm_smooth = np.zeros(len(close_1w))
-    minus_dm_smooth = np.zeros(len(close_1w))
-    plus_dm_smooth[0] = plus_dm[0]
-    minus_dm_smooth[0] = minus_dm[0]
-    for i in range(1, len(plus_dm)):
-        plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (adx_period-1) + plus_dm[i]) / adx_period
-        minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (adx_period-1) + minus_dm[i]) / adx_period
+    chop = np.where(
+        (highest_high - lowest_low) > 0,
+        100 * np.log10(sum_tr / atr / chop_period) / np.log10(chop_period),
+        50
+    )
     
-    # Directional Indicators
-    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
-    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
-    
-    # DX and ADX
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = np.zeros(len(close_1w))
-    adx[0] = dx[0]
-    for i in range(1, len(dx)):
-        adx[i] = (adx[i-1] * (adx_period-1) + dx[i]) / adx_period
-    
-    # Align 1-day indicators to 12h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    
-    # Align 1-week ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    # Volume filter: 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25
     
-    for i in range(50, n):
-        if np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or np.isnan(adx_aligned[i]):
+    for i in range(30, n):
+        # 1-day index (6 bars per day for 4h timeframe)
+        idx_1d = i // 6
+        if idx_1d < 1:
+            continue
+        
+        # Use previous 1d values to avoid look-ahead
+        prev_idx = idx_1d - 1
+        if prev_idx < 0:
+            continue
+            
+        # Get values from previous 1d bar
+        h3_prev = camarilla_h3[prev_idx] if prev_idx < len(camarilla_h3) else camarilla_h3[-1]
+        l3_prev = camarilla_l3[prev_idx] if prev_idx < len(camarilla_l3) else camarilla_l3[-1]
+        h4_prev = camarilla_h4[prev_idx] if prev_idx < len(camarilla_h4) else camarilla_h4[-1]
+        l4_prev = camarilla_l4[prev_idx] if prev_idx < len(camarilla_l4) else camarilla_l4[-1]
+        chop_prev = chop[prev_idx] if prev_idx < len(chop) else chop[-1]
+        
+        if np.isnan(h3_prev) or np.isnan(l3_prev) or np.isnan(h4_prev) or np.isnan(l4_prev) or np.isnan(chop_prev):
+            continue
+        
+        # Create arrays for alignment
+        h3_arr = np.full(len(df_1d), h3_prev)
+        l3_arr = np.full(len(df_1d), l3_prev)
+        h4_arr = np.full(len(df_1d), h4_prev)
+        l4_arr = np.full(len(df_1d), l4_prev)
+        chop_arr = np.full(len(df_1d), chop_prev)
+        
+        h3_4h = align_htf_to_ltf(prices, df_1d, h3_arr)[i]
+        l3_4h = align_htf_to_ltf(prices, df_1d, l3_arr)[i]
+        h4_4h = align_htf_to_ltf(prices, df_1d, h4_arr)[i]
+        l4_4h = align_htf_to_ltf(prices, df_1d, l4_arr)[i]
+        chop_4h = align_htf_to_ltf(prices, df_1d, chop_arr)[i]
+        
+        if np.isnan(h3_4h) or np.isnan(l3_4h) or np.isnan(h4_4h) or np.isnan(l4_4h) or np.isnan(chop_4h):
             continue
         
         if position == 0:
-            # Long: KAMA turning up, RSI < 35 (oversold), ADX > 20
-            if i > 0 and kama_aligned[i] > kama_aligned[i-1] and rsi_aligned[i] < 35 and adx_aligned[i] > 20:
+            # Long: Close above H3 with volume spike and chop > 50 (range)
+            if close[i] > h3_4h and volume[i] > vol_ma[i] * 2.0 and chop_4h > 50:
                 position = 1
                 signals[i] = position_size
-            # Short: KAMA turning down, RSI > 65 (overbought), ADX > 20
-            elif i > 0 and kama_aligned[i] < kama_aligned[i-1] and rsi_aligned[i] > 65 and adx_aligned[i] > 20:
+            # Short: Close below L3 with volume spike and chop > 50 (range)
+            elif close[i] < l3_4h and volume[i] > vol_ma[i] * 2.0 and chop_4h > 50:
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
-            # Exit: RSI crosses 50 (mean reversion) or ADX < 15 (no trend)
-            if rsi_aligned[i] >= 50 or adx_aligned[i] < 15:
+            # Exit: Reach H4 or chop < 40 (trending)
+            if close[i] >= h4_4h or chop_4h < 40:
                 position = 0
                 signals[i] = 0.0
         elif position == -1:
-            # Exit: RSI crosses 50 (mean reversion) or ADX < 15 (no trend)
-            if rsi_aligned[i] <= 50 or adx_aligned[i] < 15:
+            # Exit: Reach L4 or chop < 40 (trending)
+            if close[i] <= l4_4h or chop_4h < 40:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_1d_KAMA_RSI_1wADX"
-timeframe = "12h"
+name = "4h_1d_Camarilla_Pivot_Volume_Chop"
+timeframe = "4h"
 leverage = 1.0
