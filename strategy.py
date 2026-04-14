@@ -13,109 +13,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for Bollinger Bands and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly EMA(20) for trend filter
+    close_1w = df_1w['close'].values
+    ema20_1w = np.full_like(close_1w, np.nan)
+    if len(close_1w) >= 20:
+        multiplier = 2 / (20 + 1)
+        ema20_1w[19] = np.mean(close_1w[:20])
+        for i in range(20, len(close_1w)):
+            ema20_1w[i] = (close_1w[i] - ema20_1w[i-1]) * multiplier + ema20_1w[i-1]
     
-    # Calculate 20-day ATR (daily) for volatility filter
-    if len(high_1d) < 21:
-        return np.zeros(n)
+    # Align weekly EMA to 4h timeframe
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    tr = np.zeros_like(high_1d)
-    for i in range(1, len(high_1d)):
-        tr[i] = max(high_1d[i] - low_1d[i],
-                   abs(high_1d[i] - high_1d[i-1]),
-                   abs(low_1d[i] - low_1d[i-1]))
+    # Calculate 20-period ATR (4h) for volatility and stop loss
+    tr = np.zeros_like(high)
+    for i in range(1, len(high)):
+        tr[i] = max(high[i] - low[i],
+                   abs(high[i] - high[i-1]),
+                   abs(low[i] - low[i-1]))
     
-    atr_1d = np.full_like(high_1d, np.nan)
-    if len(high_1d) >= 21:
-        atr_1d[20] = np.mean(tr[1:21])
-        for i in range(21, len(high_1d)):
-            atr_1d[i] = (atr_1d[i-1] * 19 + tr[i]) / 20
-    
-    # Align daily ATR to 4h timeframe
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # Calculate 20-period SMA of daily close (trend filter)
-    if len(close_1d) < 20:
-        return np.zeros(n)
-    
-    sma20_1d = np.full_like(close_1d, np.nan)
-    for i in range(19, len(close_1d)):
-        sma20_1d[i] = np.mean(close_1d[i-19:i+1])
-    
-    # Align daily SMA to 4h timeframe
-    sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, sma20_1d)
-    
-    # Calculate 20-period standard deviation of daily close (volatility for Bollinger Bands)
-    if len(close_1d) < 20:
-        return np.zeros(n)
-    
-    std20_1d = np.full_like(close_1d, np.nan)
-    for i in range(19, len(close_1d)):
-        std20_1d[i] = np.std(close_1d[i-19:i+1])
-    
-    # Align daily std to 4h timeframe
-    std20_1d_aligned = align_htf_to_ltf(prices, df_1d, std20_1d)
-    
-    # Bollinger Bands: upper and lower (2 std dev from SMA)
-    upper_bb_1d_aligned = sma20_1d_aligned + 2 * std20_1d_aligned
-    lower_bb_1d_aligned = sma20_1d_aligned - 2 * std20_1d_aligned
+    atr = np.full_like(high, np.nan)
+    if len(high) >= 20:
+        atr[19] = np.mean(tr[1:20])
+        for i in range(20, len(high)):
+            atr[i] = (atr[i-1] * 19 + tr[i]) / 20
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # Position size: 25% of capital
     
+    # Pre-calculate volume ratio for efficiency
+    vol_ma_20 = np.full_like(volume, np.nan)
+    for i in range(19, len(volume)):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    
     for i in range(30, n):
         # Skip if any critical data is NaN
-        if (np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(sma20_1d_aligned[i]) or
-            np.isnan(std20_1d_aligned[i]) or
-            np.isnan(upper_bb_1d_aligned[i]) or
-            np.isnan(lower_bb_1d_aligned[i])):
+        if (np.isnan(ema20_1w_aligned[i]) or 
+            np.isnan(atr[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current period volume vs 20-period average
-        vol_ma_20 = np.full_like(volume, np.nan)
-        for j in range(19, len(volume)):
-            vol_ma_20[j] = np.mean(volume[j-19:j+1])
-        
-        if np.isnan(vol_ma_20[i]) or vol_ma_20[i] <= 0:
+        # Volume ratio
+        if vol_ma_20[i] <= 0:
             volume_ratio = 0
         else:
             volume_ratio = volume[i] / vol_ma_20[i]
         
         if position == 0:
-            # Long: price touches lower Bollinger Band with volume surge
-            if (close[i] <= lower_bb_1d_aligned[i] and 
-                volume_ratio > 4.0):  # High threshold to reduce trades
+            # Long: price above weekly EMA with volume surge
+            if (close[i] > ema20_1w_aligned[i] and 
+                volume_ratio > 3.0):
                 position = 1
                 signals[i] = position_size
-            # Short: price touches upper Bollinger Band with volume surge
-            elif (close[i] >= upper_bb_1d_aligned[i] and 
-                  volume_ratio > 4.0):
+            # Short: price below weekly EMA with volume surge
+            elif (close[i] < ema20_1w_aligned[i] and 
+                  volume_ratio > 3.0):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses above SMA(20) or volume dries up
-            if (close[i] > sma20_1d_aligned[i] or
-                volume_ratio < 0.3):
+            # Exit long: price crosses below weekly EMA or volatility contraction
+            if (close[i] < ema20_1w_aligned[i] or
+                atr[i] < np.mean(atr[max(0, i-19):i+1]) * 0.7):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses below SMA(20) or volume dries up
-            if (close[i] < sma20_1d_aligned[i] or
-                volume_ratio < 0.3):
+            # Exit short: price crosses above weekly EMA or volatility contraction
+            if (close[i] > ema20_1w_aligned[i] or
+                atr[i] < np.mean(atr[max(0, i-19):i+1]) * 0.7):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -123,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Bollinger_Touch_Volume_v3"
+name = "4h_WeeklyEMA_Volume_Surge"
 timeframe = "4h"
 leverage = 1.0
