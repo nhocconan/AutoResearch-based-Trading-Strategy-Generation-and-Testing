@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Weekly Camarilla Pivot breakout with 1-week trend filter (EMA200) and volume confirmation
-# Long when price breaks above Camarilla H3 level AND price > weekly EMA200 AND volume > 2x 20-period average
-# Short when price breaks below Camarilla L3 level AND price < weekly EMA200 AND volume > 2x 20-period average
-# Exit when price crosses back inside the Camarilla H3-L3 range
-# Uses weekly timeframe for structure, daily for entry timing
-# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag while capturing major moves
+# Hypothesis: 4-hour ADX trend filter with 1-day Donchian breakout and volume confirmation
+# Long when price breaks above 1-day Donchian(20) high AND ADX(14) > 25 AND volume > 1.5x 20-period average
+# Short when price breaks below 1-day Donchian(20) low AND ADX(14) > 25 AND volume > 1.5x 20-period average
+# Exit when price crosses back inside the 1-day Donchian channel (opposite band)
+# Uses higher timeframe structure (1-day) to reduce whipsaw in both bull and bear markets
+# Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,30 +20,51 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for Camarilla pivots and EMA200 trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop for Donchian channels and ADX
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly Camarilla pivot levels
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # H3 = Pivot + (Range * 1.1)
-    # L3 = Pivot - (Range * 1.1)
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # Calculate 1-day Donchian channels (20-period high/low)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    high_20_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    pivot = (weekly_high + weekly_low + weekly_close) / 3
-    weekly_range = weekly_high - weekly_low
-    camarilla_h3 = pivot + (weekly_range * 1.1)
-    camarilla_l3 = pivot - (weekly_range * 1.1)
+    # Calculate ADX(14) on 1-day data for trend strength filter
+    # ADX calculation: +DM, -DM, TR, then smoothed
+    high_1d_series = pd.Series(high_1d)
+    low_1d_series = pd.Series(low_1d)
+    close_1d_series = pd.Series(df_1d['close'].values)
     
-    # Align weekly Camarilla levels to daily timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
+    # True Range
+    tr1 = high_1d_series - low_1d_series
+    tr2 = abs(high_1d_series - close_1d_series.shift(1))
+    tr3 = abs(low_1d_series - close_1d_series.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     
-    # Calculate weekly EMA200 for trend filter
-    ema200_1w = pd.Series(weekly_close).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # Directional Movement
+    up_move = high_1d_series - high_1d_series.shift(1)
+    down_move = low_1d_series.shift(1) - low_1d_series
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values (Wilder's smoothing)
+    tr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean()
+    plus_dm_14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean()
+    minus_dm_14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean()
+    
+    # Directional Indicators
+    plus_di_14 = 100 * plus_dm_14 / tr_14
+    minus_di_14 = 100 * minus_dm_14 / tr_14
+    
+    # DX and ADX
+    dx = 100 * abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
+    adx_14 = dx.ewm(alpha=1/14, adjust=False).mean()
+    adx_14_values = adx_14.values
+    
+    # Align 1-day indicators to 4-hour timeframe
+    high_20_1d_aligned = align_htf_to_ltf(prices, df_1d, high_20_1d)
+    low_20_1d_aligned = align_htf_to_ltf(prices, df_1d, low_20_1d)
+    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14_values)
     
     # Calculate volume average for confirmation (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,41 +73,41 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations (200 for EMA200 + buffer)
-    start = 220
+    # Start after enough data for calculations (20 for Donchian + 14 for ADX + buffer)
+    start = 40
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(ema200_1w_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(high_20_1d_aligned[i]) or np.isnan(low_20_1d_aligned[i]) or 
+            np.isnan(adx_14_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_threshold = vol_avg[i] * 2.0
+        vol_threshold = vol_avg[i] * 1.5
         
         if position == 0:
-            # Long setup: breakout above Camarilla H3 + above weekly EMA200 + volume confirmation
-            if (price > camarilla_h3_aligned[i] and price > ema200_1w_aligned[i] and vol > vol_threshold):
+            # Long setup: breakout above 1-day Donchian high + ADX > 25 + volume confirmation
+            if (price > high_20_1d_aligned[i] and adx_14_aligned[i] > 25 and vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: breakdown below Camarilla L3 + below weekly EMA200 + volume confirmation
-            elif (price < camarilla_l3_aligned[i] and price < ema200_1w_aligned[i] and vol > vol_threshold):
+            # Short setup: breakdown below 1-day Donchian low + ADX > 25 + volume confirmation
+            elif (price < low_20_1d_aligned[i] and adx_14_aligned[i] > 25 and vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price falls back below Camarilla L3 (opposite side)
-            if price < camarilla_l3_aligned[i]:
+            # Exit long: price falls back below 1-day Donchian low (opposite band)
+            if price < low_20_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price rises back above Camarilla H3 (opposite side)
-            if price > camarilla_h3_aligned[i]:
+            # Exit short: price rises back above 1-day Donchian high (opposite band)
+            if price > high_20_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -94,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyCamarilla_EMA200_Volume"
-timeframe = "1d"
+name = "4h_ADX_Donchian1D_Volume"
+timeframe = "4h"
 leverage = 1.0
