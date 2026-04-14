@@ -1,18 +1,19 @@
-# 6h strategy using monthly pivot levels for institutional support/resistance with volume confirmation
-# Monthly pivots provide strong institutional reference points that work across market regimes
-# Volume ensures institutional participation at key levels
-# Long when bouncing from monthly S1/S2 with bullish candle and volume > 1.3x average
-# Short when rejected at monthly R1/R2 with bearish candle and volume > 1.3x average
-# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 12h strategy using daily volatility-adjusted price channels with volume confirmation
+# - Long when price breaks above upper channel (mean + 2*ATR) with volume > 1.5x 20-period average
+# - Short when price breaks below lower channel (mean - 2*ATR) with volume > 1.5x 20-period average
+# - Uses 1d ATR for volatility normalization to adapt to changing market conditions
+# - Volume confirmation ensures institutional participation at breakouts
+# - Target: 50-150 total trades over 4 years (12-37/year) for optimal frequency
+# - Position size 0.25 for balanced risk exposure
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,87 +22,74 @@ def generate_signals(prices):
     open_price = prices['open'].values
     volume = prices['volume'].values
     
-    # Load monthly data once before loop
-    df_m = get_htf_data(prices, '1M')
-    if len(df_m) < 2:
+    # Load daily data once before loop
+    df_d = get_htf_data(prices, '1d')
+    if len(df_d) < 20:
         return np.zeros(n)
     
-    high_m = df_m['high'].values
-    low_m = df_m['low'].values
-    close_m = df_m['close'].values
+    high_d = df_d['high'].values
+    low_d = df_d['low'].values
+    close_d = df_d['close'].values
     
-    # Calculate monthly pivot points
-    pivot = (high_m + low_m + close_m) / 3
-    r1 = 2 * pivot - low_m
-    s1 = 2 * pivot - high_m
-    r2 = pivot + (high_m - low_m)
-    s2 = pivot - (high_m - low_m)
+    # Calculate daily ATR (14-period)
+    tr_d = np.maximum(
+        high_d[1:] - low_d[1:],
+        np.maximum(
+            np.abs(high_d[1:] - close_d[:-1]),
+            np.abs(low_d[1:] - close_d[:-1])
+        )
+    )
+    tr_d = np.concatenate([[np.nan], tr_d])  # Align with original index
+    atr_d = pd.Series(tr_d).rolling(window=14, min_periods=14).mean().values
     
-    # Volume filter: 50-period average
+    # Calculate daily mean price (typical price)
+    typical_price_d = (high_d + low_d + close_d) / 3
+    
+    # Calculate upper and lower channels (mean ± 2*ATR)
+    upper_channel_d = typical_price_d + 2 * atr_d
+    lower_channel_d = typical_price_d - 2 * atr_d
+    
+    # Align daily channels to 12h timeframe
+    upper_channel_12h = align_htf_to_ltf(prices, df_d, upper_channel_d)
+    lower_channel_12h = align_htf_to_ltf(prices, df_d, lower_channel_d)
+    
+    # Volume filter: 20-period average
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=50, min_periods=50).mean().values
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if any critical data is NaN
-        if np.isnan(vol_ma[i]):
+        if np.isnan(vol_ma[i]) or np.isnan(upper_channel_12h[i]) or np.isnan(lower_channel_12h[i]):
             continue
-        
-        # Get previous month's pivot levels for current month
-        idx_m = i // (30 * 24 * 60 // 6)  # Approximate monthly index from 6h bars
-        if idx_m < 1:
-            continue
-            
-        # Previous month's levels
-        piv_prev = pivot[idx_m-1]
-        r1_prev = r1[idx_m-1]
-        s1_prev = s1[idx_m-1]
-        r2_prev = r2[idx_m-1]
-        s2_prev = s2[idx_m-1]
-        
-        # Create arrays for alignment (constant values for the month)
-        pivot_arr = np.full(len(df_m), piv_prev)
-        r1_arr = np.full(len(df_m), r1_prev)
-        s1_arr = np.full(len(df_m), s1_prev)
-        r2_arr = np.full(len(df_m), r2_prev)
-        s2_arr = np.full(len(df_m), s2_prev)
-        
-        # Align to 6h timeframe
-        pivot_6h = align_htf_to_ltf(prices, df_m, pivot_arr)[i]
-        r1_6h = align_htf_to_ltf(prices, df_m, r1_arr)[i]
-        s1_6h = align_htf_to_ltf(prices, df_m, s1_arr)[i]
-        r2_6h = align_htf_to_ltf(prices, df_m, r2_arr)[i]
-        s2_6h = align_htf_to_ltf(prices, df_m, s2_arr)[i]
         
         if position == 0:
-            # Long: Price near support with bullish candle and volume
-            if ((low[i] <= s1_6h * 1.005 or low[i] <= s2_6h * 1.005) and  # Near S1/S2
-                close[i] > open_price[i] and  # Bullish candle
-                volume[i] > vol_ma[i] * 1.3):  # Volume confirmation
+            # Long: Price breaks above upper channel with volume confirmation
+            if close[i] > upper_channel_12h[i] and volume[i] > vol_ma[i] * 1.5:
                 position = 1
                 signals[i] = position_size
-            # Short: Price near resistance with bearish candle and volume
-            elif ((high[i] >= r1_6h * 0.995 or high[i] >= r2_6h * 0.995) and  # Near R1/R2
-                  close[i] < open_price[i] and  # Bearish candle
-                  volume[i] > vol_ma[i] * 1.3):  # Volume confirmation
+            # Short: Price breaks below lower channel with volume confirmation
+            elif close[i] < lower_channel_12h[i] and volume[i] > vol_ma[i] * 1.5:
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
-            # Exit: Price reaches pivot or opposite resistance
-            if close[i] >= pivot_6h or close[i] >= r1_6h:
+            # Exit: Price returns to mean or opposite channel
+            typical_price = (high[i] + low[i] + close[i]) / 3
+            if typical_price < upper_channel_12h[i] or close[i] < lower_channel_12h[i]:
                 position = 0
                 signals[i] = 0.0
         elif position == -1:
-            # Exit: Price reaches pivot or opposite support
-            if close[i] <= pivot_6h or close[i] <= s1_6h:
+            # Exit: Price returns to mean or opposite channel
+            typical_price = (high[i] + low[i] + close[i]) / 3
+            if typical_price > lower_channel_12h[i] or close[i] > upper_channel_12h[i]:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "6h_1M_PivotReversal_Volume"
-timeframe = "6h"
+name = "12h_1d_VolatilityChannel_VolumeBreakout"
+timeframe = "12h"
 leverage = 1.0
