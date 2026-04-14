@@ -49,7 +49,7 @@ def generate_signals(prices):
     
     ema50_12h = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate 12h Donchian channels (20-period)
+    # Calculate 4h Donchian channels (20-period) for entry signals
     donch_high = np.full(n, np.nan)
     donch_low = np.full(n, np.nan)
     if n >= 20:
@@ -75,7 +75,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 12h volume vs 20-period average (using 12h data)
+        # Volume ratio: current 12h volume vs 20-period average
         vol_ma_20 = np.full(n, np.nan)
         if n >= 20:
             for j in range(19, n):
@@ -104,26 +104,26 @@ def generate_signals(prices):
         s4_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s4))[i]
         
         if position == 0:
-            # Long: Price breaks above R4 with volume confirmation and above daily EMA50
-            if close[i] > r4_12h and volume_ratio > vol_threshold and close[i] > ema50_12h[i]:
+            # Long: Price breaks above 4h Donchian high with volume confirmation and above daily EMA50
+            if close[i] > donch_high[i] and volume_ratio > vol_threshold and close[i] > ema50_12h[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below S4 with volume confirmation and below daily EMA50
-            elif close[i] < s4_12h and volume_ratio > vol_threshold and close[i] < ema50_12h[i]:
+            # Short: Price breaks below 4h Donchian low with volume confirmation and below daily EMA50
+            elif close[i] < donch_low[i] and volume_ratio > vol_threshold and close[i] < ema50_12h[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price falls back below S4 OR below daily EMA50
-            if close[i] < s4_12h or close[i] < ema50_12h[i]:
+            # Exit: Price falls back below 4h Donchian low OR below daily EMA50
+            if close[i] < donch_low[i] or close[i] < ema50_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price rises back above R4 OR above daily EMA50
-            if close[i] > r4_12h or close[i] > ema50_12h[i]:
+            # Exit: Price rises back above 4h Donchian high OR above daily EMA50
+            if close[i] > donch_high[i] or close[i] > ema50_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -131,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_R4S4_EMA50_Volume"
-timeframe = "12h"
+name = "4h_1d_Donchian_EMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
