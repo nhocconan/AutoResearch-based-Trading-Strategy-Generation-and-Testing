@@ -21,6 +21,7 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
     # Calculate daily ATR (14-period)
     tr = np.zeros(len(df_1d))
@@ -68,10 +69,26 @@ def generate_signals(prices):
         elif not np.isnan(avg_gain[i]) and avg_loss[i] == 0:
             rsi_1d[i] = 100.0
     
+    # Calculate daily volume moving average (20-period)
+    vol_ma_1d = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 20:
+        vol_ma_1d[19] = np.mean(volume_1d[:20])
+        for i in range(20, len(df_1d)):
+            vol_ma_1d[i] = (vol_ma_1d[i-1] * 19 + volume_1d[i]) / 20
+    
+    # Calculate daily volume ratio (current / MA)
+    vol_ratio_1d = np.zeros(len(df_1d))
+    for i in range(len(df_1d)):
+        if not np.isnan(vol_ma_1d[i]) and vol_ma_1d[i] > 0:
+            vol_ratio_1d[i] = volume_1d[i] / vol_ma_1d[i]
+        else:
+            vol_ratio_1d[i] = 0.0
+    
     # Align indicators to 4h timeframe (primary timeframe)
     atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
     vol_filter_4h = align_htf_to_ltf(prices, df_1d, vol_filter_1d.astype(float))
     rsi_4h = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    vol_ratio_4h = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
     # Calculate 4-hour Donchian channels (20-period)
     donch_high = np.full(n, np.nan)
@@ -90,12 +107,18 @@ def generate_signals(prices):
         if (np.isnan(atr_4h[i]) or
             np.isnan(donch_high[i]) or
             np.isnan(donch_low[i]) or
-            np.isnan(rsi_4h[i])):
+            np.isnan(rsi_4h[i]) or
+            np.isnan(vol_ratio_4h[i])):
             signals[i] = 0.0
             continue
         
         # Skip low volatility periods (ATR < 1.5% of price)
         if vol_filter_4h[i] < 0.5:
+            signals[i] = 0.0
+            continue
+        
+        # Skip low volume periods (volume ratio < 1.2)
+        if vol_ratio_4h[i] < 1.2:
             signals[i] = 0.0
             continue
         
@@ -114,11 +137,11 @@ def generate_signals(prices):
         s3_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i]
         
         if position == 0:
-            # Long: Price breaks above 4h Donchian high AND above S3 AND RSI < 70
+            # Long: Price breaks above 4h Donchian high AND above S3 AND RSI < 70 AND volume ratio > 1.2
             if close[i] > donch_high[i] and close[i] > s3_4h and rsi_4h[i] < 70:
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below 4h Donchian low AND below R3 AND RSI > 30
+            # Short: Price breaks below 4h Donchian low AND below R3 AND RSI > 30 AND volume ratio > 1.2
             elif close[i] < donch_low[i] and close[i] < r3_4h and rsi_4h[i] > 30:
                 position = -1
                 signals[i] = -position_size
@@ -141,6 +164,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_R3S3_RSI_Filter"
+name = "4h_1d_Camarilla_R3S3_RSI_Volume_Filter"
 timeframe = "4h"
 leverage = 1.0
