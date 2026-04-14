@@ -3,14 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Daily Pivot Point with Volume Confirmation and Trend Filter
-# Uses daily pivot levels (R1/S1, R2/S2, R3/S3) from previous day as support/resistance
-# Long when price bounces from S1/S2 with volume confirmation and uptrend filter
-# Short when price is rejected from R1/R2 with volume confirmation and downtrend filter
-# Volume filter requires current volume > 1.5x 20-period average to confirm institutional interest
-# Trend filter uses 12h EMA(50) to align with higher timeframe momentum
-# Designed to work in both bull and bear markets by fading extremes with institutional validation
-# Target: 20-30 trades/year (80-120 total over 4 years) to minimize fee drag
+# Hypothesis: 12h ADX Trend Strength + Volume Surge + Price Reversion to VWAP
+# Uses ADX(14) > 25 to identify strong trends, then enters on pullbacks to VWAP
+# Volume surge (current volume > 1.5x 20-period average) confirms momentum
+# Works in both bull/bear markets by only trading with strong trend direction
+# Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,91 +19,118 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for pivot points and trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop for ADX trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate daily pivot points (using previous day's OHLC)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate ADX(14) on weekly data
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
-    r3 = high_1d + 2 * (pivot - low_1d)
-    s3 = low_1d - 2 * (high_1d - pivot)
+    # True Range
+    tr1 = np.abs(high_1w[1:] - low_1w[1:])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
-    # Align pivot levels to 6h timeframe (use previous day's levels)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Directional Movement
+    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Calculate 12h EMA (50) for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Smoothed values
+    def smooth_wilder(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) >= period:
+            result[period-1] = np.nansum(arr[:period])
+            for i in range(period, len(arr)):
+                result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
     
-    # Volume filter: current volume > 1.5x 20-period average
+    atr = smooth_wilder(tr, 14)
+    dm_plus_smooth = smooth_wilder(dm_plus, 14)
+    dm_minus_smooth = smooth_wilder(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 
+                  100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = smooth_wilder(dx, 14)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Calculate VWAP (20-period) on 12h data
+    typical_price = (high + low + close) / 3.0
+    tpv = typical_price * volume
+    cum_tpv = np.nancumsum(tpv)
+    cum_vol = np.nancumsum(volume)
+    vwap = np.full_like(typical_price, np.nan)
+    valid_vol = cum_vol != 0
+    vwap[valid_vol] = cum_tpv[valid_vol] / cum_vol[valid_vol]
+    
+    # Standard deviation of price from VWAP (20-period)
+    price_dev = typical_price - vwap
+    dev_series = pd.Series(price_dev)
+    std_dev = dev_series.rolling(window=20, min_periods=20).std().values
+    
+    # Volume surge: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
+    volume_surge = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 20  # for volume MA
+    start = 50  # for ADX and VWAP calculations
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(ema_12h_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(vwap[i]) or np.isnan(std_dev[i]) or 
+            np.isnan(adx_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_ok = volume_filter[i]
         
-        # Trend filter: only trade in direction of 12h EMA
-        above_ema = price > ema_12h_aligned[i]
+        # Trend filter: only trade when ADX > 25 (strong trend)
+        strong_trend = adx_1w_aligned[i] > 25
+        
+        if not strong_trend:
+            signals[i] = 0.0
+            continue
         
         if position == 0:
-            # Long: price bounces from S1/S2 with volume and uptrend
-            if vol_ok and above_ema:
-                if price <= s1_aligned[i] * 1.002 and price >= s1_aligned[i] * 0.998:
-                    position = 1
-                    signals[i] = position_size
-                elif price <= s2_aligned[i] * 1.002 and price >= s2_aligned[i] * 0.998:
-                    position = 1
-                    signals[i] = position_size
-            # Short: price rejected from R1/R2 with volume and downtrend
-            elif vol_ok and not above_ema:
-                if price >= r1_aligned[i] * 0.998 and price <= r1_aligned[i] * 1.002:
-                    position = -1
-                    signals[i] = -position_size
-                elif price >= r2_aligned[i] * 0.998 and price <= r2_aligned[i] * 1.002:
-                    position = -1
-                    signals[i] = -position_size
+            # Long: price pulls back to VWAP from below in uptrend with volume surge
+            if (price < vwap[i] - 0.5 * std_dev[i] and 
+                price > vwap[i] - 2.0 * std_dev[i] and
+                volume_surge[i]):
+                position = 1
+                signals[i] = position_size
+            # Short: price pulls back to VWAP from above in downtrend with volume surge
+            elif (price > vwap[i] + 0.5 * std_dev[i] and 
+                  price < vwap[i] + 2.0 * std_dev[i] and
+                  volume_surge[i]):
+                position = -1
+                signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price reaches pivot or trend changes
-            if price >= pivot_aligned[i] or price < ema_12h_aligned[i]:
+            # Exit long: price reaches VWAP or trend weakens
+            if price >= vwap[i] or adx_1w_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price reaches pivot or trend changes
-            if price <= pivot_aligned[i] or price > ema_12h_aligned[i]:
+            # Exit short: price reaches VWAP or trend weakens
+            if price <= vwap[i] or adx_1w_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -114,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_DailyPivot_Volume_TrendFilter"
-timeframe = "6h"
+name = "12h_ADX_Trend_VWAP_Pullback"
+timeframe = "12h"
 leverage = 1.0
