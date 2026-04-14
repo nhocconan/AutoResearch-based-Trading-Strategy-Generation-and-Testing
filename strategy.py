@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily KAMA + RSI + Chop filter strategy
-# Uses 1-day KAMA to establish trend direction (bullish when price > KAMA)
-# Combines with RSI(14) for entry timing (oversold in uptrend, overbought in downtrend)
-# Uses weekly Choppiness Index to filter ranging markets (avoid trading when CHOP > 61.8)
-# Designed to work in both bull and bear markets by using adaptive trend filter
-# Target: 10-25 trades/year per symbol to minimize fee drag
+# Hypothesis: 6h strategy using 1-day Williams %R and price momentum.
+# Williams %R(14) > -20 indicates overbought (short signal), < -80 indicates oversold (long signal).
+# Enter only when price is also above/below 6h EMA(20) for momentum confirmation.
+# Exit when Williams %R returns to neutral range (-80 to -20) or opposite extreme.
+# Uses 1-day Williams %R for higher reliability, avoiding lower timeframe noise.
+# Target: 20-40 trades/year per symbol (80-160 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,131 +20,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for chop filter
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE for Williams %R
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly Choppiness Index
-    chop_len = 14
-    if len(df_1w) >= chop_len:
-        high_1w = df_1w['high'].values
-        low_1w = df_1w['low'].values
-        close_1w = df_1w['close'].values
-        
-        # True Range
-        tr1 = high_1w[1:] - low_1w[1:]
-        tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-        tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.nan], tr])
-        
-        # ATR
-        atr_1w = pd.Series(tr).ewm(span=chop_len, adjust=False, min_periods=chop_len).mean().values
-        
-        # Highest high and lowest low over chop_len periods
-        highest_high = pd.Series(high_1w).rolling(window=chop_len, min_periods=chop_len).max().values
-        lowest_low = pd.Series(low_1w).rolling(window=chop_len, min_periods=chop_len).min().values
-        
-        # Chop calculation
-        sum_tr = pd.Series(tr).rolling(window=chop_len, min_periods=chop_len).sum().values
-        chop = 100 * np.log10(sum_tr / (highest_high - lowest_low)) / np.log10(chop_len)
-        chop[highest_high == lowest_low] = 100  # Avoid division by zero
-        chop_align = align_htf_to_ltf(prices, df_1w, chop)
-    else:
-        chop_align = np.full(n, np.nan)
+    # Williams %R(14) on 1d
+    williams_len = 14
+    if len(df_1d) < williams_len:
+        return np.zeros(n)
     
-    # Daily KAMA calculation
-    kama_len = 10
-    fast_sc = 2 / (2 + 1)
-    slow_sc = 2 / (30 + 1)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    if len(close) >= kama_len:
-        # Efficiency Ratio
-        change = np.abs(np.diff(close, kama_len))
-        change = np.concatenate([np.full(kama_len, np.nan), change])
-        
-        volatility = np.sum(np.abs(np.diff(close)), axis=0)
-        volatility = pd.Series(volatility).rolling(window=kama_len, min_periods=kama_len).sum().values
-        
-        er = np.where(volatility != 0, change / volatility, 0)
-        
-        # Smoothing Constant
-        sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-        
-        # KAMA
-        kama = np.full_like(close, np.nan)
-        kama[kama_len] = close[kama_len]
-        
-        for i in range(kama_len + 1, len(close)):
-            if not np.isnan(sc[i]):
-                kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-            else:
-                kama[i] = kama[i-1]
-    else:
-        kama = np.full(n, np.nan)
+    # Highest high and lowest low over lookback period
+    highest_high = pd.Series(high_1d).rolling(window=williams_len, min_periods=williams_len).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=williams_len, min_periods=williams_len).min().values
     
-    # Daily RSI
-    rsi_len = 14
-    if len(close) >= rsi_len:
-        delta = np.diff(close)
-        delta = np.concatenate([[np.nan], delta])
-        
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = pd.Series(gain).ewm(alpha=1/rsi_len, adjust=False, min_periods=rsi_len).mean().values
-        avg_loss = pd.Series(loss).ewm(alpha=1/rsi_len, adjust=False, min_periods=rsi_len).mean().values
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-    else:
-        rsi = np.full(n, np.nan)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    williams_r = np.where(
+        (highest_high - lowest_low) != 0,
+        ((highest_high - close_1d) / (highest_high - lowest_low)) * -100,
+        -50  # neutral when range is zero
+    )
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    
+    # 6h EMA(20) for momentum confirmation
+    ema_len = 20
+    if len(close) < ema_len:
+        return np.zeros(n)
+    
+    ema = pd.Series(close).ewm(span=ema_len, adjust=False, min_periods=ema_len).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(kama_len*2, rsi_len, chop_len)
+    start = max(williams_len, ema_len)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(kama[i]) or 
-            np.isnan(rsi[i]) or
-            np.isnan(chop_align[i])):
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(ema[i])):
             signals[i] = 0.0
             continue
         
-        # Chop filter: only trade when market is not too choppy (trending)
-        # CHOP > 61.8 indicates ranging market, avoid trading
-        not_choppy = chop_align[i] <= 61.8
+        williams = williams_r_aligned[i]
+        price_above_ema = close[i] > ema[i]
+        price_below_ema = close[i] < ema[i]
         
         if position == 0:
-            # Long signal: price above KAMA (uptrend) and RSI oversold
-            if (close[i] > kama[i] and 
-                rsi[i] < 30 and 
-                not_choppy):
+            # Long when oversold AND price above EMA (bullish momentum)
+            if (williams < -80 and 
+                price_above_ema):
                 position = 1
                 signals[i] = position_size
-            # Short signal: price below KAMA (downtrend) and RSI overbought
-            elif (close[i] < kama[i] and 
-                  rsi[i] > 70 and 
-                  not_choppy):
+            # Short when overbought AND price below EMA (bearish momentum)
+            elif (williams > -20 and 
+                  price_below_ema):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below KAMA or RSI overbought
-            if (close[i] < kama[i] or 
-                rsi[i] > 70):
+            # Exit long when Williams returns to neutral or overbought
+            if (williams > -50 or  # returned to neutral or overbought
+                williams > -20):   # or reached overbought
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above KAMA or RSI oversold
-            if (close[i] > kama[i] or 
-                rsi[i] < 30):
+            # Exit short when Williams returns to neutral or oversold
+            if (williams < -50 or  # returned to neutral or oversold
+                williams < -80):   # or reached oversold
                 position = 0
                 signals[i] = 0.0
             else:
@@ -152,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "daily_kama_rsi_chop_filter_v1"
-timeframe = "1d"
+name = "6h_1d_WilliamsR_EMA_Momentum_v1"
+timeframe = "6h"
 leverage = 1.0
