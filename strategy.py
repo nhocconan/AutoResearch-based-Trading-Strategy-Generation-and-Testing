@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Ichimoku Cloud with 1-day trend filter and volume confirmation
-# Long when price breaks above Kumo (cloud) with volume spike and daily bullish trend
-# Short when price breaks below Kumo with volume spike and daily bearish trend
-# Exit when price re-enters Kumo
-# Uses daily Ichimoku trend to avoid counter-trend trades
-# Target: 50-150 total trades over 4 years (12-37/year) with moderate size
+# Hypothesis: 4h Donchian breakout with 1d volume confirmation and 1d EMA trend filter
+# Long when price breaks above 4h Donchian high (20) with volume spike above 1d average and price above 1d EMA(50)
+# Short when price breaks below 4h Donchian low (20) with volume spike and price below 1d EMA(50)
+# Exit when price crosses back below/above 4h Donchian midline
+# Uses 1d trend to avoid counter-trend trades and volume to confirm breakout strength
+# Target: 20-50 trades per symbol over 4 years (5-12.5/year)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 80:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,97 +20,74 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 6h and daily data ONCE before loop
-    df_6h = get_htf_data(prices, '6h')
-    df_daily = get_htf_data(prices, '1d')
+    # Load 4h and 1d data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Ichimoku components on 6h data
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
+    # Calculate 4h Donchian channels (20-period)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    tenkan_sen = (pd.Series(high_6h).rolling(window=9, min_periods=9).max().values + 
-                  pd.Series(low_6h).rolling(window=9, min_periods=9).min().values) / 2
+    # Calculate 1d EMA for trend filter (50-period)
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    kijun_sen = (pd.Series(high_6h).rolling(window=26, min_periods=26).max().values + 
-                 pd.Series(low_6h).rolling(window=26, min_periods=26).min().values) / 2
+    # Calculate 1d volume average (20-period)
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
-    senkou_span_b = ((pd.Series(high_6h).rolling(window=52, min_periods=52).max().values + 
-                      pd.Series(low_6h).rolling(window=52, min_periods=52).min().values) / 2)
-    
-    # Chikou Span (Lagging Span): Close shifted 26 periods behind
-    chikou_span = np.roll(close, 26)  # Will be handled by alignment
-    
-    # Daily trend filter using EMA
-    close_daily = df_daily['close'].values
-    ema_daily = pd.Series(close_daily).ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # 6h volume average
-    vol_6h = df_6h['volume'].values
-    vol_ma_6h = pd.Series(vol_6h).rolling(window=24, min_periods=24).mean().values
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_6h, tenkan_sen)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_6h, kijun_sen)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_6h, senkou_span_a)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_6h, senkou_span_b)
-    chikou_span_aligned = align_htf_to_ltf(prices, df_6h, chikou_span)
-    ema_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
-    vol_ma_6h_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_6h)
+    # Align indicators to 4h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_4h, donchian_mid)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations (52 periods for Senkou B)
-    start = 52
+    # Start after enough data for calculations
+    start = 50  # for 20-period calculations and 50-period EMA
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
-            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or
-            np.isnan(ema_daily_aligned[i]) or np.isnan(vol_ma_6h_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_6h_current = volume[i]
-        
-        # Kumo (Cloud) boundaries - use future values as per Ichimoku definition
-        # Senkou Span A and B are already shifted, so we use current values
-        upper_kumo = max(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        lower_kumo = min(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        vol_4h_current = volume[i]  # Current 4h volume
         
         if position == 0:
-            # Long setup: price breaks above Kumo with volume spike and daily bullish trend
-            if (price > upper_kumo and 
-                vol_6h_current > 1.8 * vol_ma_6h_aligned[i] and  # Volume spike
-                price > ema_daily_aligned[i]):                  # Price above daily EMA for bullish trend
+            # Long setup: break above Donchian high with volume spike and 1d bullish trend
+            if (price > donchian_high_aligned[i] and 
+                vol_4h_current > 1.5 * vol_ma_1d_aligned[i] and  # Volume spike
+                price > ema_1d_aligned[i]):                     # Price above 1d EMA for bullish trend
                 position = 1
                 signals[i] = position_size
-            # Short setup: price breaks below Kumo with volume spike and daily bearish trend
-            elif (price < lower_kumo and 
-                  vol_6h_current > 1.8 * vol_ma_6h_aligned[i] and  # Volume spike
-                  price < ema_daily_aligned[i]):                  # Price below daily EMA for bearish trend
+            # Short setup: break below Donchian low with volume spike and 1d bearish trend
+            elif (price < donchian_low_aligned[i] and 
+                  vol_4h_current > 1.5 * vol_ma_1d_aligned[i] and  # Volume spike
+                  price < ema_1d_aligned[i]):                     # Price below 1d EMA for bearish trend
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price re-enters Kumo (falls below upper Kumo)
-            if price < upper_kumo:
+            # Exit long: price breaks below Donchian midline
+            if price < donchian_mid_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price re-enters Kumo (rises above lower Kumo)
-            if price > lower_kumo:
+            # Exit short: price breaks above Donchian midline
+            if price > donchian_mid_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -118,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_Kumo_Breakout_Volume_DailyTrend"
-timeframe = "6h"
+name = "4h_Donchian_Breakout_1dVolume_EMA_Trend"
+timeframe = "4h"
 leverage = 1.0
