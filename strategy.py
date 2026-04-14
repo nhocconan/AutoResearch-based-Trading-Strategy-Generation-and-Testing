@@ -13,10 +13,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # Pre-compute hour for session filter (08-20 UTC)
+    hours = prices.index.hour.values
+    
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate ATR (14-period) for volatility filter
+    # Calculate ATR (14-period) for volatility filter and stop loss
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     close_series = pd.Series(close)
@@ -39,6 +42,9 @@ def generate_signals(prices):
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs)).values
     
+    # Calculate 20-period average volume for confirmation
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
@@ -47,32 +53,35 @@ def generate_signals(prices):
     start = 100
     
     for i in range(start, n):
-        price = close[i]
-        vol = volume[i]
+        # Session filter: only trade 08-20 UTC
+        if hours[i] < 8 or hours[i] > 20:
+            signals[i] = 0.0
+            continue
         
         # Skip if any critical data is NaN
         if (np.isnan(atr[i]) or 
             np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(rsi[i])):
+            np.isnan(rsi[i]) or
+            np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
-        # Calculate average volume for confirmation (20-period)
-        vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().iloc[i]
+        price = close[i]
+        vol = volume[i]
         
         # ATR-based volatility filter: avoid extremely low volatility periods
         atr_ratio = atr[i] / price if price > 0 else 0
         vol_filter = atr_ratio > 0.005  # Minimum 0.5% ATR relative to price
         
-        # Volume confirmation: current volume > 1.3x average
-        vol_confirm = vol > (vol_avg * 1.3) if not np.isnan(vol_avg) else False
+        # Volume confirmation: current volume > 1.5x average
+        vol_confirm = vol > (vol_avg[i] * 1.5) if not np.isnan(vol_avg[i]) else False
         
         # Trend filter: price > 1d EMA50 for long, price < 1d EMA50 for short
         trend_filter_long = price > ema_50_1d_aligned[i]
         trend_filter_short = price < ema_50_1d_aligned[i]
         
-        # Momentum filter: RSI between 35 and 65 to avoid extremes
-        rsi_filter = 35 <= rsi[i] <= 65
+        # Momentum filter: RSI between 40 and 60 to avoid extremes
+        rsi_filter = 40 <= rsi[i] <= 60
         
         if position == 0:
             # Long setup: price above 1d EMA50 + volume confirmation + volatility filter + RSI filter
@@ -102,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1dEMA50_Volume_RSI_Filter"
-timeframe = "12h"
+name = "4h_1dEMA50_Volume_RSI_Filter"
+timeframe = "4h"
 leverage = 1.0
