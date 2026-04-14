@@ -3,44 +3,24 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 12h Donchian breakout with daily volume confirmation and daily ADX trend filter.
-# Long when price breaks above 12h Donchian upper channel AND daily volume > 1.3x 20-day average AND daily ADX > 20.
-# Short when price breaks below 12h Donchian lower channel AND daily volume > 1.3x 20-day average AND daily ADX > 20.
-# Exit when price crosses the 12h Donchian midpoint OR daily ADX drops below 15.
-# Donchian provides clear breakout structure, daily volume confirms participation, daily ADX ensures trending conditions.
-# Target: 12-37 trades/year per symbol (48-148 total over 4 years) to minimize fee drag while capturing major trends.
+# Hypothesis: 4h strategy using daily VWAP as dynamic support/resistance with volume confirmation and RSI filter.
+# Long when price crosses above VWAP AND volume > 1.5x 20-period average AND RSI(14) > 50.
+# Short when price crosses below VWAP AND volume > 1.5x 20-period average AND RSI(14) < 50.
+# Exit when price crosses back below/above VWAP OR RSI crosses back to neutral zone.
+# VWAP provides intraday mean reversion level, volume confirms institutional participation, RSI filters momentum.
+# Target: 20-40 trades/year per symbol (80-160 total over 4 years) to balance opportunity and cost.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE for Donchian channels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Calculate 12h Donchian channels (20-period)
-    lookback = 20
-    donchian_upper = np.full(len(high_12h), np.nan)
-    donchian_lower = np.full(len(low_12h), np.nan)
-    donchian_mid = np.full(len(close_12h), np.nan)
-    
-    for i in range(lookback - 1, len(high_12h)):
-        donchian_upper[i] = np.max(high_12h[i - lookback + 1:i + 1])
-        donchian_lower[i] = np.min(low_12h[i - lookback + 1:i + 1])
-        donchian_mid[i] = (donchian_upper[i] + donchian_lower[i]) / 2.0
-    
-    # Load daily data ONCE for ADX and volume
+    # Load daily data ONCE for VWAP and volume average
     df_daily = get_htf_data(prices, '1d')
     if len(df_daily) < 30:
         return np.zeros(n)
@@ -50,113 +30,95 @@ def generate_signals(prices):
     close_daily = df_daily['close'].values
     volume_daily = df_daily['volume'].values
     
-    # Calculate daily ADX (14-period)
-    # True Range
-    tr1 = high_daily[1:] - low_daily[1:]
-    tr2 = np.abs(high_daily[1:] - close_daily[:-1])
-    tr3 = np.abs(low_daily[1:] - close_daily[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate typical price and cumulative VWAP components
+    typical_price_daily = (high_daily + low_daily + close_daily) / 3.0
+    pv_daily = typical_price_daily * volume_daily
     
-    # Directional Movement
-    dm_plus = np.where((high_daily[1:] - high_daily[:-1]) > (low_daily[:-1] - low_daily[1:]), 
-                       np.maximum(high_daily[1:] - high_daily[:-1], 0), 0)
-    dm_minus = np.where((low_daily[:-1] - low_daily[1:]) > (high_daily[1:] - high_daily[:-1]), 
-                        np.maximum(low_daily[:-1] - low_daily[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # Cumulative sums for VWAP (reset daily)
+    cum_pv = np.cumsum(pv_daily)
+    cum_volume = np.cumsum(volume_daily)
+    vwap_daily = cum_pv / cum_volume
     
-    # Wilder's smoothing
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value: simple average (skip first element for DM)
-        result[period-1] = np.nanmean(data[1:period])  # Skip first element which is 0 for DM
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    tr_14 = wilders_smoothing(tr, 14)
-    dm_plus_14 = wilders_smoothing(dm_plus, 14)
-    dm_minus_14 = wilders_smoothing(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = np.full_like(dx, np.nan)
-    # First ADX: simple average of first 14 DX values
-    valid_dx = dx[~np.isnan(dx)]
-    if len(valid_dx) >= 14:
-        adx[13] = np.mean(valid_dx[:14])
-        for i in range(14, len(dx)):
-            if not np.isnan(dx[i]):
-                adx[i] = (adx[i-1] * 13 + dx[i]) / 14
-    
-    # Calculate 20-day average volume
+    # Calculate 20-period average volume
     vol_ma_20 = np.full_like(volume_daily, np.nan)
     for i in range(19, len(volume_daily)):
         vol_ma_20[i] = np.mean(volume_daily[i-19:i+1])
     
-    # Align indicators
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_12h, donchian_mid)
-    adx_aligned = align_htf_to_ltf(prices, df_daily, adx)
+    # Calculate RSI(14) on daily close
+    delta = np.diff(close_daily, prepend=close_daily[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing for RSI
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First average
+        result[period-1] = np.mean(data[:period])
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    avg_gain = wilders_smoothing(gain, 14)
+    avg_loss = wilders_smoothing(loss, 14)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_daily = 100 - (100 / (1 + rs))
+    
+    # Align indicators to 4h timeframe
+    vwap_aligned = align_htf_to_ltf(prices, df_daily, vwap_daily)
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_daily, vol_ma_20)
-    volume_daily_aligned = align_htf_to_ltf(prices, df_daily, volume_daily)
+    rsi_aligned = align_htf_to_ltf(prices, df_daily, rsi_daily)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(30, 20)  # Need daily and 12h data
+    start = max(30, 20)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_upper_aligned[i]) or 
-            np.isnan(donchian_lower_aligned[i]) or
-            np.isnan(donchian_mid_aligned[i]) or
-            np.isnan(adx_aligned[i]) or
+        if (np.isnan(vwap_aligned[i]) or 
             np.isnan(vol_ma_20_aligned[i]) or
-            np.isnan(volume_daily_aligned[i])):
+            np.isnan(rsi_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current daily volume vs 20-day average
-        volume_ratio = volume_daily_aligned[i] / vol_ma_20_aligned[i] if vol_ma_20_aligned[i] > 0 else 0
+        # Volume ratio: current 4h volume vs daily 20-period average volume (scaled)
+        # Approximate daily volume from 4h by scaling (6 periods per day)
+        daily_volume_approx = volume[i] * 6  # Rough estimate of daily volume from 4h bar
+        vol_ma_20_scaled = vol_ma_20_aligned[i] * 6  # Scale to comparable units
+        volume_ratio = daily_volume_approx / vol_ma_20_scaled if vol_ma_20_scaled > 0 else 0
         
         if position == 0:
-            # Look for breakout entries with volume confirmation and trend
-            # Long: price breaks above upper channel AND volume > 1.3x average AND ADX > 20
-            if (close[i] > donchian_upper_aligned[i] and 
-                volume_ratio > 1.3 and 
-                adx_aligned[i] > 20):
+            # Look for VWAP cross entries with volume confirmation and RSI filter
+            # Long: price crosses above VWAP AND volume > 1.5x average AND RSI > 50
+            if (close[i] > vwap_aligned[i] and close[i-1] <= vwap_aligned[i-1] and 
+                volume_ratio > 1.5 and 
+                rsi_aligned[i] > 50):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below lower channel AND volume > 1.3x average AND ADX > 20
-            elif (close[i] < donchian_lower_aligned[i] and 
-                  volume_ratio > 1.3 and 
-                  adx_aligned[i] > 20):
+            # Short: price crosses below VWAP AND volume > 1.5x average AND RSI < 50
+            elif (close[i] < vwap_aligned[i] and close[i-1] >= vwap_aligned[i-1] and 
+                  volume_ratio > 1.5 and 
+                  rsi_aligned[i] < 50):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses midline or trend weakens
-            if (close[i] < donchian_mid_aligned[i] or 
-                adx_aligned[i] < 15):
+            # Exit long: price crosses below VWAP OR RSI drops below 40
+            if (close[i] < vwap_aligned[i] and close[i-1] >= vwap_aligned[i-1]) or \
+               (rsi_aligned[i] < 40):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses midline or trend weakens
-            if (close[i] > donchian_mid_aligned[i] or 
-                adx_aligned[i] < 15):
+            # Exit short: price crosses above VWAP OR RSI rises above 60
+            if (close[i] > vwap_aligned[i] and close[i-1] <= vwap_aligned[i-1]) or \
+               (rsi_aligned[i] > 60):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -164,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_12h_Donchian_Breakout_DailyVolume_ADX_v1"
-timeframe = "12h"
+name = "4h_VWAP_Volume_RSI_v1"
+timeframe = "4h"
 leverage = 1.0
