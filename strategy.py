@@ -3,13 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy with 1-day ATR-based volatility filter and 1-day ATR trailing stop
-# ATR(14) measures volatility; when ATR < 20-period SMA of ATR, market is low volatility (consolidation)
-# Enter long when price breaks above highest high of last 20 bars with volume confirmation
-# Enter short when price breaks below lowest low of last 20 bars with volume confirmation
-# Use 1-day ATR trailing stop: exit when price moves against position by 2.5 * ATR
-# Works in both bull and bear markets: volatility filter avoids whipsaws in low volatility,
-# breakout captures strong moves, ATR stop adapts to volatility regimes
+# Hypothesis: 4h strategy with 1d Williams %R momentum and 1w EMA trend filter
+# Williams %R < -80 indicates oversold, > -20 indicates overbought
+# 1w EMA filter ensures trades align with higher timeframe trend
+# Williams %R mean reversion within trend has proven edge in BTC/ETH
+# Target: 20-40 trades/year with controlled risk
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,91 +17,83 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Load 1d data ONCE for ATR and volatility filter
+    # Load 1d data ONCE for Williams %R
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d ATR (14 periods)
-    atr_len = 14
+    # Calculate 1d Williams %R (14 periods)
+    wr_len = 14
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Highest High and Lowest Low over period
+    highest_high = pd.Series(high_1d).rolling(window=wr_len, min_periods=wr_len).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=wr_len, min_periods=wr_len).min().values
     
-    # ATR
-    atr = pd.Series(tr).ewm(span=atr_len, adjust=False, min_periods=atr_len).mean().values
+    # Williams %R formula: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    wr = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    wr = np.where((highest_high - lowest_low) == 0, -50, wr)  # Avoid division by zero
     
-    # Align ATR to 4h timeframe
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    # Align Williams %R to 4h timeframe
+    wr_aligned = align_htf_to_ltf(prices, df_1d, wr)
     
-    # Calculate 20-period SMA of ATR for volatility filter
-    atr_sma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
-    atr_sma_aligned = align_htf_to_ltf(prices, df_1d, atr_sma)
+    # Load 1w data ONCE for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Volatility filter: low volatility when ATR < SMA of ATR
-    low_volatility = atr_aligned < atr_sma_aligned
+    # Calculate 1w EMA (21 periods)
+    ema_len = 21
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=ema_len, adjust=False, min_periods=ema_len).mean().values
     
-    # Calculate 20-period highest high and lowest low for breakout
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation: volume > 1.5 * 20-period average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma)
+    # Align EMA to 4h timeframe
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(50, 20)
+    start = max(50, wr_len, ema_len)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(atr_aligned[i]) or 
-            np.isnan(atr_sma_aligned[i]) or
-            np.isnan(highest_high[i]) or
-            np.isnan(lowest_low[i]) or
-            np.isnan(volume_confirm[i])):
+        if (np.isnan(wr_aligned[i]) or 
+            np.isnan(ema_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade in low volatility conditions
-        if not low_volatility[i]:
-            signals[i] = 0.0
-            continue
+        price = close[i]
+        
+        # Trend filter: price above/below 1w EMA
+        above_ema = price > ema_1w_aligned[i]
+        below_ema = price < ema_1w_aligned[i]
+        
+        # Williams %R signals
+        oversold = wr_aligned[i] < -80
+        overbought = wr_aligned[i] > -20
         
         if position == 0:
-            # Enter long: price breaks above highest high with volume confirmation
-            if close[i] > highest_high[i] and volume_confirm[i]:
+            # Enter long: uptrend + oversold
+            if above_ema and oversold:
                 position = 1
                 signals[i] = position_size
-            # Enter short: price breaks below lowest low with volume confirmation
-            elif close[i] < lowest_low[i] and volume_confirm[i]:
+            # Enter short: downtrend + overbought
+            elif below_ema and overbought:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: ATR-based trailing stop or reversal signal
-            # Trailing stop: exit if price drops by 2.5 * ATR from entry
-            # Since we don't track entry price, use: exit if price < highest_high[i] - 2.5 * ATR
-            if close[i] < (highest_high[i] - 2.5 * atr_aligned[i]):
+            # Exit long: Williams %R crosses above -50 (momentum shift) OR trend change
+            if wr_aligned[i] > -50 or not above_ema:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: ATR-based trailing stop or reversal signal
-            # Trailing stop: exit if price rises by 2.5 * ATR from entry
-            # Exit if price > lowest_low[i] + 2.5 * ATR
-            if close[i] > (lowest_low[i] + 2.5 * atr_aligned[i]):
+            # Exit short: Williams %R crosses below -50 (momentum shift) OR trend change
+            if wr_aligned[i] < -50 or not below_ema:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -111,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dATR_VolFilter_Breakout_TrailStop_v1"
+name = "4h_1dWR_1wEMA_Trend_Momentum_v1"
 timeframe = "4h"
 leverage = 1.0
