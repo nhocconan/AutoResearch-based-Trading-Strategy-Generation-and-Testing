@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d Donchian(20) breakout + weekly pivot direction + volume confirmation.
-# Long when price breaks above 1d Donchian upper band AND 1w pivot level above current price AND 6h volume > 1.5x 20-period average.
-# Short when price breaks below 1d Donchian lower band AND 1w pivot level below current price AND 6h volume > 1.5x 20-period average.
-# Exit when price crosses back inside the 1d Donchian channel.
-# This captures breakouts aligned with weekly pivot levels, filtering false breakouts with volume confirmation.
-# Designed to work in both bull and bear markets by using pivot levels for direction and volume for confirmation.
-# Target: 12-37 trades/year to minimize fee drag.
+# Hypothesis: 4h strategy using 12h Donchian(10) breakout + volume confirmation + 12h ATR volatility filter.
+# Long when price breaks above 12h Donchian upper band AND 4h volume > 1.3x 20-period average AND 12h ATR(14) > 0.02 * close.
+# Short when price breaks below 12h Donchian lower band AND 4h volume > 1.3x 20-period average AND 12h ATR(14) > 0.02 * close.
+# Exit when price crosses back inside the 12h Donchian channel.
+# This captures volatility-expansion breakouts with volume confirmation, filtering low-volatility false breakouts.
+# Designed to work in both bull and bear markets by using volatility expansion as entry filter.
+# Target: 20-50 trades/year to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,53 +21,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Donchian channel
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load 12h data for Donchian channel and ATR
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 20-period Donchian channel
-    donchian_up = np.full_like(high_1d, np.nan)
-    donchian_down = np.full_like(low_1d, np.nan)
-    for i in range(19, len(high_1d)):
-        donchian_up[i] = np.max(high_1d[i-19:i+1])
-        donchian_down[i] = np.min(low_1d[i-19:i+1])
+    # Calculate 10-period Donchian channel on 12h
+    donchian_up = np.full_like(high_12h, np.nan)
+    donchian_down = np.full_like(low_12h, np.nan)
+    for i in range(9, len(high_12h)):
+        donchian_up[i] = np.max(high_12h[i-9:i+1])
+        donchian_down[i] = np.min(low_12h[i-9:i+1])
     
-    # Load 1w data for pivot point calculation (using 1w data)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    # Calculate 14-period ATR on 12h
+    tr = np.maximum(
+        high_12h[1:] - low_12h[1:],
+        np.maximum(
+            np.abs(high_12h[1:] - close_12h[:-1]),
+            np.abs(low_12h[1:] - close_12h[:-1])
+        )
+    )
+    atr_14 = np.full_like(close_12h, np.nan)
+    for i in range(13, len(tr)):
+        atr_14[i] = np.mean(tr[i-13:i+1])
+    atr_14 = np.insert(atr_14, 0, np.nan)  # align with close_12h index
+    
+    # Load 4h data for volume confirmation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    volume_4h = df_4h['volume'].values
     
-    # Calculate weekly pivot point: (H + L + C) / 3
-    pivot_1w = np.full_like(high_1w, np.nan)
-    for i in range(len(high_1w)):
-        pivot_1w[i] = (high_1w[i] + low_1w[i] + close_1w[i]) / 3.0
+    # Calculate 20-period average volume on 4h
+    vol_ma_20 = np.full_like(volume_4h, np.nan)
+    for i in range(19, len(volume_4h)):
+        vol_ma_20[i] = np.mean(volume_4h[i-19:i+1])
     
-    # Load 6h data for volume confirmation
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
-        return np.zeros(n)
-    
-    volume_6h = df_6h['volume'].values
-    
-    # Calculate 20-period average volume
-    vol_ma_20 = np.full_like(volume_6h, np.nan)
-    for i in range(19, len(volume_6h)):
-        vol_ma_20[i] = np.mean(volume_6h[i-19:i+1])
-    
-    # Align indicators to 6h timeframe
-    donchian_up_aligned = align_htf_to_ltf(prices, df_1d, donchian_up)
-    donchian_down_aligned = align_htf_to_ltf(prices, df_1d, donchian_down)
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_6h, vol_ma_20)
+    # Align indicators to 4h timeframe
+    donchian_up_aligned = align_htf_to_ltf(prices, df_12h, donchian_up)
+    donchian_down_aligned = align_htf_to_ltf(prices, df_12h, donchian_down)
+    atr_14_aligned = align_htf_to_ltf(prices, df_12h, atr_14)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20)
+    volume_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_4h)
     
     signals = np.zeros(n)
     position = 0
@@ -80,27 +80,30 @@ def generate_signals(prices):
         # Skip if any critical data is NaN
         if (np.isnan(donchian_up_aligned[i]) or 
             np.isnan(donchian_down_aligned[i]) or
-            np.isnan(pivot_1w_aligned[i]) or
-            np.isnan(vol_ma_20_aligned[i])):
+            np.isnan(atr_14_aligned[i]) or
+            np.isnan(vol_ma_20_aligned[i]) or
+            np.isnan(volume_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 6h volume vs 20-period average
-        volume_6h_aligned = align_htf_to_ltf(prices, df_6h, volume_6h)
-        volume_ratio = volume_6h_aligned[i] / vol_ma_20_aligned[i] if vol_ma_20_aligned[i] > 0 else 0
+        # Volume ratio: current 4h volume vs 20-period average
+        volume_ratio = volume_4h_aligned[i] / vol_ma_20_aligned[i] if vol_ma_20_aligned[i] > 0 else 0
+        
+        # Volatility filter: ATR > 2% of price
+        vol_filter = atr_14_aligned[i] > 0.02 * close[i]
         
         if position == 0:
-            # Look for entries: Donchian breakout + pivot direction + volume confirmation
-            # Long: break above upper band AND pivot above price AND volume > 1.5x average
+            # Look for entries: Donchian breakout + volume confirmation + volatility filter
+            # Long: break above upper band AND volume > 1.3x average AND volatility filter
             if (close[i] > donchian_up_aligned[i] and 
-                pivot_1w_aligned[i] > close[i] and 
-                volume_ratio > 1.5):
+                volume_ratio > 1.3 and 
+                vol_filter):
                 position = 1
                 signals[i] = position_size
-            # Short: break below lower band AND pivot below price AND volume > 1.5x average
+            # Short: break below lower band AND volume > 1.3x average AND volatility filter
             elif (close[i] < donchian_down_aligned[i] and 
-                  pivot_1w_aligned[i] < close[i] and 
-                  volume_ratio > 1.5):
+                  volume_ratio > 1.3 and 
+                  vol_filter):
                 position = -1
                 signals[i] = -position_size
             else:
@@ -122,6 +125,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Donchian_1wPivot_Volume_v1"
-timeframe = "6h"
+name = "4h_12h_Donchian_Volume_VolatilityFilter_v1"
+timeframe = "4h"
 leverage = 1.0
