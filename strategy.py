@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Choppiness Index regime filter with 1-day KAMA trend and volume confirmation
-# Long when KAMA(1d) is rising (bullish trend) AND Choppiness Index(12h) < 38.2 (trending regime) AND volume > 1.5x 20-period average
-# Short when KAMA(1d) is falling (bearish trend) AND Choppiness Index(12h) < 38.2 (trending regime) AND volume > 1.5x 20-period average
-# Exit when KAMA trend reverses OR Choppiness Index > 61.8 (range regime)
-# This avoids whipsaws in ranging markets while capturing strong trends with volume confirmation
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+# Hypothesis: 4-hour Camarilla pivot reversal with 1-day trend filter (EMA50) and volume confirmation
+# Long when price touches Camarilla L3 level AND price > daily EMA50 AND volume > 1.5x 20-period average
+# Short when price touches Camarilla H3 level AND price < daily EMA50 AND volume > 1.5x 20-period average
+# Exit when price crosses back through the Camarilla H4/L4 levels (strong reversal)
+# This captures mean-reversion bounces in established trends while avoiding counter-trend trades
+# Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,46 +20,43 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for KAMA trend filter
+    # Load daily data ONCE before loop for EMA50 trend filter and Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average) on daily
-    # ER = Efficiency Ratio, SC = Smoothing Constant
-    change = np.abs(np.diff(df_1d['close'], prepend=df_1d['close'][0]))
-    volatility = np.abs(np.diff(df_1d['close']))
-    er = change / (volatility + 1e-10)  # Avoid division by zero
-    sc = (er * (2/3 - 2/30) + 2/30) ** 2  # Fast=2, Slow=30
-    kama = np.zeros_like(df_1d['close'])
-    kama[0] = df_1d['close'][0]
-    for i in range(1, len(df_1d)):
-        kama[i] = kama[i-1] + sc[i] * (df_1d['close'][i] - kama[i-1])
-    kama = kama
+    # Calculate Camarilla pivot levels from previous day's range
+    # H4 = close + 1.5 * (high - low)
+    # L3 = close - 1.1 * (high - low)
+    # H3 = close + 1.1 * (high - low)
+    # L4 = close - 1.5 * (high - low)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Choppiness Index on 12h
-    # True Range = max(high-low, abs(high-previous close), abs(low-previous close))
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    # Previous day's range for Camarilla calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
     
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Set first value to NaN since we don't have previous day data
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Chop = 100 * log10(atr_sum / (highest_high - lowest_low)) / log10(14)
-    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low + 1e-10)) / np.log10(14)
+    # Calculate Camarilla levels
+    H4 = prev_close + 1.5 * (prev_high - prev_low)
+    L3 = prev_close - 1.1 * (prev_high - prev_low)
+    H3 = prev_close + 1.1 * (prev_high - prev_low)
+    L4 = prev_close - 1.5 * (prev_high - prev_low)
     
-    # Load 12h data for alignment
-    df_12h = get_htf_data(prices, '12h')
+    # Calculate daily EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align KAMA trend (rising/falling) to 12h timeframe
-    kama_rising = np.diff(kama, prepend=0) > 0  # True when KAMA is rising
-    kama_rising = kama_rising.astype(float)
-    kama_rising_aligned = align_htf_to_ltf(prices, df_1d, kama_rising)
-    
-    # Align Choppiness Index to 12h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
+    # Align all 1D data to 4H timeframe
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # Calculate volume average for confirmation (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -73,35 +70,39 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(chop_aligned[i]) or np.isnan(kama_rising_aligned[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(H4_aligned[i]) or np.isnan(L3_aligned[i]) or 
+            np.isnan(H3_aligned[i]) or np.isnan(L4_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
+        price = close[i]
         vol = volume[i]
         vol_threshold = vol_avg[i] * 1.5
         
         if position == 0:
-            # Long setup: KAMA rising + trending regime (Chop < 38.2) + volume confirmation
-            if (kama_rising_aligned[i] > 0.5 and chop_aligned[i] < 38.2 and vol > vol_threshold):
+            # Long setup: price touches L3 + above daily EMA50 + volume confirmation
+            if (price <= L3_aligned[i] * 1.002 and price >= L3_aligned[i] * 0.998 and 
+                price > ema50_1d_aligned[i] and vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: KAMA falling + trending regime (Chop < 38.2) + volume confirmation
-            elif (kama_rising_aligned[i] < 0.5 and chop_aligned[i] < 38.2 and vol > vol_threshold):
+            # Short setup: price touches H3 + below daily EMA50 + volume confirmation
+            elif (price >= H3_aligned[i] * 0.998 and price <= H3_aligned[i] * 1.002 and 
+                  price < ema50_1d_aligned[i] and vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: KAMA turns bearish OR Chop enters range regime (Chop > 61.8)
-            if (kama_rising_aligned[i] < 0.5) or (chop_aligned[i] > 61.8):
+            # Exit long: price crosses back through H4 (strong reversal)
+            if price >= H4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: KAMA turns bullish OR Chop enters range regime (Chop > 61.8)
-            if (kama_rising_aligned[i] > 0.5) or (chop_aligned[i] > 61.8):
+            # Exit short: price crosses back through L4 (strong reversal)
+            if price <= L4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -109,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_KAMA_Chop_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_1dEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
