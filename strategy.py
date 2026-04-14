@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot breakout with 12h trend filter and volume confirmation
-# Long when price breaks above Camarilla R4 AND 12h EMA(21) is rising AND volume > 1.5x average
-# Short when price breaks below Camarilla S4 AND 12h EMA(21) is falling AND volume > 1.5x average
-# Exit when price crosses back through Camarilla pivot point (mean reversion) or opposite breakout
-# Camarilla levels from 1d provide intraday support/resistance; 12h EMA ensures intermediate trend alignment; volume confirms institutional interest
-# Designed to work in both bull and bear markets by following the dominant trend on 12h timeframe
+# Hypothesis: 6h Elder Ray Index with 12h trend filter and volume confirmation
+# Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
+# Long when Bull Power > 0 AND Bear Power rising AND 12h EMA(21) rising AND volume > 1.5x average
+# Short when Bear Power < 0 AND Bull Power falling AND 12h EMA(21) falling AND volume > 1.5x average
+# Exit when Bull Power < 0 (for long) or Bear Power > 0 (for short) OR opposite signal
+# Uses 13-period EMA for Elder Ray calculation, 12h EMA for trend filter, volume for confirmation
+# Designed to capture institutional buying/selling pressure with trend alignment
 # Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
 
 def generate_signals(prices):
@@ -24,25 +25,15 @@ def generate_signals(prices):
     # Load 12h data ONCE before loop for trend filter
     df_12h = get_htf_data(prices, '12h')
     
-    # Calculate Camarilla levels from 1d (using previous day's high, low, close)
-    # We need to shift by 1 to avoid look-ahead: use previous day's data for today's levels
-    prev_high = pd.Series(high).shift(1)
-    prev_low = pd.Series(low).shift(1)
-    prev_close = pd.Series(close).shift(1)
+    # Calculate 13-period EMA for Elder Ray
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean()
     
-    # Camarilla levels calculation
-    R4 = prev_close + ((prev_high - prev_low) * 1.1 / 2)
-    R3 = prev_close + ((prev_high - prev_low) * 1.1 / 4)
-    R2 = prev_close + ((prev_high - prev_low) * 1.1 / 6)
-    R1 = prev_close + ((prev_high - prev_low) * 1.1 / 12)
-    PP = (prev_high + prev_low + prev_close) / 3
-    S1 = prev_close - ((prev_high - prev_low) * 1.1 / 12)
-    S2 = prev_close - ((prev_high - prev_low) * 1.1 / 6)
-    S3 = prev_close - ((prev_high - prev_low) * 1.1 / 4)
-    S4 = prev_close - ((prev_high - prev_low) * 1.1 / 2)
+    # Calculate Elder Ray components
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
     # Calculate EMA on 12h (21-period) for trend filter
-    ema_21 = pd.Series(df_12h['close']).ewm(span=21, adjust=False, min_periods=21).mean()
+    ema_21_12h = pd.Series(df_12h['close']).ewm(span=21, adjust=False, min_periods=21).mean()
     
     # Calculate volume average for confirmation (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -56,47 +47,47 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(R4.iloc[i]) or 
-            np.isnan(S4.iloc[i]) or 
-            np.isnan(PP.iloc[i]) or
+        if (np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or 
             np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
         # Get EMA values aligned to 6h timeframe
-        ema_21_aligned = align_htf_to_ltf(prices, df_12h, ema_21.values)
+        ema_21_aligned = align_htf_to_ltf(prices, df_12h, ema_21_12h.values)
         ema_val = ema_21_aligned[i]
         ema_prev = ema_21_aligned[i-1]
         
-        close_val = close[i]
-        high_val = high[i]
-        low_val = low[i]
+        bull_val = bull_power[i]
+        bear_val = bear_power[i]
+        bull_prev = bull_power[i-1]
+        bear_prev = bear_power[i-1]
         vol = volume[i]
         vol_threshold = vol_avg[i] * 1.5
         
         if position == 0:
-            # Long setup: price breaks above Camarilla R4 AND 12h EMA rising AND volume confirmation
-            if (high_val > R4.iloc[i] and ema_val > ema_prev and vol > vol_threshold):
+            # Long setup: Bull Power > 0 AND Bear Power rising AND 12h EMA rising AND volume confirmation
+            if (bull_val > 0 and bear_val > bear_prev and ema_val > ema_prev and vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: price breaks below Camarilla S4 AND 12h EMA falling AND volume confirmation
-            elif (low_val < S4.iloc[i] and ema_val < ema_prev and vol > vol_threshold):
+            # Short setup: Bear Power < 0 AND Bull Power falling AND 12h EMA falling AND volume confirmation
+            elif (bear_val < 0 and bull_val < bull_prev and ema_val < ema_prev and vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below Camarilla pivot point OR opposite breakout
-            if (close_val < PP.iloc[i] or 
-                low_val < S4.iloc[i]):
+            # Exit long: Bull Power < 0 OR opposite signal
+            if (bull_val < 0 or 
+                (bear_val < 0 and bull_val < bull_prev and ema_val < ema_prev and vol > vol_threshold)):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above Camarilla pivot point OR opposite breakout
-            if (close_val > PP.iloc[i] or 
-                high_val > R4.iloc[i]):
+            # Exit short: Bear Power > 0 OR opposite signal
+            if (bear_val > 0 or 
+                (bull_val > 0 and bear_val > bear_prev and ema_val > ema_prev and vol > vol_threshold)):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -104,6 +95,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_12hEMA_Volume"
+name = "6h_ElderRay_12hEMA_Volume"
 timeframe = "6h"
 leverage = 1.0
