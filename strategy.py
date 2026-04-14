@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Load daily data (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -23,8 +23,8 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 20-day ATR for volatility (more stable than 10-day)
-    if len(high_1d) < 20:
+    # Calculate 14-day ATR for volatility (daily)
+    if len(high_1d) < 14:
         return np.zeros(n)
     
     tr1 = high_1d[1:] - low_1d[1:]
@@ -33,16 +33,16 @@ def generate_signals(prices):
     tr0 = np.array([np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])])
     tr = np.concatenate([tr0, np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    atr20 = np.full_like(close_1d, np.nan)
-    for i in range(19, len(tr)):
-        if i == 19:
-            atr20[i] = np.mean(tr[0:20])
+    atr14 = np.full_like(close_1d, np.nan)
+    for i in range(13, len(tr)):
+        if i == 13:
+            atr14[i] = np.mean(tr[0:14])
         else:
-            atr20[i] = (atr20[i-1] * 19 + tr[i]) / 20
+            atr14[i] = (atr14[i-1] * 13 + tr[i]) / 14
     
-    atr20_aligned = align_htf_to_ltf(prices, df_1d, atr20)
+    atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14)
     
-    # Calculate 50-day SMA for trend
+    # Calculate 50-day SMA for trend (daily)
     if len(close_1d) < 50:
         return np.zeros(n)
     
@@ -52,8 +52,8 @@ def generate_signals(prices):
     
     sma50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
     
-    # Calculate 20-day RSI for momentum (smoother than 14-day)
-    if len(close_1d) < 20:
+    # Calculate 14-day RSI for momentum (daily)
+    if len(close_1d) < 14:
         return np.zeros(n)
     
     delta = np.diff(close_1d, prepend=close_1d[0])
@@ -63,28 +63,23 @@ def generate_signals(prices):
     avg_gain = np.full_like(close_1d, np.nan)
     avg_loss = np.full_like(close_1d, np.nan)
     
-    if len(close_1d) >= 20:
-        avg_gain[19] = np.mean(gain[1:20])
-        avg_loss[19] = np.mean(loss[1:20])
-        for i in range(20, len(close_1d)):
-            avg_gain[i] = (avg_gain[i-1] * 19 + gain[i]) / 20
-            avg_loss[i] = (avg_loss[i-1] * 19 + loss[i]) / 20
+    if len(close_1d) >= 14:
+        avg_gain[13] = np.mean(gain[1:14])
+        avg_loss[13] = np.mean(loss[1:14])
+        for i in range(14, len(close_1d)):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
     rs = np.full_like(close_1d, np.nan)
-    rsi20 = np.full_like(close_1d, np.nan)
-    for i in range(19, len(close_1d)):
+    rsi14 = np.full_like(close_1d, np.nan)
+    for i in range(13, len(close_1d)):
         if avg_loss[i] > 0:
             rs[i] = avg_gain[i] / avg_loss[i]
-            rsi20[i] = 100 - (100 / (1 + rs[i]))
+            rsi14[i] = 100 - (100 / (1 + rs[i]))
         else:
-            rsi20[i] = 100 if avg_gain[i] > 0 else 0
+            rsi14[i] = 100 if avg_gain[i] > 0 else 0
     
-    rsi20_aligned = align_htf_to_ltf(prices, df_1d, rsi20)
-    
-    # Calculate 48-period volume moving average for confirmation
-    vol_ma_48 = np.full_like(volume, np.nan)
-    for i in range(47, len(volume)):
-        vol_ma_48[i] = np.mean(volume[i-47:i+1])
+    rsi14_aligned = align_htf_to_ltf(prices, df_1d, rsi14)
     
     signals = np.zeros(n)
     position = 0
@@ -92,30 +87,33 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical data is NaN
-        if (np.isnan(atr20_aligned[i]) or 
+        if (np.isnan(atr14_aligned[i]) or 
             np.isnan(sma50_1d_aligned[i]) or 
-            np.isnan(rsi20_aligned[i]) or
-            np.isnan(vol_ma_48[i])):
+            np.isnan(rsi14_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 4h volume vs 48-period average
-        if vol_ma_48[i] <= 0:
+        # Volume ratio: current 4h volume vs 20-period average
+        vol_ma_20 = np.full_like(volume, np.nan)
+        for j in range(19, len(volume)):
+            vol_ma_20[j] = np.mean(volume[j-19:j+1])
+        
+        if np.isnan(vol_ma_20[i]) or vol_ma_20[i] <= 0:
             volume_ratio = 0
         else:
-            volume_ratio = volume[i] / vol_ma_48[i]
+            volume_ratio = volume[i] / vol_ma_20[i]
         
         if position == 0:
-            # Long: Price above 50-day SMA + RSI > 50 + volume surge
+            # Long: Price above 50-day SMA + RSI > 55 + volume surge
             if (close[i] > sma50_1d_aligned[i] and
-                rsi20_aligned[i] > 50 and
-                volume_ratio > 2.0):
+                rsi14_aligned[i] > 55 and
+                volume_ratio > 2.5):
                 position = 1
                 signals[i] = position_size
-            # Short: Price below 50-day SMA + RSI < 50 + volume surge
+            # Short: Price below 50-day SMA + RSI < 45 + volume surge
             elif (close[i] < sma50_1d_aligned[i] and
-                  rsi20_aligned[i] < 50 and
-                  volume_ratio > 2.0):
+                  rsi14_aligned[i] < 45 and
+                  volume_ratio > 2.5):
                 position = -1
                 signals[i] = -position_size
             else:
@@ -123,7 +121,7 @@ def generate_signals(prices):
         elif position == 1:
             # Exit: Price crosses below 50-day SMA OR RSI < 40
             if (close[i] < sma50_1d_aligned[i] or 
-                rsi20_aligned[i] < 40):
+                rsi14_aligned[i] < 40):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -131,7 +129,7 @@ def generate_signals(prices):
         elif position == -1:
             # Exit: Price crosses above 50-day SMA OR RSI > 60
             if (close[i] > sma50_1d_aligned[i] or 
-                rsi20_aligned[i] > 60):
+                rsi14_aligned[i] > 60):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -139,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_SMA50_RSI20_Volume_Filter"
+name = "4h_1d_SMA50_RSI14_Volume_Filter_v3"
 timeframe = "4h"
 leverage = 1.0
