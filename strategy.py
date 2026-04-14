@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 12-hour price breaking above/below 1-week Donchian Channel (20) with volume above 1.5x 24-period average and 1-day ADX > 25.
+Hypothesis: 4-hour price breaking above/below 1-week Donchian Channel (20) with volume above 1.5x 12-period average and 1-day ADX > 25.
 Trades in direction of 1-week trend to avoid counter-trend whipsaws. Uses tight entry conditions to limit trades (~20-40/year).
 """
 
@@ -70,8 +70,8 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
     adx_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 24-period average volume on 12h data (2 days average)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Calculate 12-period average volume (12*4h = 2 days)
+    vol_ma_12 = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
     
     signals = np.zeros(n)
     position = 0
@@ -83,16 +83,16 @@ def generate_signals(prices):
         lower_dc_aligned = align_htf_to_ltf(prices, df_1w, lower_dc)[i]
         mid_dc_aligned = align_htf_to_ltf(prices, df_1w, mid_dc)[i]
         adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)[i]
-        vol_ma_24_aligned = vol_ma_24[i]  # already LTF
+        vol_ma_12_aligned = vol_ma_12[i]  # already LTF
         
         # Check for NaN values
         if (np.isnan(upper_dc_aligned) or np.isnan(lower_dc_aligned) or 
             np.isnan(mid_dc_aligned) or np.isnan(adx_1d_aligned) or 
-            np.isnan(vol_ma_24_aligned)):
+            np.isnan(vol_ma_12_aligned)):
             continue
         
         # Volume confirmation (> 1.5x average)
-        volume_confirm = volume[i] > 1.5 * vol_ma_24_aligned
+        volume_confirm = volume[i] > 1.5 * vol_ma_12_aligned
         
         # ADX trend filter (> 25)
         trend_filter = adx_1d_aligned > 25
@@ -118,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_DC_1wTrend_1dADX_Volume"
-timeframe = "12h"
+name = "4h_1wDC_1dADX_Volume"
+timeframe = "4h"
 leverage = 1.0
