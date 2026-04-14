@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1-week Donchian channel breakout with volume confirmation and volatility filter
-# - Long when price breaks above previous week's high with volume > 1.8x 48-period average
-# - Short when price breaks below previous week's low with volume > 1.8x 48-period average
-# - Requires volatility expansion: ATR(14) > 1.3x ATR(14) 14 periods ago
+# Hypothesis: 1d strategy using weekly Donchian channel breakout with volume confirmation
+# - Long when price breaks above previous week's high with volume > 1.5x 20-day average
+# - Short when price breaks below previous week's low with volume > 1.5x 20-day average
 # - Exits on opposite breakout
-# - Position size 0.25 to manage risk and reduce churn
-# - Target: 50-120 trades over 4 years (12-30/year) to avoid fee drag
-# - Using weekly timeframe for better trend alignment and reduced noise
+# - Position size 0.25 to manage risk
+# - Target: 30-100 trades over 4 years (7-25/year) to avoid fee drag
+# - Weekly timeframe provides fewer, higher-quality signals suitable for 1d chart
 
 def generate_signals(prices):
     n = len(prices)
@@ -30,26 +29,17 @@ def generate_signals(prices):
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     
-    # Calculate ATR for volatility measurement
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Volume filter: 48-period average (2 days of 4h bars)
+    # Volume filter: 20-day average
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=48, min_periods=48).mean().values
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25
     
-    for i in range(50, n):
-        # Skip if any critical data is NaN
-        if np.isnan(atr[i]) or np.isnan(vol_ma[i]):
+    for i in range(20, n):
+        # Skip if volume MA is NaN
+        if np.isnan(vol_ma[i]):
             continue
         
         # Get previous week's high/low for breakout levels
@@ -60,36 +50,32 @@ def generate_signals(prices):
         high_array = np.full(len(df_1w), prev_high)
         low_array = np.full(len(df_1w), prev_low)
         
-        # Align to 4h timeframe
-        high_4h = align_htf_to_ltf(prices, df_1w, high_array)[i]
-        low_4h = align_htf_to_ltf(prices, df_1w, low_array)[i]
+        # Align to 1d timeframe
+        high_1d = align_htf_to_ltf(prices, df_1w, high_array)[i]
+        low_1d = align_htf_to_ltf(prices, df_1w, low_array)[i]
         
         if position == 0:
-            # Long: Break above previous week's high with volume and volatility expansion
-            if (close[i] > high_4h and 
-                volume[i] > vol_ma[i] * 1.8 and
-                i >= 28 and atr[i] > atr[i-14] * 1.3):
+            # Long: Break above previous week's high with volume confirmation
+            if close[i] > high_1d and volume[i] > vol_ma[i] * 1.5:
                 position = 1
                 signals[i] = position_size
-            # Short: Break below previous week's low with volume and volatility expansion
-            elif (close[i] < low_4h and 
-                  volume[i] > vol_ma[i] * 1.8 and
-                  i >= 28 and atr[i] > atr[i-14] * 1.3):
+            # Short: Break below previous week's low with volume confirmation
+            elif close[i] < low_1d and volume[i] > vol_ma[i] * 1.5:
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
             # Exit: Break below previous week's low
-            if close[i] < low_4h:
+            if close[i] < low_1d:
                 position = 0
                 signals[i] = 0.0
         elif position == -1:
             # Exit: Break above previous week's high
-            if close[i] > high_4h:
+            if close[i] > high_1d:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_1w_DonchianBreakout_Volume_VolatilityFilter"
-timeframe = "4h"
+name = "1d_1w_DonchianBreakout_VolumeConfirmation"
+timeframe = "1d"
 leverage = 1.0
