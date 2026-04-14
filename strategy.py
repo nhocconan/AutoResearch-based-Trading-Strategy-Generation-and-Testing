@@ -38,6 +38,16 @@ def generate_signals(prices):
     upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_1d)
     lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_1d)
     
+    # Calculate 1d RSI(14) for momentum filter
+    delta = pd.Series(df_1d['close']).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = (100 - (100 / (1 + rs))).values
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
@@ -50,7 +60,8 @@ def generate_signals(prices):
         if (np.isnan(ema_20_1d_aligned[i]) or 
             np.isnan(atr[i]) or 
             np.isnan(upper_bb_aligned[i]) or 
-            np.isnan(lower_bb_aligned[i])):
+            np.isnan(lower_bb_aligned[i]) or
+            np.isnan(rsi_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -69,13 +80,16 @@ def generate_signals(prices):
         trend_filter_long = price > ema_20_1d_aligned[i]
         trend_filter_short = price < ema_20_1d_aligned[i]
         
+        # Momentum filter: RSI between 30 and 70 to avoid extremes
+        rsi_filter = (rsi_1d_aligned[i] > 30) & (rsi_1d_aligned[i] < 70)
+        
         if position == 0:
-            # Long setup: price above 1d EMA20 + volatility filter + not in squeeze
-            if (trend_filter_long and vol_filter and not bb_squeeze):
+            # Long setup: price above 1d EMA20 + volatility filter + not in squeeze + momentum filter
+            if (trend_filter_long and vol_filter and not bb_squeeze and rsi_filter):
                 position = 1
                 signals[i] = position_size
-            # Short setup: price below 1d EMA20 + volatility filter + not in squeeze
-            elif (trend_filter_short and vol_filter and not bb_squeeze):
+            # Short setup: price below 1d EMA20 + volatility filter + not in squeeze + momentum filter
+            elif (trend_filter_short and vol_filter and not bb_squeeze and rsi_filter):
                 position = -1
                 signals[i] = -position_size
             else:
@@ -97,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1dEMA20_BBWidth_Filter"
+name = "12h_1dEMA20_BBWidth_RSI_Filter"
 timeframe = "12h"
 leverage = 1.0
