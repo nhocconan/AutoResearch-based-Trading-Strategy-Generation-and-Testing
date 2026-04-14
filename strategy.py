@@ -13,34 +13,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load daily data (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 20-period high and low for Donchian channel (weekly)
-    donchian_high_20 = np.full_like(close_1w, np.nan)
-    donchian_low_20 = np.full_like(close_1w, np.nan)
+    # Calculate 60-period Exponential Moving Average (daily)
+    def ema(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        result = np.full_like(arr, np.nan)
+        multiplier = 2 / (period + 1)
+        result[period-1] = np.mean(arr[:period])
+        for i in range(period, len(arr)):
+            result[i] = (arr[i] - result[i-1]) * multiplier + result[i-1]
+        return result
     
-    if len(close_1w) >= 20:
-        for i in range(19, len(close_1w)):
-            donchian_high_20[i] = np.max(high_1w[i-19:i+1])
-            donchian_low_20[i] = np.min(low_1w[i-19:i+1])
+    ema60 = ema(close_1d, 60)
+    ema60_aligned = align_htf_to_ltf(prices, df_1d, ema60)
     
-    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1w, donchian_high_20)
-    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1w, donchian_low_20)
+    # Calculate 14-period RSI (daily)
+    def rsi(arr, period):
+        if len(arr) < period + 1:
+            return np.full_like(arr, np.nan)
+        delta = np.diff(arr)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.full_like(arr, np.nan)
+        avg_loss = np.full_like(arr, np.nan)
+        avg_gain[period] = np.mean(gain[:period])
+        avg_loss[period] = np.mean(loss[:period])
+        for i in range(period+1, len(arr)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi_val = 100 - (100 / (1 + rs))
+        return rsi_val
     
-    # Calculate 20-period volume average (weekly)
-    vol_ma_20 = np.full_like(volume_1w, np.nan)
-    if len(volume_1w) >= 20:
-        for i in range(19, len(volume_1w)):
-            vol_ma_20[i] = np.mean(volume_1w[i-19:i+1])
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20)
+    rsi14 = rsi(close_1d, 14)
+    rsi14_aligned = align_htf_to_ltf(prices, df_1d, rsi14)
+    
+    # Calculate 30-period volume moving average (daily)
+    vol_ma_30 = np.full_like(volume_1d, np.nan)
+    if len(volume_1d) >= 30:
+        for i in range(29, len(volume_1d)):
+            vol_ma_30[i] = np.mean(volume_1d[i-29:i+1])
+    vol_ma_30_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_30)
     
     signals = np.zeros(n)
     position = 0
@@ -48,41 +71,45 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high_20_aligned[i]) or 
-            np.isnan(donchian_low_20_aligned[i]) or 
-            np.isnan(vol_ma_20_aligned[i])):
+        if (np.isnan(ema60_aligned[i]) or 
+            np.isnan(rsi14_aligned[i]) or 
+            np.isnan(vol_ma_30_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 1d volume vs 20-period weekly average volume
-        if vol_ma_20_aligned[i] <= 0:
+        # Volume ratio: current 6h volume vs 30-day average volume
+        if vol_ma_30_aligned[i] <= 0:
             volume_ratio = 0
         else:
-            volume_ratio = volume[i] / vol_ma_20_aligned[i]
+            volume_ratio = volume[i] / vol_ma_30_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above weekly Donchian high + volume surge
-            if (close[i] > donchian_high_20_aligned[i] and
+            # Long: Price above EMA60 + RSI > 50 + volume surge
+            if (close[i] > ema60_aligned[i] and
+                rsi14_aligned[i] > 50 and
                 volume_ratio > 2.0):
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below weekly Donchian low + volume surge
-            elif (close[i] < donchian_low_20_aligned[i] and
+            # Short: Price below EMA60 + RSI < 50 + volume surge
+            elif (close[i] < ema60_aligned[i] and
+                  rsi14_aligned[i] < 50 and
                   volume_ratio > 2.0):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price breaks below weekly Donchian low
-            if close[i] < donchian_low_20_aligned[i]:
+            # Exit: Price below EMA60 OR RSI < 40
+            if (close[i] < ema60_aligned[i] or 
+                rsi14_aligned[i] < 40):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price breaks above weekly Donchian high
-            if close[i] > donchian_high_20_aligned[i]:
+            # Exit: Price above EMA60 OR RSI > 60
+            if (close[i] > ema60_aligned[i] or 
+                rsi14_aligned[i] > 60):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -90,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_Donchian20_VolumeBreakout"
-timeframe = "1d"
+name = "6h_1d_EMA60_RSI14_Volume"
+timeframe = "6h"
 leverage = 1.0
