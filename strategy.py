@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,7 +23,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     vol_1d = df_1d['volume'].values
     
-    # Calculate Donchian channel (20-period) on daily
+    # Calculate 20-period Donchian channel (daily)
     donchian_high_20 = np.full_like(close_1d, np.nan)
     donchian_low_20 = np.full_like(close_1d, np.nan)
     
@@ -35,18 +35,21 @@ def generate_signals(prices):
     donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
     donchian_low_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
     
-    # Calculate 14-period ADX on daily
+    # Calculate 14-period ADX for trend strength (daily)
+    # Calculate True Range
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     
+    # Calculate +DM and -DM
     dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
                        np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
     dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
                         np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
     
+    # Smooth TR, DM+, DM- using Wilder's smoothing (14-period)
     atr_14 = np.full_like(close_1d, np.nan)
     dm_plus_14 = np.full_like(close_1d, np.nan)
     dm_minus_14 = np.full_like(close_1d, np.nan)
@@ -61,6 +64,7 @@ def generate_signals(prices):
             dm_plus_14[i] = (dm_plus_14[i-1] * 13 + dm_plus[i]) / 14
             dm_minus_14[i] = (dm_minus_14[i-1] * 13 + dm_minus[i]) / 14
     
+    # Calculate DI+ and DI-
     di_plus = np.full_like(close_1d, np.nan)
     di_minus = np.full_like(close_1d, np.nan)
     
@@ -69,6 +73,7 @@ def generate_signals(prices):
             di_plus[i] = (dm_plus_14[i] / atr_14[i]) * 100
             di_minus[i] = (dm_minus_14[i] / atr_14[i]) * 100
     
+    # Calculate DX and ADX
     dx = np.full_like(close_1d, np.nan)
     adx_14 = np.full_like(close_1d, np.nan)
     
@@ -90,46 +95,36 @@ def generate_signals(prices):
             vol_ma_20[i] = np.mean(vol_1d[i-19:i+1])
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
-    # Calculate 60-period volume average (daily) for trend filter
-    vol_ma_60 = np.full_like(vol_1d, np.nan)
-    if len(vol_1d) >= 60:
-        for i in range(59, len(vol_1d)):
-            vol_ma_60[i] = np.mean(vol_1d[i-59:i+1])
-    vol_ma_60_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_60)
-    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any critical data is NaN
         if (np.isnan(donchian_high_20_aligned[i]) or 
             np.isnan(donchian_low_20_aligned[i]) or 
             np.isnan(adx_14_aligned[i]) or 
-            np.isnan(vol_ma_20_aligned[i]) or
-            np.isnan(vol_ma_60_aligned[i])):
+            np.isnan(vol_ma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 6h volume vs 20-period daily average volume
+        # Volume ratio: current 4h volume vs 20-period daily average volume
         if vol_ma_20_aligned[i] <= 0:
             volume_ratio = 0
         else:
             volume_ratio = volume[i] / vol_ma_20_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above Donchian high + ADX > 25 + volume surge + above average volume regime
+            # Long: Price breaks above Donchian high + ADX > 25 + volume surge
             if (close[i] > donchian_high_20_aligned[i] and
                 adx_14_aligned[i] > 25 and
-                volume_ratio > 2.0 and
-                vol_ma_60_aligned[i] > vol_ma_20_aligned[i]):  # Above average volume regime
+                volume_ratio > 2.0):
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below Donchian low + ADX > 25 + volume surge + above average volume regime
+            # Short: Price breaks below Donchian low + ADX > 25 + volume surge
             elif (close[i] < donchian_low_20_aligned[i] and
                   adx_14_aligned[i] > 25 and
-                  volume_ratio > 2.0 and
-                  vol_ma_60_aligned[i] > vol_ma_20_aligned[i]):  # Above average volume regime
+                  volume_ratio > 2.0):
                 position = -1
                 signals[i] = -position_size
             else:
@@ -153,6 +148,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Donchian20_ADX25_Volume_Regime"
-timeframe = "6h"
+name = "4h_1d_Donchian20_ADX25_Volume"
+timeframe = "4h"
 leverage = 1.0
