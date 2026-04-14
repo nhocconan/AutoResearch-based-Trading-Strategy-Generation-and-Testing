@@ -1,21 +1,19 @@
-#43075
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h mean reversion with 4h trend filter and 1d volatility regime
-# Long when price touches 1h lower Bollinger Band AND 4h EMA(50) is rising AND 1d volatility is low
-# Short when price touches 1h upper Bollinger Band AND 4h EMA(50) is falling AND 1d volatility is low
-# Exit when price crosses Bollinger middle
-# Bollinger Bands capture mean reversion; 4h EMA ensures higher timeframe trend alignment; 
-# Low volatility regime avoids false signals during choppy periods
-# Designed for 1h timeframe with 4h/1d filters to reduce noise and trade frequency
-# Target: 60-150 total trades over 4 years (15-37/year) to manage fee drag
+# Hypothesis: 6h Camarilla pivot with 1d trend filter and volume confirmation
+# Long when price breaks above Camarilla R4 AND 1d EMA(50) is rising AND volume > 1.5x average
+# Short when price breaks below Camarilla S4 AND 1d EMA(50) is falling AND volume > 1.5x average
+# Exit when price crosses back through Camarilla H4/L4 (mean reversion) or opposite breakout
+# Camarilla levels from 1d provide precise support/resistance; 1d EMA ensures higher timeframe trend alignment; volume confirms institutional interest
+# Designed to work in both bull and bear markets by following the dominant trend on 1d timeframe
+# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,93 +21,98 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    
-    # Load 1d data ONCE before loop for volatility regime
+    # Load 1d data ONCE before loop for Camarilla levels and trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1h Bollinger Bands (20, 2)
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean()
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std()
-    upper_bb = sma_20 + (2 * std_20)
-    lower_bb = sma_20 - (2 * std_20)
-    middle_bb = sma_20
+    # Calculate Camarilla pivot levels from 1d (using previous day's OHLC)
+    # Camarilla formulas:
+    # H4 = Close + 1.5 * (High - Low)
+    # L4 = Close - 1.5 * (High - Low)
+    # H3 = Close + 1.125 * (High - Low)
+    # L3 = Close - 1.125 * (High - Low)
+    # H2 = Close + 0.75 * (High - Low)
+    # L2 = Close - 0.75 * (High - Low)
+    # H1 = Close + 0.5 * (High - Low)
+    # L1 = Close - 0.5 * (High - Low)
     
-    # Calculate 4h EMA(50) for trend filter
-    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean()
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Calculate 1d ATR(14) for volatility regime
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = np.inf
-    tr2[0] = np.inf
-    tr3[0] = np.inf
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean()
+    # Calculate levels
+    camarilla_h4 = prev_close + 1.5 * (prev_high - prev_low)
+    camarilla_l4 = prev_close - 1.5 * (prev_high - prev_low)
+    camarilla_h3 = prev_close + 1.125 * (prev_high - prev_low)
+    camarilla_l3 = prev_close - 1.125 * (prev_high - prev_low)
+    camarilla_h2 = prev_close + 0.75 * (prev_high - prev_low)
+    camarilla_l2 = prev_close - 0.75 * (prev_high - prev_low)
+    camarilla_h1 = prev_close + 0.5 * (prev_high - prev_low)
+    camarilla_l1 = prev_close - 0.5 * (prev_high - prev_low)
     
-    # Calculate 1d ATR percentile rank (252-period ~ 1 year)
-    atr_percentile = pd.Series(atr_14).rolling(window=252, min_periods=50).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
-    )
+    # Calculate EMA on 1d (50-period) for trend filter
+    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean()
     
-    # Align 4h EMA and 1d ATR percentile to 1h timeframe
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h.values)
-    atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile.values)
+    # Calculate volume average for confirmation (20-period)
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    
+    # Align 1d data to 6h timeframe
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_h2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h2)
+    camarilla_l2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l2)
+    camarilla_h1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h1)
+    camarilla_l1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l1)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50.values)
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations
-    start = 50
+    # Start after enough data for calculations (need 50 for EMA, 1 for shift)
+    start = 60
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(upper_bb[i]) or 
-            np.isnan(lower_bb[i]) or 
-            np.isnan(middle_bb[i]) or
-            np.isnan(ema_50_4h_aligned[i]) or
-            np.isnan(atr_percentile_aligned[i])):
+        if (np.isnan(camarilla_h4_aligned[i]) or 
+            np.isnan(camarilla_l4_aligned[i]) or 
+            np.isnan(ema_50_aligned[i])):
             signals[i] = 0.0
             continue
-        
-        ema_val = ema_50_4h_aligned[i]
-        ema_prev = ema_50_4h_aligned[i-1]
-        atr_percentile_val = atr_percentile_aligned[i]
         
         close_val = close[i]
         high_val = high[i]
         low_val = low[i]
+        vol = volume[i]
+        vol_threshold = vol_avg[i] * 1.5
         
-        # Only trade in low volatility regime (ATR percentile < 40%)
-        volatility_filter = atr_percentile_val < 0.4
+        ema_val = ema_50_aligned[i]
+        ema_prev = ema_50_aligned[i-1]
         
         if position == 0:
-            # Long setup: price touches lower Bollinger Band AND 4h EMA rising AND low volatility
-            if (low_val <= lower_bb[i] and ema_val > ema_prev and volatility_filter):
+            # Long setup: price breaks above Camarilla R4 AND 1d EMA rising AND volume confirmation
+            if (high_val > camarilla_h4_aligned[i] and ema_val > ema_prev and vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: price touches upper Bollinger Band AND 4h EMA falling AND low volatility
-            elif (high_val >= upper_bb[i] and ema_val < ema_prev and volatility_filter):
+            # Short setup: price breaks below Camarilla S4 AND 1d EMA falling AND volume confirmation
+            elif (low_val < camarilla_l4_aligned[i] and ema_val < ema_prev and vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses above Bollinger middle
-            if close_val > middle_bb[i]:
+            # Exit long: price crosses below Camarilla H3 OR opposite breakout
+            if (close_val < camarilla_h3_aligned[i] or 
+                low_val < camarilla_l4_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses below Bollinger middle
-            if close_val < middle_bb[i]:
+            # Exit short: price crosses above Camarilla L3 OR opposite breakout
+            if (close_val > camarilla_l3_aligned[i] or 
+                high_val > camarilla_h4_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -117,6 +120,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_Bollinger_4hEMA_1dVolatility"
-timeframe = "1h"
+name = "6h_Camarilla_1dEMA_Volume"
+timeframe = "6h"
 leverage = 1.0
