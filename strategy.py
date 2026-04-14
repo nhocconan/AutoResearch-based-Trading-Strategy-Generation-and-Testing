@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1-day Donchian channel breakout with volume confirmation and ATR filter
-# - Long when price breaks above previous day's high with volume > 1.5x 24-period average
-# - Short when price breaks below previous day's low with volume > 1.5x 24-period average
-# - Requires ATR(20) > 1.2x ATR(20) 20 periods ago to ensure volatility expansion
-# - Exits on opposite breakout or ATR contraction (< 0.8x ATR 20 periods ago)
+# Hypothesis: 4h strategy using 1-day Donchian channel breakout with volume confirmation and volatility filter
+# - Long when price breaks above previous day's high with volume > 1.8x 48-period average
+# - Short when price breaks below previous day's low with volume > 1.8x 48-period average
+# - Requires volatility expansion: ATR(14) > 1.3x ATR(14) 14 periods ago
+# - Exits on opposite breakout
 # - Position size 0.25 to manage risk and reduce churn
-# - Target: 50-150 trades over 4 years (12-38/year) to avoid fee drag
+# - Target: 50-120 trades over 4 years (12-30/year) to avoid fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -36,11 +36,11 @@ def generate_signals(prices):
     tr2[0] = 0
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume filter: 24-period average (1 day of 4h bars)
+    # Volume filter: 48-period average (2 days of 4h bars)
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=24, min_periods=24).mean().values
+    vol_ma = vol_series.rolling(window=48, min_periods=48).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,29 +66,29 @@ def generate_signals(prices):
         if position == 0:
             # Long: Break above previous day's high with volume and volatility expansion
             if (close[i] > high_4h and 
-                volume[i] > vol_ma[i] * 1.5 and
-                i >= 40 and atr[i] > atr[i-20] * 1.2):
+                volume[i] > vol_ma[i] * 1.8 and
+                i >= 28 and atr[i] > atr[i-14] * 1.3):
                 position = 1
                 signals[i] = position_size
             # Short: Break below previous day's low with volume and volatility expansion
             elif (close[i] < low_4h and 
-                  volume[i] > vol_ma[i] * 1.5 and
-                  i >= 40 and atr[i] > atr[i-20] * 1.2):
+                  volume[i] > vol_ma[i] * 1.8 and
+                  i >= 28 and atr[i] > atr[i-14] * 1.3):
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
-            # Exit: Break below previous day's low or ATR contraction
-            if close[i] < low_4h or (i >= 40 and atr[i] < atr[i-20] * 0.8):
+            # Exit: Break below previous day's low
+            if close[i] < low_4h:
                 position = 0
                 signals[i] = 0.0
         elif position == -1:
-            # Exit: Break above previous day's high or ATR contraction
-            if close[i] > high_4h or (i >= 40 and atr[i] < atr[i-20] * 0.8):
+            # Exit: Break above previous day's high
+            if close[i] > high_4h:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_1d_DonchianBreakout_Volume_ATR_Filter"
+name = "4h_1d_DonchianBreakout_Volume_VolatilityFilter"
 timeframe = "4h"
 leverage = 1.0
