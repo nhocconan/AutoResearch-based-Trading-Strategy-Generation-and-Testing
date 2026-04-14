@@ -1,8 +1,3 @@
-# [44317] 4h_1d_Camarilla_R4S4_Breakout_Volume_v2
-# Hypothesis: Camarilla R4/S4 breakouts on daily pivots with volume surge and ATR volatility filter provide
-# directional moves in both bull and bear markets. Tight entry reduces trades, volume confirms institutional interest,
-# ATR filter avoids chop. Works on BTC/ETH as primary targets.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
