@@ -13,24 +13,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data for trend context
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    # 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Load daily data for pivot points
+    # Load 1d data for pivot points
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # Calculate daily pivot points (S1, S2, R1, R2)
     pivot_point = np.full_like(close_1d, np.nan)
@@ -81,8 +71,7 @@ def generate_signals(prices):
             np.isnan(resistance2_4h[i]) or
             np.isnan(support1_4h[i]) or
             np.isnan(support2_4h[i]) or
-            np.isnan(vol_ma_20[i]) or
-            np.isnan(ema_50_12h_aligned[i])):
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -96,16 +85,14 @@ def generate_signals(prices):
         vol_threshold = 2.0
         
         if position == 0:
-            # Long: Price breaks above R1 with volume spike AND above 12h EMA50
+            # Long: Price breaks above R1 with volume spike
             if (close[i] > resistance1_4h[i] and 
-                volume_ratio > vol_threshold and
-                close[i] > ema_50_12h_aligned[i]):
+                volume_ratio > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below S1 with volume spike AND below 12h EMA50
+            # Short: Price breaks below S1 with volume spike
             elif (close[i] < support1_4h[i] and 
-                  volume_ratio > vol_threshold and
-                  close[i] < ema_50_12h_aligned[i]):
+                  volume_ratio > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
@@ -127,6 +114,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12hEMA50_1dPivot_R1S1_Volume"
+name = "4h_1d_Pivot_R1S1_Volume"
 timeframe = "4h"
 leverage = 1.0
