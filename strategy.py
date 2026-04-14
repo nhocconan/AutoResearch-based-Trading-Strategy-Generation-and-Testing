@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h 1-day Bollinger Band squeeze breakout with volume confirmation and ATR-based exit
-# Bollinger Band squeeze indicates low volatility and potential breakout
-# Breakout above upper band or below lower band with volume > 1.5x average confirms institutional participation
-# ATR-based exit provides adaptive risk management
-# Works in bull/bear as Bollinger Bands adapt to volatility
-# Target: 20-30 trades/year per symbol (80-120 total over 4 years)
+# Hypothesis: 1d EMA(50) pullback strategy with weekly pivot context and volume confirmation
+# In trending markets, price respects EMA(50) as dynamic support/resistance
+# Weekly pivot levels provide institutional context for trend strength
+# Volume > 1.5x average confirms institutional participation during pullbacks
+# Works in bull/bear as EMA adapts to trend and pivot bias confirms direction
+# Target: 15-25 trades/year per symbol (60-100 total over 4 years)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,33 +20,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for Bollinger Bands
+    # Load 1d data ONCE for EMA and weekly pivot context
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Bollinger Bands on 1d close (20 period, 2 std dev)
-    if len(df_1d) < 20:
+    # Calculate EMA(50) on 1d close
+    close_1d = pd.Series(df_1d['close'])
+    ema_50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Calculate weekly pivot points from prior week (using 1d data)
+    lookback = 5  # 5 trading days = 1 week
+    if len(df_1d) < lookback:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    # Get prior week's OHLC (excluding current incomplete day)
+    prev_week_high = pd.Series(df_1d['high']).rolling(window=lookback, min_periods=lookback).max().shift(1).values
+    prev_week_low = pd.Series(df_1d['low']).rolling(window=lookback, min_periods=lookback).min().shift(1).values
+    prev_week_close = pd.Series(df_1d['close']).rolling(window=lookback, min_periods=lookback).last().shift(1).values
     
-    upper_bb = sma_20 + (2 * std_20)
-    lower_bb = sma_20 - (2 * std_20)
+    # Weekly pivot calculation (standard floor trader pivot)
+    weekly_pivot = (prev_week_high + prev_week_low + prev_week_close) / 3
+    weekly_r1 = 2 * weekly_pivot - prev_week_low
+    weekly_s1 = 2 * weekly_pivot - prev_week_high
     
-    # Align Bollinger Bands to 4h timeframe
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    # Align EMA and weekly pivot levels to 1d timeframe (already aligned, but use for consistency)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
     
-    # 4h ATR for volatility-based exit (14 period)
-    atr_period = 14
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
-    
-    # Volume confirmation: 1.5x average volume (20 period)
+    # Volume confirmation: 1.5x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -54,59 +56,54 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(50, 20, 20)
+    start = max(100, 50)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(upper_bb_aligned[i]) or 
-            np.isnan(lower_bb_aligned[i]) or
-            np.isnan(atr[i]) or
+        if (np.isnan(ema_50_aligned[i]) or 
+            np.isnan(weekly_pivot_aligned[i]) or
+            np.isnan(weekly_r1_aligned[i]) or
+            np.isnan(weekly_s1_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Bollinger Band squeeze: bandwidth < 20th percentile of past 50 periods
-        if i >= 50:
-            bb_width = upper_bb_aligned[i] - lower_bb_aligned[i]
-            past_widths = []
-            for j in range(max(start, i-50), i):
-                if not np.isnan(upper_bb_aligned[j]) and not np.isnan(lower_bb_aligned[j]):
-                    past_widths.append(upper_bb_aligned[j] - lower_bb_aligned[j])
-            if len(past_widths) >= 10:
-                width_threshold = np.percentile(past_widths, 20)
-                squeeze = bb_width < width_threshold
-            else:
-                squeeze = False
-        else:
-            squeeze = False
+        # Trend bias: price relative to EMA(50)
+        above_ema = close[i] > ema_50_aligned[i]
+        below_ema = close[i] < ema_50_aligned[i]
+        
+        # Pivot bias: price relative to weekly pivot
+        above_pivot = close[i] > weekly_pivot_aligned[i]
+        below_pivot = close[i] < weekly_pivot_aligned[i]
+        
+        # Volume confirmation: current volume > 1.5x average
+        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Enter long: price breaks above upper BB + squeeze + volume confirmation
-            if (close[i] > upper_bb_aligned[i] and 
-                squeeze and 
-                volume[i] > 1.5 * vol_ma[i]):
+            # Enter long: pullback to EMA(50) in uptrend (price > EMA and > pivot) + volume
+            if (above_ema and 
+                above_pivot and 
+                volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Enter short: price breaks below lower BB + squeeze + volume confirmation
-            elif (close[i] < lower_bb_aligned[i] and 
-                  squeeze and 
-                  volume[i] > 1.5 * vol_ma[i]):
+            # Enter short: pullback to EMA(50) in downtrend (price < EMA and < pivot) + volume
+            elif (below_ema and 
+                  below_pivot and 
+                  volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to middle band or ATR-based stop
-            middle_bb = sma_20_aligned[i] if 'sma_20_aligned' in locals() else (upper_bb_aligned[i] + lower_bb_aligned[i]) / 2
-            if close[i] < middle_bb or close[i] < (entry_price - 1.5 * atr[i]) if 'entry_price' in locals() else False:
+            # Exit long: price breaks below EMA(50) or returns to weekly pivot
+            if close[i] < ema_50_aligned[i] or close[i] < weekly_pivot_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to middle band or ATR-based stop
-            middle_bb = sma_20_aligned[i] if 'sma_20_aligned' in locals() else (upper_bb_aligned[i] + lower_bb_aligned[i]) / 2
-            if close[i] > middle_bb or close[i] > (entry_price + 1.5 * atr[i]) if 'entry_price' in locals() else False:
+            # Exit short: price breaks above EMA(50) or returns to weekly pivot
+            if close[i] > ema_50_aligned[i] or close[i] > weekly_pivot_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -114,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Bollinger_Squeeze_Breakout_Volume_v1"
-timeframe = "4h"
+name = "1d_EMA50_Pullback_WeeklyPivot_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
