@@ -23,7 +23,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 6h ATR for volatility filter
+    # Calculate 6h ATR for volatility filter (14-period)
     high_low = high - low
     high_close = np.abs(high - np.roll(close, 1))
     low_close = np.abs(low - np.roll(close, 1))
@@ -32,7 +32,7 @@ def generate_signals(prices):
     tr = np.maximum(high_low, np.maximum(high_close, low_close))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 6-hour Donchian channels (20-period) for breakout signals
+    # Calculate 6-hour Donchian channels (20-period)
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     high_series = pd.Series(high)
