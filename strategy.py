@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -13,49 +13,48 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian channel and EMA
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Calculate Donchian channel (20-period) on 12h data
-    high_12h_series = pd.Series(high_12h)
-    low_12h_series = pd.Series(low_12h)
-    donchian_high = high_12h_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_12h_series.rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian levels to primary timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
-    
-    # Calculate EMA(50) on 12h close for trend filter
-    close_12h_series = pd.Series(close_12h)
-    ema_50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Get 1d data for volume confirmation
+    # Get daily data for daily pivot points
     df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d average volume (20-period)
-    volume_1d_series = pd.Series(volume_1d)
-    avg_volume_1d = volume_1d_series.rolling(window=20, min_periods=20).mean().values
+    # Calculate daily pivot points using previous day's OHLC
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Align average volume to primary timeframe
-    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
+    # Daily pivot point
+    pp = (prev_high + prev_low + prev_close) / 3
+    # Daily resistance and support levels
+    r1 = 2 * pp - prev_low
+    s1 = 2 * pp - prev_high
+    r2 = pp + (prev_high - prev_low)
+    s2 = pp - (prev_high - prev_low)
+    
+    # Align daily pivot levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    
+    # Volume confirmation: volume > 1.5x average volume (20-period)
+    vol_series = pd.Series(volume)
+    avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 50  # for 50-period EMA and 20-period Donchian
+    start = 20  # for 20-period volume average
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(avg_volume_1d_aligned[i])):
+        if (np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
         
@@ -63,26 +62,26 @@ def generate_signals(prices):
         vol = volume[i]
         
         if position == 0:
-            # Long: price breaks above Donchian high AND above 12h EMA50 with volume confirmation
-            if price > donchian_high_aligned[i] and price > ema_50_12h_aligned[i] and vol > 1.5 * avg_volume_1d_aligned[i]:
+            # Long: price breaks above daily R2 with volume confirmation
+            if price > r2_aligned[i] and vol > 1.5 * avg_vol[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below Donchian low AND below 12h EMA50 with volume confirmation
-            elif price < donchian_low_aligned[i] and price < ema_50_12h_aligned[i] and vol > 1.5 * avg_volume_1d_aligned[i]:
+            # Short: price breaks below daily S2 with volume confirmation
+            elif price < s2_aligned[i] and vol > 1.5 * avg_vol[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below Donchian low
-            if price < donchian_low_aligned[i]:
+            # Exit long: price breaks below daily S1
+            if price < s1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above Donchian high
-            if price > donchian_high_aligned[i]:
+            # Exit short: price breaks above daily R1
+            if price > r1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -90,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_EMA_Volume"
+name = "12h_1d_Daily_Pivot_R2_S2_Volume"
 timeframe = "12h"
 leverage = 1.0
