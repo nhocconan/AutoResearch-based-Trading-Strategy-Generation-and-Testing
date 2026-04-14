@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla Pivot Reversal with 1d Volume Filter
-# Uses daily Camarilla pivot levels calculated from prior day's OHLC.
-# Enters long at S1 support or short at R1 resistance with volume confirmation (>1.5x avg volume).
-# Exit when price touches opposite pivot level (S2/R2) or reverses at same level.
-# Works in both bull/bear by fading extremes at key intraday support/resistance.
-# Target: 50-150 total trades over 4 years (12-37/year)
+# Hypothesis: 4h Williams %R + 1d EMA200 Trend Filter
+# Uses Williams %R for overbought/oversold reversals in trending markets
+# 1d EMA200 ensures we only trade in the direction of the daily trend
+# Works in bull/bear by fading extremes within the trend
+# Target: 75-200 total trades over 4 years (19-50/year)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,48 +19,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily OHLC for Camarilla calculation
+    # Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    williams_r = williams_r.replace([np.inf, -np.inf], np.nan).fillna(0).values
+    
+    # 1d EMA200 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    ema_200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Calculate Camarilla levels from prior day's OHLC
-    # H, L, C from previous day
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    
-    # Camarilla multipliers
-    # S1 = C - (H-L)*1.12/2
-    # S2 = C - (H-L)*1.12/4
-    # R1 = C + (H-L)*1.12/2
-    # R2 = C + (H-L)*1.12/4
-    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.12 / 2
-    camarilla_s2 = prev_close - (prev_high - prev_low) * 1.12 / 4
-    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.12 / 2
-    camarilla_r2 = prev_close + (prev_high - prev_low) * 1.12 / 4
-    
-    # Align Camarilla levels to 12h timeframe (wait for daily candle to close)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s2)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r2)
-    
-    # Volume confirmation: volume > 1.5x average volume (24-period = 2 days)
+    # Volume confirmation: volume > 1.5x average volume (20-period)
     vol_series = pd.Series(volume)
-    avg_vol = vol_series.rolling(window=24, min_periods=24).mean().shift(1).values
+    avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 25
+    start = 200  # for EMA200 calculation
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or
+        if (np.isnan(williams_r[i]) or np.isnan(ema_200_1d_aligned[i]) or
             np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
@@ -69,34 +51,48 @@ def generate_signals(prices):
         price = close[i]
         vol = volume[i]
         
-        if position == 0:
-            # Long: price touches S1 support with volume confirmation
-            if abs(price - s1_aligned[i]) < 0.001 * price and vol > 1.5 * avg_vol[i]:
-                position = 1
-                signals[i] = position_size
-            # Short: price touches R1 resistance with volume confirmation
-            elif abs(price - r1_aligned[i]) < 0.001 * price and vol > 1.5 * avg_vol[i]:
-                position = -1
-                signals[i] = -position_size
-            else:
-                signals[i] = 0.0
-        elif position == 1:
-            # Exit long: price touches S2 (further support) or reverses at S1
-            if price <= s2_aligned[i] or abs(price - s1_aligned[i]) < 0.0005 * price:
+        # Trend filter: only trade long when price > daily EMA200, short when price < daily EMA200
+        if price > ema_200_1d_aligned[i]:
+            # Uptrend: look for oversold conditions to go long
+            if position == 0:
+                if williams_r[i] < -80 and vol > 1.5 * avg_vol[i]:
+                    position = 1
+                    signals[i] = position_size
+                else:
+                    signals[i] = 0.0
+            elif position == 1:
+                # Exit long when overbought or trend changes
+                if williams_r[i] > -20 or price < ema_200_1d_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = position_size
+            elif position == -1:
+                # Close short if trend turns up
                 position = 0
                 signals[i] = 0.0
-            else:
-                signals[i] = position_size
-        elif position == -1:
-            # Exit short: price touches R2 (further resistance) or reverses at R1
-            if price >= r2_aligned[i] or abs(price - r1_aligned[i]) < 0.0005 * price:
+        else:
+            # Downtrend: look for overbought conditions to go short
+            if position == 0:
+                if williams_r[i] > -20 and vol > 1.5 * avg_vol[i]:
+                    position = -1
+                    signals[i] = -position_size
+                else:
+                    signals[i] = 0.0
+            elif position == -1:
+                # Exit short when oversold or trend changes
+                if williams_r[i] < -80 or price > ema_200_1d_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -position_size
+            elif position == 1:
+                # Close long if trend turns down
                 position = 0
                 signals[i] = 0.0
-            else:
-                signals[i] = -position_size
     
     return signals
 
-name = "12h_Camarilla_Pivot_Reversal_Volume_Filter"
-timeframe = "12h"
+name = "4h_WilliamsR_1dEMA200_Trend"
+timeframe = "4h"
 leverage = 1.0
