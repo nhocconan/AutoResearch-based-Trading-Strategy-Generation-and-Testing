@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy combining 1-day ATR-based volatility breakout with 1-week RSI mean reversion.
-# Long when price breaks above ATR-based upper band AND weekly RSI < 30 (oversold).
-# Short when price breaks below ATR-based lower band AND weekly RSI > 70 (overbought).
-# Exit when price returns to ATR-based middle band or weekly RSI crosses 50.
-# Uses 1-day ATR for volatility-based channels (adapts to volatility regimes),
-# 1-week RSI for mean-reversion filter, aiming to catch reversals in both bull and bear markets.
-# Target: 15-35 trades/year per symbol (60-140 total over 4 years) to minimize fee drag.
+# Hypothesis: 1d strategy combining weekly KAMA trend with daily RSI mean reversion.
+# Long when price pulls back to KAMA support during uptrend (RSI < 40) with volume confirmation.
+# Short when price rallies to KAMA resistance during downtrend (RSI > 60) with volume confirmation.
+# Exit when RSI returns to neutral (40-60) or price crosses KAMA in opposite direction.
+# Uses weekly KAMA for trend, daily RSI for entry timing, volume for confirmation.
+# Target: 15-25 trades/year per symbol (60-100 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,92 +18,107 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load daily data ONCE for ATR-based volatility channels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
-        return np.zeros(n)
+    # Calculate daily RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate True Range and ATR(14) on daily data
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate ATR-based channels: middle = close, upper = close + 1.5*ATR, lower = close - 1.5*ATR
-    atr_middle = close_1d
-    atr_upper = close_1d + 1.5 * atr
-    atr_lower = close_1d - 1.5 * atr
-    
-    # Load weekly data ONCE for RSI mean reversion filter
+    # Load weekly data ONCE for KAMA trend
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
     
-    # Calculate weekly RSI(14)
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate weekly KAMA(30, 2, 30)
+    def calculate_kama(close, er_length=10, fast_sc=2, slow_sc=30):
+        change = np.abs(np.diff(close, n=1))
+        change = np.insert(change, 0, 0)
+        volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)
+        # Handle first element
+        volatility = np.roll(volatility, 1)
+        volatility[0] = 0
+        # Calculate ER and SC
+        er = np.where(volatility != 0, change / volatility, 0)
+        sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
+        # Initialize KAMA
+        kama = np.full_like(close, np.nan, dtype=float)
+        kama[0] = close[0]
+        for i in range(1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
+    
+    kama_1w = calculate_kama(close_1w)
     
     # Align indicators to lower timeframe
-    atr_upper_aligned = align_htf_to_ltf(prices, df_1d, atr_upper)
-    atr_lower_aligned = align_htf_to_ltf(prices, df_1d, atr_lower)
-    atr_middle_aligned = align_htf_to_ltf(prices, df_1d, atr_middle)
-    rsi_aligned = align_htf_to_ltf(prices, df_1w, rsi)
+    rsi_aligned = align_htf_to_ltf(prices, prices, rsi_values)  # Already LTF
+    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
+    
+    # Volume confirmation: 1.3x average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(14, 14)  # Need ATR and RSI
+    start = max(30, 20)  # Need KAMA and RSI
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(atr_upper_aligned[i]) or 
-            np.isnan(atr_lower_aligned[i]) or
-            np.isnan(atr_middle_aligned[i]) or
-            np.isnan(rsi_aligned[i])):
+        if (np.isnan(rsi_aligned[i]) or 
+            np.isnan(kama_1w_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Volume confirmation
+        volume_confirmed = volume[i] > 1.3 * vol_ma[i]
+        
+        # Price relative to KAMA
+        price_above_kama = close[i] > kama_1w_aligned[i]
+        price_below_kama = close[i] < kama_1w_aligned[i]
+        
+        # RSI zones
+        rsi_oversold = rsi_aligned[i] < 40
+        rsi_overbought = rsi_aligned[i] > 60
+        rsi_neutral = (rsi_aligned[i] >= 40) & (rsi_aligned[i] <= 60)
+        
         if position == 0:
-            # Look for volatility breakouts with RSI mean reversion filter
-            # Long: price breaks above ATR upper AND weekly RSI < 30 (oversold)
-            if (close[i] > atr_upper_aligned[i] and 
-                rsi_aligned[i] < 30):
+            # Look for mean reversion entries
+            # Long: price near KAMA support in uptrend, RSI oversold
+            if (price_below_kama and 
+                rsi_oversold and 
+                volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below ATR lower AND weekly RSI > 70 (overbought)
-            elif (close[i] < atr_lower_aligned[i] and 
-                  rsi_aligned[i] > 70):
+            # Short: price near KAMA resistance in downtrend, RSI overbought
+            elif (price_above_kama and 
+                  rsi_overbought and 
+                  volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to ATR middle or weekly RSI crosses above 50
-            if (close[i] <= atr_middle_aligned[i] or 
-                rsi_aligned[i] > 50):
+            # Exit long: RSI returns to neutral or price crosses above KAMA
+            if (rsi_neutral[i] or 
+                close[i] > kama_1w_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to ATR middle or weekly RSI crosses below 50
-            if (close[i] >= atr_middle_aligned[i] or 
-                rsi_aligned[i] < 50):
+            # Exit short: RSI returns to neutral or price crosses below KAMA
+            if (rsi_neutral[i] or 
+                close[i] < kama_1w_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -112,6 +126,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_ATRBreakout_WeeklyRSI_MeanRev_v1"
-timeframe = "12h"
+name = "1d_WeeklyKAMA_DailyRSI_MeanReversion_v1"
+timeframe = "1d"
 leverage = 1.0
