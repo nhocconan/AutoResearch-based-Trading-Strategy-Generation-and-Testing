@@ -15,12 +15,12 @@ def generate_signals(prices):
     
     # Load 1d data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     # Load weekly data once before loop
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
     # Calculate weekly VWAP
@@ -44,7 +44,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any critical data is NaN
-        if np.isnan(vol_ma[i]) or np.isnan(vwap_1w[-1]) if len(vwap_1w) == 0 else False:
+        if np.isnan(vol_ma[i]):
             continue
         
         # Get 1d index for current 6h bar (6h = 0.25 * 1d)
