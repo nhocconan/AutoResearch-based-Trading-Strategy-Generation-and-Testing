@@ -28,20 +28,6 @@ def generate_signals(prices):
     ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate daily ATR(14) for volatility filter
-    high_low = high_1d - low_1d
-    high_close = np.abs(high_1d - np.roll(close_1d, 1))
-    low_close = np.abs(low_1d - np.roll(close_1d, 1))
-    high_close[0] = high_low[0]
-    low_close[0] = high_low[0]
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    
-    # Calculate daily 20-period SMA for volatility normalization
-    sma20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, sma20_1d)
-    
     # Calculate 4-hour Donchian channels (20-period) for breakout signals
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
@@ -57,7 +43,7 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical data is NaN
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(atr_14_aligned[i]) or np.isnan(sma20_1d_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
+        if np.isnan(ema50_1d_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
             continue
         
         # Get previous day's data (1d index)
