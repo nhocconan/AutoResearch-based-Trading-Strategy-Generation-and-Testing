@@ -13,79 +13,66 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for calculations
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate weekly EMA200 for trend filter
+    ema200_1w = pd.Series(df_1w['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    
+    # Get daily data for Donchian channels
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate ATR(14) for volatility filtering
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate Donchian channels (20-day high/low) from previous daily bar
+    donchian_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Calculate Bollinger Bands (20, 2) for volatility regime
-    close_series = pd.Series(close)
-    sma20 = close_series.rolling(window=20, min_periods=20).mean().values
-    std20 = close_series.rolling(window=20, min_periods=20).std().values
-    upper_bb = sma20 + 2 * std20
-    lower_bb = sma20 - 2 * std20
-    bb_width = (upper_bb - lower_bb) / sma20
+    # Align Donchian levels to daily timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Bollinger Band width percentile for regime detection (50-period)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=50).rank(pct=True).values
-    
-    # Calculate daily EMA50 for trend filter
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Volume confirmation: volume > 1.5x average volume (20-period)
+    vol_series = pd.Series(volume)
+    avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(200, 50)  # 200 for BB width percentile, 50 for EMA
+    start = max(200, 20)  # 200 for weekly EMA, 20 for volume avg
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(atr[i]) or np.isnan(bb_width_percentile[i]) or 
-            np.isnan(ema50_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(ema200_1w_aligned[i]) or np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         
-        # Only trade in low volatility regimes (BB width percentile < 30%)
-        if bb_width_percentile[i] >= 0.3:
-            if position != 0:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.0
-            continue
-            
         if position == 0:
-            # Long: price above EMA50 and bouncing off lower Bollinger Band
-            if price > ema50_aligned[i] and price <= lower_bb[i] * 1.02:
+            # Long: breakout above 20-day high with volume confirmation and price above weekly EMA200 (uptrend)
+            if price > donchian_high_aligned[i] and vol > 1.5 * avg_vol[i] and price > ema200_1w_aligned[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: price below EMA50 and bouncing off upper Bollinger Band
-            elif price < ema50_aligned[i] and price >= upper_bb[i] * 0.98:
+            # Short: breakout below 20-day low with volume confirmation and price below weekly EMA200 (downtrend)
+            elif price < donchian_low_aligned[i] and vol > 1.5 * avg_vol[i] and price < ema200_1w_aligned[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below EMA50 or reaches upper BB
-            if price < ema50_aligned[i] or price >= upper_bb[i]:
+            # Exit long: price closes back below 20-day low (mean reversion)
+            if price < donchian_low_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above EMA50 or reaches lower BB
-            if price > ema50_aligned[i] or price <= lower_bb[i]:
+            # Exit short: price closes back above 20-day high (mean reversion)
+            if price > donchian_high_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -93,6 +80,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Bollinger_Bounce_EMA50Filter"
-timeframe = "4h"
+name = "1d_1w_Donchian_Breakout_TrendFilter"
+timeframe = "1d"
 leverage = 1.0
