@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Camarilla pivot (from 1-day) with volume confirmation and ADX trend filter.
-# Camarilla levels derived from prior 1-day range (H-L-C) act as intraday support/resistance.
-# Long at L3 with bullish trend (ADX>20) and volume >1.5x average; short at H3 with bearish trend.
-# Exit when price reaches opposite H3/L3 level or closes back inside the Camarilla range.
-# Designed for low-frequency, high-conviction trades (~15-25/year) to minimize fee drag.
+# Hypothesis: 4-hour 1-day Supertrend (ATR multiplier 3.0) with volume confirmation.
+# Uses daily Supertrend to capture the dominant trend direction while avoiding whipsaws.
+# Enters long when price closes above Supertrend with volume > 1.5x 20-period average.
+# Enters short when price closes below Supertrend with volume confirmation.
+# Exits when price closes back across the Supertrend line.
+# Designed for 15-35 trades per year per symbol (60-140 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,104 +20,107 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for Camarilla calculation
+    # Load 1d data ONCE for Supertrend calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    
+    # Supertrend parameters
+    atr_period = 10
+    multiplier = 3.0
+    
+    if len(df_1d) < atr_period:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from prior day's OHLC
-    ph = df_1d['high'].shift(1).values  # prior day high
-    pl = df_1d['low'].shift(1).values   # prior day low
-    pc = df_1d['close'].shift(1).values # prior day close
-    range_ = ph - pl
+    # Calculate ATR on daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Camarilla levels
-    H3 = pc + (range_ * 1.1 / 4)
-    L3 = pc - (range_ * 1.1 / 4)
-    H4 = pc + (range_ * 1.1 / 2)
-    L4 = pc - (range_ * 1.1 / 2)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
     
-    # Align to 12h timeframe
-    H3_12h = align_htf_to_ltf(prices, df_1d, H3)
-    L3_12h = align_htf_to_ltf(prices, df_1d, L3)
-    H4_12h = align_htf_to_ltf(prices, df_1d, H4)
-    L4_12h = align_htf_to_ltf(prices, df_1d, L4)
+    atr = np.zeros_like(tr)
+    atr[atr_period-1] = np.mean(tr[:atr_period])
+    for i in range(atr_period, len(tr)):
+        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
     
-    # ADX(14) for trend strength on 12h
-    adx_len = 14
-    if len(prices) < adx_len + 1:
-        return np.zeros(n)
+    # Calculate basic upper and lower bands
+    hl2 = (high_1d + low_1d) / 2
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
     
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Initialize Supertrend
+    supertrend = np.zeros_like(close_1d)
+    direction = np.ones_like(close_1d)  # 1 for uptrend, -1 for downtrend
     
-    # Directional Movement
-    up_move = high[1:] - high[:-1]
-    down_move = low[:-1] - low[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
+    supertrend[0] = upper_band[0]
+    direction[0] = 1
     
-    # Smoothed values
-    atr = pd.Series(tr).ewm(alpha=1/adx_len, adjust=False).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/adx_len, adjust=False).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/adx_len, adjust=False).mean().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/adx_len, adjust=False).mean().values
+    for i in range(1, len(close_1d)):
+        if close_1d[i] > supertrend[i-1]:
+            direction[i] = 1
+        elif close_1d[i] < supertrend[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+        
+        if direction[i] == 1:
+            supertrend[i] = max(lower_band[i], supertrend[i-1])
+        else:
+            supertrend[i] = min(upper_band[i], supertrend[i-1])
     
-    # Volume confirmation
+    # Align Supertrend and direction to 4h timeframe
+    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend)
+    direction_aligned = align_htf_to_ltf(prices, df_1d, direction)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position
+    position_size = 0.25  # 25% position size
     
-    start = max(adx_len, 20)  # ensure ADX and volume MA are ready
+    # Start after enough data for calculations
+    start = max(30, 20)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(H3_12h[i]) or np.isnan(L3_12h[i]) or 
-            np.isnan(adx[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(supertrend_aligned[i]) or 
+            np.isnan(direction_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
         volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
-        # Trend filter: ADX > 20 indicates trending market
-        trending = adx[i] > 20
-        
         if position == 0:
-            # Enter long at L3 with bullish bias
-            if (close[i] <= L3_12h[i] and 
-                trending and 
-                volume_confirmed and
-                plus_di[i] > minus_di[i]):  # bullish bias
+            # Enter long: price above Supertrend + uptrend + volume
+            if (close[i] > supertrend_aligned[i] and 
+                direction_aligned[i] == 1 and 
+                volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Enter short at H3 with bearish bias
-            elif (close[i] >= H3_12h[i] and 
-                  trending and 
-                  volume_confirmed and
-                  minus_di[i] > plus_di[i]):  # bearish bias
+            # Enter short: price below Supertrend + downtrend + volume
+            elif (close[i] < supertrend_aligned[i] and 
+                  direction_aligned[i] == -1 and 
+                  volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price reaches H4 or closes back inside Camarilla (L3-H3)
-            if close[i] >= H4_12h[i] or (close[i] >= L3_12h[i] and close[i] <= H3_12h[i]):
+            # Exit long: price closes below Supertrend
+            if close[i] < supertrend_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price reaches L4 or closes back inside Camarilla (L3-H3)
-            if close[i] <= L4_12h[i] or (close[i] >= L3_12h[i] and close[i] <= H3_12h[i]):
+            # Exit short: price closes above Supertrend
+            if close[i] > supertrend_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -124,6 +128,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Camarilla_ADX_Volume_v1"
-timeframe = "12h"
+name = "4h_1d_Supertrend_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
