@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data once before loop
+    # Load daily data once before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -22,47 +22,28 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Calculate 1d RSI (14-period)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    gain_series = pd.Series(gain)
-    loss_series = pd.Series(loss)
-    avg_gain = gain_series.ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = loss_series.ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
+    # Calculate 1d True Range
+    high_low = high_1d - low_1d
+    high_close = np.abs(high_1d - np.roll(close_1d, 1))
+    low_close = np.abs(low_1d - np.roll(close_1d, 1))
+    high_close[0] = high_low[0]
+    low_close[0] = high_low[0]
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
     
-    # Calculate 1d ADX (14-period)
-    high_diff = np.diff(high_1d, prepend=high_1d[0])
-    low_diff = np.diff(low_1d, prepend=low_1d[0])
-    plus_dm = np.where((high_diff > -low_diff) & (high_diff > 0), high_diff, 0)
-    minus_dm = np.where((-low_diff > high_diff) & (-low_diff > 0), -low_diff, 0)
-    tr = np.maximum(high_1d - low_1d, np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), np.abs(low_1d - np.roll(close_1d, 1))))
-    tr[0] = high_1d[0] - low_1d[0]
+    # 14-day ATR
     tr_series = pd.Series(tr)
-    atr_14 = tr_series.ewm(alpha=1/14, adjust=False).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values / (atr_14 + 1e-10)
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values / (atr_14 + 1e-10)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
+    atr = tr_series.rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 6-day RSI for additional filter
-    delta_6d = np.diff(close_1d, prepend=close_1d[0])
-    gain_6d = np.where(delta_6d > 0, delta_6d, 0)
-    loss_6d = np.where(delta_6d < 0, -delta_6d, 0)
-    gain_series_6d = pd.Series(gain_6d)
-    loss_series_6d = pd.Series(loss_6d)
-    avg_gain_6d = gain_series_6d.ewm(alpha=1/6, adjust=False).mean().values
-    avg_loss_6d = loss_series_6d.ewm(alpha=1/6, adjust=False).mean().values
-    rs_6d = avg_gain_6d / (avg_loss_6d + 1e-10)
-    rsi_6d = 100 - (100 / (1 + rs_6d))
+    # ATR percentile (70th) over 30 days for volatility filter
+    atr_series = pd.Series(atr)
+    atr_percentile = atr_series.rolling(window=30, min_periods=30).quantile(0.7).values
+    volatility_filter = atr > atr_percentile
     
-    # Calculate 6h volume filter: current volume > 1.5x 20-period average
+    # 12h volume filter: current volume > 1.3x 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 6h Donchian channels (20-period) - breakout levels
+    # 12h Donchian channels (20-period) - breakout levels
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_high = high_series.rolling(window=20, min_periods=20).max().shift(1).values
@@ -72,43 +53,59 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25
     
-    for i in range(30, n):
+    for i in range(60, n):
         # Skip if any critical data is NaN
-        if np.isnan(rsi_1d[i]) or np.isnan(adx[i]) or np.isnan(rsi_6d[i]) or \
-           np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
-           np.isnan(vol_ma[i]):
+        if np.isnan(atr[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
+           np.isnan(vol_ma[i]) or np.isnan(volatility_filter[i]):
             continue
         
-        # Get previous day's RSI and ADX
+        # Get previous day's data for volatility-based threshold
         if i >= 1:
-            rsi_prev = rsi_1d[i-1]
-            adx_prev = adx[i-1]
-            rsi_6d_prev = rsi_6d[i-1]
+            prev_close = close_1d[i-1]
+            prev_high = high_1d[i-1]
+            prev_low = low_1d[i-1]
+            
+            # Calculate volatility-adjusted threshold
+            daily_range = prev_high - prev_low
+            threshold = daily_range * 0.5  # 50% of daily range
+            
+            # Calculate dynamic S1/R1 levels based on volatility
+            s1 = prev_close - threshold
+            r1 = prev_close + threshold
+            
+            # Align S1/R1 levels to 12h timeframe
+            s1_array = np.full(len(df_1d), s1)
+            r1_array = np.full(len(df_1d), r1)
+            
+            s1_12h = align_htf_to_ltf(prices, df_1d, s1_array)[i]
+            r1_12h = align_htf_to_ltf(prices, df_1d, r1_array)[i]
             
             if position == 0:
-                # Long: RSI oversold (<30) + ADX rising (>25) + 6-day RSI not overbought
-                if (rsi_prev < 30 and adx_prev > 25 and rsi_6d_prev < 70 and
-                    volume[i] > vol_ma[i] * 1.5):
+                # Long: Price breaks above r1 with volume and in volatile regime
+                if (close[i] > r1_12h and close[i-1] <= r1_12h and 
+                    volume[i] > vol_ma[i] * 1.3 and 
+                    volatility_filter[i]):
                     position = 1
                     signals[i] = position_size
-                # Short: RSI overbought (>70) + ADX rising (>25) + 6-day RSI not oversold
-                elif (rsi_prev > 70 and adx_prev > 25 and rsi_6d_prev > 30 and
-                      volume[i] > vol_ma[i] * 1.5):
+                # Short: Price breaks below s1 with volume and in volatile regime
+                elif (close[i] < s1_12h and close[i-1] >= s1_12h and 
+                      volume[i] > vol_ma[i] * 1.3 and 
+                      volatility_filter[i]):
                     position = -1
                     signals[i] = -position_size
             elif position == 1:
-                # Exit: RSI overbought (>70) or ADX weakening (<20)
-                if rsi_1d[i] > 70 or adx[i] < 20:
+                # Exit: Price breaks below s1 (reversal) or drops below Donchian low
+                if close[i] < s1_12h or close[i] < donchian_low[i]:
                     position = 0
                     signals[i] = 0.0
             elif position == -1:
-                # Exit: RSI oversold (<30) or ADX weakening (<20)
-                if rsi_1d[i] < 30 or adx[i] < 20:
+                # Exit: Price breaks above s1 (reversal) or rises above Donchian high
+                if close[i] > s1_12h or close[i] > donchian_high[i]:
                     position = 0
                     signals[i] = 0.0
     
     return signals
 
-name = "6h_1d_RSI_ADX_Volume_Filter_v1"
-timeframe = "6h"
+name = "12h_1d_VolatilityAdjusted_S1R1_Breakout_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
