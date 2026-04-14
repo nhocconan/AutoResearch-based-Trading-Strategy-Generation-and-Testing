@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1-day RSI extremes with 1-week volume-weighted average price (VWAP) as dynamic support/resistance.
-# Long when RSI < 30 (oversold) AND price > weekly VWAP (bullish bias).
-# Short when RSI > 70 (overbought) AND price < weekly VWAP (bearish bias).
-# Exit when RSI returns to neutral range (40-60).
-# Uses RSI for mean-reversion signals in extreme conditions and weekly VWAP for trend bias.
-# Designed to work in both bull and bear markets by fading extremes only when aligned with higher timeframe trend.
-# Target: 20-35 trades/year per symbol (80-140 total over 4 years) to minimize fee drag.
+# Hypothesis: 1d strategy using 1-week Keltner Channel breakout with volume confirmation and ADX trend filter.
+# Long when price closes above upper Keltner Channel on weekly timeframe, ADX > 25 (trending), and volume > 1.5x average.
+# Short when price closes below lower Keltner Channel on weekly timeframe, ADX > 25, and volume > 1.5x average.
+# Exit when price returns to Keltner Channel middle line or ADX drops below 20 (trend weakening).
+# Uses Keltner Channels (ATR-based) for volatility-based breakout signals, ADX for trend strength confirmation,
+# and volume for institutional participation confirmation. Designed to work in both bull and bear markets
+# by only trading in trending conditions (ADX > 25) and avoiding choppy markets.
+# Target: 10-25 trades/year per symbol (40-100 total over 4 years) to minimize fee drain.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,83 +22,112 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for RSI and 1w data for VWAP
-    df_1d = get_htf_data(prices, '1d')
+    # Load 1w data ONCE for Keltner Channels and ADX
     df_1w = get_htf_data(prices, '1w')
-    
-    if len(df_1d) < 14:  # Need enough for RSI
-        return np.zeros(n)
-    
-    # Calculate RSI (14) on daily timeframe
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    
-    rs = avg_gain / (avg_loss + 1e-10)  # Avoid division by zero
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Calculate VWAP on weekly timeframe
-    if len(df_1w) < 1:
+    if len(df_1w) < 34:  # Need enough for KC(20,2) and ADX(14)
         return np.zeros(n)
     
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
     
-    typical_price_1w = (high_1w + low_1w + close_1w) / 3
-    vwap_numerator = np.cumsum(typical_price_1w * volume_1w)
-    vwap_denominator = np.cumsum(volume_1w)
-    vwap = vwap_numerator / (vwap_denominator + 1e-10)  # Avoid division by zero
+    # Calculate Keltner Channels (20, 2)
+    kc_middle = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
+    atr = pd.Series(high_1w - low_1w).rolling(window=20, min_periods=20).mean().values
+    kc_upper = kc_middle + 2 * atr
+    kc_lower = kc_middle - 2 * atr
     
-    # Align indicators to 4h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    vwap_aligned = align_htf_to_ltf(prices, df_1w, vwap)
+    # Calculate ADX (14)
+    # True Range
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # Directional Movement
+    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align indicators to 1d timeframe
+    kc_upper_aligned = align_htf_to_ltf(prices, df_1w, kc_upper)
+    kc_lower_aligned = align_htf_to_ltf(prices, df_1w, kc_lower)
+    kc_middle_aligned = align_htf_to_ltf(prices, df_1w, kc_middle)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Volume confirmation: 1.5x average volume (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for RSI calculation
-    start = 14
+    # Start after enough data for calculations
+    start = max(34, 20)  # Need ADX and KC periods
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(rsi_aligned[i]) or 
-            np.isnan(vwap_aligned[i])):
+        if (np.isnan(kc_upper_aligned[i]) or 
+            np.isnan(kc_lower_aligned[i]) or
+            np.isnan(kc_middle_aligned[i]) or
+            np.isnan(adx_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Volume confirmation
+        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
+        
+        # Trend filter: ADX > 25 indicates strong trend
+        strong_trend = adx_aligned[i] > 25
+        
+        # Weak trend filter: ADX < 20 indicates trend weakening
+        weak_trend = adx_aligned[i] < 20
+        
         if position == 0:
-            # Look for RSI extremes with VWAP filter
-            # Long: RSI < 30 (oversold) AND price > weekly VWAP (bullish bias)
-            if (rsi_aligned[i] < 30 and 
-                close[i] > vwap_aligned[i]):
+            # Look for Keltner Channel breakouts in strong trend
+            # Long: price closes above upper KC AND strong trend AND volume confirmation
+            if (close[i] > kc_upper_aligned[i] and 
+                strong_trend and 
+                volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: RSI > 70 (overbought) AND price < weekly VWAP (bearish bias)
-            elif (rsi_aligned[i] > 70 and 
-                  close[i] < vwap_aligned[i]):
+            # Short: price closes below lower KC AND strong trend AND volume confirmation
+            elif (close[i] < kc_lower_aligned[i] and 
+                  strong_trend and 
+                  volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI returns to neutral range (40-60)
-            if (rsi_aligned[i] >= 40 and 
-                rsi_aligned[i] <= 60):
+            # Exit long: price returns to middle KC or trend weakens
+            if (close[i] <= kc_middle_aligned[i] or 
+                weak_trend):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: RSI returns to neutral range (40-60)
-            if (rsi_aligned[i] >= 40 and 
-                rsi_aligned[i] <= 60):
+            # Exit short: price returns to middle KC or trend weakens
+            if (close[i] >= kc_middle_aligned[i] or 
+                weak_trend):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -105,6 +135,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dRSI_1wVWAP_ExtremeReversion_v1"
-timeframe = "4h"
+name = "1d_1w_Keltner_Channel_ADX_VolumeFilter_v1"
+timeframe = "1d"
 leverage = 1.0
