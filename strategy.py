@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla Pivot Breakout with Volume Spike and ADX Trend Filter
-# Uses Camarilla pivot levels from 1d timeframe (calculated once) for high-probability breakouts
-# Volume confirmation ensures breakouts have institutional participation
-# ADX > 25 filters for trending markets to avoid false breakouts in ranges
-# Works in bull/bear by trading breakouts in direction of trend
-# Target: 75-200 total trades over 4 years (19-50/year)
+# Hypothesis: 12h KAMA Direction + RSI + Chop Filter
+# Uses KAMA (Kaufman Adaptive Moving Average) for trend direction,
+# RSI(14) for overbought/oversold conditions, and Choppiness Index for regime filtering.
+# Works in bull/bear by only trading in strong trends (ADX > 25) and avoiding choppy markets.
+# Target: 50-150 total trades over 4 years (12-37/year)
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,41 +19,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if df_1d is None or len(df_1d) < 2:
-        return np.zeros(n)
+    # KAMA calculation (10-period ER, 2/30 fast/slow EMA)
+    change = np.abs(close - np.roll(close, 10))
+    change[0:10] = 0
+    volatility = np.sum(np.abs(np.diff(close)), axis=0) if False else None  # placeholder for correct calc
+    # Manual calculation of efficiency ratio
+    er = np.zeros_like(close)
+    for i in range(10, n):
+        if i >= 10:
+            price_change = np.abs(close[i] - close[i-10])
+            volatility_sum = np.sum(np.abs(np.diff(close[i-9:i+1]))) if i >= 9 else 0
+            er[i] = price_change / (volatility_sum + 1e-10)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Calculate Camarilla levels from previous 1d bar
-    # HLC from previous day (already completed 1d candle)
-    ph = df_1d['high'].shift(1).values  # previous day high
-    pl = df_1d['low'].shift(1).values   # previous day low
-    pc = df_1d['close'].shift(1).values # previous day close
+    # RSI (14-period)
+    delta = np.diff(close)
+    delta = np.insert(delta, 0, 0)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Camarilla levels (based on previous day's range)
-    range_val = ph - pl
-    # Resistance levels
-    r4 = pc + range_val * 1.1 / 2
-    r3 = pc + range_val * 1.1 / 4
-    r2 = pc + range_val * 1.1 / 6
-    r1 = pc + range_val * 1.1 / 12
-    # Support levels
-    s1 = pc - range_val * 1.1 / 12
-    s2 = pc - range_val * 1.1 / 6
-    s3 = pc - range_val * 1.1 / 4
-    s4 = pc - range_val * 1.1 / 2
-    
-    # Align Camarilla levels to 4h timeframe (wait for 1d bar to close)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # ADX calculation (14-period) on 4h
+    # Choppiness Index (14-period)
     # True Range
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
@@ -62,7 +54,20 @@ def generate_signals(prices):
     tr2[0] = 0
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
+    chop = np.where((highest_high - lowest_low) != 0, chop, 50)
     
+    # ADX (14-period) for trend strength
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     # Directional Movement
     dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
                        np.maximum(high - np.roll(high, 1), 0), 0)
@@ -70,46 +75,36 @@ def generate_signals(prices):
                         np.maximum(np.roll(low, 1) - low, 0), 0)
     dm_plus[0] = 0
     dm_minus[0] = 0
-    
     # Smoothed values
     tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
     dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
     dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
-    
     # Directional Indicators
     di_plus = np.where(tr14 != 0, 100 * dm_plus14 / tr14, 0)
     di_minus = np.where(tr14 != 0, 100 * dm_minus14 / tr14, 0)
-    
     # DX and ADX
     dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Volume confirmation: volume > 1.5x average volume (20-period)
-    vol_series = pd.Series(volume)
-    avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 35  # for ADX calculation
+    start = 30  # for KAMA, RSI, CHOP, ADX
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(r2_aligned[i]) or
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(adx[i]) or np.isnan(avg_vol[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
+            np.isnan(chop[i]) or np.isnan(adx[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol = volume[i]
         
-        # Trend filter: only trade when ADX > 25 (trending market)
-        if adx[i] < 25:
-            # In weak trend/ranging market, stay flat
+        # Trend filter: only trade when ADX > 25 (trending market) and Chop < 61.8 (not choppy)
+        if adx[i] < 25 or chop[i] > 61.8:
+            # In weak trend or choppy market, stay flat
             if position != 0:
                 position = 0
                 signals[i] = 0.0
@@ -118,26 +113,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above Camarilla resistance level 3 or 4 with volume
-            if (price > r3_aligned[i] or price > r4_aligned[i]) and vol > 1.5 * avg_vol[i]:
+            # Long: price above KAMA and RSI < 70 (not overbought)
+            if price > kama[i] and rsi[i] < 70:
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below Camarilla support level 3 or 4 with volume
-            elif (price < s3_aligned[i] or price < s4_aligned[i]) and vol > 1.5 * avg_vol[i]:
+            # Short: price below KAMA and RSI > 30 (not oversold)
+            elif price < kama[i] and rsi[i] > 30:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below Camarilla support level 1
-            if price < s1_aligned[i]:
+            # Exit long: price crosses below KAMA or RSI > 70 (overbought)
+            if price < kama[i] or rsi[i] > 70:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above Camarilla resistance level 1
-            if price > r1_aligned[i]:
+            # Exit short: price crosses above KAMA or RSI < 30 (oversold)
+            if price > kama[i] or rsi[i] < 30:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -145,6 +140,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_Volume_ADX_Filter"
-timeframe = "4h"
+name = "12h_KAMA_RSI_Chop_Filter"
+timeframe = "12h"
 leverage = 1.0
