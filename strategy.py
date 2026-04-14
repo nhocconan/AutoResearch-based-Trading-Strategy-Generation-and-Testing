@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d timeframe with weekly donchian breakout + volume confirmation + volatility filter
-# Targets: 10-30 trades/year by requiring strong weekly breakout conditions
-# Logic: Long when price breaks above weekly donchian high (20) with volume spike and low volatility
-#        Short when price breaks below weekly donchian low (20) with volume spike and low volatility
-#        Uses daily ATR to filter out high volatility periods where breakouts fail
-# Position size: 0.25 to manage drawdown
+# Hypothesis: 12h timeframe with 1-day Bollinger Band squeeze breakout + volume confirmation + trend filter
+# Targets: 20-50 trades/year by requiring multiple confluence factors
+# Logic: Long when price breaks above upper BB (20,2) after squeeze (BBW < 20th percentile) with volume surge
+#        Short when price breaks below lower BB (20,2) after squeeze with volume surge
+#        Uses 12h EMA50 as trend filter to avoid counter-trend trades
+# Position size: 0.25 to manage drawdown in volatile markets
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,81 +20,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data once
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load daily data once
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Weekly Donchian channels (20 period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Daily Bollinger Bands (20,2)
+    close_1d = df_1d['close'].values
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
     
-    # Calculate rolling max/min for donchian channels
-    def rolling_max(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            result[i] = np.max(arr[i-window+1:i+1])
-        return result
+    # Bollinger Band Width for squeeze detection
+    bb_width = (upper_bb - lower_bb) / sma_20
+    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=50).quantile(0.20).values
+    squeeze = bb_width < bb_width_percentile
     
-    def rolling_min(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            result[i] = np.min(arr[i-window+1:i+1])
-        return result
+    # Calculate 12h VWAP (typical price * volume cumulative)
+    typical_price = (high + low + close) / 3
+    vwap_numerator = np.cumsum(typical_price * volume)
+    vwap_denominator = np.cumsum(volume)
+    vwap = vwap_numerator / np.where(vwap_denominator > 0, vwap_denominator, np.nan)
     
-    donchian_high_20 = rolling_max(high_1w, 20)
-    donchian_low_20 = rolling_min(low_1w, 20)
+    # 12h EMA50 for trend filter
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Daily ATR (14) for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(np.concatenate([[high[0]], high[:-1]]) - np.concatenate([[close[0]], close[:-1]]))
-    tr3 = np.abs(np.concatenate([[low[0]], low[:-1]]) - np.concatenate([[close[0]], close[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Volume moving average (20) for volume spike detection
+    # Volume moving average (20) for volume surge detection
     vol_ma_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    for i in range(30, n):
-        # Get aligned weekly donchian levels
-        donchian_high_i = align_htf_to_ltf(prices, df_1w, donchian_high_20)[i]
-        donchian_low_i = align_htf_to_ltf(prices, df_1w, donchian_low_20)[i]
+    for i in range(100, n):
+        # Get aligned daily Bollinger data
+        upper_bb_i = align_htf_to_ltf(prices, df_1d, upper_bb)[i]
+        lower_bb_i = align_htf_to_ltf(prices, df_1d, lower_bb)[i]
+        squeeze_i = align_htf_to_ltf(prices, df_1d, squeeze)[i]
         
-        if np.isnan(donchian_high_i) or np.isnan(donchian_low_i) or np.isnan(atr_14[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(upper_bb_i) or np.isnan(lower_bb_i) or np.isnan(squeeze_i) or np.isnan(vwap[i]) or np.isnan(ema_50[i]) or np.isnan(vol_ma_20[i]):
             continue
         
-        # Volume spike (1.5x average volume)
-        volume_spike = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume surge (2x average volume)
+        volume_surge = volume[i] > 2.0 * vol_ma_20[i]
         
-        # Low volatility filter (ATR below 20-period average)
-        atr_ma_20 = pd.Series(atr_14).ewm(span=20, adjust=False, min_periods=20).mean().values
-        atr_ma_i = align_htf_to_ltf(prices, pd.DataFrame({'atr': atr_14}), atr_ma_20)['atr'].values[i]
-        low_volatility = atr_14[i] < atr_ma_i
-        
-        # Long: Price breaks above weekly donchian high + volume spike + low volatility
-        if position == 0 and close[i] > donchian_high_i and volume_spike and low_volatility:
+        # Long: BB squeeze breakout above upper BB + volume surge + above VWAP + above EMA50 (uptrend)
+        if position == 0 and squeeze_i and close[i] > upper_bb_i and volume_surge and close[i] > vwap[i] and close[i] > ema_50[i]:
             position = 1
             signals[i] = position_size
-        # Short: Price breaks below weekly donchian low + volume spike + low volatility
-        elif position == 0 and close[i] < donchian_low_i and volume_spike and low_volatility:
+        # Short: BB squeeze breakout below lower BB + volume surge + below VWAP + below EMA50 (downtrend)
+        elif position == 0 and squeeze_i and close[i] < lower_bb_i and volume_surge and close[i] < vwap[i] and close[i] < ema_50[i]:
             position = -1
             signals[i] = -position_size
-        # Exit: Price returns to weekly donchian middle or opposite breakout
+        # Exit: Price returns to VWAP or opposite BB break
         elif position != 0:
-            donchian_mid = (donchian_high_i + donchian_low_i) / 2
-            if position == 1 and close[i] < donchian_mid:
+            if position == 1 and (close[i] < vwap[i] or close[i] < lower_bb_i):
                 position = 0
                 signals[i] = 0.0
-            elif position == -1 and close[i] > donchian_mid:
+            elif position == -1 and (close[i] > vwap[i] or close[i] > upper_bb_i):
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "1d_WeeklyDonchian_Breakout_Volume_VolatilityFilter"
-timeframe = "1d"
+name = "12h_BollingerSqueeze_Breakout_VWAP_VolumeTrendFilter"
+timeframe = "12h"
 leverage = 1.0
