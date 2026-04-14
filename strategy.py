@@ -3,10 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 12h Supertrend for trend direction and 4h Donchian breakout with volume confirmation.
-# In strong trends (Supertrend direction), trade breakouts in the direction of the trend.
-# In weak trends or ranging markets, avoid trades to reduce whipsaw.
-# Volume > 1.5x 20-period average confirms breakout strength.
+# Hypothesis: 6h strategy using weekly pivot levels and 1-day Ichimoku cloud for trend direction.
+# Weekly pivot levels provide strong support/resistance from institutional activity.
+# Ichimoku cloud from daily timeframe filters trades to align with higher timeframe trend.
+# Long when price breaks above weekly R1 with price above Ichimoku cloud (bullish).
+# Short when price breaks below weekly S1 with price below Ichimoku cloud (bearish).
+# Volume confirmation (>1.5x 20-period average) reduces false breakouts.
+# Designed to work in both bull and bear markets by using weekly pivot structure and
+# daily trend filter to avoid counter-trend trades.
 # Target: 20-40 trades/year per symbol (80-160 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
@@ -19,68 +23,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    
-    # 12h Supertrend (ATR=10, mult=3) for trend direction
-    atr_len = 10
-    mult = 3
-    if len(df_12h) < atr_len:
+    # Load weekly data ONCE for pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate weekly pivot points (using previous week's OHLC)
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # True Range
-    tr1 = high_12h[1:] - low_12h[1:]
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
+    # Calculate pivot levels for each week (using previous week's data)
+    pivot = np.full(len(df_1w), np.nan)
+    r1 = np.full(len(df_1w), np.nan)
+    s1 = np.full(len(df_1w), np.nan)
     
-    # ATR
-    atr = pd.Series(tr).ewm(span=atr_len, adjust=False, min_periods=atr_len).mean().values
+    for i in range(1, len(df_1w)):
+        # Use previous week's data to calculate current week's pivot
+        ph = high_1w[i-1]
+        pl = low_1w[i-1]
+        pc = close_1w[i-1]
+        
+        p = (ph + pl + pc) / 3.0
+        r1_val = 2 * p - pl
+        s1_val = 2 * p - ph
+        
+        pivot[i] = p
+        r1[i] = r1_val
+        s1[i] = s1_val
     
-    # Upper and Lower Bands
-    hl2 = (high_12h + low_12h) / 2
-    upper_band = hl2 + mult * atr
-    lower_band = hl2 - mult * atr
+    # Align weekly pivot levels to 6h timeframe (wait for weekly close)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     
-    # Supertrend calculation
-    supertrend = np.zeros_like(close_12h)
-    direction = np.ones_like(close_12h)  # 1 for uptrend, -1 for downtrend
-    
-    supertrend[0] = upper_band[0] if not np.isnan(upper_band[0]) else close_12h[0]
-    direction[0] = 1
-    
-    for i in range(1, len(close_12h)):
-        if np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(atr[i]):
-            supertrend[i] = supertrend[i-1]
-            direction[i] = direction[i-1]
-        else:
-            if close_12h[i] > supertrend[i-1]:
-                direction[i] = 1
-            elif close_12h[i] < supertrend[i-1]:
-                direction[i] = -1
-            else:
-                direction[i] = direction[i-1]
-            
-            if direction[i] == 1:
-                supertrend[i] = max(lower_band[i], supertrend[i-1])
-            else:
-                supertrend[i] = min(upper_band[i], supertrend[i-1])
-    
-    # Align Supertrend direction to 4h timeframe
-    supertrend_direction_aligned = align_htf_to_ltf(prices, df_12h, direction)
-    
-    # 4h Donchian Channel (20 periods)
-    donch_len = 20
-    if len(high) < donch_len:
+    # Load daily data ONCE for Ichimoku cloud
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 26:  # Need at least 26 periods for Ichimoku
         return np.zeros(n)
     
-    highest_high = pd.Series(high).rolling(window=donch_len, min_periods=donch_len).max().values
-    lowest_low = pd.Series(low).rolling(window=donch_len, min_periods=donch_len).min().values
+    # Calculate Ichimoku components
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_b = (period52_high + period52_low) / 2
+    
+    # Align Ichimoku components to 6h timeframe
+    # Senkou Span B needs 26-period displacement (already built into calculation)
+    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
+    
+    # The cloud is between Senkou Span A and B
+    # Top of cloud = max(Senkou A, Senkou B)
+    # Bottom of cloud = min(Senkou A, Senkou B)
+    cloud_top = np.maximum(senkou_a_aligned, senkou_b_aligned)
+    cloud_bottom = np.minimum(senkou_a_aligned, senkou_b_aligned)
+    
+    # Price above cloud: bullish
+    # Price below cloud: bearish
+    price_above_cloud = close > cloud_top
+    price_below_cloud = close < cloud_bottom
     
     # Volume confirmation: 1.5x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -90,51 +114,51 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(donch_len, 20)
+    start = max(26, 20)  # Need Ichimoku and volume MA
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(supertrend_direction_aligned[i]) or 
-            np.isnan(highest_high[i]) or
-            np.isnan(lowest_low[i]) or
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or
+            np.isnan(cloud_top[i]) or
+            np.isnan(cloud_bottom[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
-        
-        # Trend direction from 12h Supertrend
-        uptrend = supertrend_direction_aligned[i] == 1
-        downtrend = supertrend_direction_aligned[i] == -1
         
         # Volume confirmation
         volume_confirmed = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            if uptrend and volume_confirmed:
-                # Long breakout above Donchian high in uptrend
-                if close[i] > highest_high[i]:
-                    position = 1
-                    signals[i] = position_size
-                else:
-                    signals[i] = 0.0
-            elif downtrend and volume_confirmed:
-                # Short breakdown below Donchian low in downtrend
-                if close[i] < lowest_low[i]:
-                    position = -1
-                    signals[i] = -position_size
-                else:
-                    signals[i] = 0.0
+            # Look for breakouts above weekly R1 or below weekly S1
+            # Only trade in direction of Ichimoku cloud (trend filter)
+            
+            # Long: price breaks above weekly R1 AND price above Ichimoku cloud (bullish)
+            if (close[i] > r1_aligned[i] and 
+                price_above_cloud[i] and 
+                volume_confirmed):
+                position = 1
+                signals[i] = position_size
+            # Short: price breaks below weekly S1 AND price below Ichimoku cloud (bearish)
+            elif (close[i] < s1_aligned[i] and 
+                  price_below_cloud[i] and 
+                  volume_confirmed):
+                position = -1
+                signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below Donchian low or trend reverses
-            if close[i] < lowest_low[i] or supertrend_direction_aligned[i] != 1:
+            # Exit long: price returns to weekly pivot or breaks below cloud bottom
+            if (close[i] <= pivot_aligned[i] or 
+                close[i] < cloud_bottom[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above Donchian high or trend reverses
-            if close[i] > highest_high[i] or supertrend_direction_aligned[i] != -1:
+            # Exit short: price returns to weekly pivot or breaks above cloud top
+            if (close[i] >= pivot_aligned[i] or 
+                close[i] > cloud_top[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -142,6 +166,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_Supertrend_Donchian_Breakout_v1"
-timeframe = "4h"
+name = "6h_1wPivot_1dIchimoku_CloudFilter_v1"
+timeframe = "6h"
 leverage = 1.0
