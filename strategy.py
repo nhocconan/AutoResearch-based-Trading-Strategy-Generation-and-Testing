@@ -3,12 +3,6 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h timeframe with 12h trend filter and volume confirmation
-# Uses 12h Donchian breakout (20-period) aligned to 6h chart with volume surge
-# Works in bull/bear by capturing breakouts with institutional volume
-# Target: 50-150 total trades over 4 years (12-37/year)
-# Size: 0.25
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -19,81 +13,135 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Load daily data for 1D ATR and close
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h Donchian channels (20-period)
-    donch_high_12h = np.full_like(high_12h, np.nan)
-    donch_low_12h = np.full_like(low_12h, np.nan)
+    # Calculate 14-day ATR (daily)
+    if len(high_1d) < 15:
+        return np.zeros(n)
     
-    for i in range(19, len(high_12h)):
-        donch_high_12h[i] = np.max(high_12h[i-19:i+1])
-        donch_low_12h[i] = np.min(low_12h[i-19:i+1])
+    tr = np.zeros_like(high_1d)
+    for i in range(1, len(high_1d)):
+        tr[i] = max(high_1d[i] - low_1d[i],
+                   abs(high_1d[i] - high_1d[i-1]),
+                   abs(low_1d[i] - low_1d[i-1]))
     
-    # Align Donchian levels to 6h timeframe
-    donch_high_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_high_12h)
-    donch_low_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_low_12h)
+    atr_1d = np.full_like(high_1d, np.nan)
+    if len(high_1d) >= 15:
+        atr_1d[14] = np.mean(tr[1:15])
+        for i in range(15, len(high_1d)):
+            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # Calculate 12h volume moving average (20-period)
-    vol_ma_12h = np.full_like(volume_12h, np.nan)
-    for i in range(19, len(volume_12h)):
-        vol_ma_12h[i] = np.mean(volume_12h[i-19:i+1])
+    # Align daily ATR to 4h timeframe
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
+    # Calculate 20-period SMA of daily close (trend filter)
+    if len(close_1d) < 20:
+        return np.zeros(n)
+    
+    sma20_1d = np.full_like(close_1d, np.nan)
+    for i in range(19, len(close_1d)):
+        sma20_1d[i] = np.mean(close_1d[i-19:i+1])
+    
+    # Align daily SMA to 4h timeframe
+    sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, sma20_1d)
+    
+    # Calculate 20-period standard deviation of daily close (volatility filter)
+    if len(close_1d) < 20:
+        return np.zeros(n)
+    
+    std20_1d = np.full_like(close_1d, np.nan)
+    for i in range(19, len(close_1d)):
+        std20_1d[i] = np.std(close_1d[i-19:i+1])
+    
+    # Align daily std to 4h timeframe
+    std20_1d_aligned = align_htf_to_ltf(prices, df_1d, std20_1d)
+    
+    # Bollinger Bands: upper and lower (2 std dev from SMA)
+    upper_bb_1d_aligned = sma20_1d_aligned + 2 * std20_1d_aligned
+    lower_bb_1d_aligned = sma20_1d_aligned - 2 * std20_1d_aligned
+    
+    # Calculate RSI(14) on 4h closes for momentum confirmation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.full_like(close, np.nan)
+    avg_loss = np.full_like(close, np.nan)
+    
+    # First average
+    if len(gain) >= 14:
+        avg_gain[13] = np.mean(gain[1:14])
+        avg_loss[13] = np.mean(loss[1:14])
+    
+    # Wilder smoothing
+    for i in range(14, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(close, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25
+    position_size = 0.20  # Reduced to lower trade frequency
     
     for i in range(30, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donch_high_12h_aligned[i]) or 
-            np.isnan(donch_low_12h_aligned[i]) or
-            np.isnan(vol_ma_12h_aligned[i])):
+        if (np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(sma20_1d_aligned[i]) or 
+            np.isnan(std20_1d_aligned[i]) or
+            np.isnan(upper_bb_1d_aligned[i]) or
+            np.isnan(lower_bb_1d_aligned[i]) or
+            np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 12h-aligned volume vs its 20-period MA
-        if vol_ma_12h_aligned[i] <= 0:
+        # Volume ratio: current period volume vs 20-period average
+        vol_ma_20 = np.full_like(volume, np.nan)
+        for j in range(19, len(volume)):
+            vol_ma_20[j] = np.mean(volume[j-19:j+1])
+        
+        if np.isnan(vol_ma_20[i]) or vol_ma_20[i] <= 0:
             volume_ratio = 0
         else:
-            # Use the volume from the 12h bar that corresponds to this 6h bar
-            # Get the volume of the most recent completed 12h bar
-            vol_12h_current = volume_12h_aligned[i] if i < len(volume_12h_aligned) else volume_12h_aligned[-1]
-            volume_ratio = vol_12h_current / vol_ma_12h_aligned[i] if vol_ma_12h_aligned[i] > 0 else 0
+            volume_ratio = volume[i] / vol_ma_20[i]
         
         if position == 0:
-            # Long: price breaks above 12h Donchian high with volume surge
-            if (close[i] > donch_high_12h_aligned[i] and 
-                volume_ratio > 1.5):
+            # Long: price touches lower Bollinger Band with volume surge and RSI oversold
+            if (close[i] <= lower_bb_1d_aligned[i] and 
+                volume_ratio > 3.0 and  # Increased threshold to reduce trades
+                rsi[i] < 25):           # More oversold threshold
                 position = 1
                 signals[i] = position_size
-            # Short: price breaks below 12h Donchian low with volume surge
-            elif (close[i] < donch_low_12h_aligned[i] and 
-                  volume_ratio > 1.5):
+            # Short: price touches upper Bollinger Band with volume surge and RSI overbought
+            elif (close[i] >= upper_bb_1d_aligned[i] and 
+                  volume_ratio > 3.0 and
+                  rsi[i] > 75):         # More overbought threshold
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below 12h Donchian low or volume drops
-            if (close[i] < donch_low_12h_aligned[i] or
-                volume_ratio < 0.8):
+            # Exit long: price crosses above SMA(20) or volume dries up or RSI overbought
+            if (close[i] > sma20_1d_aligned[i] or
+                volume_ratio < 0.5 or
+                rsi[i] > 70):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above 12h Donchian high or volume drops
-            if (close[i] > donch_high_12h_aligned[i] or
-                volume_ratio < 0.8):
+            # Exit short: price crosses below SMA(20) or volume dries up or RSI oversold
+            if (close[i] < sma20_1d_aligned[i] or
+                volume_ratio < 0.5 or
+                rsi[i] < 30):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -101,6 +149,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_Donchian_Breakout_Volume"
-timeframe = "6h"
+name = "4h_1d_Bollinger_Touch_Volume_RSI_v2"
+timeframe = "4h"
 leverage = 1.0
