@@ -13,108 +13,96 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h Donchian(20) for trend direction
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    upper_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lower_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    upper_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_4h)
-    lower_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_4h)
+    # Calculate weekly ATR(14) for volatility filter
+    high_low = df_1w['high'] - df_1w['low']
+    high_close = np.abs(df_1w['high'] - df_1w['close'].shift(1))
+    low_close = np.abs(df_1w['low'] - df_1w['close'].shift(1))
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    atr_1w = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 4h ATR(14) for volatility filter
-    tr_4h = np.maximum(
-        high_4h[1:] - low_4h[1:],
-        np.maximum(
-            np.abs(high_4h[1:] - high_4h[:-1]),
-            np.abs(low_4h[1:] - low_4h[:-1])
-        )
-    )
-    tr_4h = np.concatenate([[np.nan], tr_4h])
-    atr_4h = pd.Series(tr_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+    # Calculate weekly EMA(50) for trend filter
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 1h ADX(14) for trend strength filter
-    tr = np.maximum(
-        high[1:] - low[1:],
-        np.maximum(
-            np.abs(high[1:] - high[:-1]),
-            np.abs(low[1:] - low[:-1])
-        )
-    )
-    tr = np.concatenate([[np.nan], tr])
-    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
-    dx = (np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)) * 100
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Align weekly indicators to 6h timeframe
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_mask = (hours >= 8) & (hours <= 20)
+    # Calculate 6h Donchian channel (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 6h volume ratio (current vs 20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / (vol_ma + 1e-10)
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
     start = 200
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(upper_4h_aligned[i]) or 
-            np.isnan(lower_4h_aligned[i]) or 
-            np.isnan(atr_4h_aligned[i]) or 
-            np.isnan(adx[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Skip outside session
-        if not session_mask[i]:
+        if (np.isnan(atr_1w_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or
+            np.isnan(donchian_high[i]) or
+            np.isnan(donchian_low[i]) or
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # Trend filter: price above/below 4h Donchian bands
-        trend_long = price > upper_4h_aligned[i]
-        trend_short = price < lower_4h_aligned[i]
+        # Weekly trend filter: price above/below weekly EMA50
+        trend_filter_long = price > ema_50_1w_aligned[i]
+        trend_filter_short = price < ema_50_1w_aligned[i]
         
-        # Volatility filter: require sufficient volatility
-        vol_filter = atr_4h_aligned[i] > 0.01 * price  # at least 1% of price
+        # Volatility filter: current 6h ATR should be less than 2x weekly ATR
+        # Calculate 6h ATR(14)
+        if i >= 14:
+            hl = high[i] - low[i]
+            hc = np.abs(high[i] - close[i-1])
+            lc = np.abs(low[i] - close[i-1])
+            tr_6h = max(hl, hc, lc)
+            # Simplified: use current TR vs weekly ATR
+            vol_filter = tr_6h < (2.0 * atr_1w_aligned[i])
+        else:
+            vol_filter = False
         
-        # Trend strength filter: ADX > 25
-        adx_filter = adx[i] > 25
+        # Volume filter: above average volume
+        vol_filter = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Long entry: price above upper Donchian + volatility + trend strength
-            if trend_long and vol_filter and adx_filter:
+            # Long setup: price breaks above Donchian high + weekly uptrend + volume + volatility
+            if (price > donchian_high[i] and 
+                trend_filter_long and 
+                vol_filter and 
+                vol_filter):
                 position = 1
                 signals[i] = position_size
-            # Short entry: price below lower Donchian + volatility + trend strength
-            elif trend_short and vol_filter and adx_filter:
+            # Short setup: price breaks below Donchian low + weekly downtrend + volume + volatility
+            elif (price < donchian_low[i] and 
+                  trend_filter_short and 
+                  vol_filter and 
+                  vol_filter):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below lower Donchian OR ADX < 20
-            if price < lower_4h_aligned[i] or adx[i] < 20:
+            # Exit long: price breaks below Donchian low OR weekly trend turns down
+            if price < donchian_low[i] or not trend_filter_long:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above upper Donchian OR ADX < 20
-            if price > upper_4h_aligned[i] or adx[i] < 20:
+            # Exit short: price breaks above Donchian high OR weekly trend turns up
+            if price > donchian_high[i] or not trend_filter_short:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -122,6 +110,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4hDonchian20_ATR_ADX_Filter_v1"
-timeframe = "1h"
+name = "6h_1wATR_EMA_Donchian_Breakout_v1"
+timeframe = "6h"
 leverage = 1.0
