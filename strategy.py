@@ -18,8 +18,12 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
+    # Calculate 30-period EMA on 1d
+    close_1d = df_1d['close'].values
+    ema_30 = pd.Series(close_1d).ewm(span=30, adjust=False, min_periods=30).mean().values
+    
     # Calculate 14-period RSI on 1d
-    delta = np.diff(df_1d['close'].values, prepend=df_1d['close'].values[0])
+    delta = np.diff(close_1d, prepend=close_1d[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
@@ -27,12 +31,12 @@ def generate_signals(prices):
     rs = avg_gain / (avg_loss + 1e-10)
     rsi_1d = 100 - (100 / (1 + rs))
     
-    # Calculate 10-period volume moving average (10*4h periods per day)
-    vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    # Calculate 20-period volume moving average (20*4h periods per day)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 4-period high/low for breakout detection
-    high_4 = pd.Series(high).rolling(window=4, min_periods=4).max().values
-    low_4 = pd.Series(low).rolling(window=4, min_periods=4).min().values
+    # Calculate 20-period Donchian channels
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0
@@ -40,37 +44,39 @@ def generate_signals(prices):
     
     for i in range(200, n):
         # Get aligned indicators
+        ema_30_aligned = align_htf_to_ltf(prices, df_1d, ema_30)[i]
         rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)[i]
-        vol_ma_10_val = vol_ma_10[i]  # already LTF
+        vol_ma_20_val = vol_ma_20[i]  # already LTF
         
         # Check for NaN values
-        if (np.isnan(rsi_1d_aligned) or np.isnan(vol_ma_10_val)):
+        if (np.isnan(ema_30_aligned) or np.isnan(rsi_1d_aligned) or 
+            np.isnan(vol_ma_20_val) or np.isnan(high_20[i]) or np.isnan(low_20[i])):
             continue
         
-        # Volume confirmation (> 1.2x average)
-        volume_confirm = volume[i] > 1.2 * vol_ma_10_val
+        # Volume confirmation (> 1.5x average)
+        volume_confirm = volume[i] > 1.5 * vol_ma_20_val
         
         if position == 0:  # No position - look for entries
             if volume_confirm:
-                # Long: Break above 4-period high + RSI not overbought
-                if high[i] > high_4[i] and rsi_1d_aligned < 70:
+                # Long: Break above 20-period high + price above 1d EMA30 + RSI not overbought
+                if high[i] > high_20[i] and close[i] > ema_30_aligned and rsi_1d_aligned < 70:
                     position = 1
                     signals[i] = position_size
-                # Short: Break below 4-period low + RSI not oversold
-                elif low[i] < low_4[i] and rsi_1d_aligned > 30:
+                # Short: Break below 20-period low + price below 1d EMA30 + RSI not oversold
+                elif low[i] < low_20[i] and close[i] < ema_30_aligned and rsi_1d_aligned > 30:
                     position = -1
                     signals[i] = -position_size
-        elif position == 1:  # Long position - exit when price breaks below 4-period low
-            if low[i] < low_4[i]:
+        elif position == 1:  # Long position - exit when price breaks below 20-period low
+            if low[i] < low_20[i]:
                 position = 0
                 signals[i] = 0.0
-        elif position == -1:  # Short position - exit when price breaks above 4-period high
-            if high[i] > high_4[i]:
+        elif position == -1:  # Short position - exit when price breaks above 20-period high
+            if high[i] > high_20[i]:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_4BarBreakout_RSI_Volume_v1"
+name = "4h_Donchian20_EMA30_RSI_Volume_v1"
 timeframe = "4h"
 leverage = 1.0
