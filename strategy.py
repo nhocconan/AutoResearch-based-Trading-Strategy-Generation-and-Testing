@@ -22,6 +22,14 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
+    # Calculate 12-hour Donchian channels (20-period) for entry signals
+    donch_high = np.full(n, np.nan)
+    donch_low = np.full(n, np.nan)
+    if n >= 20:
+        for i in range(19, n):
+            donch_high[i] = np.max(high[i-19:i+1])
+            donch_low[i] = np.min(low[i-19:i+1])
+    
     # Calculate daily ATR for volatility filter (14-period)
     tr = np.zeros(len(df_1d))
     tr[0] = high_1d[0] - low_1d[0]
@@ -48,14 +56,6 @@ def generate_signals(prices):
             ema200_1d[i] = (close_1d[i] * 2 + ema200_1d[i-1] * 198) / 200
     
     ema200_12h = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    
-    # Calculate 12-hour Donchian channels (20-period) for entry signals
-    donch_high = np.full(n, np.nan)
-    donch_low = np.full(n, np.nan)
-    if n >= 20:
-        for i in range(19, n):
-            donch_high[i] = np.max(high[i-19:i+1])
-            donch_low[i] = np.min(low[i-19:i+1])
     
     # Calculate volume moving average (20-period)
     vol_ma_20 = np.full(n, np.nan)
