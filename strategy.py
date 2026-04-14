@@ -37,6 +37,9 @@ def generate_signals(prices):
     atr_ma_50_1d = pd.Series(atr_14_1d).rolling(window=50, min_periods=50).mean().values
     atr_ratio_1d = atr_14_1d / np.where(atr_ma_50_1d > 0, atr_ma_50_1d, np.nan)
     
+    # Daily EMA 50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
@@ -46,8 +49,9 @@ def generate_signals(prices):
         upper_dc_20_i = align_htf_to_ltf(prices, df_1d, upper_dc_20)[i]
         lower_dc_20_i = align_htf_to_ltf(prices, df_1d, lower_dc_20)[i]
         atr_ratio_1d_i = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)[i]
+        ema_50_1d_i = align_htf_to_ltf(prices, df_1d, ema_50_1d)[i]
         
-        if np.isnan(upper_dc_20_i) or np.isnan(lower_dc_20_i) or np.isnan(atr_ratio_1d_i):
+        if np.isnan(upper_dc_20_i) or np.isnan(lower_dc_20_i) or np.isnan(atr_ratio_1d_i) or np.isnan(ema_50_1d_i):
             continue
         
         # Volatility filter: only trade when ATR ratio < 0.8 (low volatility regime)
@@ -57,13 +61,13 @@ def generate_signals(prices):
         vol_median = np.nanmedian(volume[:i+1])
         volume_spike = volume[i] > 2.0 * vol_median
         
-        # Long: break above upper Donchian with volume spike in low vol
+        # Long: break above upper Donchian with volume spike in low vol and price above daily EMA50
         if position == 0 and low_vol and volume_spike:
-            if close[i] > upper_dc_20_i:
+            if close[i] > upper_dc_20_i and close[i] > ema_50_1d_i:
                 position = 1
                 signals[i] = position_size
-            # Short: break below lower Donchian with volume spike in low vol
-            elif close[i] < lower_dc_20_i:
+            # Short: break below lower Donchian with volume spike in low vol and price below daily EMA50
+            elif close[i] < lower_dc_20_i and close[i] < ema_50_1d_i:
                 position = -1
                 signals[i] = -position_size
         
@@ -79,6 +83,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian_Breakout_LowVol_Volume_Spike"
+name = "12h_Donchian_Breakout_LowVol_Volume_Spike_EMA50_Filter"
 timeframe = "12h"
 leverage = 1.0
