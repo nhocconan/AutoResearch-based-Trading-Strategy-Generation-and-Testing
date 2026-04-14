@@ -8,95 +8,92 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
-    volume = prices['volume'].values
+    # Pre-calculate hour filter
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d data for weekly pivot levels and trend
+    # Load 4h data once
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    
+    # 4h EMA21 and EMA50 for trend direction
+    close_4h_series = pd.Series(close_4h)
+    ema21_4h = close_4h_series.ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema50_4h = close_4h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align to 1h
+    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    
+    # Load 1d data once
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points (using prior week's OHLC approximation)
-    # Use 5-day window for weekly approximation
-    def rolling_window(a, window):
-        shape = a.shape[:-1] + (a.shape[-1] - window + 1, window)
-        strides = a.strides + (a.strides[-1],)
-        return np.lib.stride_tricks.as_strided(a, shape=shape, strides=strides)
+    # 1d EMA200 for long-term trend
+    close_1d_series = pd.Series(close_1d)
+    ema200_1d = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Get weekly high, low, close using 5-day windows
-    if len(high_1d) >= 5:
-        weekly_high = np.max(rolling_window(high_1d, 5), axis=1)
-        weekly_low = np.min(rolling_window(low_1d, 5), axis=1)
-        weekly_close = close_1d[4:]  # Last day of each 5-day window
-        
-        # Pad to match original length
-        weekly_high = np.concatenate([np.full(4, np.nan), weekly_high])
-        weekly_low = np.concatenate([np.full(4, np.nan), weekly_low])
-        weekly_close = np.concatenate([np.full(4, np.nan), weekly_close])
-        
-        # Previous week's values for pivot calculation
-        prev_weekly_high = np.roll(weekly_high, 5)
-        prev_weekly_low = np.roll(weekly_low, 5)
-        prev_weekly_close = np.roll(weekly_close, 5)
-        
-        # Weekly pivot point: (H + L + C) / 3
-        pp = (prev_weekly_high + prev_weekly_low + prev_weekly_close) / 3
-        # Resistance and support levels
-        r1 = 2 * pp - prev_weekly_low
-        r2 = pp + (prev_weekly_high - prev_weekly_low)
-        s1 = 2 * pp - prev_weekly_high
-        s2 = pp - (prev_weekly_high - prev_weekly_low)
-        
-        # Align pivot levels to 12h timeframe
-        r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-        s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    else:
-        # Fallback if insufficient data
-        r2_aligned = np.full(n, np.nan)
-        s2_aligned = np.full(n, np.nan)
+    # 1h RSI(14) for entry timing
+    close_series = pd.Series(prices['close'])
+    delta = close_series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
     
-    # Volume confirmation: volume > 1.5x average volume (20-period)
+    # 1h volume filter
+    volume = prices['volume'].values
     vol_series = pd.Series(volume)
-    avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position size
+    position_size = 0.20  # 20% position size
     
-    # Start after enough data for calculations
-    start = 30  # 20 for volume + 10 buffer
+    start = max(50, 200)  # Need enough data for EMA200
     
     for i in range(start, n):
-        # Skip if any critical data is NaN
-        if (np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(avg_vol[i])):
+        if not in_session[i]:
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        vol = volume[i]
+        # Skip if any data is NaN
+        if (np.isnan(ema21_4h_aligned[i]) or np.isnan(ema50_4h_aligned[i]) or
+            np.isnan(ema200_1d_aligned[i]) or np.isnan(rsi[i]) or
+            np.isnan(vol_ma[i])):
+            signals[i] = 0.0
+            continue
+        
+        price = close_series.iloc[i]
+        
+        # Trend alignment: 4h EMA21 > EMA50 AND price > 1d EMA200 for long
+        # 4h EMA21 < EMA50 AND price < 1d EMA200 for short
+        bullish = ema21_4h_aligned[i] > ema50_4h_aligned[i] and price > ema200_1d_aligned[i]
+        bearish = ema21_4h_aligned[i] < ema50_4h_aligned[i] and price < ema200_1d_aligned[i]
         
         if position == 0:
-            # Long: price touches or goes above R2 resistance with volume
-            if price >= r2_aligned[i] and vol > 1.5 * avg_vol[i]:
+            if bullish and rsi[i] < 40 and volume[i] > 1.5 * vol_ma[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: price touches or goes below S2 support with volume
-            elif price <= s2_aligned[i] and vol > 1.5 * avg_vol[i]:
+            elif bearish and rsi[i] > 60 and volume[i] > 1.5 * vol_ma[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price touches or goes below S2 support
-            if price <= s2_aligned[i]:
+            # Exit: 4h EMA21 < EMA50 OR RSI > 70
+            if ema21_4h_aligned[i] < ema50_4h_aligned[i] or rsi[i] > 70:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price touches or goes above R2 resistance
-            if price >= r2_aligned[i]:
+            # Exit: 4h EMA21 > EMA50 OR RSI < 30
+            if ema21_4h_aligned[i] > ema50_4h_aligned[i] or rsi[i] < 30:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -104,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Weekly_Pivot_Touch_Volume"
-timeframe = "12h"
+name = "1h_4h_1d_EMA_RSI_Volume_Filter"
+timeframe = "1h"
 leverage = 1.0
