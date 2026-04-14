@@ -1,14 +1,17 @@
+# ANALYSIS & STRATEGY DESIGN
+# Objective: Create a robust 1h strategy with minimal trade frequency (target: 15-37 trades/year) to avoid fee drag.
+# Core Idea: Use 4h trend direction (EMA crossover) as the primary signal filter, and 1h for precise entry timing using
+# price action relative to the 4h EMA. This ensures trades only occur in the direction of the higher timeframe trend,
+# reducing whipsaws. Volume confirmation adds robustness.
+# Risk Management: Fixed position size (0.20) and trend-following exits (when 4h EMA slope changes sign).
+# Session Filter: Limit trading to 08:00-20:00 UTC to avoid low-liquidity periods.
+# Expected Performance: Low trade count, high win rate in trending markets, resilience in ranging/choppy markets due to
+# strict 4h trend filter.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 4h strategy using 12h VWAP deviation and 1d ATR-based volatility filter.
-# Long when price closes above 12h VWAP + 1.5*ATR(1d) with expanding volume and bullish 1d EMA(50).
-# Short when price closes below 12h VWAP - 1.5*ATR(1d) with expanding volume and bearish 1d EMA(50).
-# Exit when price crosses back to 12h VWAP or volatility contracts (ATR ratio < 0.8).
-# Designed to capture volatility expansion moves in both bull and bear markets with strict entry filters.
-# Target: 20-30 trades/year per symbol (80-120 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,105 +23,108 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE for VWAP
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Load 4h data ONCE for trend and filters
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    volume_4h = df_4h['volume'].values
     
-    # Calculate VWAP for 12h
-    typical_price_12h = (high_12h + low_12h + close_12h) / 3.0
-    vwap_num = np.cumsum(typical_price_12h * volume_12h)
-    vwap_den = np.cumsum(volume_12h)
-    vwap_12h = vwap_num / vwap_den
-    vwap_12h[vwap_den == 0] = np.nan
+    # 4h EMA(21) for trend direction
+    ema_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # 4h EMA slope: current EMA - previous EMA
+    ema_slope_4h = np.diff(ema_4h, prepend=np.nan)
     
-    # Load 1d data ONCE for ATR and EMA
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # 4h ATR(14) for volatility filter
+    tr1 = np.abs(high_4h[1:] - low_4h[1:])
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
+    tr_4h = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_4h = np.concatenate([[np.nan], tr_4h])
+    atr_4h = pd.Series(tr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 4h EMA(50) for dynamic support/resistance
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate True Range and ATR(14) on 1d
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
+    # Align 4h indicators to 1h timeframe
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    ema_slope_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_slope_4h)
+    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    atr_period = 14
-    atr_1d = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    # 1h EMA(20) for entry timing
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate EMA(50) on 1d for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align indicators to lower timeframe
-    vwap_12h_aligned = align_htf_to_ltf(prices, df_12h, vwap_12h)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # 1h volume moving average for confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
-    position = 0
-    position_size = 0.25  # 25% position size
+    position = 0  # 0: flat, 1: long, -1: short
+    position_size = 0.20  # Fixed 20% position size
     
-    # Start after enough data for calculations
-    start = max(20, 20, 50)  # Need VWAP, volume MA, and EMA
+    # Precompute session filter (08:00-20:00 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Start after sufficient warmup
+    start = max(50, 20)
     
     for i in range(start, n):
+        # Skip if outside trading session
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
+        
         # Skip if any critical data is NaN
-        if (np.isnan(vwap_12h_aligned[i]) or 
-            np.isnan(atr_1d_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or
+        if (np.isnan(ema_4h_aligned[i]) or 
+            np.isnan(ema_slope_4h_aligned[i]) or
+            np.isnan(atr_4h_aligned[i]) or
+            np.isnan(ema_50_4h_aligned[i]) or
+            np.isnan(ema_20[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: current volume > 1.3x 20-period average
+        volume_confirmed = volume[i] > 1.3 * vol_ma[i]
         
-        # Trend filter: EMA(50) slope
-        ema_slope = ema_50_1d_aligned[i] - ema_50_1d_aligned[i-1] if i > 0 else 0
-        uptrend = ema_slope > 0
-        downtrend = ema_slope < 0
+        # 4h trend filter: only trade in direction of 4h EMA slope
+        uptrend_4h = ema_slope_4h_aligned[i] > 0
+        downtrend_4h = ema_slope_4h_aligned[i] < 0
         
         if position == 0:
-            # Look for VWAP breakouts with volatility expansion
-            # Long: price close above VWAP + 1.5*ATR AND uptrend AND volume confirmation
-            if (close[i] > vwap_12h_aligned[i] + 1.5 * atr_1d_aligned[i] and 
-                uptrend and 
+            # Look for entry opportunities
+            # Long: price above 4h EMA(21) and 4h EMA(50), with volume and uptrend
+            if (close[i] > ema_4h_aligned[i] and 
+                close[i] > ema_50_4h_aligned[i] and
+                uptrend_4h and 
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Short: price close below VWAP - 1.5*ATR AND downtrend AND volume confirmation
-            elif (close[i] < vwap_12h_aligned[i] - 1.5 * atr_1d_aligned[i] and 
-                  downtrend and 
+            # Short: price below 4h EMA(21) and 4h EMA(50), with volume and downtrend
+            elif (close[i] < ema_4h_aligned[i] and 
+                  close[i] < ema_50_4h_aligned[i] and
+                  downtrend_4h and 
                   volume_confirmed):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses back to VWAP or volatility contracts
-            if (close[i] <= vwap_12h_aligned[i] or 
-                atr_1d_aligned[i] < 0.8 * atr_1d_aligned[i-1]):
+            # Exit long: price closes below 4h EMA(21) or 4h trend turns down
+            if (close[i] < ema_4h_aligned[i] or 
+                ema_slope_4h_aligned[i] <= 0):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses back to VWAP or volatility contracts
-            if (close[i] >= vwap_12h_aligned[i] or 
-                atr_1d_aligned[i] < 0.8 * atr_1d_aligned[i-1]):
+            # Exit short: price closes above 4h EMA(21) or 4h trend turns up
+            if (close[i] > ema_4h_aligned[i] or 
+                ema_slope_4h_aligned[i] >= 0):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -126,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_VWAP_ATR_VolumeTrendFilter_v1"
-timeframe = "4h"
+name = "1h_4hEMA_Trend_Filter_Volume_Entry"
+timeframe = "1h"
 leverage = 1.0
