@@ -16,10 +16,6 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA(55) for trend filter
-    ema_55_1d = pd.Series(df_1d['close']).ewm(span=55, adjust=False, min_periods=55).mean().values
-    ema_55_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_55_1d)
-    
     # Calculate 1d ATR(14) for volatility filter
     high_series = pd.Series(high)
     low_series = pd.Series(low)
@@ -40,18 +36,26 @@ def generate_signals(prices):
     rsi_1d = (100 - (100 / (1 + rs))).values
     rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
+    # Calculate 1d Bollinger Band width for squeeze detection
+    sma_20_1d = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).mean().values
+    std_20_1d = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).std().values
+    upper_bb_1d = sma_20_1d + (2 * std_20_1d)
+    lower_bb_1d = sma_20_1d - (2 * std_20_1d)
+    bb_width_1d = (upper_bb_1d - lower_bb_1d) / sma_20_1d
+    bb_width_1d_aligned = align_htf_to_ltf(prices, df_1d, bb_width_1d)
+    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 55
+    start = 50
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_55_1d_aligned[i]) or 
-            np.isnan(atr[i]) or 
-            np.isnan(rsi_1d_aligned[i])):
+        if (np.isnan(atr[i]) or 
+            np.isnan(rsi_1d_aligned[i]) or
+            np.isnan(bb_width_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -62,34 +66,33 @@ def generate_signals(prices):
         atr_ratio = atr[i] / price if price > 0 else 0
         vol_filter = atr_ratio > 0.003  # Minimum 0.3% ATR relative to price
         
-        # Trend filter: price > 1d EMA55 for long, price < 1d EMA55 for short
-        trend_filter_long = price > ema_55_1d_aligned[i]
-        trend_filter_short = price < ema_55_1d_aligned[i]
+        # Bollinger Band squeeze detection: bandwidth < 5%
+        bb_squeeze = bb_width_1d_aligned[i] < 0.05
         
-        # Momentum filter: RSI between 35 and 65 to avoid extremes
-        rsi_filter = (rsi_1d_aligned[i] > 35) & (rsi_1d_aligned[i] < 65)
+        # Momentum filter: RSI between 30 and 70 to avoid extremes
+        rsi_filter = (rsi_1d_aligned[i] > 30) & (rsi_1d_aligned[i] < 70)
         
         if position == 0:
-            # Long setup: price above 1d EMA55 + volatility filter + momentum filter
-            if (trend_filter_long and vol_filter and rsi_filter):
+            # Long setup: volatility filter + not in squeeze + momentum filter
+            if (vol_filter and not bb_squeeze and rsi_filter):
                 position = 1
                 signals[i] = position_size
-            # Short setup: price below 1d EMA55 + volatility filter + momentum filter
-            elif (trend_filter_short and vol_filter and rsi_filter):
+            # Short setup: volatility filter + not in squeeze + momentum filter
+            elif (vol_filter and not bb_squeeze and rsi_filter):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below 1d EMA55
-            if price < ema_55_1d_aligned[i]:
+            # Exit long: Bollinger Band squeeze detected (mean reversion setup)
+            if bb_squeeze:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above 1d EMA55
-            if price > ema_55_1d_aligned[i]:
+            # Exit short: Bollinger Band squeeze detected (mean reversion setup)
+            if bb_squeeze:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -97,6 +100,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dEMA55_RSI_Filter_v1"
+name = "4h_1dATR_RSI_BBWidth_Exit_v1"
 timeframe = "4h"
 leverage = 1.0
