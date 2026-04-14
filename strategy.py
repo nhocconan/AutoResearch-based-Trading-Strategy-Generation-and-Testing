@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator (Jaw/Teeth/Lips) with 1d trend filter (EMA50) and volume confirmation.
-# Alligator identifies trend direction and strength; avoids choppy markets.
-# 1d EMA50 provides higher timeframe trend bias to avoid counter-trend trades.
-# Volume > 1.5x average confirms institutional participation.
-# Works in bull/bear as 1d EMA adapts to trend and Alligator filters chop.
-# Target: 12-37 trades/year per symbol (50-150 total over 4 years).
+# Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and 12h trend filter (EMA50).
+# Camarilla levels from 1d provide high-probability support/resistance levels.
+# 12h EMA(50) trend filter ensures trades align with intermediate-term direction.
+# Volume > 1.3x average confirms institutional participation at breakout.
+# Works in bull/bear as 12h EMA adapts to trend and Camarilla adapts to volatility.
+# Target: 20-30 trades/year per symbol (80-120 total over 4 years).
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,44 +20,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for trend filter
+    # Load 1d data ONCE for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    
-    # 1d EMA(50) for trend filter
-    ema_len = 50
-    if len(df_1d) < ema_len:
-        return np.zeros(n)
-    
-    ema_1d = pd.Series(df_1d['close']).ewm(span=ema_len, adjust=False, min_periods=ema_len).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # Load 12h data ONCE for Alligator
+    # Load 12h data ONCE for trend filter
     df_12h = get_htf_data(prices, '12h')
     
-    # Williams Alligator: Jaw (13), Teeth (8), Lips (5) SMAs of median price
-    if len(df_12h) < 13:
+    # 12h EMA(50) for trend filter
+    ema_len = 50
+    if len(df_12h) < ema_len:
         return np.zeros(n)
     
-    median_price = (df_12h['high'] + df_12h['low']) / 2
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
+    ema_12h = pd.Series(df_12h['close']).ewm(span=ema_len, adjust=False, min_periods=ema_len).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
+    # Camarilla levels from 1d (previous day)
+    # Calculate using previous day's high, low, close
+    phigh = df_1d['high'].shift(1).values  # previous day high
+    plow = df_1d['low'].shift(1).values    # previous day low
+    pclose = df_1d['close'].shift(1).values # previous day close
     
-    # Alligator signals: Lips > Teeth > Jaw = bullish; Lips < Teeth < Jaw = bearish
-    # Alligator sleeping: all lines intertwined (choppy market)
-    lips_above_teeth = lips_aligned > teeth_aligned
-    teeth_above_jaw = teeth_aligned > jaw_aligned
-    lips_below_teeth = lips_aligned < teeth_aligned
-    teeth_below_jaw = teeth_aligned < jaw_aligned
+    # Camarilla formulas
+    range_ = phigh - plow
+    camarilla_h4 = pclose + range_ * 1.1/2
+    camarilla_l4 = pclose - range_ * 1.1/2
+    camarilla_h3 = pclose + range_ * 1.1/4
+    camarilla_l3 = pclose - range_ * 1.1/4
+    camarilla_h2 = pclose + range_ * 1.1/6
+    camarilla_l2 = pclose - range_ * 1.1/6
+    camarilla_h1 = pclose + range_ * 1.1/12
+    camarilla_l1 = pclose - range_ * 1.1/12
     
-    bullish_alligator = lips_above_teeth & teeth_above_jaw
-    bearish_alligator = lips_below_teeth & teeth_below_jaw
+    # Align Camarilla levels to 4h timeframe
+    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    h2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h2)
+    l2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l2)
+    h1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h1)
+    l1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l1)
     
-    # Volume confirmation: 1.5x average volume
+    # Volume confirmation: 1.3x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -65,34 +68,39 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(50, 13, 20)
+    start = max(50, 20)  # need 12h EMA50 and volume MA20
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_1d_aligned[i]) or 
-            np.isnan(jaw_aligned[i]) or
-            np.isnan(teeth_aligned[i]) or
-            np.isnan(lips_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_12h_aligned[i]) or 
+            np.isnan(vol_ma[i]) or
+            np.isnan(h4_aligned[i]) or
+            np.isnan(l4_aligned[i]) or
+            np.isnan(h3_aligned[i]) or
+            np.isnan(l3_aligned[i]) or
+            np.isnan(h2_aligned[i]) or
+            np.isnan(l2_aligned[i]) or
+            np.isnan(h1_aligned[i]) or
+            np.isnan(l1_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to 1d EMA50
-        above_ema = close[i] > ema_1d_aligned[i]
-        below_ema = close[i] < ema_1d_aligned[i]
+        # Trend filter: price relative to 12h EMA50
+        above_ema = close[i] > ema_12h_aligned[i]
+        below_ema = close[i] < ema_12h_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x average
-        volume_confirmed = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation: current volume > 1.3x average
+        volume_confirmed = volume[i] > 1.3 * vol_ma[i]
         
         if position == 0:
-            # Enter long: bullish Alligator + above 1d EMA + volume
-            if (bullish_alligator[i] and 
+            # Enter long: price breaks above Camarilla H3/H4 + above 12h EMA + volume
+            if ((close[i] > h3_aligned[i] or close[i] > h4_aligned[i]) and 
                 above_ema and 
                 volume_confirmed):
                 position = 1
                 signals[i] = position_size
-            # Enter short: bearish Alligator + below 1d EMA + volume
-            elif (bearish_alligator[i] and 
+            # Enter short: price breaks below Camarilla L3/L4 + below 12h EMA + volume
+            elif ((close[i] < l3_aligned[i] or close[i] < l4_aligned[i]) and 
                   below_ema and 
                   volume_confirmed):
                 position = -1
@@ -100,15 +108,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Alligator turns bearish or price crosses below 1d EMA
-            if bearish_alligator[i] or close[i] < ema_1d_aligned[i]:
+            # Exit long: price returns to Camarilla L3 or breaks below L4
+            if close[i] < l3_aligned[i] or close[i] < l4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Alligator turns bullish or price crosses above 1d EMA
-            if bullish_alligator[i] or close[i] > ema_1d_aligned[i]:
+            # Exit short: price returns to Camarilla H3 or breaks above H4
+            if close[i] > h3_aligned[i] or close[i] > h4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -116,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_Alligator_EMA50_Volume_v1"
-timeframe = "12h"
+name = "4h_12h_EMA50_1d_Camarilla_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
