@@ -1,13 +1,13 @@
-# 4h_12h_Camarilla_Pivot_Volume_Filter_v1
-# Hypothesis: Camarilla pivot levels on 12h act as strong support/resistance in both bull and bear markets.
-# Long when price touches L3 with volume confirmation; short when price touches H3 with volume confirmation.
-# Uses 12h Camarilla levels (calculated from prior 12h bar) for structure, volume spike for confirmation.
-# Works in trending markets (pullbacks to pivot levels) and ranging markets (oscillations between H3/L3).
-# Volume filter reduces false breakouts. Target: 20-50 trades/year on 4h timeframe.
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 1h strategy with 4h RSI trend filter and 1h volume-weighted VWAP mean reversion
+# 4h RSI > 50 indicates bullish trend bias, < 50 indicates bearish bias
+# 1h VWAP deviation identifies mean reversion opportunities within the trend
+# Volume filter ensures trades occur during sufficient liquidity
+# Designed for 15-35 trades/year to avoid fee drag
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,72 +19,96 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE for Camarilla levels
-    df_12h = get_htf_data(prices, '12h')
+    # Load 4h data ONCE for RSI trend filter
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate Camarilla levels for each 12h bar: based on prior bar's OHLC
-    # H3 = close + (high - low) * 1.1/4
-    # L3 = close - (high - low) * 1.1/4
-    # We use prior bar to avoid look-ahead
-    h12 = df_12h['high'].values
-    l12 = df_12h['low'].values
-    c12 = df_12h['close'].values
+    # Calculate 4h RSI (14 periods)
+    rsi_len = 14
+    close_4h = df_4h['close'].values
     
-    # Prior bar values (shifted by 1)
-    h12_prev = np.concatenate([[np.nan], h12[:-1]])
-    l12_prev = np.concatenate([[np.nan], l12[:-1]])
-    c12_prev = np.concatenate([[np.nan], c12[:-1]])
+    # Price changes
+    delta = np.diff(close_4h, prepend=close_4h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Camarilla levels
-    H3 = c12_prev + (h12_prev - l12_prev) * 1.1 / 4
-    L3 = c12_prev - (h12_prev - l12_prev) * 1.1 / 4
+    # Wilder's smoothing
+    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_len, adjust=False, min_periods=rsi_len).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_len, adjust=False, min_periods=rsi_len).mean().values
     
-    # Align to 4h timeframe (will only update after 12h bar closes)
-    H3_4h = align_htf_to_ltf(prices, df_12h, H3)
-    L3_4h = align_htf_to_ltf(prices, df_12h, L3)
+    # RSI calculation
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.where(avg_loss == 0, 100, rsi)
+    rsi = np.where(avg_gain == 0, 0, rsi)
     
-    # Volume spike: current volume > 1.5 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
+    # Align 4h RSI to 1h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_4h, rsi)
+    
+    # Calculate 1h VWAP (volume-weighted average price)
+    typical_price = (high + low + close) / 3
+    vwap_numerator = (typical_price * volume)
+    vwap_denominator = volume
+    
+    # Cumulative VWAP with reset at session boundaries (optional)
+    # Using expanding window for simplicity, but resets daily would be better
+    vwap = np.cumsum(vwap_numerator) / np.cumsum(vwap_denominator)
+    vwap = np.where(np.cumsum(vwap_denominator) == 0, typical_price, vwap)
+    
+    # VWAP deviation as percentage
+    vwap_dev = (close - vwap) / vwap
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # 25% position size
+    position_size = 0.20  # 20% position size
     
     # Start after enough data for calculations
-    start = 20  # for volume MA
+    start = max(30, rsi_len)
     
     for i in range(start, n):
-        # Skip if Camarilla levels are not available (NaN)
-        if np.isnan(H3_4h[i]) or np.isnan(L3_4h[i]):
+        # Skip if any critical data is NaN
+        if np.isnan(rsi_aligned[i]):
             signals[i] = 0.0
             continue
         
-        price = close[i]
+        # Trend filter: 4h RSI > 50 = bullish bias, < 50 = bearish bias
+        bullish_bias = rsi_aligned[i] > 50
+        bearish_bias = rsi_aligned[i] < 50
+        
+        # Mean reversion signals from VWAP deviation
+        vwap_dev_current = vwap_dev[i]
+        
+        # Oversold/overbought thresholds
+        oversold = vwap_dev_current < -0.015  # -1.5% below VWAP
+        overbought = vwap_dev_current > 0.015  # +1.5% above VWAP
+        
+        # Volume filter: current volume > 20-period average
+        if i >= 20:
+            vol_avg = np.mean(volume[i-20:i])
+            volume_filter = volume[i] > vol_avg * 0.5  # At least 50% of average
+        else:
+            volume_filter = True  # Not enough data, don't filter
         
         if position == 0:
-            # Enter long: price touches L3 with volume confirmation
-            if price <= L3_4h[i] and volume_spike[i]:
+            # Enter long: bullish bias + oversold + volume
+            if bullish_bias and oversold and volume_filter:
                 position = 1
                 signals[i] = position_size
-            # Enter short: price touches H3 with volume confirmation
-            elif price >= H3_4h[i] and volume_spike[i]:
+            # Enter short: bearish bias + overbought + volume
+            elif bearish_bias and overbought and volume_filter:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price reaches midpoint (H3+L3)/2 or touches H3
-            midpoint = (H3_4h[i] + L3_4h[i]) / 2
-            if price >= midpoint or price >= H3_4h[i]:
+            # Exit long: price returns to VWAP or trend weakens
+            if vwap_dev_current > -0.005 or rsi_aligned[i] < 45:  # Near VWAP or RSI weakening
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price reaches midpoint or touches L3
-            midpoint = (H3_4h[i] + L3_4h[i]) / 2
-            if price <= midpoint or price <= L3_4h[i]:
+            # Exit short: price returns to VWAP or trend weakens
+            if vwap_dev_current < 0.005 or rsi_aligned[i] > 55:  # Near VWAP or RSI weakening
                 position = 0
                 signals[i] = 0.0
             else:
@@ -92,6 +116,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_12h_Camarilla_Pivot_Volume_Filter_v1"
-timeframe = "4h"
+name = "1h_4hRSI_VWAP_MeanReversion_v1"
+timeframe = "1h"
 leverage = 1.0
