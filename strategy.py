@@ -3,119 +3,94 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Weekly Donchian Breakout with Volume Confirmation and ADX Trend Filter
-# Takes long when price breaks above weekly Donchian upper band with daily volume spike and ADX > 20
-# Takes short when price breaks below weekly Donchian lower band with daily volume spike and ADX > 20
-# Exits when price crosses back below/above the weekly Donchian midline or volume drops
-# Designed to capture strong trends with volume confirmation, avoiding choppy markets
-# Weekly timeframe reduces trade frequency, daily confirmation improves timing
+# Hypothesis: 6h EMA crossover with 1d RSI filter and volume confirmation
+# Takes long when 6h EMA(9) crosses above EMA(21) with 1d RSI > 50 and volume spike
+# Takes short when 6h EMA(9) crosses below EMA(21) with 1d RSI < 50 and volume spike
+# Exits when EMA crossover reverses or volume drops below average
+# Designed to capture momentum with trend confirmation from higher timeframe
+# Target: 50-150 total trades over 4 years (12-37/year)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly and daily data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
-    df_daily = get_htf_data(prices, '1d')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly Donchian channels (20-period)
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    donchian_high = pd.Series(high_weekly).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_weekly).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # Calculate 6h EMA(9) and EMA(21)
+    ema9 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Calculate daily ADX for trend strength
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
-    close_daily = df_daily['close'].values
+    # Calculate 1d RSI(14)
+    close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
     
-    # True Range
-    tr1 = high_daily[1:] - low_daily[1:]
-    tr2 = np.abs(high_daily[1:] - close_daily[:-1])
-    tr3 = np.abs(low_daily[1:] - close_daily[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate 1d volume average (20-period)
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Directional Movement
-    dm_plus = np.where((high_daily[1:] - high_daily[:-1]) > (low_daily[:-1] - low_daily[1:]), 
-                       np.maximum(high_daily[1:] - high_daily[:-1], 0), 0)
-    dm_minus = np.where((low_daily[:-1] - low_daily[1:]) > (high_daily[1:] - high_daily[:-1]), 
-                        np.maximum(low_daily[:-1] - low_daily[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
-    
-    # Smoothed values
-    tr_14 = pd.Series(tr).ewm(span=14, adjust=False).mean().values
-    dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False).mean().values
-    dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False).mean().values
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(span=14, adjust=False).mean().values
-    
-    # Calculate daily volume average (20-period)
-    vol_daily = df_daily['volume'].values
-    vol_ma_daily = pd.Series(vol_daily).rolling(window=20, min_periods=20).mean().values
-    
-    # Align indicators to daily timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_weekly, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_weekly, donchian_low)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_weekly, donchian_mid)
-    adx_aligned = align_htf_to_ltf(prices, df_daily, adx)
-    vol_ma_daily_aligned = align_htf_to_ltf(prices, df_daily, vol_ma_daily)
+    # Align indicators to 6h timeframe
+    ema9_aligned = ema9  # already on 6h
+    ema21_aligned = ema21  # already on 6h
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 60  # for Donchian and ADX calculations
+    start = 50  # for EMA and RSI calculations
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_daily_aligned[i])):
+        if (np.isnan(ema9_aligned[i]) or np.isnan(ema21_aligned[i]) or 
+            np.isnan(rsi_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_daily_current = volume[i]  # Use current daily volume
+        vol_1d_current = vol_1d[i] if i < len(vol_1d) else vol_1d[-1]
+        
+        # EMA crossover signals
+        ema_cross_up = ema9_aligned[i] > ema21_aligned[i] and ema9_aligned[i-1] <= ema21_aligned[i-1]
+        ema_cross_down = ema9_aligned[i] < ema21_aligned[i] and ema9_aligned[i-1] >= ema21_aligned[i-1]
         
         if position == 0:
-            # Long setup: break above weekly Donchian high with volume spike and trend
-            if (price > donchian_high_aligned[i] and 
-                vol_daily_current > 1.5 * vol_ma_daily_aligned[i] and  # Volume spike
-                adx_aligned[i] > 20):                              # Trend filter
+            # Long setup: EMA bullish cross with RSI > 50 and volume spike
+            if (ema_cross_up and 
+                rsi_1d_aligned[i] > 50 and 
+                vol_1d_current > 1.5 * vol_ma_1d_aligned[i]):
                 position = 1
                 signals[i] = position_size
-            # Short setup: break below weekly Donchian low with volume spike and trend
-            elif (price < donchian_low_aligned[i] and 
-                  vol_daily_current > 1.5 * vol_ma_daily_aligned[i] and  # Volume spike
-                  adx_aligned[i] > 20):                              # Trend filter
+            # Short setup: EMA bearish cross with RSI < 50 and volume spike
+            elif (ema_cross_down and 
+                  rsi_1d_aligned[i] < 50 and 
+                  vol_1d_current > 1.5 * vol_ma_1d_aligned[i]):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price breaks below weekly Donchian mid or volume drops
-            if price < donchian_mid_aligned[i] or vol_daily_current < vol_ma_daily_aligned[i]:
+            # Exit long: EMA bearish cross or volume drops
+            if ema_cross_down or vol_1d_current < vol_ma_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price breaks above weekly Donchian mid or volume drops
-            if price > donchian_mid_aligned[i] or vol_daily_current < vol_ma_daily_aligned[i]:
+            # Exit short: EMA bullish cross or volume drops
+            if ema_cross_up or vol_1d_current < vol_ma_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -123,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyDonchian_Breakout_DailyVolume_ADX"
-timeframe = "1d"
+name = "6h_EMA_Crossover_1dRSI_Volume"
+timeframe = "6h"
 leverage = 1.0
