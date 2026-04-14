@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1-day Williams %R with volume confirmation and ADX trend filter.
-# Long when Williams %R crosses above -80 (oversold reversal) on 1d timeframe, ADX > 20 (trending), and volume > 1.3x average.
-# Short when Williams %R crosses below -20 (overbought reversal) on 1d timeframe, ADX > 20, and volume > 1.3x average.
-# Exit when Williams %R returns to -50 (mean reversion) or ADX drops below 15 (trend weakening).
-# Williams %R identifies overbought/oversold conditions, ADX confirms trend strength, volume validates participation.
-# Designed to work in both bull and bear markets by trading mean reversions within trends.
-# Target: 25-40 trades/year per symbol (100-160 total over 4 years) to minimize fee drag.
+# Hypothesis: 1d strategy using 1-week CCI for trend strength and 1-week Williams %R for momentum extremes.
+# Long when weekly CCI > 100 (strong uptrend) and weekly Williams %R < -80 (oversold bounce).
+# Short when weekly CCI < -100 (strong downtrend) and weekly Williams %R > -20 (overbought bounce).
+# Exit when CCI returns to zero line or Williams %R reaches neutral territory (-50).
+# Uses weekly momentum/oscillator extremes to catch reversals in both bull and bear markets,
+# with CCI filtering for strong trends to avoid whipsaws in ranging conditions.
+# Target: 10-25 trades/year per symbol (40-100 total over 4 years) to minimize fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,109 +19,71 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Load 1d data ONCE for Williams %R and ADX
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need enough for Williams %R(14) and ADX(14)
+    # Load weekly data ONCE for CCI and Williams %R
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:  # Need enough for CCI(20) and Williams %R(14)
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate CCI (20)
+    tp_1w = (high_1w + low_1w + close_1w) / 3.0
+    sma_tp = pd.Series(tp_1w).rolling(window=20, min_periods=20).mean().values
+    mad = pd.Series(tp_1w).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
+    cci = (tp_1w - sma_tp) / (0.015 * mad)
     
     # Calculate Williams %R (14)
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    highest_high = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+    willr = -100 * (highest_high - close_1w) / (highest_high - lowest_low)
     
-    # Calculate ADX (14)
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smoothed values
-    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
-    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align indicators to 4h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume confirmation: 1.3x average volume (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align indicators to daily timeframe
+    cci_aligned = align_htf_to_ltf(prices, df_1w, cci)
+    willr_aligned = align_htf_to_ltf(prices, df_1w, willr)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(34, 20)  # Need Williams %R and ADX periods
+    start = 34  # Need CCI and Williams %R periods
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(williams_r_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(cci_aligned[i]) or 
+            np.isnan(willr_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        volume_confirmed = volume[i] > 1.3 * vol_ma[i]
-        
-        # Trend filter: ADX > 20 indicates trending market
-        trending = adx_aligned[i] > 20
-        
-        # Weak trend filter: ADX < 15 indicates trend weakening
-        weak_trend = adx_aligned[i] < 15
-        
         if position == 0:
-            # Look for Williams %R reversals in trending market
-            # Long: Williams %R crosses above -80 (oversold reversal) AND trending AND volume confirmation
-            if i > start and (williams_r_aligned[i-1] <= -80 and williams_r_aligned[i] > -80 and 
-                trending and volume_confirmed):
+            # Look for momentum extremes in strong trends
+            # Long: strong uptrend (CCI > 100) + oversold (Williams %R < -80)
+            if (cci_aligned[i] > 100 and 
+                willr_aligned[i] < -80):
                 position = 1
                 signals[i] = position_size
-            # Short: Williams %R crosses below -20 (overbought reversal) AND trending AND volume confirmation
-            elif i > start and (williams_r_aligned[i-1] >= -20 and williams_r_aligned[i] < -20 and 
-                  trending and volume_confirmed):
+            # Short: strong downtrend (CCI < -100) + overbought (Williams %R > -20)
+            elif (cci_aligned[i] < -100 and 
+                  willr_aligned[i] > -20):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Williams %R returns to -50 or trend weakens
-            if (williams_r_aligned[i] >= -50 or 
-                weak_trend):
+            # Exit long: trend weakening or momentum normalizing
+            if (cci_aligned[i] <= 0 or 
+                willr_aligned[i] >= -50):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Williams %R returns to -50 or trend weakens
-            if (williams_r_aligned[i] <= -50 or 
-                weak_trend):
+            # Exit short: trend weakening or momentum normalizing
+            if (cci_aligned[i] >= 0 or 
+                willr_aligned[i] <= -50):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -129,6 +91,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_WilliamsR_ADX_VolumeFilter_v1"
-timeframe = "4h"
+name = "1d_1w_CCI_WilliamsR_MomentumExtremes_v1"
+timeframe = "1d"
 leverage = 1.0
