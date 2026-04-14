@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla Pivot Reversal + Volume Spike + 1d Trend Filter
-# Uses daily Camarilla pivot levels for mean reversion entries in 12h timeframe
-# Volume confirmation ensures institutional participation
-# 1d EMA50 filter ensures we trade against the daily trend only when momentum is exhausted
-# Works in bull/bear by fading exhaustion moves at key pivot levels
-# Target: 50-150 total trades over 4 years (12-37/year)
+# Hypothesis: 4h Donchian Breakout + 12h Volume Spike + ADX Trend Filter
+# Uses Donchian channel breakouts with 12h volume confirmation and ADX trend filter
+# 12h volume filter ensures we only trade on significant volume spikes, reducing false breakouts
+# ADX > 25 ensures we only trade in trending markets, avoiding false breakouts in ranging conditions
+# Works in bull/bear by capturing breakouts in the direction of the trend
+# Target: 75-200 total trades over 4 years (19-50/year)
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,129 +20,101 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and EMA filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Donchian channel (20-period) on 4h data
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Calculate Camarilla pivot levels from previous day
-    # Formula: 
-    # H4 = Close + 1.5 * (High - Low)
-    # H3 = Close + 1.0 * (High - Low)
-    # H2 = Close + 0.5 * (High - Low)
-    # H1 = Close + 0.25 * (High - Low)
-    # L1 = Close - 0.25 * (High - Low)
-    # L2 = Close - 0.5 * (High - Low)
-    # L3 = Close - 1.0 * (High - Low)
-    # L4 = Close - 1.5 * (High - Low)
+    # ADX calculation (14-period) on 4h data
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Directional Movement
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Calculate pivot levels
-    high_low_range = prev_high - prev_low
-    H4 = prev_close + 1.5 * high_low_range
-    H3 = prev_close + 1.0 * high_low_range
-    H2 = prev_close + 0.5 * high_low_range
-    H1 = prev_close + 0.25 * high_low_range
-    L1 = prev_close - 0.25 * high_low_range
-    L2 = prev_close - 0.5 * high_low_range
-    L3 = prev_close - 1.0 * high_low_range
-    L4 = prev_close - 1.5 * high_low_range
+    # Smoothed values
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
     
-    # Align Camarilla levels to 12h timeframe (wait for daily close)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    H2_aligned = align_htf_to_ltf(prices, df_1d, H2)
-    H1_aligned = align_htf_to_ltf(prices, df_1d, H1)
-    L1_aligned = align_htf_to_ltf(prices, df_1d, L1)
-    L2_aligned = align_htf_to_ltf(prices, df_1d, L2)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    # Directional Indicators
+    di_plus = np.where(tr14 != 0, 100 * dm_plus14 / tr14, 0)
+    di_minus = np.where(tr14 != 0, 100 * dm_minus14 / tr14, 0)
     
-    # 1d EMA50 for trend filter (use previous day's EMA to avoid look-ahead)
-    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().shift(1).values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Volume confirmation: volume > 1.5x average volume (24-period = 12 days)
-    vol_series = pd.Series(volume)
-    avg_vol = vol_series.rolling(window=24, min_periods=24).mean().shift(1).values
+    # 12h Volume confirmation: volume > 2x average volume (20-period)
+    df_12h = get_htf_data(prices, '12h')
+    vol_12h = df_12h['volume'].values
+    avg_vol_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().shift(1).values
+    vol_12h_avg_aligned = align_htf_to_ltf(prices, df_12h, avg_vol_12h)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 50  # for EMA calculation
+    start = 35  # for ADX calculation
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or
-            np.isnan(ema_50_aligned[i]) or np.isnan(avg_vol[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(adx[i]) or np.isnan(vol_12h_avg_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         
-        # Trend filter: only trade against the daily trend
-        # In uptrend (price > EMA50), look for short at resistance
-        # In downtrend (price < EMA50), look for long at support
-        if ema_50_aligned[i] > 0:  # Valid EMA value
-            if price > ema_50_aligned[i]:
-                # Daily uptrend - look for short at resistance levels
-                if position == 0:
-                    # Short at H3 or H4 with volume confirmation
-                    if ((price >= H3_aligned[i] or price >= H4_aligned[i]) and 
-                        vol > 1.5 * avg_vol[i]):
-                        position = -1
-                        signals[i] = -position_size
-                    else:
-                        signals[i] = 0.0
-                elif position == 1:
-                    # Exit long if price breaks above H4 (stop and reverse)
-                    if price > H4_aligned[i]:
-                        position = -1
-                        signals[i] = -position_size
-                    else:
-                        signals[i] = position_size
-                elif position == -1:
-                    # Maintain short unless price breaks above H4 (stop)
-                    if price > H4_aligned[i]:
-                        position = 0
-                        signals[i] = 0.0
-                    else:
-                        signals[i] = -position_size
+        # Trend filter: only trade when ADX > 25 (trending market)
+        if adx[i] < 25:
+            # In weak trend/ranging market, stay flat
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
             else:
-                # Daily downtrend - look for long at support levels
-                if position == 0:
-                    # Long at L3 or L4 with volume confirmation
-                    if ((price <= L3_aligned[i] or price <= L4_aligned[i]) and 
-                        vol > 1.5 * avg_vol[i]):
-                        position = 1
-                        signals[i] = position_size
-                    else:
-                        signals[i] = 0.0
-                elif position == 1:
-                    # Maintain long unless price breaks below L4 (stop)
-                    if price < L4_aligned[i]:
-                        position = 0
-                        signals[i] = 0.0
-                    else:
-                        signals[i] = position_size
-                elif position == -1:
-                    # Exit short if price breaks below L4 (stop and reverse)
-                    if price < L4_aligned[i]:
-                        position = 1
-                        signals[i] = position_size
-                    else:
-                        signals[i] = -position_size
-        else:
-            signals[i] = 0.0
+                signals[i] = 0.0
+            continue
+        
+        if position == 0:
+            # Long: price breaks above Donchian high with 12h volume filter
+            if price > donchian_high[i] and vol > 2.0 * vol_12h_avg_aligned[i]:
+                position = 1
+                signals[i] = position_size
+            # Short: price breaks below Donchian low with 12h volume filter
+            elif price < donchian_low[i] and vol > 2.0 * vol_12h_avg_aligned[i]:
+                position = -1
+                signals[i] = -position_size
+            else:
+                signals[i] = 0.0
+        elif position == 1:
+            # Exit long: price breaks below Donchian low
+            if price < donchian_low[i]:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = position_size
+        elif position == -1:
+            # Exit short: price breaks above Donchian high
+            if price > donchian_high[i]:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -position_size
     
     return signals
 
-name = "12h_Camarilla_Pivot_Reversal_Volume_TrendFilter"
-timeframe = "12h"
+name = "4h_Donchian_12hVolume_ADX_Filter"
+timeframe = "4h"
 leverage = 1.0
