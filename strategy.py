@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Ichimoku Cloud breakout with 1-day trend filter and volume confirmation
-# Long when price breaks above Kumo (cloud) + Tenkan > Kijun + price > daily EMA50 + volume > 1.5x 20-period average
-# Short when price breaks below Kumo + Tenkan < Kijun + price < daily EMA50 + volume > 1.5x 20-period average
-# Exit when price crosses back inside the Kumo (opposite side)
-# This captures strong momentum with Ichimoku's multi-line confirmation while avoiding false breakouts
+# Hypothesis: 12-hour Choppiness Index regime filter with 1-day EMA trend filter and volume confirmation
+# Long when price > 1-day EMA100 AND Choppiness Index(14) < 38.2 (trending) AND volume > 1.5x 20-period average
+# Short when price < 1-day EMA100 AND Choppiness Index(14) < 38.2 (trending) AND volume > 1.5x 20-period average
+# Exit when Choppiness Index(14) > 61.8 (range) OR price crosses EMA100
+# This avoids range-bound losses and captures trending moves with volume confirmation
 # Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,36 +20,33 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for EMA50 trend filter
+    # Load daily data ONCE before loop for EMA100 trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (high_9 + low_9) / 2
+    # Calculate Choppiness Index on 12h (14-period)
+    # CHOP = 100 * log10(sum(ATR(14)) / (log10(highest_high - lowest_low) * 14))
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (high_26 + low_26) / 2
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    sum_atr14 = pd.Series(atr14).rolling(window=14, min_periods=14).sum().values
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
+    highest_high14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    range14 = highest_high14 - lowest_low14
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = (high_52 + low_52) / 2
+    # Avoid division by zero
+    chop = np.full_like(close, 50.0)  # Default to neutral
+    mask = (range14 > 0) & (~np.isnan(range14))
+    chop[mask] = 100 * np.log10(sum_atr14[mask] / (np.log10(range14[mask]) * 14))
     
-    # Kumo top and bottom (cloud)
-    kumotop = np.maximum(senkou_a, senkou_b)
-    kumbottom = np.minimum(senkou_a, senkou_b)
-    
-    # Calculate daily EMA50 for trend filter
+    # Calculate daily EMA100 for trend filter
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
+    ema100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema100_1d)
     
     # Calculate volume average for confirmation (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -58,14 +55,13 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations (52 for Senkou B)
-    start = 60
+    # Start after enough data for calculations (100 for EMA100 + buffer)
+    start = 110
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(kumotop[i]) or np.isnan(kumbottom[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(chop[i]) or np.isnan(ema100_1d_aligned[i]) or 
+            np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
@@ -74,28 +70,26 @@ def generate_signals(prices):
         vol_threshold = vol_avg[i] * 1.5
         
         if position == 0:
-            # Long setup: price above cloud + Tenkan > Kijun + above daily EMA50 + volume confirmation
-            if (price > kumotop[i] and tenkan[i] > kijun[i] and 
-                price > ema50_1d_aligned[i] and vol > vol_threshold):
+            # Long setup: price above EMA100 AND trending market (CHOP < 38.2) AND volume confirmation
+            if (price > ema100_1d_aligned[i] and chop[i] < 38.2 and vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: price below cloud + Tenkan < Kijun + below daily EMA50 + volume confirmation
-            elif (price < kumbottom[i] and tenkan[i] < kijun[i] and 
-                  price < ema50_1d_aligned[i] and vol > vol_threshold):
+            # Short setup: price below EMA100 AND trending market (CHOP < 38.2) AND volume confirmation
+            elif (price < ema100_1d_aligned[i] and chop[i] < 38.2 and vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price falls below cloud bottom (Kumo bottom)
-            if price < kumbottom[i]:
+            # Exit long: range market (CHOP > 61.8) OR price crosses below EMA100
+            if chop[i] > 61.8 or price < ema100_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price rises above cloud top (Kumo top)
-            if price > kumotop[i]:
+            # Exit short: range market (CHOP > 61.8) OR price crosses above EMA100
+            if chop[i] > 61.8 or price > ema100_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -103,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Ichimoku_1dEMA50_Volume"
-timeframe = "6h"
+name = "12h_Chop_EMA100_Volume"
+timeframe = "12h"
 leverage = 1.0
