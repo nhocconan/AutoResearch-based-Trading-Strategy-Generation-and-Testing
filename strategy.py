@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h 12-hour EMA Trend Filter with 1-day Donchian Breakout and Volume Confirmation
-# Uses 12h EMA to filter trend direction, then enters on 1d Donchian breakouts with volume spike
-# This combines multi-timeframe trend alignment (12h) with higher-timeframe structure (1d)
-# Designed to work in both bull and bear markets by only trading breakouts in the direction of the 12h trend
-# Target: 75-200 total trades over 4 years (19-50/year)
+# Hypothesis: 6h Elder Ray Index + 1d EMA200 Trend Filter + Volume Confirmation
+# Elder Ray measures bull/bear power relative to EMA13. In trending markets,
+# we go long when bull power > 0 and price > 1d EMA200, short when bear power < 0 and price < 1d EMA200.
+# Volume confirmation ensures breakouts have participation. Works in bull/bear by following the trend.
+# Target: 50-150 total trades over 4 years (12-37/year)
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,17 +19,17 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h EMA for trend direction (updated every 12h)
-    df_12h = get_htf_data(prices, '12h')
-    ema_12h = pd.Series(df_12h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Elder Ray components (13-period EMA for reference)
+    close_series = pd.Series(close)
+    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Get 1d Donchian levels (breakout levels)
+    bull_power = high - ema13
+    bear_power = low - ema13
+    
+    # 1d EMA200 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    donchian_high_1d = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_low_1d = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().shift(1).values
-    donchian_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_1d)
-    donchian_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_1d)
+    ema200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
     # Volume confirmation: volume > 1.5x average volume (20-period)
     vol_series = pd.Series(volume)
@@ -40,54 +40,51 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 40  # for EMA and Donchian calculations
+    start = max(50, 200)  # for EMA200
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_12h_aligned[i]) or np.isnan(donchian_high_1d_aligned[i]) or 
-            np.isnan(donchian_low_1d_aligned[i]) or np.isnan(avg_vol[i])):
+        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(ema200_1d_aligned[i]) or np.isnan(avg_vol[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
         
-        # Trend filter: only trade in direction of 12h EMA
-        if price > ema_12h_aligned[i]:
-            # Uptrend: only look for long breakouts
-            if position == 0:
-                # Long: price breaks above 1d Donchian high with volume filter
-                if price > donchian_high_1d_aligned[i] and vol > 1.5 * avg_vol[i]:
-                    position = 1
-                    signals[i] = position_size
-                else:
-                    signals[i] = 0.0
-            elif position == 1:
-                # Stay long
+        # Trend filter: price must be on correct side of 1d EMA200
+        if ema200_1d_aligned[i] <= 0:  # invalid EMA
+            signals[i] = 0.0
+            continue
+            
+        if position == 0:
+            # Long: bull power positive AND price above 1d EMA200 with volume
+            if bull_power[i] > 0 and price > ema200_1d_aligned[i] and vol > 1.5 * avg_vol[i]:
+                position = 1
                 signals[i] = position_size
-            else:  # position == -1
-                # Exit short and go flat
-                position = 0
-                signals[i] = 0.0
-        else:
-            # Downtrend: only look for short breakouts
-            if position == 0:
-                # Short: price breaks below 1d Donchian low with volume filter
-                if price < donchian_low_1d_aligned[i] and vol > 1.5 * avg_vol[i]:
-                    position = -1
-                    signals[i] = -position_size
-                else:
-                    signals[i] = 0.0
-            elif position == -1:
-                # Stay short
+            # Short: bear power negative AND price below 1d EMA200 with volume
+            elif bear_power[i] < 0 and price < ema200_1d_aligned[i] and vol > 1.5 * avg_vol[i]:
+                position = -1
                 signals[i] = -position_size
-            else:  # position == 1
-                # Exit long and go flat
+            else:
+                signals[i] = 0.0
+        elif position == 1:
+            # Exit long: bear power turns negative OR price drops below EMA200
+            if bear_power[i] < 0 or price < ema200_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
+            else:
+                signals[i] = position_size
+        elif position == -1:
+            # Exit short: bull power turns positive OR price rises above EMA200
+            if bull_power[i] > 0 or price > ema200_1d_aligned[i]:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -position_size
     
     return signals
 
-name = "4h_12hEMA_1dDonchian_Volume_Filter"
-timeframe = "4h"
+name = "6h_ElderRay_1dEMA200_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
