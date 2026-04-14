@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Volume-Weighted Average Price (VWAP) deviation with 12-hour trend filter
-# Long when price deviates below VWAP by >1.5 sigma AND price > 12h EMA50 AND volume confirmation
-# Short when price deviates above VWAP by >1.5 sigma AND price < 12h EMA50 AND volume confirmation
-# Exit when price returns to VWAP (±0.5 sigma)
-# Uses mean reversion to VWAP in ranging markets, filtered by 12h trend to avoid counter-trend trades
-# Target: 60-120 total trades over 4 years (15-30/year) to balance opportunity and cost
+# Hypothesis: 4-hour Donchian channel breakout with 1-day ATR filter and volume confirmation
+# Long when price breaks above 20-period Donchian high AND ATR(14) > 1.5x ATR(50) AND volume > 1.5x 20-period average
+# Short when price breaks below 20-period Donchian low AND ATR(14) > 1.5x ATR(50) AND volume > 1.5x 20-period average
+# Exit when price crosses back inside the Donchian channel (opposite side)
+# Uses Donchian channels for breakout signals, ATR ratio to filter for volatile breakouts, volume for confirmation
+# Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,26 +20,33 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Load 1-day data ONCE before loop for ATR filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate VWAP and standard deviation (typical price * volume)
-    typical_price = (high + low + close) / 3.0
-    vp = typical_price * volume
-    cum_vp = np.nancumsum(vp)
-    cum_vol = np.nancumsum(volume)
-    vwap = np.divide(cum_vp, cum_vol, out=np.full_like(cum_vp, np.nan), where=cum_vol!=0)
+    # Calculate Donchian channels on 4h (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Calculate VWAP deviation standard deviation (using 20-period)
-    vwap_dev = typical_price - vwap
-    vwap_ma = pd.Series(vwap_dev).rolling(window=20, min_periods=20).mean().values
-    vwap_std = pd.Series(vwap_dev).rolling(window=20, min_periods=20).std().values
-    vwap_z = np.divide((vwap_dev - vwap_ma), vwap_std, out=np.full_like(vwap_dev, np.nan), where=vwap_std!=0)
+    # Calculate ATR on 1d for volatility filter (ATR(14) and ATR(50))
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # True Range calculation
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # ATR(14) and ATR(50)
+    atr14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr50_1d = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    
+    # ATR ratio filter: ATR(14) > 1.5 * ATR(50) indicates elevated volatility
+    atr_ratio = atr14_1d / atr50_1d
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
     # Calculate volume average for confirmation (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -48,43 +55,41 @@ def generate_signals(prices):
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations
-    start = 30
+    # Start after enough data for calculations (max of 20, 50)
+    start = 50
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(vwap[i]) or np.isnan(vwap_z[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(atr_ratio_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vwap_val = vwap[i]
-        z_score = vwap_z[i]
         vol = volume[i]
         vol_threshold = vol_avg[i] * 1.5
         
         if position == 0:
-            # Long setup: price below VWAP by >1.5 sigma AND above 12h EMA50 AND volume confirmation
-            if (z_score < -1.5 and price > ema50_12h_aligned[i] and vol > vol_threshold):
+            # Long setup: break above Donchian high + high volatility + volume confirmation
+            if (price > donchian_high[i] and atr_ratio_aligned[i] > 1.5 and vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: price above VWAP by >1.5 sigma AND below 12h EMA50 AND volume confirmation
-            elif (z_score > 1.5 and price < ema50_12h_aligned[i] and vol > vol_threshold):
+            # Short setup: break below Donchian low + high volatility + volume confirmation
+            elif (price < donchian_low[i] and atr_ratio_aligned[i] > 1.5 and vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price returns to VWAP (within +/- 0.5 sigma)
-            if abs(z_score) < 0.5:
+            # Exit long: price crosses back below Donchian low
+            if price < donchian_low[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price returns to VWAP (within +/- 0.5 sigma)
-            if abs(z_score) < 0.5:
+            # Exit short: price crosses back above Donchian high
+            if price > donchian_high[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -92,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_VWAP_MeanReversion_12hEMA50_Volume"
-timeframe = "6h"
+name = "4h_Donchian_ATR_Volume_Filter"
+timeframe = "4h"
 leverage = 1.0
