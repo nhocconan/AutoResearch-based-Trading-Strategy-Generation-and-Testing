@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-hour RSI with 4-hour trend filter and volume confirmation
-# Long when RSI(14) > 55, price > 4h EMA200, and volume > 1.5x 20-period average
-# Short when RSI(14) < 45, price < 4h EMA200, and volume > 1.5x 20-period average
-# Exit when RSI crosses back to neutral (45-55) or volume drops
-# Uses 4h for trend direction, 1h for entry timing, volume for confirmation
-# Target: 80-150 total trades over 4 years (20-38/year) with strict entry conditions
+# Hypothesis: 6-hour Weekly Camarilla Pivot Breakout with 1-day Volume Confirmation
+# Long when price breaks above weekly R4 level AND volume > 2x daily average
+# Short when price breaks below weekly S4 level AND volume > 2x daily average
+# Exit when price returns to weekly pivot (R3/S3) or closes back inside weekly H-L range
+# Uses weekly structure for direction and daily volume for confirmation to catch strong trending moves
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee impact
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,66 +20,81 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4-hour data ONCE before loop for trend filter
-    df_4h = get_htf_data(prices, '4h')
+    # Load weekly data ONCE before loop for Camarilla pivots
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate RSI on 1h (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Calculate weekly Camarilla levels from prior week's OHLC
+    # H, L, C from previous week (already completed due to get_htf_data alignment)
+    H = df_1w['high'].values
+    L = df_1w['low'].values
+    C = df_1w['close'].values
     
-    # Calculate 4h EMA200 for trend filter
-    close_4h = df_4h['close'].values
-    ema200_4h = pd.Series(close_4h).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
+    # Camarilla formulas
+    R4 = C + (H - L) * 1.1 / 2
+    R3 = C + (H - L) * 1.1 / 4
+    S3 = C - (H - L) * 1.1 / 4
+    S4 = C - (H - L) * 1.1 / 2
     
-    # Calculate volume average for confirmation (20-period)
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align weekly levels to 6h timeframe (wait for weekly bar to close)
+    R4_6h = align_htf_to_ltf(prices, df_1w, R4)
+    R3_6h = align_htf_to_ltf(prices, df_1w, R3)
+    S3_6h = align_htf_to_ltf(prices, df_1w, S3)
+    S4_6h = align_htf_to_ltf(prices, df_1w, S4)
+    
+    # Weekly high-low range for exit condition
+    WHL_range = H - L
+    weekly_mid = (H + L) / 2
+    WHL_range_6h = align_htf_to_ltf(prices, df_1w, WHL_range)
+    weekly_mid_6h = align_htf_to_ltf(prices, df_1w, weekly_mid)
+    
+    # Load daily data ONCE before loop for volume average
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Daily volume average (20-period)
+    vol_1d = df_1d['volume'].values
+    vol_avg_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_6h = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 200  # Wait for 4h EMA200
+    start = 30
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(rsi[i]) or np.isnan(ema200_4h_aligned[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(R4_6h[i]) or np.isnan(S4_6h[i]) or 
+            np.isnan(vol_avg_20_6h[i]) or np.isnan(WHL_range_6h[i]) or 
+            np.isnan(weekly_mid_6h[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         vol = volume[i]
-        vol_threshold = vol_avg[i] * 1.5
+        vol_threshold = vol_avg_20_6h[i] * 2.0  # Require 2x daily average volume
         
         if position == 0:
-            # Long setup: RSI > 55, price > 4h EMA200, volume confirmation
-            if (rsi[i] > 55 and price > ema200_4h_aligned[i] and vol > vol_threshold):
+            # Long setup: break above weekly R4 with volume confirmation
+            if price > R4_6h[i] and vol > vol_threshold:
                 position = 1
                 signals[i] = position_size
-            # Short setup: RSI < 45, price < 4h EMA200, volume confirmation
-            elif (rsi[i] < 45 and price < ema200_4h_aligned[i] and vol > vol_threshold):
+            # Short setup: break below weekly S4 with volume confirmation
+            elif price < S4_6h[i] and vol > vol_threshold:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI drops below 50 or volume drops
-            if rsi[i] < 50 or vol < vol_avg[i] * 0.8:
+            # Exit long: price returns to weekly S3 or below weekly midpoint
+            if price < S3_6h[i] or price < weekly_mid_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: RSI rises above 50 or volume drops
-            if rsi[i] > 50 or vol < vol_avg[i] * 0.8:
+            # Exit short: price returns to weekly R3 or above weekly midpoint
+            if price > R3_6h[i] or price > weekly_mid_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -87,6 +102,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_RSI_4hEMA200_Volume"
-timeframe = "1h"
+name = "6h_WeeklyCamarilla_VolumeBreakout"
+timeframe = "6h"
 leverage = 1.0
