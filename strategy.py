@@ -1,14 +1,15 @@
+# Your trading strategy code here
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy with 4h ADX trend filter and 1d Bollinger Bands reversal
-# ADX > 25 indicates trending market (use for trend direction)
-# Bollinger Bands %B < 0.2 or > 0.8 indicates oversold/overbought conditions for mean reversion entries
-# Works in both bull and bear markets: trend filter prevents counter-trend trades in strong moves,
-# while Bollinger Bands capture mean reversion within the trend
-# Uses 4h ADX for trend regime and 1d BB% for entry timing - avoids overtrading
+# Hypothesis: 1h strategy combining 4h ADX for trend strength and 1d RSI for mean reversion
+# Uses 4h ADX > 25 to identify trending markets and 1d RSI < 30 or > 70 for entry signals
+# In trending markets, buys pullbacks (RSI < 30) and sells rallies (RSI > 70)
+# Works in both bull and bear markets: trend filter ensures we trade with the dominant trend,
+# while RSI provides mean-reversion entries within the trend
+# Uses session filter (08-20 UTC) to avoid low-liquidity periods and reduce false signals
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,6 +19,10 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    
+    # Pre-compute session filter (08-20 UTC)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     # Load 4h data ONCE for ADX
     df_4h = get_htf_data(prices, '4h')
@@ -42,7 +47,7 @@ def generate_signals(prices):
                         np.maximum(low_4h[:-1] - low_4h[1:], 0), 0)
     dm_minus = np.concatenate([[np.nan], dm_minus])
     
-    # Smoothed values
+    # Smoothed values with min_periods
     tr_sum = pd.Series(tr).rolling(window=adx_len, min_periods=adx_len).sum().values
     dm_plus_sum = pd.Series(dm_plus).rolling(window=adx_len, min_periods=adx_len).sum().values
     dm_minus_sum = pd.Series(dm_minus).rolling(window=adx_len, min_periods=adx_len).sum().values
@@ -58,39 +63,39 @@ def generate_signals(prices):
     # Align ADX to 1h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
     
-    # Load 1d data ONCE for Bollinger Bands
+    # Load 1d data ONCE for RSI
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d Bollinger Bands (20, 2)
-    bb_len = 20
-    bb_mult = 2.0
-    bb_src = df_1d['close'].values
+    # Calculate 1d RSI (14 periods)
+    rsi_len = 14
+    delta = np.diff(df_1d['close'].values, prepend=np.nan)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Basis (SMA)
-    basis = pd.Series(bb_src).rolling(window=bb_len, min_periods=bb_len).mean().values
-    # Deviation
-    dev = bb_mult * pd.Series(bb_src).rolling(window=bb_len, min_periods=bb_len).std().values
-    # Upper and Lower bands
-    upper = basis + dev
-    lower = basis - dev
-    # Percent B (%B)
-    bb_pctb = (bb_src - lower) / (upper - lower)
-    bb_pctb = np.where((upper - lower) == 0, 0.5, bb_pctb)  # Avoid division by zero
+    # Smoothed gains and losses
+    avg_gain = pd.Series(gain).rolling(window=rsi_len, min_periods=rsi_len).mean().values
+    avg_loss = pd.Series(loss).rolling(window=rsi_len, min_periods=rsi_len).mean().values
     
-    # Align BB %B to 1h timeframe
-    bb_pctb_aligned = align_htf_to_ltf(prices, df_1d, bb_pctb)
+    # Relative Strength
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.where(avg_loss == 0, 100, rsi)  # Handle division by zero
+    
+    # Align RSI to 1h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.20  # 20% position size
     
     # Start after enough data for calculations
-    start = max(100, adx_len + bb_len)
+    start = max(100, adx_len + rsi_len)
     
     for i in range(start, n):
-        # Skip if any critical data is NaN
+        # Skip if any critical data is NaN or outside session
         if (np.isnan(adx_aligned[i]) or 
-            np.isnan(bb_pctb_aligned[i])):
+            np.isnan(rsi_aligned[i]) or
+            not in_session[i]):
             signals[i] = 0.0
             continue
         
@@ -99,9 +104,9 @@ def generate_signals(prices):
         # Trend filter: ADX > 25 indicates trending market
         trending = adx_aligned[i] > 25
         
-        # Mean reversion signals from Bollinger Bands %B
-        oversold = bb_pctb_aligned[i] < 0.2
-        overbought = bb_pctb_aligned[i] > 0.8
+        # Mean reversion signals from RSI
+        oversold = rsi_aligned[i] < 30
+        overbought = rsi_aligned[i] > 70
         
         if position == 0:
             # Enter long: trending + oversold (pullback in uptrend)
@@ -121,15 +126,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses above 50% BB level (mean reversion complete) OR ADX drops
-            if bb_pctb_aligned[i] > 0.5 or adx_aligned[i] < 20:
+            # Exit long: RSI crosses above 50 (mean reversion complete) or ADX drops
+            if rsi_aligned[i] > 50 or adx_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses below 50% BB level (mean reversion complete) OR ADX drops
-            if bb_pctb_aligned[i] < 0.5 or adx_aligned[i] < 20:
+            # Exit short: RSI crosses below 50 (mean reversion complete) or ADX drops
+            if rsi_aligned[i] < 50 or adx_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -137,6 +142,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_4hADX_1dBB_PB_MeanReversion_v1"
+name = "1h_4hADX_1dRSI_MeanReversion_v1"
 timeframe = "1h"
 leverage = 1.0
