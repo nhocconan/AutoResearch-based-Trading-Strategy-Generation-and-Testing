@@ -13,6 +13,15 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly EMA(21) for trend filter
+    close_1w_series = pd.Series(close_1w)
+    ema_21_1w = close_1w_series.ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    
     # Get daily data for pivot points and ATR
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
@@ -55,13 +64,6 @@ def generate_signals(prices):
     # Volume confirmation: volume > 1.5x average volume (20-period)
     vol_series = pd.Series(volume)
     avg_vol = vol_series.rolling(window=20, min_periods=20).mean().shift(1).values
-    
-    # Weekly trend filter: 1w EMA(21)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    close_1w_series = pd.Series(close_1w)
-    ema_21_1w = close_1w_series.ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
     signals = np.zeros(n)
     position = 0
