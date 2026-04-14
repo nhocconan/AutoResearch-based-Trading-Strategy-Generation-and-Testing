@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -13,98 +13,123 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data once for trend filter and ATR
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load weekly data once for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    daily_close = df_1d['close'].values
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_open = df_1d['open'].values
+    weekly_close = df_1w['close'].values
     
-    # ATR(14) on daily
-    tr1 = daily_high[1:] - daily_low[1:]
-    tr2 = np.abs(daily_high[1:] - daily_close[:-1])
-    tr3 = np.abs(daily_low[1:] - daily_close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14 = np.full_like(tr, np.nan, dtype=float)
-    for i in range(14, len(tr)):
-        atr_14[i] = np.nanmean(tr[i-13:i+1])
+    # Weekly EMA50 for trend filter
+    if len(weekly_close) >= 50:
+        weekly_ema50 = pd.Series(weekly_close).ewm(span=50, adjust=False).mean().values
+    else:
+        weekly_ema50 = np.full(len(weekly_close), np.nan)
     
-    # Daily trend: 1 if bullish (close > open), -1 if bearish
-    daily_bullish = (daily_close > daily_open).astype(float)
-    daily_bearish = (daily_close < daily_open).astype(float)
+    # Daily Donchian channels (20-period)
+    donch_high = np.full(n, np.nan)
+    donch_low = np.full(n, np.nan)
+    for i in range(19, n):
+        donch_high[i] = np.max(high[i-19:i+1])
+        donch_low[i] = np.min(low[i-19:i+1])
+    donch_mid = (donch_high + donch_low) / 2
     
-    # Bollinger Bands (20, 2) on daily close
-    sma_20 = np.full_like(daily_close, np.nan)
-    std_20 = np.full_like(daily_close, np.nan)
-    for i in range(19, len(daily_close)):
-        sma_20[i] = np.mean(daily_close[i-19:i+1])
-        std_20[i] = np.std(daily_close[i-19:i+1])
-    upper_band = sma_20 + 2 * std_20
-    lower_band = sma_20 - 2 * std_20
+    # Daily volume filter: 20-period average
+    vol_ma = np.full(n, np.nan)
+    vol_sum = 0
+    vol_count = 0
+    for i in range(n):
+        vol_sum += volume[i]
+        vol_count += 1
+        if vol_count >= 20:
+            vol_ma[i] = vol_sum / vol_count
+            vol_sum -= volume[i-19]
+            vol_count -= 1
     
-    # Bollinger Band Width for regime detection
-    bb_width = (upper_band - lower_band) / sma_20
-    bb_width_percentile = np.full_like(bb_width, np.nan)
-    for i in range(49, len(bb_width)):  # 50-period lookback
-        window = bb_width[i-49:i+1]
-        if not np.all(np.isnan(window)):
-            rank = np.sum(~np.isnan(window) & (bb_width[i] >= window)) / np.sum(~np.isnan(window))
-            bb_width_percentile[i] = rank
+    # Daily RSI(14) for overbought/oversold
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    gain_sum = 0
+    loss_sum = 0
+    for i in range(n):
+        gain_sum += gain[i]
+        loss_sum += loss[i]
+        if i >= 13:
+            if i == 13:
+                avg_gain[i] = gain_sum / 14
+                avg_loss[i] = loss_sum / 14
+            else:
+                avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+                avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+            if avg_loss[i] != 0:
+                rs = avg_gain[i] / avg_loss[i]
+                rsi = 100 - (100 / (1 + rs))
+            else:
+                rsi = 100
+            # RSI not stored in array for simplicity, calculated on fly
     
-    # Align daily indicators to 12h
-    daily_bull_aligned = align_htf_to_ltf(prices, df_1d, daily_bullish)
-    daily_bear_aligned = align_htf_to_ltf(prices, df_1d, daily_bearish)
-    bb_width_percentile_aligned = align_htf_to_ltf(prices, df_1d, bb_width_percentile)
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    # Align weekly trend
+    weekly_trend = weekly_close > weekly_ema50
+    weekly_trend_arr = weekly_trend.astype(float)
+    weekly_trend_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_arr)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25
     
-    for i in range(50, n):
+    for i in range(19, n):
         # Skip if any indicator not ready
-        if (np.isnan(daily_bull_aligned[i]) or np.isnan(daily_bear_aligned[i]) or 
-            np.isnan(bb_width_percentile_aligned[i]) or np.isnan(atr_14_aligned[i])):
+        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(donch_mid[i]) or np.isnan(vol_ma[i]):
             continue
         
-        bb_percentile = bb_width_percentile_aligned[i]
-        daily_bull = daily_bull_aligned[i]
-        daily_bear = daily_bear_aligned[i]
-        atr_val = atr_14_aligned[i]
+        weekly_trend_val = weekly_trend_aligned[i]
+        if np.isnan(weekly_trend_val):
+            continue
+        
+        # Calculate RSI for current bar
+        if i >= 14:
+            # Recalculate RSI components up to i
+            gain_sum_rsi = np.sum(gain[max(0, i-13):i+1])
+            loss_sum_rsi = np.sum(loss[max(0, i-13):i+1])
+            if loss_sum_rsi == 0:
+                rsi_val = 100
+            else:
+                rs_val = gain_sum_rsi / loss_sum_rsi
+                rsi_val = 100 - (100 / (1 + rs_val))
+        else:
+            continue
         
         if position == 0:
-            # Long: Bollinger squeeze breakout above upper band in bullish daily trend
-            if (bb_percentile < 0.2 and  # Squeeze: low volatility
-                close[i] > upper_band[int(np.sum(~np.isnan(daily_close) & (np.arange(len(daily_close)) <= i)))-1] if i < len(daily_close) else upper_band[-1] and
-                daily_bull > 0.5 and
-                volume[i] > np.nanmedian(volume[max(0, i-20):i+1]) * 1.5):  # Volume spike
+            # Long: Break above Donchian high, volume spike, weekly uptrend, RSI not overbought
+            if close[i] > donch_high[i] and volume[i] > vol_ma[i] * 1.5 and weekly_trend_val > 0.5 and rsi_val < 70:
                 position = 1
                 signals[i] = position_size
-            # Short: Bollinger squeeze breakout below lower band in bearish daily trend
-            elif (bb_percentile < 0.2 and  # Squeeze: low volatility
-                  close[i] < lower_band[int(np.sum(~np.isnan(daily_low) & (np.arange(len(daily_low)) <= i)))-1] if i < len(daily_low) else lower_band[-1] and
-                  daily_bear > 0.5 and
-                  volume[i] > np.nanmedian(volume[max(0, i-20):i+1]) * 1.5):  # Volume spike
+            # Short: Break below Donchian low, volume spike, weekly downtrend, RSI not oversold
+            elif close[i] < donch_low[i] and volume[i] > vol_ma[i] * 1.5 and weekly_trend_val < 0.5 and rsi_val > 30:
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
-            # Exit: Price closes below Bollinger middle or volatility expands
-            sma_val = sma_20[int(np.sum(~np.isnan(daily_close) & (np.arange(len(daily_close)) <= i)))-1] if i < len(daily_close) else sma_20[-1]
-            if close[i] < sma_val or bb_percentile > 0.8:  # Mean reversion or high volatility
+            # Exit: Price closes below Donchian middle OR RSI overbought
+            if close[i] < donch_mid[i] and close[i-1] >= donch_mid[i-1]:
+                position = 0
+                signals[i] = 0.0
+            elif rsi_val > 70:
                 position = 0
                 signals[i] = 0.0
         elif position == -1:
-            # Exit: Price closes above Bollinger middle or volatility expands
-            sma_val = sma_20[int(np.sum(~np.isnan(daily_close) & (np.arange(len(daily_close)) <= i)))-1] if i < len(daily_close) else sma_20[-1]
-            if close[i] > sma_val or bb_percentile > 0.8:  # Mean reversion or high volatility
+            # Exit: Price closes above Donchian middle OR RSI oversold
+            if close[i] > donch_mid[i] and close[i-1] <= donch_mid[i-1]:
+                position = 0
+                signals[i] = 0.0
+            elif rsi_val < 30:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_Bollinger_Squeeze_Breakout_DailyTrend"
-timeframe = "12h"
+name = "1d_Donchian_Breakout_Volume_WeeklyTrend_RSI"
+timeframe = "1d"
 leverage = 1.0
