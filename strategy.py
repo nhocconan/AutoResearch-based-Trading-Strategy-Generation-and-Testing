@@ -1,3 +1,10 @@
+# 2025-07-08: 1d Pivot S3R3 Rejection with Volume and EMA Filter - Refined
+# Hypothesis: Price rejection at daily S3/R3 levels with volume confirmation and EMA trend filter works in both bull and bear markets.
+# In bull markets: long at S3 support during pullbacks. In bear markets: short at R3 resistance during bounces.
+# Volume filter ensures institutional interest. EMA filter avoids counter-trend trades.
+# Timeframe: 1d (lower frequency reduces fee burden, improves generalization)
+# Uses 1d timeframe for entries to avoid overtrading. Target: <50 trades/year.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -5,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -28,55 +35,22 @@ def generate_signals(prices):
     ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate daily ATR (14-period) for volatility filter
-    high_low = high_1d - low_1d
-    high_close = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    low_close = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    
-    atr_1d = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 14:
-        atr_1d[13] = np.mean(tr[:14])
-        for i in range(14, len(df_1d)):
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
     # Calculate daily volume moving average (20-period) for volume filter
     volume_1d_series = pd.Series(volume_1d)
     volume_ma_1d = volume_1d_series.rolling(window=20, min_periods=20).mean().values
     volume_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
     
-    # Calculate daily RSI(14) for mean reversion
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.full_like(gain, np.nan)
-    avg_loss = np.full_like(loss, np.nan)
-    if len(gain) >= 14:
-        avg_gain[13] = np.mean(gain[1:14])
-        avg_loss[13] = np.mean(loss[1:14])
-        for i in range(14, len(gain)):
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
     signals = np.zeros(n)
     position = 0
     position_size = 0.25
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any critical data is NaN
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or np.isnan(volume_ma_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]):
+        if np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_ma_1d_aligned[i]):
             continue
         
-        # Skip low volatility periods (ATR < 0.3% of price)
-        if atr_1d_aligned[i] / close[i] < 0.003:
-            continue
-        
-        # Skip low volume periods (volume < 60% of 20-period MA)
-        if volume[i] < 0.6 * volume_ma_1d_aligned[i]:
+        # Skip low volume periods (volume < 50% of 20-period MA)
+        if volume[i] < 0.5 * volume_ma_1d_aligned[i]:
             continue
         
         # Get previous day's data (1d index)
@@ -101,27 +75,27 @@ def generate_signals(prices):
             r3_1d = align_htf_to_ltf(prices, df_1d, r3_array)[i]
             
             if position == 0:
-                # Long: Price rejects S3 with volume, above EMA50, and RSI < 40 (oversold)
-                if low[i] <= s3_1d and close[i] > s3_1d and volume[i] > volume_ma_1d_aligned[i] and close[i] > ema50_1d_aligned[i] and rsi_1d_aligned[i] < 40:
+                # Long: Price closes above S3 with volume, above EMA50
+                if close[i] > s3_1d and volume[i] > volume_ma_1d_aligned[i] and close[i] > ema50_1d_aligned[i]:
                     position = 1
                     signals[i] = position_size
-                # Short: Price rejects R3 with volume, below EMA50, and RSI > 60 (overbought)
-                elif high[i] >= r3_1d and close[i] < r3_1d and volume[i] > volume_ma_1d_aligned[i] and close[i] < ema50_1d_aligned[i] and rsi_1d_aligned[i] > 60:
+                # Short: Price closes below R3 with volume, below EMA50
+                elif close[i] < r3_1d and volume[i] > volume_ma_1d_aligned[i] and close[i] < ema50_1d_aligned[i]:
                     position = -1
                     signals[i] = -position_size
             elif position == 1:
-                # Exit: Price breaks S3 again or trend changes (price below EMA50) or RSI > 70 (overbought)
-                if low[i] <= s3_1d or close[i] < ema50_1d_aligned[i] or rsi_1d_aligned[i] > 70:
+                # Exit: Price closes below S3 or trend changes (price below EMA50)
+                if close[i] < s3_1d or close[i] < ema50_1d_aligned[i]:
                     position = 0
                     signals[i] = 0.0
             elif position == -1:
-                # Exit: Price breaks R3 again or trend changes (price above EMA50) or RSI < 30 (oversold)
-                if high[i] >= r3_1d or close[i] > ema50_1d_aligned[i] or rsi_1d_aligned[i] < 30:
+                # Exit: Price closes above R3 or trend changes (price above EMA50)
+                if close[i] > r3_1d or close[i] > ema50_1d_aligned[i]:
                     position = 0
                     signals[i] = 0.0
     
     return signals
 
-name = "1d_Pivot_S3R3_Rejection_Volume_EMA50_RSI_Filter_v3"
+name = "1d_Pivot_S3R3_Rejection_Volume_EMA50_Filter_v4"
 timeframe = "1d"
 leverage = 1.0
