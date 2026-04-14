@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Load daily data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
