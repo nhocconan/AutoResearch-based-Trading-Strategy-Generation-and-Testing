@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,21 +18,11 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d data
-    close_1d = df_1d['close'].values
+    # Calculate 1d ATR (14-period) for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA20 for trend filter
-    ema_20_1d = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 20:
-        ema_series = pd.Series(close_1d).ewm(span=20, adjust=False).mean()
-        ema_20_1d = ema_series.values
-    
-    # Align 1d EMA20 to 4h timeframe
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
-    
-    # Calculate 1d ATR (14-period) for volatility filter
     high_low = high_1d - low_1d
     high_close = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
     low_close = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
@@ -55,13 +45,11 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.25  # Conservative size to manage drawdown
+    position_size = 0.25
     
-    for i in range(60, n):
+    for i in range(100, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_20_1d_aligned[i]) or
-            np.isnan(atr_4h_aligned[i]) or
-            np.isnan(volume_ma[i])):
+        if np.isnan(atr_4h_aligned[i]) or np.isnan(volume_ma[i]):
             signals[i] = 0.0
             continue
         
@@ -98,30 +86,26 @@ def generate_signals(prices):
             r3_4h = align_htf_to_ltf(prices, df_1d, r3_array)[i]
             
             if position == 0:
-                # Long: Price rejects S3 with volume and trend alignment
-                if low[i] <= s3_4h and close[i] > s3_4h and volume[i] > volume_ma[i] and close[i] > ema_20_1d_aligned[i]:
+                # Long: Price rejects S3 with volume
+                if low[i] <= s3_4h and close[i] > s3_4h and volume[i] > volume_ma[i]:
                     position = 1
                     signals[i] = position_size
-                # Short: Price rejects R3 with volume and trend alignment
-                elif high[i] >= r3_4h and close[i] < r3_4h and volume[i] > volume_ma[i] and close[i] < ema_20_1d_aligned[i]:
+                # Short: Price rejects R3 with volume
+                elif high[i] >= r3_4h and close[i] < r3_4h and volume[i] > volume_ma[i]:
                     position = -1
                     signals[i] = -position_size
                 else:
                     signals[i] = 0.0
             elif position == 1:
-                # Exit: Price breaks S3 again or reaches mean reversion target
-                # Dynamic exit at 50% of the range from S3 to pivot
-                exit_level = s3_4h + (pivot - s3_4h) * 0.5
-                if low[i] <= s3_4h or close[i] <= exit_level:
+                # Exit: Price breaks S3 again
+                if low[i] <= s3_4h:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                # Exit: Price breaks R3 again or reaches mean reversion target
-                # Dynamic exit at 50% of the range from pivot to R3
-                exit_level = r3_4h - (r3_4h - pivot) * 0.5
-                if high[i] >= r3_4h or close[i] >= exit_level:
+                # Exit: Price breaks R3 again
+                if high[i] >= r3_4h:
                     position = 0
                     signals[i] = 0.0
                 else:
@@ -131,6 +115,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Pivot_S3R3_Rejection_Volume_Filter_v5"
+name = "4h_1d_Pivot_S3R3_Rejection_Volume_Filter_v6"
 timeframe = "4h"
 leverage = 1.0
