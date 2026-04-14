@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Load daily data (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -23,7 +23,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 20-period Donchian channel (daily) - weekly pivot equivalent
+    # Calculate 20-period high and low for Donchian channel (daily)
     donchian_high_20 = np.full_like(close_1d, np.nan)
     donchian_low_20 = np.full_like(close_1d, np.nan)
     
@@ -93,14 +93,13 @@ def generate_signals(prices):
     if len(volume_1d) >= 20:
         for i in range(19, len(volume_1d)):
             vol_ma_20[i] = np.mean(volume_1d[i-19:i+1])
-    
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any critical data is NaN
         if (np.isnan(donchian_high_20_aligned[i]) or 
             np.isnan(donchian_low_20_aligned[i]) or 
@@ -109,7 +108,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume ratio: current 6h volume vs 20-period daily average volume
+        # Volume ratio: current 12h volume vs 20-period daily average volume
         if vol_ma_20_aligned[i] <= 0:
             volume_ratio = 0
         else:
@@ -149,6 +148,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_Donchian20_ADX25_Volume"
-timeframe = "6h"
+name = "12h_1d_Donchian20_ADX25_Volume"
+timeframe = "12h"
 leverage = 1.0
