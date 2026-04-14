@@ -1,10 +1,3 @@
-# Strategy: 4h_1d_Camarilla_R4S4_Breakout_Volume_v2
-# Hypothesis: Breakouts above R4 (bullish) or below S4 (bearish) of the previous day's Camarilla pivot levels,
-# combined with significant volume spikes (>2.5x 20-period average), capture institutional breakouts.
-# Works in both bull and bear markets because breakouts often precede sustained moves.
-# Uses volatility filter (ATR > 0.5% of price) to avoid choppy markets. Position size 0.25 to limit drawdown.
-# Target: 20-40 trades/year per symbol (<160 total over 4 years) to minimize fee drag.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -91,10 +84,10 @@ def generate_signals(prices):
         s3 = prev_close - (prev_range * 1.1 / 4)
         
         # Align to 4h timeframe
-        r4_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r4))[i] if i < len(prices) else r4
-        s4_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s4))[i] if i < len(prices) else s4
-        r3_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r3))[i] if i < len(prices) else r3
-        s3_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i] if i < len(prices) else s3
+        r4_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r4))[i]
+        s4_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s4))[i]
+        r3_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r3))[i]
+        s3_4h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i]
         
         if position == 0:
             # Long: Price breaks above R4 with volume confirmation
