@@ -13,22 +13,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA(34) for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1w EMA(21) for trend filter
+    ema_21_1w = pd.Series(df_1w['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
-    # Calculate 1d RSI(14) for momentum filter
-    delta = np.diff(df_1d['close'], prepend=df_1d['close'].iloc[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Calculate 1w ATR(14) for volatility filter
+    tr1 = df_1w['high'] - df_1w['low']
+    tr2 = abs(df_1w['high'] - df_1w['close'].shift(1))
+    tr3 = abs(df_1w['low'] - df_1w['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_14_1w = tr.rolling(window=14, min_periods=14).mean().values
+    atr_14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_14_1w)
     
     signals = np.zeros(n)
     position = 0
@@ -39,41 +37,41 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(rsi_1d_aligned[i])):
+        if (np.isnan(ema_21_1w_aligned[i]) or 
+            np.isnan(atr_14_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # Trend filter: price > 1d EMA34 for long, price < 1d EMA34 for short
-        trend_filter_long = price > ema_34_1d_aligned[i]
-        trend_filter_short = price < ema_34_1d_aligned[i]
+        # Trend filter: price > 1w EMA21 for long, price < 1w EMA21 for short
+        trend_filter_long = price > ema_21_1w_aligned[i]
+        trend_filter_short = price < ema_21_1w_aligned[i]
         
-        # Momentum filter: RSI between 35 and 65 to avoid extremes
-        mom_filter = (rsi_1d_aligned[i] >= 35) & (rsi_1d_aligned[i] <= 65)
+        # Volatility filter: ATR > 0.5% of price to avoid choppy markets
+        vol_filter = atr_14_1w_aligned[i] > (0.005 * price)
         
         if position == 0:
-            # Long setup: price above 1d EMA34 + momentum filter
-            if trend_filter_long and mom_filter:
+            # Long setup: price above 1w EMA21 + volatility filter
+            if trend_filter_long and vol_filter:
                 position = 1
                 signals[i] = position_size
-            # Short setup: price below 1d EMA34 + momentum filter
-            elif trend_filter_short and mom_filter:
+            # Short setup: price below 1w EMA21 + volatility filter
+            elif trend_filter_short and vol_filter:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below 1d EMA34 OR RSI > 70 (overbought)
-            if price < ema_34_1d_aligned[i] or rsi_1d_aligned[i] > 70:
+            # Exit long: price crosses below 1w EMA21 OR ATR drops below 0.3% of price
+            if price < ema_21_1w_aligned[i] or atr_14_1w_aligned[i] < (0.003 * price):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above 1d EMA34 OR RSI < 30 (oversold)
-            if price > ema_34_1d_aligned[i] or rsi_1d_aligned[i] < 30:
+            # Exit short: price crosses above 1w EMA21 OR ATR drops below 0.3% of price
+            if price > ema_21_1w_aligned[i] or atr_14_1w_aligned[i] < (0.003 * price):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -81,6 +79,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dEMA34_RSI_Filter_v1"
-timeframe = "4h"
+name = "1d_1wEMA21_ATR_Filter_v1"
+timeframe = "1d"
 leverage = 1.0
