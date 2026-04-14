@@ -13,157 +13,132 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load weekly data (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate daily pivot points (classic)
-    if len(high_1d) < 1:
-        return np.zeros(n)
+    # Calculate weekly pivot points (classic)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
     
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
     
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Calculate 10-period EMA for trend filter (weekly)
+    ema10_1w = np.full_like(close_1w, np.nan)
+    if len(close_1w) >= 10:
+        ema10_1w[9] = np.mean(close_1w[:10])
+        for i in range(10, len(close_1w)):
+            ema10_1w[i] = close_1w[i] * 0.1818 + ema10_1w[i-1] * 0.8182  # alpha = 2/(10+1)
     
-    # Calculate 20-period EMA for trend filter (daily)
-    if len(close_1d) < 20:
-        return np.zeros(n)
+    ema10_1w_aligned = align_htf_to_ltf(prices, df_1w, ema10_1w)
     
-    ema20_1d = np.full_like(close_1d, np.nan)
-    ema20_1d[19] = np.mean(close_1d[:20])
-    for i in range(20, len(close_1d)):
-        ema20_1d[i] = close_1d[i] * 0.0952 + ema20_1d[i-1] * 0.9048  # alpha = 2/(20+1)
-    
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
-    
-    # Calculate 14-day RSI for momentum (daily)
-    if len(close_1d) < 14:
-        return np.zeros(n)
-    
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.full_like(close_1d, np.nan)
-    avg_loss = np.full_like(close_1d, np.nan)
-    
-    if len(close_1d) >= 14:
+    # Calculate 14-period RSI for momentum (weekly)
+    rsi14_1w = np.full_like(close_1w, np.nan)
+    if len(close_1w) >= 14:
+        delta = np.diff(close_1w, prepend=close_1w[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.full_like(close_1w, np.nan)
+        avg_loss = np.full_like(close_1w, np.nan)
+        
         avg_gain[13] = np.mean(gain[1:14])
         avg_loss[13] = np.mean(loss[1:14])
-        for i in range(14, len(close_1d)):
+        
+        for i in range(14, len(close_1w)):
             avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
             avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+        
+        rs = np.full_like(close_1w, np.nan)
+        for i in range(13, len(close_1w)):
+            if avg_loss[i] > 0:
+                rs[i] = avg_gain[i] / avg_loss[i]
+                rsi14_1w[i] = 100 - (100 / (1 + rs[i]))
+            else:
+                rsi14_1w[i] = 100 if avg_gain[i] > 0 else 0
     
-    rs = np.full_like(close_1d, np.nan)
-    rsi14 = np.full_like(close_1d, np.nan)
-    for i in range(13, len(close_1d)):
-        if avg_loss[i] > 0:
-            rs[i] = avg_gain[i] / avg_loss[i]
-            rsi14[i] = 100 - (100 / (1 + rs[i]))
-        else:
-            rsi14[i] = 100 if avg_gain[i] > 0 else 0
+    rsi14_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi14_1w)
     
-    rsi14_aligned = align_htf_to_ltf(prices, df_1d, rsi14)
+    # Calculate 14-period ATR for volatility filter (weekly)
+    atr14_1w = np.full_like(close_1w, np.nan)
+    if len(high_1w) >= 14 and len(low_1w) >= 14 and len(close_1w) >= 14:
+        tr1 = high_1w - low_1w
+        tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+        tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]
+        
+        if len(close_1w) >= 14:
+            atr14_1w[13] = np.mean(tr[1:14])
+            for i in range(14, len(close_1w)):
+                atr14_1w[i] = (atr14_1w[i-1] * 13 + tr[i]) / 14
     
-    # Calculate 14-day ATR for volatility filter (daily)
-    if len(high_1d) < 14 or len(low_1d) < 14 or len(close_1d) < 14:
-        return np.zeros(n)
-    
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first TR
-    
-    atr14 = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 14:
-        atr14[13] = np.mean(tr[1:14])
-        for i in range(14, len(close_1d)):
-            atr14[i] = (atr14[i-1] * 13 + tr[i]) / 14
-    
-    atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14)
-    
-    # Volume moving average (20 periods) for volume spike detection
-    vol_ma_20 = np.full_like(volume, np.nan)
-    for i in range(19, len(volume)):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
-    
-    # Session filter: 08:00-20:00 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    atr14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr14_1w)
     
     signals = np.zeros(n)
     position = 0
-    position_size = 0.20  # 20% position size
+    position_size = 0.25  # 25% position size
     
     for i in range(50, n):
         # Skip if any critical data is NaN
-        if (np.isnan(pivot_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(ema20_1d_aligned[i]) or 
-            np.isnan(rsi14_aligned[i]) or 
-            np.isnan(atr14_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(pivot_1w_aligned[i]) or 
+            np.isnan(r1_1w_aligned[i]) or 
+            np.isnan(s1_1w_aligned[i]) or 
+            np.isnan(ema10_1w_aligned[i]) or 
+            np.isnan(rsi14_1w_aligned[i]) or 
+            np.isnan(atr14_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Apply session filter
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
+        # Volume ratio: current 6h volume vs 20-period average
+        vol_ma_20 = np.full_like(volume, np.nan)
+        for j in range(19, len(volume)):
+            vol_ma_20[j] = np.mean(volume[j-19:j+1])
         
-        # Volume ratio: current volume vs 20-period average
-        if vol_ma_20[i] <= 0:
+        if np.isnan(vol_ma_20[i]) or vol_ma_20[i] <= 0:
             volume_ratio = 0
         else:
             volume_ratio = volume[i] / vol_ma_20[i]
         
-        # Long conditions: Price above S1, above EMA20, RSI > 55, volume surge (>2x), ATR positive
-        long_condition = (close[i] > s1_aligned[i] and
-                         close[i] > ema20_1d_aligned[i] and
-                         rsi14_aligned[i] > 55 and
-                         volume_ratio > 2.0 and
-                         atr14_aligned[i] > 0)
-        
-        # Short conditions: Price below R1, below EMA20, RSI < 45, volume surge (>2x), ATR positive
-        short_condition = (close[i] < r1_aligned[i] and
-                          close[i] < ema20_1d_aligned[i] and
-                          rsi14_aligned[i] < 45 and
-                          volume_ratio > 2.0 and
-                          atr14_aligned[i] > 0)
-        
         if position == 0:
-            if long_condition:
+            # Long: Price above S1 + price above EMA10 + RSI > 55 + volume surge + ATR filter
+            if (close[i] > s1_1w_aligned[i] and
+                close[i] > ema10_1w_aligned[i] and
+                rsi14_1w_aligned[i] > 55 and
+                volume_ratio > 2.0 and
+                atr14_1w_aligned[i] > 0):
                 position = 1
                 signals[i] = position_size
-            elif short_condition:
+            # Short: Price below R1 + price below EMA10 + RSI < 45 + volume surge + ATR filter
+            elif (close[i] < r1_1w_aligned[i] and
+                  close[i] < ema10_1w_aligned[i] and
+                  rsi14_1w_aligned[i] < 45 and
+                  volume_ratio > 2.0 and
+                  atr14_1w_aligned[i] > 0):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
             # Exit: Price below S1 OR RSI < 40
-            if (close[i] < s1_aligned[i] or 
-                rsi14_aligned[i] < 40):
+            if (close[i] < s1_1w_aligned[i] or 
+                rsi14_1w_aligned[i] < 40):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
             # Exit: Price above R1 OR RSI > 60
-            if (close[i] > r1_aligned[i] or 
-                rsi14_aligned[i] > 60):
+            if (close[i] > r1_1w_aligned[i] or 
+                rsi14_1w_aligned[i] > 60):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -171,6 +146,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1h_1d_Pivot_R1S1_EMA20_RSI14_Volume_Session"
-timeframe = "1h"
+name = "6h_1w_Pivot_R1S1_EMA10_RSI14_Volume_ATR"
+timeframe = "6h"
 leverage = 1.0
