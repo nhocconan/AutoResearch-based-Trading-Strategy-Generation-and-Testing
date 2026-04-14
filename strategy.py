@@ -1,3 +1,11 @@
+# 12h_1w_1d_S3R3_Pivot_Breakout_With_Volume_Confirmation
+# Hypothesis: Price breaking daily S3/R3 levels with volume confirmation on 12h timeframe
+# captures institutional order flow during extreme price rejection. Works in both bull/bear
+# markets because S3/R3 act as dynamic support/resistance based on previous day's range.
+# Volume filter ensures only significant breakouts trigger trades, reducing false signals.
+# 12h timeframe balances trade frequency (target 15-30/year) with sufficient signal clarity.
+# Weekly trend filter (EMA50) avoids counter-trend trades in strong trends.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -13,16 +21,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data (HTF) once before loop
+    # Load weekly data (HTF) once before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Load daily data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
+    # Calculate weekly EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = np.full(len(df_1w), np.nan)
+    if len(df_1w) >= 50:
+        multiplier = 2 / (50 + 1)
+        ema_50_1w[49] = np.mean(close_1w[:50])
+        for i in range(50, len(df_1w)):
+            ema_50_1w[i] = (close_1w[i] - ema_50_1w[i-1]) * multiplier + ema_50_1w[i-1]
+    
+    # Align weekly EMA to 12h timeframe
+    ema_50_12h = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Calculate daily ATR (14-period) for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily ATR (14-period) - Wilder's smoothing
     high_low = high_1d - low_1d
     high_close = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
     low_close = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
@@ -34,56 +59,10 @@ def generate_signals(prices):
         for i in range(14, len(df_1d)):
             atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # Calculate daily ADX (14-period) - Wilder's smoothing
-    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
+    # Align daily ATR to 12h timeframe
+    atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    tr_14 = tr
-    plus_dm_smooth = np.full(len(df_1d), np.nan)
-    minus_dm_smooth = np.full(len(df_1d), np.nan)
-    tr_smooth = np.full(len(df_1d), np.nan)
-    
-    if len(df_1d) >= 14:
-        plus_dm_smooth[13] = np.sum(plus_dm[1:15])
-        minus_dm_smooth[13] = np.sum(minus_dm[1:15])
-        tr_smooth[13] = np.sum(tr[1:15])
-        
-        for i in range(14, len(df_1d)):
-            plus_dm_smooth[i] = plus_dm_smooth[i-1] - (plus_dm_smooth[i-1] / 14) + plus_dm[i]
-            minus_dm_smooth[i] = minus_dm_smooth[i-1] - (minus_dm_smooth[i-1] / 14) + minus_dm[i]
-            tr_smooth[i] = tr_smooth[i-1] - (tr_smooth[i-1] / 14) + tr[i]
-        
-        plus_di_14 = 100 * plus_dm_smooth / tr_smooth
-        minus_di_14 = 100 * minus_dm_smooth / tr_smooth
-        dx_14 = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
-    else:
-        plus_di_14 = np.full(len(df_1d), np.nan)
-        minus_di_14 = np.full(len(df_1d), np.nan)
-        dx_14 = np.full(len(df_1d), np.nan)
-    
-    adx_14 = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 27:  # Need 14 + 14 for smoothing
-        adx_14[26] = np.mean(dx_14[14:28])
-        for i in range(27, len(df_1d)):
-            adx_14[i] = (adx_14[i-1] * 13 + dx_14[i]) / 14
-    
-    # Align indicators to 6h timeframe
-    atr_6h = align_htf_to_ltf(prices, df_1d, atr_1d)
-    adx_6h = align_htf_to_ltf(prices, df_1d, adx_14)
-    
-    # Calculate 6-hour Donchian channels (20-period)
-    donch_high = np.full(n, np.nan)
-    donch_low = np.full(n, np.nan)
-    if n >= 20:
-        for i in range(19, n):
-            donch_high[i] = np.max(high[i-19:i+1])
-            donch_low[i] = np.min(low[i-19:i+1])
-    
-    # Calculate 6-hour volume moving average (20-period)
+    # Calculate 12-hour volume moving average (20-period)
     volume_ma = np.full(n, np.nan)
     if n >= 20:
         for i in range(19, n):
@@ -95,75 +74,76 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any critical data is NaN
-        if (np.isnan(atr_6h[i]) or
-            np.isnan(donch_high[i]) or
-            np.isnan(donch_low[i]) or
-            np.isnan(adx_6h[i]) or
+        if (np.isnan(ema_50_12h[i]) or
+            np.isnan(atr_12h[i]) or
             np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Skip low volatility periods (ATR < 0.5% of price)
-        if atr_6h[i] / close[i] < 0.005:
+        # Skip low volatility periods (ATR < 0.3% of price)
+        if atr_12h[i] / close[i] < 0.003:
             signals[i] = 0.0
             continue
         
-        # Skip low volume periods (volume < 65% of 20-period MA)
-        if volume[i] < 0.65 * volume_ma[i]:
-            signals[i] = 0.0
-            continue
-        
-        # Skip low trend strength (ADX < 28)
-        if adx_6h[i] < 28:
+        # Skip low volume periods (volume < 50% of 20-period MA)
+        if volume[i] < 0.5 * volume_ma[i]:
             signals[i] = 0.0
             continue
         
         # Calculate pivot levels based on previous day's range
-        prev_high = high_1d[i-1] if i > 0 else high_1d[0]
-        prev_low = low_1d[i-1] if i > 0 else low_1d[0]
-        prev_close = close_1d[i-1] if i > 0 else close_1d[0]
-        prev_range = prev_high - prev_low
-        
-        # Pivot levels for reversal at extremes
-        s3 = prev_close - (prev_range * 1.1 / 4)  # Support 3
-        r3 = prev_close + (prev_range * 1.1 / 4)  # Resistance 3
-        
-        # Align to 6h timeframe
-        s3_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i]
-        r3_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r3))[i]
-        
-        if position == 0:
-            # Long: Price breaks above 6h Donchian high AND above S3 (support hold) AND volume > 1.6x MA
-            if close[i] > donch_high[i] and close[i] > s3_6h and volume[i] > 1.6 * volume_ma[i]:
-                position = 1
-                signals[i] = position_size
-            # Short: Price breaks below 6h Donchian low AND below R3 (resistance hold) AND volume > 1.6x MA
-            elif close[i] < donch_low[i] and close[i] < r3_6h and volume[i] > 1.6 * volume_ma[i]:
-                position = -1
-                signals[i] = -position_size
-            else:
-                signals[i] = 0.0
-        elif position == 1:
-            # Exit: Price falls back below 6h Donchian low OR below S4 (S3 - 0.5*range)
-            s4 = s3 - 0.5 * prev_range
-            s4_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s4))[i]
-            if close[i] < donch_low[i] or close[i] < s4_6h:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = position_size
-        elif position == -1:
-            # Exit: Price rises back above 6h Donchian high OR above R4 (R3 + 0.5*range)
-            r4 = r3 + 0.5 * prev_range
-            r4_6h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r4))[i]
-            if close[i] > donch_high[i] or close[i] > r4_6h:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = -position_size
+        # Need previous day's data - use index-1 for daily data alignment
+        if i >= 1:
+            prev_high = high_1d[i-1]
+            prev_low = low_1d[i-1]
+            prev_close = close_1d[i-1]
+            prev_range = prev_high - prev_low
+            
+            # S3 and R3 levels (more extreme than standard S1/R1)
+            s3 = prev_close - (prev_range * 1.1)
+            r3 = prev_close + (prev_range * 1.1)
+            
+            # Align S3/R3 to 12h timeframe (constant values for the day)
+            s3_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s3))[i]
+            r3_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r3))[i]
+            
+            if position == 0:
+                # Long: Price breaks below S3 (extreme rejection) AND closes back above S3
+                # with volume confirmation AND above weekly EMA50 (trend alignment)
+                if low[i] <= s3 and close[i] > s3 and volume[i] > volume_ma[i] and close[i] > ema_50_12h[i]:
+                    position = 1
+                    signals[i] = position_size
+                # Short: Price breaks above R3 (extreme rejection) AND closes back below R3
+                # with volume confirmation AND below weekly EMA50 (trend alignment)
+                elif high[i] >= r3 and close[i] < r3 and volume[i] > volume_ma[i] and close[i] < ema_50_12h[i]:
+                    position = -1
+                    signals[i] = -position_size
+                else:
+                    signals[i] = 0.0
+            elif position == 1:
+                # Exit: Price breaks below S3 again or reaches R1 (mean reversion target)
+                # Calculate R1 for profit target
+                r1 = prev_close + (prev_range * 0.5)
+                r1_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), r1))[i]
+                if low[i] <= s3 or close[i] >= r1_12h:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = position_size
+            elif position == -1:
+                # Exit: Price breaks above R3 again or reaches S1 (mean reversion target)
+                # Calculate S1 for profit target
+                s1 = prev_close - (prev_range * 0.5)
+                s1_12h = align_htf_to_ltf(prices, df_1d, np.full(len(df_1d), s1))[i]
+                if high[i] >= r3 or close[i] <= s1_12h:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -position_size
+        else:
+            signals[i] = 0.0
     
     return signals
 
-name = "6h_1d_S3R3_Pivot_Breakout_With_Volume_Confirmation"
-timeframe = "6h"
+name = "12h_1w_1d_S3R3_Pivot_Breakout_With_Volume_Confirmation"
+timeframe = "12h"
 leverage = 1.0
