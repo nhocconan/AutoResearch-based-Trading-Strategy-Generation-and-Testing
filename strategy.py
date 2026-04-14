@@ -4,6 +4,14 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
+    """
+    Hypothesis: 6h Williams %R with 1d trend filter and volume spike.
+    Williams %R identifies overbought/oversold conditions.
+    1d EMA50 provides trend direction to avoid counter-trend trades.
+    Volume spike confirms momentum behind the move.
+    Works in bull/bear by only taking trades in direction of 1d trend.
+    Target: 50-150 total trades over 4 years.
+    """
     n = len(prices)
     if n < 50:
         return np.zeros(n)
@@ -13,79 +21,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data (HTF) once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Load daily data (HTF) once before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate weekly RSI (14-period)
-    def calculate_rsi(close_prices, period=14):
-        delta = np.diff(close_prices)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.full_like(close_prices, np.nan)
-        avg_loss = np.full_like(close_prices, np.nan)
-        
-        if len(close_prices) >= period + 1:
-            avg_gain[period] = np.mean(gain[:period])
-            avg_loss[period] = np.mean(loss[:period])
-            
-            for i in range(period + 1, len(close_prices)):
-                avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-                avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-        
-        rsi = np.full_like(close_prices, np.nan)
-        for i in range(period, len(close_prices)):
-            if avg_loss[i] != 0:
-                rs = avg_gain[i] / avg_loss[i]
-                rsi[i] = 100 - (100 / (1 + rs))
+    # Calculate 14-period Williams %R on 6h data
+    willr = np.full(n, np.nan)
+    if n >= 14:
+        for i in range(13, n):
+            highest_high = np.max(high[i-13:i+1])
+            lowest_low = np.min(low[i-13:i+1])
+            if highest_high != lowest_low:
+                willr[i] = (highest_high - close[i]) / (highest_high - lowest_low) * -100
             else:
-                rsi[i] = 100
-        return rsi
+                willr[i] = -50
     
-    rsi_1w = calculate_rsi(close_1w, 14)
-    rsi_1d = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # Calculate 50-period EMA on 1d for trend filter
+    ema50_1d = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 50:
+        ema50_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(df_1d)):
+            ema50_1d[i] = (close_1d[i] * 2 + ema50_1d[i-1] * 48) / 50
     
-    # Calculate weekly Bollinger Bands (20-period, 2 std)
-    def calculate_bollinger(close_prices, period=20, std_dev=2):
-        sma = np.full_like(close_prices, np.nan)
-        std = np.full_like(close_prices, np.nan)
-        upper = np.full_like(close_prices, np.nan)
-        lower = np.full_like(close_prices, np.nan)
-        
-        if len(close_prices) >= period:
-            for i in range(period-1, len(close_prices)):
-                sma[i] = np.mean(close_prices[i-period+1:i+1])
-                std[i] = np.std(close_prices[i-period+1:i+1])
-                upper[i] = sma[i] + (std[i] * std_dev)
-                lower[i] = sma[i] - (std[i] * std_dev)
-        return upper, lower
+    ema50_6h = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    bb_upper_1w, bb_lower_1w = calculate_bollinger(close_1w, 20, 2)
-    bb_upper_1d = align_htf_to_ltf(prices, df_1w, bb_upper_1w)
-    bb_lower_1d = align_htf_to_ltf(prices, df_1w, bb_lower_1w)
+    # Calculate 20-period volume moving average on 1d
+    vol_ma_20_1d = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 20:
+        for i in range(19, len(df_1d)):
+            vol_ma_20_1d[i] = np.mean(volume_1d[i-19:i+1])
     
-    # Calculate daily ATR (14-period)
-    tr = np.zeros(len(prices))
-    tr[0] = high[0] - low[0]
-    for i in range(1, len(prices)):
-        tr[i] = max(
-            high[i] - low[i],
-            abs(high[i] - close[i-1]),
-            abs(low[i] - close[i-1])
-        )
-    
-    atr = np.full(len(prices), np.nan)
-    if len(prices) >= 14:
-        atr[13] = np.mean(tr[:14])
-        for i in range(14, len(prices)):
-            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    vol_ma_20_6h = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0
@@ -93,41 +65,42 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any critical data is NaN
-        if (np.isnan(rsi_1d[i]) or
-            np.isnan(bb_upper_1d[i]) or
-            np.isnan(bb_lower_1d[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(willr[i]) or
+            np.isnan(ema50_6h[i]) or
+            np.isnan(vol_ma_20_6h[i])):
             signals[i] = 0.0
             continue
         
-        # Avoid extremely low volatility
-        if atr[i] < 0.001 * close[i]:
-            signals[i] = 0.0
-            continue
+        # Volume ratio: current volume vs 20-period average
+        if vol_ma_20_6h[i] <= 0:
+            volume_ratio = 0
+        else:
+            volume_ratio = volume[i] / vol_ma_20_6h[i]
+        
+        # Volume threshold: require significant spike
+        vol_threshold = 1.5
         
         if position == 0:
-            # Long: Price touches or breaks below weekly BB lower AND weekly RSI < 30 (oversold)
-            if close[i] <= bb_lower_1d[i] and rsi_1d[i] < 30:
+            # Long: Williams %R oversold (< -80) + above 1d EMA50 + volume spike
+            if willr[i] < -80 and close[i] > ema50_6h[i] and volume_ratio > vol_threshold:
                 position = 1
                 signals[i] = position_size
-            # Short: Price touches or breaks above weekly BB upper AND weekly RSI > 70 (overbought)
-            elif close[i] >= bb_upper_1d[i] and rsi_1d[i] > 70:
+            # Short: Williams %R overbought (> -20) + below 1d EMA50 + volume spike
+            elif willr[i] > -20 and close[i] < ema50_6h[i] and volume_ratio > vol_threshold:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit: Price returns to weekly BB middle (mean reversion complete) OR RSI > 50
-            bb_middle = (bb_upper_1d[i] + bb_lower_1d[i]) / 2
-            if close[i] >= bb_middle or rsi_1d[i] > 50:
+            # Exit: Williams %R returns to neutral (> -50) or trend change
+            if willr[i] > -50 or close[i] < ema50_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit: Price returns to weekly BB middle OR RSI < 50
-            bb_middle = (bb_upper_1d[i] + bb_lower_1d[i]) / 2
-            if close[i] <= bb_middle or rsi_1d[i] < 50:
+            # Exit: Williams %R returns to neutral (< -50) or trend change
+            if willr[i] < -50 or close[i] > ema50_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -135,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_Bollinger_RSI_MeanReversion"
-timeframe = "1d"
+name = "6h_WilliamsR_1dEMA50_Volume"
+timeframe = "6h"
 leverage = 1.0
