@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R with 1-day momentum filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions (reversal signals)
-# 1-day RSI momentum filter ensures we trade with higher timeframe momentum
-# Volume confirmation filters out low-conviction moves
-# Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag
-# Works in bull/bear: Williams %R captures reversals in ranging markets,
-# momentum filter avoids counter-trend trades in strong trends
+# Hypothesis: 12h Donchian(20) breakout with 1d ADX filter and volume confirmation
+# Uses Donchian channel breakout for trend following, filtered by 1d ADX > 25 to ensure
+# trending market conditions and volume > 1.5x 20-period average for confirmation.
+# Position exits when price crosses opposite Donchian band or ADX falls below 20.
+# Designed for low-frequency trading (target: 15-25 trades/year) to minimize fee drag
+# Works in both bull and bear markets by only taking trades in direction of 1d trend
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,68 +20,121 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1-day data ONCE before loop for momentum filter
+    # Load 1d data ONCE before loop for trend filter (ADX)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1-day RSI (14) for momentum filter
+    # Calculate 1d ADX (14) for trend strength
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Calculate Williams %R (14) on 4h data
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Volume confirmation: volume > 1.5 * 20-period average
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * avg_volume)
+    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smoothed values using Wilder's smoothing (equivalent to EMA with alpha=1/14)
+    atr = np.zeros_like(tr)
+    dm_plus_smooth = np.zeros_like(dm_plus)
+    dm_minus_smooth = np.zeros_like(dm_minus)
+    
+    # Initial values (simple average of first 14 periods)
+    atr[13] = np.mean(tr[1:14])
+    dm_plus_smooth[13] = np.mean(dm_plus[1:14])
+    dm_minus_smooth[13] = np.mean(dm_minus[1:14])
+    
+    # Wilder's smoothing: today's value = (13/14)*yesterday + (1/14)*today
+    for i in range(14, len(tr)):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+        dm_plus_smooth[i] = (dm_plus_smooth[i-1] * 13 + dm_plus[i]) / 14
+        dm_minus_smooth[i] = (dm_minus_smooth[i-1] * 13 + dm_minus[i]) / 14
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    
+    # ADX: smoothed DX
+    adx = np.zeros_like(dx)
+    adx[27] = np.mean(dx[14:28])  # First ADX after 2*14 periods
+    for i in range(28, len(dx)):
+        adx[i] = (adx[i-1] * 13 + dx[i]) / 14
+    
+    # Align ADX to 12h timeframe (with 1-bar delay for completed 1d bar)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate Donchian channels (20-period) on 12h data
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    
+    # Upper band: highest high over 20 periods
+    upper = np.full_like(high_12h, np.nan)
+    for i in range(19, len(high_12h)):
+        upper[i] = np.max(high_12h[i-19:i+1])
+    
+    # Lower band: lowest low over 20 periods
+    lower = np.full_like(low_12h, np.nan)
+    for i in range(19, len(low_12h)):
+        lower[i] = np.min(low_12h[i-19:i+1])
+    
+    # Align Donchian bands to 12h timeframe (no additional delay needed)
+    upper_aligned = align_htf_to_ltf(prices, df_12h, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_12h, lower)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = np.full_like(volume, np.nan)
+    for i in range(19, len(volume)):
+        vol_ma[i] = np.mean(volume[i-19:i+1])
+    vol_ratio = volume / vol_ma
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = 20  # for Williams %R and volume average
+    start = max(20, 28)  # Donchian(20) and ADX need ~28 periods
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(williams_r[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(avg_volume[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(adx_12h_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Momentum filter: only take signals aligned with 1-day RSI
-        bullish_momentum = rsi_1d_aligned[i] > 50
-        bearish_momentum = rsi_1d_aligned[i] < 50
+        price = close[i]
+        adx_value = adx_12h_aligned[i]
         
         if position == 0:
-            # Long: Williams %R oversold (< -80) with bullish momentum and volume
-            if williams_r[i] < -80 and bullish_momentum and volume_confirm[i]:
+            # Long: price breaks above upper Donchian band with strong trend and volume
+            if price > upper_aligned[i] and adx_value > 25 and vol_ratio[i] > 1.5:
                 position = 1
                 signals[i] = position_size
-            # Short: Williams %R overbought (> -20) with bearish momentum and volume
-            elif williams_r[i] > -20 and bearish_momentum and volume_confirm[i]:
+            # Short: price breaks below lower Donchian band with strong trend and volume
+            elif price < lower_aligned[i] and adx_value > 25 and vol_ratio[i] > 1.5:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Williams %R returns to neutral (> -50) or momentum shifts
-            if williams_r[i] > -50 or not bullish_momentum:
+            # Exit long: price crosses below lower band OR trend weakens (ADX < 20)
+            if price < lower_aligned[i] or adx_value < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Williams %R returns to neutral (< -50) or momentum shifts
-            if williams_r[i] < -50 or not bearish_momentum:
+            # Exit short: price crosses above upper band OR trend weakens (ADX < 20)
+            if price > upper_aligned[i] or adx_value < 20:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -90,6 +142,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_WilliamsR_1dRSI_Momentum_Volume"
-timeframe = "4h"
+name = "12h_Donchian_breakout_ADX_volume"
+timeframe = "12h"
 leverage = 1.0
