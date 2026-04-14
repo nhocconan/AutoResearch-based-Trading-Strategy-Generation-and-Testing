@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using daily volatility-adjusted price channels with volume confirmation
-# - Long when price breaks above upper channel (mean + 2*ATR) with volume > 1.5x 20-period average
-# - Short when price breaks below lower channel (mean - 2*ATR) with volume > 1.5x 20-period average
-# - Uses 1d ATR for volatility normalization to adapt to changing market conditions
-# - Volume confirmation ensures institutional participation at breakouts
-# - Target: 50-150 total trades over 4 years (12-37/year) for optimal frequency
+# Hypothesis: 4h strategy using daily price channels and volume imbalance
+# - Long when price breaks above daily Donchian upper band with volume > 1.5x 20-period average
+# - Short when price breaks below daily Donchian lower band with volume > 1.5x 20-period average
+# - Uses 4h ATR(14) for volatility filtering (ATR > 20-period ATR average)
+# - Target: 80-160 total trades over 4 years (20-40/year) to balance opportunity and cost
 # - Position size 0.25 for balanced risk exposure
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,69 +26,70 @@ def generate_signals(prices):
     if len(df_d) < 20:
         return np.zeros(n)
     
+    # Calculate daily Donchian channels
     high_d = df_d['high'].values
     low_d = df_d['low'].values
-    close_d = df_d['close'].values
     
-    # Calculate daily ATR (14-period)
-    tr_d = np.maximum(
-        high_d[1:] - low_d[1:],
-        np.maximum(
-            np.abs(high_d[1:] - close_d[:-1]),
-            np.abs(low_d[1:] - close_d[:-1])
-        )
-    )
-    tr_d = np.concatenate([[np.nan], tr_d])  # Align with original index
-    atr_d = pd.Series(tr_d).rolling(window=14, min_periods=14).mean().values
+    # 20-period Donchian high/low
+    donch_high = pd.Series(high_d).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_d).rolling(window=20, min_periods=20).min().values
     
-    # Calculate daily mean price (typical price)
-    typical_price_d = (high_d + low_d + close_d) / 3
+    # Daily volume average
+    vol_d = df_d['volume'].values
+    vol_ma_d = pd.Series(vol_d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate upper and lower channels (mean ± 2*ATR)
-    upper_channel_d = typical_price_d + 2 * atr_d
-    lower_channel_d = typical_price_d - 2 * atr_d
+    # Align daily indicators to 4h timeframe
+    donch_high_4h = align_htf_to_ltf(prices, df_d, donch_high)
+    donch_low_4h = align_htf_to_ltf(prices, df_d, donch_low)
+    vol_ma_d_4h = align_htf_to_ltf(prices, df_d, vol_ma_d)
     
-    # Align daily channels to 12h timeframe
-    upper_channel_12h = align_htf_to_ltf(prices, df_d, upper_channel_d)
-    lower_channel_12h = align_htf_to_ltf(prices, df_d, lower_channel_d)
-    
-    # Volume filter: 20-period average
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    # 4h ATR for volatility filter
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ma_14 = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if any critical data is NaN
-        if np.isnan(vol_ma[i]) or np.isnan(upper_channel_12h[i]) or np.isnan(lower_channel_12h[i]):
+        if np.isnan(donch_high_4h[i]) or np.isnan(donch_low_4h[i]) or np.isnan(vol_ma_d_4h[i]) or np.isnan(atr_ma_14[i]):
             continue
-        
+            
+        # Volatility filter: only trade when current ATR > average ATR
+        if atr_14[i] <= atr_ma_14[i]:
+            continue
+            
+        # Volume filter: current volume > 1.5x daily average volume
+        if volume[i] <= vol_ma_d_4h[i] * 1.5:
+            continue
+            
         if position == 0:
-            # Long: Price breaks above upper channel with volume confirmation
-            if close[i] > upper_channel_12h[i] and volume[i] > vol_ma[i] * 1.5:
+            # Long: Price breaks above daily Donchian high with volume and volatility
+            if high[i] > donch_high_4h[i]:
                 position = 1
                 signals[i] = position_size
-            # Short: Price breaks below lower channel with volume confirmation
-            elif close[i] < lower_channel_12h[i] and volume[i] > vol_ma[i] * 1.5:
+            # Short: Price breaks below daily Donchian low with volume and volatility
+            elif low[i] < donch_low_4h[i]:
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
-            # Exit: Price returns to mean or opposite channel
-            typical_price = (high[i] + low[i] + close[i]) / 3
-            if typical_price < upper_channel_12h[i] or close[i] < lower_channel_12h[i]:
+            # Exit: Price returns to daily Donchian low or opposite band
+            if low[i] <= donch_low_4h[i] or high[i] >= donch_high_4h[i]:
                 position = 0
                 signals[i] = 0.0
         elif position == -1:
-            # Exit: Price returns to mean or opposite channel
-            typical_price = (high[i] + low[i] + close[i]) / 3
-            if typical_price > lower_channel_12h[i] or close[i] > upper_channel_12h[i]:
+            # Exit: Price returns to daily Donchian high or opposite band
+            if high[i] >= donch_high_4h[i] or low[i] <= donch_low_4h[i]:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_1d_VolatilityChannel_VolumeBreakout"
-timeframe = "12h"
+name = "4h_1d_Donchian_Volume_Volatility"
+timeframe = "4h"
 leverage = 1.0
