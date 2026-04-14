@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h Donchian breakout (20-period) + 1d EMA50 trend filter + volume > 1.5x 20-period average.
-Enter long when price breaks above upper band in uptrend (price > 1d EMA50), short when breaks below lower band in downtrend.
-Uses Donchian for breakout signals, 1d EMA for trend direction, volume for confirmation.
-Targets 20-30 trades/year per symbol (80-120 total over 4 years).
+Hypothesis: 1d price crossing above/below 1-week 10-period EMA with volume above 1.5x 10-period average and 1-week ADX > 20.
+Trades in direction of weekly trend to avoid counter-trend whipsaws. Uses EMA for smooth trend and ADX for trend strength.
+Targets 15-25 trades/year per symbol (60-100 total over 4 years).
 """
 
 import numpy as np
@@ -12,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 20:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,58 +19,94 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA50
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Calculate weekly EMA (10-period)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    close_1w = df_1w['close'].values
+    ema_10 = pd.Series(close_1w).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Calculate Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate weekly ADX (14-period)
+    if len(df_1w) < 30:
+        return np.zeros(n)
     
-    # Calculate 20-period average volume
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # True Range
+    tr1 = np.abs(high_1w[1:] - low_1w[1:])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # Directional Movement
+    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_14 / (tr_14 + 1e-10)
+    di_minus = 100 * dm_minus_14 / (tr_14 + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx_1w = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Calculate 10-period average volume
+    vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25
     
     for i in range(20, n):
-        # Get aligned 1d EMA
-        ema = ema_50_aligned[i]
+        # Get aligned indicators
+        ema_10_aligned = align_htf_to_ltf(prices, df_1w, ema_10)[i]
+        adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)[i]
+        vol_ma_10_aligned = vol_ma_10[i]  # already LTF
         
         # Check for NaN values
-        if np.isnan(ema) or np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(vol_ma_20[i]):
+        if (np.isnan(ema_10_aligned) or np.isnan(adx_1w_aligned) or 
+            np.isnan(vol_ma_10_aligned)):
             continue
         
         # Volume confirmation (> 1.5x average)
-        volume_confirm = volume[i] > 1.5 * vol_ma_20[i]
+        volume_confirm = volume[i] > 1.5 * vol_ma_10_aligned
+        
+        # ADX trend filter (> 20)
+        trend_filter = adx_1w_aligned > 20
         
         if position == 0:  # No position - look for entries
-            if volume_confirm:
-                # Long: price breaks above upper Donchian in uptrend
-                if close[i] > high_20[i] and close[i-1] <= high_20[i-1] and close[i] > ema:
+            if volume_confirm and trend_filter:
+                # Long: price crosses above EMA
+                if close[i] > ema_10_aligned and close[i-1] <= ema_10_aligned:
                     position = 1
                     signals[i] = position_size
-                # Short: price breaks below lower Donchian in downtrend
-                elif close[i] < low_20[i] and close[i-1] >= low_20[i-1] and close[i] < ema:
+                # Short: price crosses below EMA
+                elif close[i] < ema_10_aligned and close[i-1] >= ema_10_aligned:
                     position = -1
                     signals[i] = -position_size
-        elif position == 1:  # Long position - exit when price breaks below lower band
-            if close[i] < low_20[i] and close[i-1] >= low_20[i-1]:
+        elif position == 1:  # Long position - exit when price crosses below EMA
+            if close[i] < ema_10_aligned and close[i-1] >= ema_10_aligned:
                 position = 0
                 signals[i] = 0.0
-        elif position == -1:  # Short position - exit when price breaks above upper band
-            if close[i] > high_20[i] and close[i-1] <= high_20[i-1]:
+        elif position == -1:  # Short position - exit when price crosses above EMA
+            if close[i] > ema_10_aligned and close[i-1] <= ema_10_aligned:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian20_1dEMA50_Volume1.5x"
-timeframe = "4h"
+name = "1d_1wEMA10_1wADX20_Volume1.5x_v1"
+timeframe = "1d"
 leverage = 1.0
