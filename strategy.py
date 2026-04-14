@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Williams %R with 1-day volume regime filter
-# Long when Williams %R(14) crosses above -20 AND daily volume > 1.5x 20-day average
-# Short when Williams %R(14) crosses below -80 AND daily volume > 1.5x 20-day average
-# Exit when Williams %R returns to opposite threshold (-80 for longs, -20 for shorts)
-# Williams %R identifies overbought/oversold conditions; volume regime ensures trades occur during
-# high-participation moves, reducing whipsaw in low-volume environments. Effective in both
-# trending and ranging markets by capturing mean reversion within institutional interest zones.
+# Hypothesis: 12-hour Camarilla pivot bounce with 1-day trend filter (EMA200) and volume confirmation
+# Long when price touches Camarilla L3 level AND price > daily EMA200 AND volume > 1.5x 20-period average
+# Short when price touches Camarilla H3 level AND price < daily EMA200 AND volume > 1.5x 20-period average
+# Exit when price crosses back inside the Camarilla range (H3-L3)
+# Uses Camarilla levels from daily timeframe for stronger support/resistance
+# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,59 +20,69 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for volume regime filter
+    # Load daily data ONCE before loop for Camarilla levels and EMA200
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Williams %R on 6h (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate Camarilla pivot levels on daily data
+    # Camarilla: H4, H3, H2, H1, L1, L2, L3, L4
+    # Formula: H3 = Close + (High - Low) * 1.1/4, L3 = Close - (High - Low) * 1.1/4
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate daily volume average for regime filter (20-period)
-    vol_1d = df_1d['volume'].values
-    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    camarilla_h3 = close_1d + (high_1d - low_1d) * 1.1 / 4
+    camarilla_l3 = close_1d - (high_1d - low_1d) * 1.1 / 4
+    
+    # Calculate daily EMA200 for trend filter
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Align daily indicators to 12h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    
+    # Calculate volume average for confirmation (20-period)
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
-    # Start after enough data for calculations (14 for Williams %R + buffer)
-    start = 20
+    # Start after enough data for calculations (200 for EMA200 + buffer)
+    start = 210
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(williams_r[i]) or np.isnan(vol_avg_1d_aligned[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(ema200_1d_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0
             continue
         
-        wr = williams_r[i]
-        vol_1d_now = vol_avg_1d_aligned[i]
-        vol_threshold = vol_avg_1d_aligned[i] * 1.5 if not np.isnan(vol_avg_1d_aligned[i]) else np.inf
+        price = close[i]
+        vol = volume[i]
+        vol_threshold = vol_avg[i] * 1.5
         
         if position == 0:
-            # Long setup: Williams %R crosses above -20 (from below) + volume regime
-            if i > start and williams_r[i-1] <= -20 and wr > -20 and vol_1d_now > vol_threshold:
+            # Long setup: touch Camarilla L3 + above daily EMA200 + volume confirmation
+            if (price <= camarilla_l3_aligned[i] and price > ema200_1d_aligned[i] and vol > vol_threshold):
                 position = 1
                 signals[i] = position_size
-            # Short setup: Williams %R crosses below -80 (from above) + volume regime
-            elif i > start and williams_r[i-1] >= -80 and wr < -80 and vol_1d_now > vol_threshold:
+            # Short setup: touch Camarilla H3 + below daily EMA200 + volume confirmation
+            elif (price >= camarilla_h3_aligned[i] and price < ema200_1d_aligned[i] and vol > vol_threshold):
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: Williams %R returns to -80 or below
-            if wr <= -80:
+            # Exit long: price rises back above Camarilla H3 (upper range)
+            if price >= camarilla_h3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: Williams %R returns to -20 or above
-            if wr >= -20:
+            # Exit short: price falls back below Camarilla L3 (lower range)
+            if price <= camarilla_l3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -81,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_1dVolumeRegime"
-timeframe = "6h"
+name = "12h_Camarilla_Pivot_EMA200_Volume"
+timeframe = "12h"
 leverage = 1.0
