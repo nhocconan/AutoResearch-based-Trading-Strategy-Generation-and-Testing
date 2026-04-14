@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour RSI(14) mean reversion with 1-day Bollinger Bands filter and volume confirmation.
-# In bear markets (2025+), RSI extremes often precede mean-reversion bounces rather than continuation.
-# The 1-day Bollinger Bands (20,2) define the medium-term range; trades fade extremes toward the mean.
-# Volume > 1.3x average confirms participation at turning points.
-# Exit when RSI returns to neutral (40-60) or price touches the opposite Bollinger Band.
-# This strategy targets 20-30 trades per year per symbol (80-120 total over 4 years), well within limits.
+# Hypothesis: 4-hour ADX(14) trend strength filter + daily pivot support/resistance + volume confirmation.
+# ADX > 25 identifies trending markets (bull or bear) to avoid whipsaws in ranging periods.
+# Daily pivot levels act as dynamic support/resistance: buy near S1/S2 in uptrend, sell near R1/R2 in downtrend.
+# Volume > 1.3x 20-period average confirms institutional participation.
+# Designed for 20-35 trades/year per symbol to minimize fee drag while capturing strong trends.
+# Works in both bull (buy pullbacks to support) and bear (sell rallies to resistance) markets.
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,35 +20,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for Bollinger Bands filter
+    # Load daily data ONCE for pivot points and ADX
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d Bollinger Bands (20,2)
-    bb_len = 20
-    bb_std = 2
-    if len(df_1d) < bb_len:
+    # Need at least 30 days for ADX calculation
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    basis = pd.Series(close_1d).rolling(window=bb_len, min_periods=bb_len).mean().values
-    dev = bb_std * pd.Series(close_1d).rolling(window=bb_len, min_periods=bb_len).std().values
-    upper_bb = basis + dev
-    lower_bb = basis - dev
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    # Calculate ADX(14) on daily timeframe
+    # TR = max(high-low, abs(high-previous_close), abs(low-previous_close))
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     
-    # RSI(14) on 4h
-    rsi_len = 14
-    if n < rsi_len + 1:
-        return np.zeros(n)
+    # +DM and -DM
+    up_move = df_1d['high'] - df_1d['high'].shift(1)
+    down_move = df_1d['low'].shift(1) - df_1d['low']
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_len, min_periods=rsi_len, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_len, min_periods=rsi_len, adjust=False).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Smoothed values
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum()
+    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum()
+    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum()
+    
+    # DI values
+    plus_di = 100 * plus_dm_14 / tr_14
+    minus_di = 100 * minus_dm_14 / tr_14
+    
+    # DX and ADX
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean()
+    
+    adx_values = adx.values
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
+    
+    # Calculate daily pivot points (using previous day's OHLC)
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
+    pivot = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    r1 = 2 * pivot - df_1d['low']
+    s1 = 2 * pivot - df_1d['high']
+    r2 = pivot + (df_1d['high'] - df_1d['low'])
+    s2 = pivot - (df_1d['high'] - df_1d['low'])
+    
+    # Align pivot levels to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot.values)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2.values)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2.values)
     
     # Volume confirmation: 1.3x average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -58,45 +82,59 @@ def generate_signals(prices):
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(rsi_len + 1, bb_len, 20)
+    start = max(30, 20)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(rsi[i]) or 
-            np.isnan(upper_bb_aligned[i]) or
-            np.isnan(lower_bb_aligned[i]) or
+        if (np.isnan(adx_1d_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or
+            np.isnan(s2_aligned[i]) or
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x average
+        # Trend filter: ADX > 25 indicates trending market
+        trending = adx_1d_aligned[i] > 25
+        
+        # Volume confirmation
         volume_confirmed = volume[i] > 1.3 * vol_ma[i]
         
         if position == 0:
-            # Enter long: RSI oversold (<30) + price near lower BB + volume
-            if (rsi[i] < 30 and 
-                close[i] <= lower_bb_aligned[i] * 1.02 and  # within 2% of lower BB
-                volume_confirmed):
-                position = 1
-                signals[i] = position_size
-            # Enter short: RSI overbought (>70) + price near upper BB + volume
-            elif (rsi[i] > 70 and 
-                  close[i] >= upper_bb_aligned[i] * 0.98 and  # within 2% of upper BB
-                  volume_confirmed):
-                position = -1
-                signals[i] = -position_size
+            # Enter long: price near support (S1 or S2) in uptrend + volume
+            if trending and volume_confirmed:
+                # Buy near S1 (primary support) or S2 (secondary support)
+                near_support = (abs(close[i] - s1_aligned[i]) < 0.005 * close[i]) or \
+                               (abs(close[i] - s2_aligned[i]) < 0.01 * close[i])
+                if near_support:
+                    position = 1
+                    signals[i] = position_size
+            # Enter short: price near resistance (R1 or R2) in downtrend + volume
+            elif trending and volume_confirmed:
+                # Sell near R1 (primary resistance) or R2 (secondary resistance)
+                near_resistance = (abs(close[i] - r1_aligned[i]) < 0.005 * close[i]) or \
+                                  (abs(close[i] - r2_aligned[i]) < 0.01 * close[i])
+                if near_resistance:
+                    position = -1
+                    signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI returns to neutral (40-60) or price touches upper BB
-            if (rsi[i] >= 40 and rsi[i] <= 60) or close[i] >= upper_bb_aligned[i] * 0.98:
+            # Exit long: price reaches pivot or R1, or trend weakens
+            if (close[i] > pivot_aligned[i] or 
+                close[i] > r1_aligned[i] or 
+                adx_1d_aligned[i] < 20):  # Trend weakening
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: RSI returns to neutral (40-60) or price touches lower BB
-            if (rsi[i] >= 40 and rsi[i] <= 60) or close[i] <= lower_bb_aligned[i] * 1.02:
+            # Exit short: price reaches pivot or S1, or trend weakens
+            if (close[i] < pivot_aligned[i] or 
+                close[i] < s1_aligned[i] or 
+                adx_1d_aligned[i] < 20):  # Trend weakening
                 position = 0
                 signals[i] = 0.0
             else:
@@ -104,6 +142,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_RSI_BB_Volume_MeanRev_v1"
+name = "4h_ADX_Pivot_Volume_v1"
 timeframe = "4h"
 leverage = 1.0
