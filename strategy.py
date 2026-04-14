@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 4h price breaking above/below 1-day Donchian Channel (10) with volume above 1.5x 50-period average and 1-day ADX > 20.
+Hypothesis: 4h price breaking above/below 1-day Donchian Channel (20) with volume above 2x 50-period average and 1-day ADX > 25.
 Trades in direction of daily trend to avoid counter-trend whipsaws. Uses daily timeframe for trend filtering.
 Target: 20-30 trades/year per symbol (80-120 total over 4 years).
 """
@@ -19,17 +19,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1-day Donchian Channel (10-period)
+    # Calculate 1-day Donchian Channel (20-period)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
     # Upper and lower bands
-    upper_dc = pd.Series(high_1d).rolling(window=10, min_periods=10).max().values
-    lower_dc = pd.Series(low_1d).rolling(window=10, min_periods=10).min().values
+    upper_dc = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_dc = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
     # Middle line for trend
     mid_dc = (upper_dc + lower_dc) / 2
@@ -90,11 +90,11 @@ def generate_signals(prices):
             np.isnan(vol_ma_50_aligned)):
             continue
         
-        # Volume confirmation (> 1.5x average)
-        volume_confirm = volume[i] > 1.5 * vol_ma_50_aligned
+        # Volume confirmation (> 2x average)
+        volume_confirm = volume[i] > 2.0 * vol_ma_50_aligned
         
-        # ADX trend filter (> 20)
-        trend_filter = adx_1d_aligned > 20
+        # ADX trend filter (> 25)
+        trend_filter = adx_1d_aligned > 25
         
         if position == 0:  # No position - look for entries
             if volume_confirm and trend_filter:
@@ -117,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1dDC10_1dADX20_Volume"
+name = "4h_1dDC20_1dADX25_Volume"
 timeframe = "4h"
 leverage = 1.0
