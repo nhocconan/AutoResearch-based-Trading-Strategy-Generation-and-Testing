@@ -1,15 +1,42 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout + Volume Spike + Daily Trend Filter
-Long when price breaks above Donchian(20) high with volume > 2x average and daily close > daily open.
-Short when price breaks below Donchian(20) low with volume > 2x average and daily close < daily open.
-Exit when price crosses the Donchian midpoint.
-Designed for low turnover: ~20-40 trades/year per symbol.
+1d KAMA + RSI + Chop Regime Filter
+Long when KAMA is rising, RSI < 60, and chop > 61.8 (range) or chop < 38.2 (trend).
+Short when KAMA is falling, RSI > 40, and chop > 61.8 or chop < 38.2.
+Exit when KAMA direction reverses.
+Designed for low turnover: ~10-25 trades/year per symbol.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_kama(close, er_period=10, fast=2, slow=30):
+    """Kaufman Adaptive Moving Average"""
+    close_series = pd.Series(close)
+    change = abs(close_series.diff(er_period))
+    volatility = close_series.diff().abs().rolling(window=er_period, min_periods=er_period).sum()
+    er = change / volatility.replace(0, np.nan)
+    er = er.fillna(0)
+    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
+    return kama
+
+def calculate_chop(high, low, close, period=14):
+    """Choppiness Index"""
+    atr = pd.DataFrame({'high': high, 'low': low, 'close': close})
+    atr['tr0'] = atr['high'] - atr['low']
+    atr['tr1'] = abs(atr['high'] - atr['close'].shift())
+    atr['tr2'] = abs(atr['low'] - atr['close'].shift())
+    atr['tr'] = atr[['tr0', 'tr1', 'tr2']].max(axis=1)
+    atr_sum = atr['tr'].rolling(window=period, min_periods=period).sum()
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
+    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(period)
+    return chop.values
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,66 +46,51 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (high_roll + low_roll) / 2
-    
-    # Volume filter: 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Load daily data once for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
-        return np.zeros(n)
-    
-    daily_close = df_1d['close'].values
-    daily_open = df_1d['open'].values
-    
-    # Daily trend: 1 if bullish (close > open), -1 if bearish (close < open)
-    daily_bullish = (daily_close > daily_open).astype(float)
-    daily_bearish = (daily_close < daily_open).astype(float)
-    
-    # Align daily trend to 4h timeframe
-    daily_bull_aligned = align_htf_to_ltf(prices, df_1d, daily_bullish)
-    daily_bear_aligned = align_htf_to_ltf(prices, df_1d, daily_bearish)
+    # Calculate indicators
+    kama = calculate_kama(close)
+    rsi = pd.Series(close).rolling(window=14, min_periods=14).apply(
+        lambda x: 100 - (100 / (1 + (x.diff().clip(min=0).mean() / (-x.diff().clip(max=0).mean()).replace(0, 1))))
+    ).fillna(50).values
+    chop = calculate_chop(high, low, close)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     position_size = 0.25
     
-    for i in range(20, n):
-        # Get aligned daily trend values
-        daily_bull = daily_bull_aligned[i]
-        daily_bear = daily_bear_aligned[i]
-        
-        if np.isnan(daily_bull) or np.isnan(daily_bear):
+    for i in range(30, n):
+        if np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]):
             continue
         
+        kama_rising = kama[i] > kama[i-1]
+        kama_falling = kama[i] < kama[i-1]
+        
+        # Chop regime: >61.8 = range, <38.2 = trend
+        chop_range = chop[i] > 61.8
+        chop_trend = chop[i] < 38.2
+        
         if position == 0:
-            # Long: Break above Donchian high, volume spike, daily bullish
-            if close[i] > high_roll[i] and volume[i] > vol_ma[i] * 2.0 and daily_bull > 0.5:
+            # Long: KAMA rising, RSI not overbought, in any regime
+            if kama_rising and rsi[i] < 60 and (chop_range or chop_trend):
                 position = 1
                 signals[i] = position_size
-            # Short: Break below Donchian low, volume spike, daily bearish
-            elif close[i] < low_roll[i] and volume[i] > vol_ma[i] * 2.0 and daily_bear > 0.5:
+            # Short: KAMA falling, RSI not oversold, in any regime
+            elif kama_falling and rsi[i] > 40 and (chop_range or chop_trend):
                 position = -1
                 signals[i] = -position_size
         elif position == 1:
-            # Exit: Price crosses below Donchian midpoint
-            if close[i] < donchian_mid[i]:
+            # Exit: KAMA turns falling
+            if kama_falling:
                 position = 0
                 signals[i] = 0.0
         elif position == -1:
-            # Exit: Price crosses above Donchian midpoint
-            if close[i] > donchian_mid[i]:
+            # Exit: KAMA turns rising
+            if kama_rising:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian_Breakout_Volume_DailyTrend"
-timeframe = "4h"
+name = "1d_KAMA_RSI_Chop_Regime"
+timeframe = "1d"
 leverage = 1.0
