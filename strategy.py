@@ -3,11 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy with 1w Supertrend trend filter and 1d ATR-based volatility breakout
-# Supertrend (10, 3) on weekly timeframe determines trend direction
-# Volatility breakout: price closes above/below ATR-based bands (mean ± k*ATR) with volume confirmation
-# Works in both bull and bear markets: Supertrend filter ensures we trade with the higher timeframe trend,
-# while volatility breakout captures momentum expansion phases. Volume filter avoids false breakouts.
+# Hypothesis: 4h strategy with 1-day ATR-based volatility filter and 1-day ATR trailing stop
+# ATR(14) measures volatility; when ATR < 20-period SMA of ATR, market is low volatility (consolidation)
+# Enter long when price breaks above highest high of last 20 bars with volume confirmation
+# Enter short when price breaks below lowest low of last 20 bars with volume confirmation
+# Use 1-day ATR trailing stop: exit when price moves against position by 2.5 * ATR
+# Works in both bull and bear markets: volatility filter avoids whipsaws in low volatility,
+# breakout captures strong moves, ATR stop adapts to volatility regimes
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,126 +21,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE for Supertrend
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE for ATR and volatility filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w Supertrend (10, 3)
-    atr_len = 10
-    atr_mult = 3.0
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 1d ATR (14 periods)
+    atr_len = 14
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # True Range
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
     # ATR
     atr = pd.Series(tr).ewm(span=atr_len, adjust=False, min_periods=atr_len).mean().values
     
-    # Basic Upper and Lower Bands
-    hl2 = (high_1w + low_1w) / 2
-    upper_band = hl2 + (atr_mult * atr)
-    lower_band = hl2 - (atr_mult * atr)
+    # Align ATR to 4h timeframe
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
-    # Initialize Supertrend
-    supertrend = np.full_like(close_1w, np.nan)
-    direction = np.full_like(close_1w, 1)  # 1 for uptrend, -1 for downtrend
+    # Calculate 20-period SMA of ATR for volatility filter
+    atr_sma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
+    atr_sma_aligned = align_htf_to_ltf(prices, df_1d, atr_sma)
     
-    for i in range(1, len(close_1w)):
-        if np.isnan(atr[i-1]) or np.isnan(close_1w[i-1]):
-            supertrend[i] = np.nan
-            direction[i] = 1
-            continue
-            
-        if close_1w[i] > upper_band[i-1]:
-            direction[i] = 1
-        elif close_1w[i] < lower_band[i-1]:
-            direction[i] = -1
-        else:
-            direction[i] = direction[i-1]
-            if direction[i] == 1 and lower_band[i] < lower_band[i-1]:
-                lower_band[i] = lower_band[i-1]
-            if direction[i] == -1 and upper_band[i] > upper_band[i-1]:
-                upper_band[i] = upper_band[i-1]
+    # Volatility filter: low volatility when ATR < SMA of ATR
+    low_volatility = atr_aligned < atr_sma_aligned
     
-        if direction[i] == 1:
-            supertrend[i] = lower_band[i]
-        else:
-            supertrend[i] = upper_band[i]
+    # Calculate 20-period highest high and lowest low for breakout
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Align Supertrend direction to 1d timeframe
-    direction_aligned = align_htf_to_ltf(prices, df_1w, direction)
-    
-    # Calculate 1d ATR for volatility breakout bands
-    tr1_d = high[1:] - low[1:]
-    tr2_d = np.abs(high[1:] - close[:-1])
-    tr3_d = np.abs(low[1:] - close[:-1])
-    tr_d = np.concatenate([[np.nan], np.maximum(tr1_d, np.maximum(tr2_d, tr3_d))])
-    atr_d = pd.Series(tr_d).ewm(span=10, adjust=False, min_periods=10).mean().values
-    
-    # Calculate 1d SMA (20) for mean
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    
-    # Volatility bands: mean ± k*ATR
-    k = 1.5
-    upper_vol_band = sma_20 + (k * atr_d)
-    lower_vol_band = sma_20 - (k * atr_d)
-    
-    # Volume filter: volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_ma_20)
+    # Volume confirmation: volume > 1.5 * 20-period average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     # Start after enough data for calculations
-    start = max(30, 20)  # Supertrend needs ~10, SMA needs 20
+    start = max(50, 20)
     
     for i in range(start, n):
         # Skip if any critical data is NaN
-        if (np.isnan(direction_aligned[i]) or 
-            np.isnan(atr_d[i]) or 
-            np.isnan(sma_20[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(atr_aligned[i]) or 
+            np.isnan(atr_sma_aligned[i]) or
+            np.isnan(highest_high[i]) or
+            np.isnan(lowest_low[i]) or
+            np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
-        
-        # Trend filter: Supertrend direction from weekly
-        uptrend = direction_aligned[i] == 1
-        downtrend = direction_aligned[i] == -1
-        
-        # Volatility breakout conditions
-        breakout_up = price > upper_vol_band[i]
-        breakout_down = price < lower_vol_band[i]
+        # Volatility filter: only trade in low volatility conditions
+        if not low_volatility[i]:
+            signals[i] = 0.0
+            continue
         
         if position == 0:
-            # Enter long: uptrend + upward breakout + volume
-            if uptrend and breakout_up and vol_filter[i]:
+            # Enter long: price breaks above highest high with volume confirmation
+            if close[i] > highest_high[i] and volume_confirm[i]:
                 position = 1
                 signals[i] = position_size
-            # Enter short: downtrend + downward breakout + volume
-            elif downtrend and breakout_down and vol_filter[i]:
+            # Enter short: price breaks below lowest low with volume confirmation
+            elif close[i] < lowest_low[i] and volume_confirm[i]:
                 position = -1
                 signals[i] = -position_size
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price crosses below SMA (mean reversion) OR trend changes
-            if price < sma_20[i] or direction_aligned[i] != 1:
+            # Exit long: ATR-based trailing stop or reversal signal
+            # Trailing stop: exit if price drops by 2.5 * ATR from entry
+            # Since we don't track entry price, use: exit if price < highest_high[i] - 2.5 * ATR
+            if close[i] < (highest_high[i] - 2.5 * atr_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
         elif position == -1:
-            # Exit short: price crosses above SMA (mean reversion) OR trend changes
-            if price > sma_20[i] or direction_aligned[i] != -1:
+            # Exit short: ATR-based trailing stop or reversal signal
+            # Trailing stop: exit if price rises by 2.5 * ATR from entry
+            # Exit if price > lowest_low[i] + 2.5 * ATR
+            if close[i] > (lowest_low[i] + 2.5 * atr_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -146,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1wSupertrend_ATRBreakout_Volume_v1"
-timeframe = "1d"
+name = "4h_1dATR_VolFilter_Breakout_TrailStop_v1"
+timeframe = "4h"
 leverage = 1.0
