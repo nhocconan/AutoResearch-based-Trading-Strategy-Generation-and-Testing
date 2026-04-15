@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI(14) mean reversion with 4h trend filter and session filter
-# Long when RSI < 30 + price > 4h EMA50 + session (08-20 UTC)
-# Short when RSI > 70 + price < 4h EMA50 + session (08-20 UTC)
-# Uses discrete position sizing (0.20) to minimize fee churn.
-# RSI mean reversion works in ranging markets; 4h EMA50 filter ensures we trade with higher timeframe trend.
-# Session filter reduces noise during low-volume hours. Target: 15-30 trades/year.
+# Hypothesis: 6h Williams %R (14) mean reversion with 1d EMA(34) trend filter and volume spike confirmation
+# Long when Williams %R < -80 (oversold) + price > 1d EMA(34) + volume > 2x 20-period avg
+# Short when Williams %R > -20 (overbought) + price < 1d EMA(34) + volume > 2x 20-period avg
+# Uses discrete position sizing (0.25) to minimize fee churn. Target: 50-150 total trades over 4 years.
+# Williams %R identifies overextended moves. EMA filter ensures we trade with the higher timeframe trend.
+# Volume spike confirms institutional participation. Works in ranging markets (mean reversion) and 
+# trending markets (pullbacks to EMA). Avoids chop by requiring volume confirmation.
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,45 +19,38 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     # Precompute session hours (08-20 UTC) for filter
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 4h HTF data once before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1d HTF data once before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    # === 4h Indicator: EMA(50) for trend filter ===
-    close_4h = df_4h['close'].values
-    ema_span = 50
-    ema_4h = pd.Series(close_4h).ewm(span=ema_span, min_periods=ema_span, adjust=False).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # === 1d Indicator: EMA(34) (trend filter) ===
+    close_1d = df_1d['close'].values
+    ema_span = 34
+    ema_1d = pd.Series(close_1d).ewm(span=ema_span, adjust=False, min_periods=ema_span).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # === 1h Indicator: RSI(14) ===
-    rsi_period = 14
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # === 6h Indicator: Williams %R (14) ===
+    lookback = 14
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Avoid division by zero
+    denominator = highest_high - lowest_low
+    williams_r = np.where(denominator != 0, -100 * (highest_high - close) / denominator, -50)
     
-    # Wilder's smoothing for RSI
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[rsi_period-1] = np.mean(gain[:rsi_period])
-    avg_loss[rsi_period-1] = np.mean(loss[:rsi_period])
-    
-    for i in range(rsi_period, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
-        avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Volume SMA for confirmation (using 20-period)
+    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(rsi_period, ema_span) + 5
+    warmup = max(lookback, ema_span) + 20  # Williams %R(14) + EMA(34) + volume(20)
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -64,28 +58,36 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
+        # Volume filter: current volume > 2x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
+        
         # Skip if any required data is NaN
-        if (np.isnan(rsi[i]) or np.isnan(ema_4h_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_1d_aligned[i]) or 
+            np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. RSI < 30 (oversold)
-        # 2. Price > 4h EMA50 (uptrend filter)
-        if (rsi[i] < 30) and (close[i] > ema_4h_aligned[i]):
-            signals[i] = 0.20
+        # 1. Williams %R < -80 (oversold)
+        # 2. Price > 1d EMA(34) (uptrend filter)
+        # 3. Volume confirmation
+        if (williams_r[i] < -80) and \
+           (close[i] > ema_1d_aligned[i]) and vol_confirm:
+            signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. RSI > 70 (overbought)
-        # 2. Price < 4h EMA50 (downtrend filter)
-        elif (rsi[i] > 70) and (close[i] < ema_4h_aligned[i]):
-            signals[i] = -0.20
+        # 1. Williams %R > -20 (overbought)
+        # 2. Price < 1d EMA(34) (downtrend filter)
+        # 3. Volume confirmation
+        elif (williams_r[i] > -20) and \
+             (close[i] < ema_1d_aligned[i]) and vol_confirm:
+            signals[i] = -0.25
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "1h_RSI14_4hEMA50_SessionFilter_v1"
-timeframe = "1h"
+name = "6h_WilliamsR14_1dEMA34_VolumeSpike_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
