@@ -3,72 +3,63 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h KAMA (Kaufman Adaptive Moving Average) trend + RSI pullback + volume confirmation
-# Uses KAMA for adaptive trend detection (adapts to market noise), RSI(14) for pullback entries in trend direction,
-# and volume spike to confirm momentum. Works in both bull and bear by only taking long in uptrend (price > KAMA)
-# and short in downtrend (price < KAMA). Target: 60-120 total trades over 4 years (15-30/year) with high-quality entries.
+# Hypothesis: 4h 12h EMA crossover + volume confirmation + volatility filter
+# Uses EMA crossover for trend changes, volume to confirm momentum,
+# and volatility filter (ATR ratio) to avoid choppy markets.
+# Works in both bull and bear by trading EMA crossovers with volume confirmation.
+# Target: 60-150 total trades over 4 years (15-38/year) with selective entries.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data (primary timeframe) for trend and price action
+    # Load 4h data (primary timeframe) for price action and EMA
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 50:
         return np.zeros(n)
     
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
     
-    # Load 1d data for RSI calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 12h data for ATR calculation (volatility filter)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average) on 4h
-    # Efficiency Ratio: ER = |close - close[10]| / sum(|close - close[1]|) over 10 periods
-    change = np.abs(close_4h - np.roll(close_4h, 10))
-    change[0:10] = 0  # First 10 values
-    volatility = np.abs(np.diff(close_4h, prepend=close_4h[0]))
-    volatility_sum = pd.Series(volatility).rolling(window=10, min_periods=10).sum().values
-    er = np.where(volatility_sum > 0, change / volatility_sum, 0)
+    # Calculate EMA12 and EMA26 on 4h for crossover
+    ema12_4h = pd.Series(close_4h).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema26_4h = pd.Series(close_4h).ewm(span=26, adjust=False, min_periods=26).mean().values
     
-    # Smoothing constants: SC = [ER * (fastest - slowest) + slowest]^2
-    # fastest = 2/(2+1) = 0.6667, slowest = 2/(30+1) = 0.0645
-    sc = (er * (0.6667 - 0.0645) + 0.0645) ** 2
+    # Calculate ATR (14-period) on 12h for volatility filter
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # KAMA calculation
-    kama = np.full_like(close_4h, np.nan)
-    kama[0] = close_4h[0]
-    for i in range(1, len(close_4h)):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close_4h[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    # Calculate ATR ratio (current ATR / 50-period average ATR) for volatility regime
+    atr_avg_50 = pd.Series(atr_12h).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr_12h / (atr_avg_50 + 1e-10)
     
-    # Calculate RSI (14-period) on 1d
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume average (20-period on 1d)
-    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Volume average (20-period on 4h)
+    vol_avg_4h = pd.Series(df_4h['volume'].values).rolling(window=20, min_periods=20).mean().values
     
     # Align all indicators to 4h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_4h, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    ema12_4h_aligned = align_htf_to_ltf(prices, df_4h, ema12_4h)
+    ema26_4h_aligned = align_htf_to_ltf(prices, df_4h, ema26_4h)
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_12h, atr_ratio)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_4h, vol_avg_4h)
     
     signals = np.zeros(n)
     position = 0
@@ -76,36 +67,38 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or
-            np.isnan(vol_avg_aligned[i])):
+        if (np.isnan(ema12_4h_aligned[i]) or np.isnan(ema26_4h_aligned[i]) or
+            np.isnan(atr_ratio_aligned[i]) or np.isnan(vol_avg_aligned[i])):
             continue
         
-        # Long entry: price > KAMA (uptrend) + RSI < 40 (pullback) + volume spike
-        if (close[i] > kama_aligned[i] and
-            rsi_aligned[i] < 40 and
+        # Long entry: EMA12 crosses above EMA26 + volume spike + low volatility (atr_ratio < 1.5)
+        if (ema12_4h_aligned[i] > ema26_4h_aligned[i] and
+            ema12_4h_aligned[i-1] <= ema26_4h_aligned[i-1] and
             volume[i] > 1.5 * vol_avg_aligned[i] and
+            atr_ratio_aligned[i] < 1.5 and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price < KAMA (downtrend) + RSI > 60 (pullback) + volume spike
-        elif (close[i] < kama_aligned[i] and
-              rsi_aligned[i] > 60 and
+        # Short entry: EMA12 crosses below EMA26 + volume spike + low volatility (atr_ratio < 1.5)
+        elif (ema12_4h_aligned[i] < ema26_4h_aligned[i] and
+              ema12_4h_aligned[i-1] >= ema26_4h_aligned[i-1] and
               volume[i] > 1.5 * vol_avg_aligned[i] and
+              atr_ratio_aligned[i] < 1.5 and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse signal or price crosses KAMA (trend change)
-        elif position == 1 and close[i] < kama_aligned[i]:
+        # Exit: reverse signal or high volatility (atr_ratio > 2.0) to avoid chop
+        elif position == 1 and (ema12_4h_aligned[i] < ema26_4h_aligned[i] or atr_ratio_aligned[i] > 2.0):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > kama_aligned[i]:
+        elif position == -1 and (ema12_4h_aligned[i] > ema26_4h_aligned[i] or atr_ratio_aligned[i] > 2.0):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_KAMA_RSI_Pullback_Volume"
+name = "4h_EMA_Crossover_Volume_Volatility_Filter"
 timeframe = "4h"
 leverage = 1.0
