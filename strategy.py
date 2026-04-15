@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d volume spike and ADX regime filter
-# Long when price breaks above Camarilla R3 level + 1d volume > 1.5x 20-period avg + 1d ADX < 25 (range regime)
-# Short when price breaks below Camarilla S3 level + 1d volume > 1.5x 20-period avg + 1d ADX < 25 (range regime)
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d ADX regime filter and volume confirmation
+# Long when Bull Power > 0 + 1d ADX > 25 (trending) + volume > 1.5x 20-period avg
+# Short when Bear Power < 0 + 1d ADX > 25 (trending) + volume > 1.5x 20-period avg
 # Uses discrete position sizing (0.25) to control drawdown and minimize fee drag.
-# Camarilla pivots provide intraday support/resistance levels that work well in ranging markets.
-# Volume filter ensures breakouts have conviction, ADX < 25 filters for ranging conditions where mean reversion works.
-# Designed to generate ~20-40 trades/year on 12h timeframe to avoid overtrading and fee drag.
+# Elder Ray measures bull/bear strength relative to EMA13. ADX filter ensures we only trade strong trends.
+# Volume confirmation avoids low-conviction breakouts. Target: ~15-25 trades/year on 6h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -27,56 +26,70 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d Indicators: Volume SMA and ADX ===
-    close_1d = df_1d['close'].values
+    # === 1d Indicator: ADX(14) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    vol_1d = df_1d['volume'].values
+    close_1d = df_1d['close'].values
     
-    # Volume SMA (20-period)
-    vol_sma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma_20_1d)
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align length
     
-    # ADX (14-period)
-    # Calculate True Range
-    tr1 = pd.Series(high_1d - low_1d)
-    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
-    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
     
-    # Calculate Directional Movement
-    up_move = pd.Series(high_1d - np.roll(high_1d, 1))
-    down_move = pd.Series(np.roll(low_1d, 1) - low_1d)
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Smooth with Wilder's smoothing (alpha = 1/period)
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            # First value is simple average
+            result[period-1] = np.nanmean(data[:period])
+            # Subsequent values: Wilder smoothing
+            for i in range(period, len(data)):
+                if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                    result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
     
-    # Smoothed DM
-    plus_di_14_1d = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_14_1d
-    minus_di_14_1d = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_14_1d
+    period = 14
+    atr_1d = wilder_smooth(tr, period)
+    dm_plus_smooth = wilder_smooth(dm_plus, period)
+    dm_minus_smooth = wilder_smooth(dm_minus, period)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr_1d != 0, (dm_plus_smooth / atr_1d) * 100, 0)
+    di_minus = np.where(atr_1d != 0, (dm_minus_smooth / atr_1d) * 100, 0)
     
     # DX and ADX
-    dx_14_1d = 100 * np.abs(plus_di_14_1d - minus_di_14_1d) / (plus_di_14_1d + minus_di_14_1d)
-    adx_14_1d = pd.Series(dx_14_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_14_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_14_1d)
+    dx = np.where((di_plus + di_minus) != 0, 
+                  np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
+    adx_1d = wilder_smooth(dx, period)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # === 12h Camarilla Pivot Levels (based on previous day) ===
-    # Camarilla levels calculated from previous 1d OHLC
-    # R3 = close + (high - low) * 1.1/4
-    # S3 = close - (high - low) * 1.1/4
-    # We use the 1d OHLC to calculate levels for the 12h chart
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # === 6h Indicators: EMA13 for Elder Ray ===
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema_13
+    bear_power = low - ema_13
+    
+    # Volume SMA for confirmation (using 20-period)
+    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(50, 20) + 5  # ADX + volume + buffer
+    warmup = max(13, 20, 14*2) + 5  # EMA13 + volume(20) + ADX(14x2) + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -85,32 +98,28 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(vol_sma_20_1d_aligned[i]) or np.isnan(adx_14_1d_aligned[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current 12h volume > 1.5x 20-period 1d volume SMA
-        vol_confirm = volume[i] > (vol_sma_20_1d_aligned[i] * 1.5)
-        
-        # Regime filter: 1d ADX < 25 (range-bound market)
-        range_regime = adx_14_1d_aligned[i] < 25
-        
-        # Only trade in range regime
-        if not range_regime:
-            signals[i] = 0.0
-            continue
+        # Volume filter: current volume > 1.5x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above Camarilla R3 level
-        # 2. Volume confirmation
-        if (close[i] > camarilla_r3_aligned[i]) and vol_confirm:
+        # 1. Bull Power > 0 (bulls in control)
+        # 2. 1d ADX > 25 (strong trend)
+        # 3. Volume confirmation
+        if (bull_power[i] > 0) and \
+           (adx_1d_aligned[i] > 25) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below Camarilla S3 level
-        # 2. Volume confirmation
-        elif (close[i] < camarilla_s3_aligned[i]) and vol_confirm:
+        # 1. Bear Power < 0 (bears in control)
+        # 2. 1d ADX > 25 (strong trend)
+        # 3. Volume confirmation
+        elif (bear_power[i] < 0) and \
+             (adx_1d_aligned[i] > 25) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -118,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_1dVolume_ADX_RangeFilter_v1"
-timeframe = "12h"
+name = "6h_ElderRay_1dADX_Volume_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
