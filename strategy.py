@@ -3,14 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h mean reversion with 4h trend filter and 1d regime filter
-# Uses RSI(14) for mean reversion signals (long <30, short >70)
-# Filters by 4h ADX > 25 for trending markets (avoid chop)
-# Uses 1d Bollinger Bands width percentile to detect regime (narrow = range, wide = trend)
-# In ranging markets (BBW < 50th percentile): mean reversion
-# In trending markets (BBW >= 50th percentile): follow 4h trend
-# Designed to work in both bull (trend following) and bear (mean reversion in ranges)
-# Discrete sizing (0.20) to limit trade frequency and control drawdown
+# Hypothesis: 6h weekly pivot breakout + volume confirmation
+# Trade breakout above weekly pivot resistance (R1) or below support (S1) with volume > 1.5x median.
+# Use weekly pivot levels from prior week for bias: price above weekly pivot = bullish bias (long breakouts only),
+# price below weekly pivot = bearish bias (short breakouts only). This adapts to weekly trend.
+# Target: 50-150 total trades over 4 years with discrete sizing (0.25) to limit fee drag.
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,106 +19,60 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h ADX for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Weekly pivot points (calculated from prior week's OHLC)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate ADX components
-    plus_dm = np.where((high_4h[1:] - high_4h[:-1]) > (low_4h[:-1] - low_4h[1:]), 
-                       np.maximum(high_4h[1:] - high_4h[:-1], 0), 0)
-    minus_dm = np.where((low_4h[:-1] - low_4h[1:]) > (high_4h[1:] - high_4h[:-1]), 
-                        np.maximum(low_4h[:-1] - low_4h[1:], 0), 0)
-    tr = np.maximum(high_4h[1:] - low_4h[1:], 
-                    np.absolute(high_4h[1:] - close_4h[:-1]), 
-                    np.absolute(low_4h[1:] - close_4h[:-1]))
+    # Weekly pivot: (H+L+C)/3
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    # Resistance levels: R1 = 2*P - L, R2 = P + (H-L)
+    r1_1w = 2 * pivot_1w - low_1w
+    # Support levels: S1 = 2*P - H, S2 = P - (H-L)
+    s1_1w = 2 * pivot_1w - high_1w
     
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    tr = np.concatenate([[0], tr])
+    # Align weekly levels to 6h timeframe (using prior week's values)
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
     
-    atr_4h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    plus_di_4h = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_4h
-    minus_di_4h = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_4h
-    dx_4h = 100 * np.abs(plus_di_4h - minus_di_4h) / (plus_di_4h + minus_di_4h)
-    adx_4h = pd.Series(dx_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Align 4h ADX and DI to 1h
-    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
-    plus_di_4h_aligned = align_htf_to_ltf(prices, df_4h, plus_di_4h)
-    minus_di_4h_aligned = align_htf_to_ltf(prices, df_4h, minus_di_4h)
-    
-    # 1d Bollinger Bands for regime detection
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    
-    # Calculate Bollinger Bands (20, 2)
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
-    bb_width = (upper_bb - lower_bb) / sma_20  # Normalized width
-    
-    # Calculate percentile of BB width (lookback 50 days)
-    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=10).apply(
-        lambda x: np.percentile(x, 50) if len(x) >= 10 else np.nan, raw=True
-    ).values
-    
-    # Align BB width percentile to 1h
-    bb_width_percentile_aligned = align_htf_to_ltf(prices, df_1d, bb_width_percentile)
-    
-    # 1h RSI for mean reversion signals
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    # Handle first value
-    rsi = np.concatenate([[50], rsi])
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Volume confirmation: current > 1.5x median of last 20 bars
+    vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
+    vol_threshold = 1.5 * vol_median
     
     signals = np.zeros(n)
     
     for i in range(20, n):
-        # Skip if any required data is NaN or outside session
-        if (np.isnan(adx_4h_aligned[i]) or np.isnan(plus_di_4h_aligned[i]) or 
-            np.isnan(minus_di_4h_aligned[i]) or np.isnan(bb_width_percentile_aligned[i]) or
-            np.isnan(rsi[i]) or not in_session[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or 
+            np.isnan(s1_1w_aligned[i]) or np.isnan(vol_threshold[i])):
             continue
         
-        # Determine market regime: ranging (BBW < 50th percentile) or trending (BBW >= 50th)
-        is_ranging = bb_width_percentile_aligned[i] < 50.0
+        # Long breakout: price > R1 weekly + volume spike + price above weekly pivot (bullish bias)
+        if (close[i] > r1_1w_aligned[i] and 
+            volume[i] > vol_threshold[i] and 
+            close[i] > pivot_1w_aligned[i]):
+            signals[i] = 0.25
         
-        if is_ranging:
-            # Ranging market: mean reversion
-            # Long: RSI < 30 (oversold)
-            # Short: RSI > 70 (overbought)
-            if rsi[i] < 30:
-                signals[i] = 0.20
-            elif rsi[i] > 70:
-                signals[i] = -0.20
-            else:
-                signals[i] = 0.0  # Exit mean reversion position
+        # Short breakout: price < S1 weekly + volume spike + price below weekly pivot (bearish bias)
+        elif (close[i] < s1_1w_aligned[i] and 
+              volume[i] > vol_threshold[i] and 
+              close[i] < pivot_1w_aligned[i]):
+            signals[i] = -0.25
+        
+        # Exit: price returns to weekly pivot area (mean reversion)
+        elif (i > 0 and 
+              ((signals[i-1] == 0.25 and close[i] <= pivot_1w_aligned[i]) or
+               (signals[i-1] == -0.25 and close[i] >= pivot_1w_aligned[i]))):
+            signals[i] = 0.0
+        
+        # Otherwise, hold previous position
         else:
-            # Trending market: follow 4h trend
-            # Long: +DI > -DI
-            # Short: -DI > +DI
-            if plus_di_4h_aligned[i] > minus_di_4h_aligned[i]:
-                signals[i] = 0.20
-            elif minus_di_4h_aligned[i] > plus_di_4h_aligned[i]:
-                signals[i] = -0.20
-            else:
-                signals[i] = 0.0  # Exit trend position
+            signals[i] = signals[i-1]
     
     return signals
 
-name = "1h_RSI_MeanReversion_4hADX_1dBBRegime"
-timeframe = "1h"
+name = "6h_WeeklyPivot_Breakout_Volume"
+timeframe = "6h"
 leverage = 1.0
