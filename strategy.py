@@ -15,7 +15,7 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Calculate 1d ATR(14) for volatility regime filter
@@ -36,20 +36,9 @@ def generate_signals(prices):
     donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
     donchian_low_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
     
-    # Calculate 1d volume ratio (current vs 20-period average)
-    vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
-    volume_ratio = volume / (vol_ma_20_aligned + 1e-10)
-    
-    # Calculate 1d RSI(14) for mean reversion filter
-    delta = pd.Series(df_1d['close'].values).diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14 = 100 - (100 / (1 + rs))
-    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
+    # Calculate 4h volume ratio (current vs 20-period average)
+    vol_ma_20_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ratio = volume / (vol_ma_20_4h + 1e-10)
     
     signals = np.zeros(n)
     
@@ -57,30 +46,25 @@ def generate_signals(prices):
         # Skip if any required data is NaN
         if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]) or 
-            np.isnan(volume_ratio[i]) or np.isnan(rsi_14_aligned[i])):
+            np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility regime filter: only trade when daily ATR is elevated (> 0.6% of price)
-        vol_regime = atr_14_1d_aligned[i] > 0.006 * close[i]
+        # Volatility regime filter: only trade when daily ATR is elevated (> 0.8% of price)
+        vol_regime = atr_14_1d_aligned[i] > 0.008 * close[i]
         
         # Trend filter: price relative to daily EMA50
         trend_filter = close[i] > ema_50_1d_aligned[i]
         
-        # Mean reversion filter: avoid extreme RSI
-        rsi_filter = (rsi_14_aligned[i] > 30) & (rsi_14_aligned[i] < 70)
-        
         # Long conditions:
         # 1. Price above daily EMA50 (bullish bias)
         # 2. Price breaks above daily Donchian(20) high with volume (bullish breakout)
-        # 3. Volume confirmation: volume > 2.0x average (stricter)
+        # 3. Volume confirmation: volume > 2.0x average
         # 4. Daily volatility regime filter
-        # 5. RSI not overbought/oversold
         if (trend_filter and
             close[i] > donchian_high_20_aligned[i] and
             volume_ratio[i] > 2.0 and
-            vol_regime and
-            rsi_filter):
+            vol_regime):
             signals[i] = 0.25
             
         # Short conditions:
@@ -88,18 +72,16 @@ def generate_signals(prices):
         # 2. Price breaks below daily Donchian(20) low with volume (bearish breakdown)
         # 3. Volume confirmation: volume > 2.0x average
         # 4. Daily volatility regime filter
-        # 5. RSI not overbought/oversold
         elif (not trend_filter and
               close[i] < donchian_low_20_aligned[i] and
               volume_ratio[i] > 2.0 and
-              vol_regime and
-              rsi_filter):
+              vol_regime):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "1d_Vol_Regime_Donchian20_1dEMA50_RSI_Filter_v1"
+name = "1d_Vol_Regime_Donchian20_1dEMA50_Breakout_v1"
 timeframe = "4h"
 leverage = 1.0
