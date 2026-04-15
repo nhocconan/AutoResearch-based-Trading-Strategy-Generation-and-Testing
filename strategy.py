@@ -30,45 +30,50 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 12h Donchian channels (20-period)
-    donch_period = 20
-    highest_high = pd.Series(high).rolling(window=donch_period, min_periods=donch_period).max().values
-    lowest_low = pd.Series(low).rolling(window=donch_period, min_periods=donch_period).min().values
-    
-    # Calculate 12h volume average (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate daily RSI(14) for momentum filter
+    delta = pd.Series(df_1d['close'].values).diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_14_1d = 100 - (100 / (1 + rs))
+    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
         if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(vol_ma[i])):
+            np.isnan(rsi_14_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when daily ATR is elevated (> 0.3% of price)
-        vol_filter = atr_14_1d_aligned[i] > 0.003 * close[i]
+        # Regime filter: only trade when daily ATR is elevated (> 0.4% of price)
+        vol_filter = atr_14_1d_aligned[i] > 0.004 * close[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
-        
-        # Donchian breakout conditions
-        long_breakout = close[i] > highest_high[i-1]  # Break above previous high
-        short_breakout = close[i] < lowest_low[i-1]   # Break below previous low
-        
-        # Long conditions: price above daily EMA34 + volatility + volume + long breakout
-        if (close[i] > ema_34_1d_aligned[i] and vol_filter and vol_confirm and long_breakout):
+        # Long conditions:
+        # 1. Price above daily EMA34 (bullish bias)
+        # 2. Daily RSI > 50 (bullish momentum)
+        # 3. Volatility filter
+        if (close[i] > ema_34_1d_aligned[i] and 
+            rsi_14_1d_aligned[i] > 50 and 
+            vol_filter):
             signals[i] = 0.25
             
-        # Short conditions: price below daily EMA34 + volatility + volume + short breakout
-        elif (close[i] < ema_34_1d_aligned[i] and vol_filter and vol_confirm and short_breakout):
+        # Short conditions:
+        # 1. Price below daily EMA34 (bearish bias)
+        # 2. Daily RSI < 50 (bearish momentum)
+        # 3. Volatility filter
+        elif (close[i] < ema_34_1d_aligned[i] and 
+              rsi_14_1d_aligned[i] < 50 and 
+              vol_filter):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "12h_EMA34_Donchian_Volume_Breakout"
-timeframe = "12h"
+name = "4h_EMA34_RSI_VolFilter_v2"
+timeframe = "4h"
 leverage = 1.0
