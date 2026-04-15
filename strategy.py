@@ -1,86 +1,65 @@
+# 2025-07-01: Simple 4h Bollinger Band Breakout with Volume Confirmation
+# Based on #45733 (BollingerSqueeze_RSI_Volume) which had 0 trades due to over-filtering.
+# New: Relaxed Bollinger Band breakout with volume confirmation only.
+# Long: Close > Upper Band + Volume > 1.5x median volume
+# Short: Close < Lower Band + Volume > 1.5x median volume
+# Exit: Close crosses back inside bands
+# Target: 30-50 trades/year to avoid fee drag.
+# Bollinger Bands: 20-period SMA, 2 std dev (standard)
+# Volume: Current > 1.5x median of last 20 bars
+# No trend filter to avoid over-filtering; relies on mean reversion in ranging markets.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 12h Donchian(20) breakout with 1d trend filter and volume confirmation
-# Uses 12h price channel breakouts (20-period Donchian) confirmed by 1d EMA trend and volume spike.
-# Works in bull markets (breakouts above upper band) and bear markets (breakouts below lower band).
-# Target: 50-150 total trades over 4 years (12-37/year). Timeframe: 12h, HTF: 1d.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data for Donchian channels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Bollinger Bands (20, 2) on close
+    sma = pd.Series(close).rolling(window=20, min_periods=20).mean()
+    std = pd.Series(close).rolling(window=20, min_periods=20).std()
+    upper = sma + 2 * std
+    lower = sma - 2 * std
     
-    # Calculate 20-period Donchian channels on 12h
-    donch_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian channels to 12h timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_12h, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_12h, donch_low)
-    
-    # Load 1d data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    close_1d = df_1d['close'].values
-    
-    # Calculate 50-period EMA on 1d
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align EMA to 12h timeframe
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Volume confirmation: current > 1.5x median of last 20 bars
+    vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
+    vol_threshold = 1.5 * vol_median
     
     signals = np.zeros(n)
-    position = 0
-    base_size = 0.25  # Position size
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or
-            np.isnan(ema_1d_aligned[i])):
+        if np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(vol_threshold[i]):
             continue
         
-        # Long entry: price breaks above Donchian high + price above 1d EMA + volume confirmation
-        if (close[i] > donch_high_aligned[i] and
-            close[i] > ema_1d_aligned[i] and
-            volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-            position <= 0):
-            position = 1
-            signals[i] = base_size
+        # Long: close breaks above upper band + volume confirmation
+        if close[i] > upper[i] and volume[i] > vol_threshold[i]:
+            signals[i] = 0.25
         
-        # Short entry: price breaks below Donchian low + price below 1d EMA + volume confirmation
-        elif (close[i] < donch_low_aligned[i] and
-              close[i] < ema_1d_aligned[i] and
-              volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-              position >= 0):
-            position = -1
-            signals[i] = -base_size
+        # Short: close breaks below lower band + volume confirmation
+        elif close[i] < lower[i] and volume[i] > vol_threshold[i]:
+            signals[i] = -0.25
         
-        # Exit: reverse breakout or price crosses 1d EMA in opposite direction
-        elif position == 1 and (close[i] < donch_low_aligned[i] or close[i] < ema_1d_aligned[i]):
-            position = 0
+        # Exit: close crosses back inside bands (mean reversion)
+        elif (i > 0 and 
+              ((signals[i-1] == 0.25 and close[i] < upper[i]) or
+               (signals[i-1] == -0.25 and close[i] > lower[i]))):
             signals[i] = 0.0
-        elif position == -1 and (close[i] > donch_high_aligned[i] or close[i] > ema_1d_aligned[i]):
-            position = 0
-            signals[i] = 0.0
+        
+        # Otherwise, hold previous position
+        else:
+            signals[i] = signals[i-1]
     
     return signals
 
-name = "12h_Donchian20_1dEMA_Volume"
-timeframe = "12h"
+name = "4h_Bollinger_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
