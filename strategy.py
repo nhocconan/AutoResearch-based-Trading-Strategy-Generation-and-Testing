@@ -1,124 +1,84 @@
 #!/usr/bin/env python3
-"""
-12h_1d_KAMA_RSI_Chop
-- Trend direction via KAMA on 12h
-- Entry timing via RSI pullback in trend direction on 12h
-- Regime filter: Choppiness Index on 1d < 61.8 (trending market)
-- Stops via reverse signal
-- Target: 15-30 trades/year per symbol
-"""
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Primary 12h data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === HTF: 1d data (loaded once) ===
-    df_1d = get_htf_data(prices, '1d')
+    # Weekly Donchian channels for trend direction (from weekly high/low)
+    df_1w = get_htf_data(prices, '1w')
+    donchian_high = pd.Series(df_1w['high'].values).rolling(window=20, min_periods=20).max()
+    donchian_low = pd.Series(df_1w['low'].values).rolling(window=20, min_periods=20).min()
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high.values)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low.values)
     
-    # === Indicators on 12h (primary) ===
-    # KAMA trend (12h)
-    def kama(close, er_len=10, fast=2, slow=30):
-        change = np.abs(np.diff(close, n=er_len))
-        vol = np.sum(np.abs(np.diff(close)), axis=0)
-        er = np.where(vol != 0, change / vol, 0)
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        kama = np.full_like(close, np.nan, dtype=float)
-        kama[er_len] = close[er_len]
-        for i in range(er_len+1, len(close)):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        return kama
+    # Weekly pivot points (from weekly close)
+    weekly_close = df_1w['close'].values
+    pivot = (df_1w['high'].values + df_1w['low'].values + weekly_close) / 3
+    r1 = 2 * pivot - df_1w['low'].values
+    s1 = 2 * pivot - df_1w['high'].values
+    r2 = pivot + (df_1w['high'].values - df_1w['low'].values)
+    s2 = pivot - (df_1w['high'].values - df_1w['low'].values)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
     
-    kama_val = kama(close, 10, 2, 30)
-    kama_long = close > kama_val
-    kama_short = close < kama_val
+    # 6h volume confirmation
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    vol_threshold = 1.5 * vol_ma
     
-    # RSI(14) on 12h for pullback entries
-    def rsi(close, period=14):
-        delta = np.diff(close)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.full_like(close, np.nan, dtype=float)
-        avg_loss = np.full_like(close, np.nan, dtype=float)
-        avg_gain[period] = np.nanmean(gain[1:period+1])
-        avg_loss[period] = np.nanmean(loss[1:period+1])
-        for i in range(period+1, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
-    
-    rsi_val = rsi(close, 14)
-    rsi_oversold = rsi_val < 30
-    rsi_overbought = rsi_val > 70
-    
-    # === HTF: 1d Choppiness Index (regime filter) ===
-    def choppiness_index(high, low, close, period=14):
-        atr = np.full_like(close, np.nan, dtype=float)
-        tr1 = np.abs(high[1:] - low[1:])
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.nan], tr])
-        atr = np.full_like(close, np.nan, dtype=float)
-        atr[period] = np.nanmean(tr[1:period+1])
-        for i in range(period+1, len(close)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        
-        max_high = np.full_like(close, np.nan, dtype=float)
-        min_low = np.full_like(close, np.nan, dtype=float)
-        for i in range(period, len(close)):
-            max_high[i] = np.max(high[i-period+1:i+1])
-            min_low[i] = np.min(low[i-period+1:i+1])
-        
-        sum_atr = np.nansum(atr[1:], axis=0) if len(atr) > 1 else 0
-        range_val = max_high - min_low
-        chop = 100 * np.log10(sum_atr / range_val) / np.log10(period)
-        return chop
-    
-    chop_1d = choppiness_index(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
-    trending_market = chop_1d_aligned < 61.8  # trending when chop < 61.8
-    
-    # === Signal generation ===
     signals = np.zeros(n)
     
-    for i in range(30, n):  # warmup for indicators
-        # Skip if any data is NaN
-        if (np.isnan(kama_val[i]) or np.isnan(rsi_val[i]) or 
-            np.isnan(chop_1d_aligned[i])):
+    for i in range(100, n):
+        # Skip if any required data is NaN
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(vol_threshold[i])):
             continue
         
-        # Long: KAMA uptrend + RSI oversold pullback + trending market
-        if (kama_long[i] and rsi_oversold[i] and trending_market[i]):
+        # Long conditions:
+        # 1. Price above weekly Donchian high (uptrend)
+        # 2. Price above weekly pivot (bullish bias)
+        # 3. Volume confirmation
+        if (close[i] > donchian_high_aligned[i] and
+            close[i] > pivot_aligned[i] and
+            volume[i] > vol_threshold[i]):
             signals[i] = 0.25
         
-        # Short: KAMA downtrend + RSI overbought pullback + trending market
-        elif (kama_short[i] and rsi_overbought[i] and trending_market[i]):
+        # Short conditions:
+        # 1. Price below weekly Donchian low (downtrend)
+        # 2. Price below weekly pivot (bearish bias)
+        # 3. Volume confirmation
+        elif (close[i] < donchian_low_aligned[i] and
+              close[i] < pivot_aligned[i] and
+              volume[i] > vol_threshold[i]):
             signals[i] = -0.25
         
-        # Exit: reverse signal or chop > 61.8 (range market)
-        elif (signals[i-1] == 0.25 and (kama_short[i] or not trending_market[i])) or \
-             (signals[i-1] == -0.25 and (kama_long[i] or not trending_market[i])):
+        # Exit conditions:
+        # Long exit: price crosses below weekly pivot
+        elif i > 0 and signals[i-1] == 0.25 and close[i] < pivot_aligned[i]:
             signals[i] = 0.0
         
-        # Otherwise hold
+        # Short exit: price crosses above weekly pivot
+        elif i > 0 and signals[i-1] == -0.25 and close[i] > pivot_aligned[i]:
+            signals[i] = 0.0
+        
+        # Otherwise, hold previous position
         else:
             signals[i] = signals[i-1]
     
     return signals
 
-name = "12h_1d_KAMA_RSI_Chop"
-timeframe = "12h"
+name = "6h_WeeklyDonchian_Pivot_Volume"
+timeframe = "6h"
 leverage = 1.0
