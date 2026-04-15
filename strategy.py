@@ -1,67 +1,81 @@
 #!/usr/bin/env python3
+"""
+6h Elder Ray + Regime Filter
+Uses Elder Ray (Bull/Bear Power) with EMA13 from 1d trend filter.
+Long when Bull Power > 0 and Bear Power < 0 (bullish divergence) in uptrend.
+Short when Bear Power > 0 and Bull Power < 0 (bearish divergence) in downtrend.
+Adds volume confirmation to avoid whipsaws.
+Target: 20-50 trades/year.
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1h data for volatility calculation
-    df_1h = get_htf_data(prices, '1h')
-    atr_1h = calculate_atr(df_1h['high'].values, df_1h['low'].values, df_1h['close'].values, 14)
-    atr_1h_aligned = align_htf_to_ltf(prices, df_1h, atr_1h)
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate ATR-based volatility threshold
-    vol_threshold = atr_1h_aligned * 1.5
+    # Get 1d data once
+    df_1d = get_htf_data(prices, '1d')
     
-    # Price range for the last 24 hours (2 periods on 12h)
-    high_24h = pd.Series(prices['high']).rolling(window=2, min_periods=2).max()
-    low_24h = pd.Series(prices['low']).rolling(window=2, min_periods=2).min()
-    range_24h = high_24h - low_24h
+    # Calculate EMA13 on 1d close for trend filter
+    ema13_1d = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
+    
+    # Calculate Elder Ray components on 6h data
+    ema13_6h = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13_6h
+    bear_power = low - ema13_6h
+    
+    # Volume confirmation: current > 1.5x median of last 20 bars
+    vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
+    vol_threshold = 1.5 * vol_median
     
     signals = np.zeros(n)
     
-    for i in range(2, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if np.isnan(range_24h[i]) or np.isnan(vol_threshold[i]):
+        if (np.isnan(ema13_1d_aligned[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(vol_threshold[i])):
             continue
         
-        # Long: price breaks above 24h high with sufficient volatility
-        if prices['high'][i] > high_24h[i] and range_24h[i] > vol_threshold[i]:
+        # Determine trend from 1d EMA13
+        uptrend = close[i] > ema13_1d_aligned[i]
+        downtrend = close[i] < ema13_1d_aligned[i]
+        
+        # Long: Bull power positive AND Bear power negative (bullish divergence) in uptrend + volume
+        if (bull_power[i] > 0 and bear_power[i] < 0 and uptrend and 
+            volume[i] > vol_threshold[i]):
             signals[i] = 0.25
         
-        # Short: price breaks below 24h low with sufficient volatility
-        elif prices['low'][i] < low_24h[i] and range_24h[i] > vol_threshold[i]:
+        # Short: Bear power positive AND Bull power negative (bearish divergence) in downtrend + volume
+        elif (bear_power[i] > 0 and bull_power[i] < 0 and downtrend and 
+              volume[i] > vol_threshold[i]):
             signals[i] = -0.25
         
-        # Exit: price returns to the middle of the 24h range
+        # Exit: when divergence disappears or trend changes
         elif i > 0 and signals[i-1] != 0:
-            mid_point = (high_24h[i] + low_24h[i]) / 2
-            if (signals[i-1] == 0.25 and prices['close'][i] < mid_point) or \
-               (signals[i-1] == -0.25 and prices['close'][i] > mid_point):
+            prev_signal = signals[i-1]
+            # Exit long if bull power turns negative or bear power turns positive
+            if prev_signal == 0.25 and (bull_power[i] <= 0 or bear_power[i] >= 0):
                 signals[i] = 0.0
-        
-        # Otherwise, hold previous position
+            # Exit short if bear power turns negative or bull power turns positive
+            elif prev_signal == -0.25 and (bear_power[i] <= 0 or bull_power[i] >= 0):
+                signals[i] = 0.0
+            else:
+                signals[i] = prev_signal
         else:
             signals[i] = signals[i-1]
     
     return signals
 
-def calculate_atr(high, low, close, period):
-    """Calculate Average True Range"""
-    high = pd.Series(high)
-    low = pd.Series(low)
-    close = pd.Series(close)
-    
-    tr1 = high - low
-    tr2 = abs(high - close.shift())
-    tr3 = abs(low - close.shift())
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=period, min_periods=period).mean()
-    return atr.values
-
-name = "12h_Volatility_Breakout"
-timeframe = "12h"
+name = "6h_ElderRay_1dEMA13_Volume"
+timeframe = "6h"
 leverage = 1.0
