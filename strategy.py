@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -32,28 +32,38 @@ def generate_signals(prices):
     vol_median = pd.Series(volume).rolling(window=30, min_periods=30).median()
     vol_threshold = 1.5 * vol_median
     
+    # Daily 50-period EMA for trend confirmation
+    ema_50d = pd.Series(close_d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50d_aligned = align_htf_to_ltf(prices, daily, ema_50d)
+    
     signals = np.zeros(n)
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14d_aligned[i]) or np.isnan(ema_20d_aligned[i]) or
-            np.isnan(vol_threshold[i])):
+        if (np.isnan(atr_14d_aligned[i]) or np.isnan(ema_20d_aligned[i]) or 
+            np.isnan(ema_50d_aligned[i]) or np.isnan(vol_threshold[i])):
             continue
         
         # Volatility filter: avoid extremes (0.5x to 3.0x of median ATR)
         atr_median = pd.Series(atr_14d_aligned).rolling(window=50, min_periods=50).median()
         vol_filter = (atr_14d_aligned[i] > 0.5 * atr_median[i]) and (atr_14d_aligned[i] < 3.0 * atr_median[i])
         
-        # Long: Price above daily EMA20 + volume spike + volatility filter
+        # Trend filter: EMA20 > EMA50 for long, EMA20 < EMA50 for short
+        trend_up = ema_20d_aligned[i] > ema_50d_aligned[i]
+        trend_down = ema_20d_aligned[i] < ema_50d_aligned[i]
+        
+        # Long: Price above daily EMA20 + volume spike + volatility filter + trend up
         if (close[i] > ema_20d_aligned[i] and 
             volume[i] > vol_threshold[i] and 
-            vol_filter):
+            vol_filter and 
+            trend_up):
             signals[i] = 0.25
         
-        # Short: Price below daily EMA20 + volume spike + volatility filter
+        # Short: Price below daily EMA20 + volume spike + volatility filter + trend down
         elif (close[i] < ema_20d_aligned[i] and 
               volume[i] > vol_threshold[i] and 
-              vol_filter):
+              vol_filter and 
+              trend_down):
             signals[i] = -0.25
         
         # Exit: price crosses back below/above daily EMA20
@@ -68,6 +78,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_DailyEMA20_Vol1.5x_ATR14dFilter"
-timeframe = "4h"
+name = "12h_DailyEMA20_50_Vol1.5x_ATR14dFilter"
+timeframe = "12h"
 leverage = 1.0
