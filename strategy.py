@@ -3,10 +3,6 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with weekly EMA34 trend filter and ATR-based position sizing
-# Works in bull/bear: breakouts capture trends, EMA34 filter avoids counter-trend trades, ATR sizing adapts to volatility
-# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag
-
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
@@ -15,64 +11,93 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d HTF data once before loop
+    # Get 12h HTF data once before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
+        return np.zeros(n)
+    
+    # Calculate 12h Donchian channels (20-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian channels to 6h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    
+    # Get 1d HTF data for weekly pivot (using 1d to calculate weekly)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Get 1w HTF data once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    # Calculate weekly pivot points from prior week (using Friday's data)
+    # We'll use the prior Friday's high/low/close to calculate weekly pivot
+    # For simplicity, we'll use 1d data and calculate pivot from 5 days ago
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d ATR(14) for volatility-based position sizing
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
-    tr3 = np.abs(df_1d['low'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Calculate weekly pivot using prior Friday's OHLC (5-day lookback for weekly)
+    pivot_high = pd.Series(high_1d).rolling(window=5, min_periods=5).max().values  # Weekly high
+    pivot_low = pd.Series(low_1d).rolling(window=5, min_periods=5).min().values    # Weekly low
+    pivot_close = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values  # Weekly close approx
     
-    # Calculate 1d Donchian(20) channels
-    donchian_high_20 = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
-    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
-    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
+    # Weekly pivot point (standard calculation)
+    weekly_pivot = (pivot_high + pivot_low + pivot_close) / 3.0
+    weekly_r1 = 2 * weekly_pivot - pivot_low
+    weekly_s1 = 2 * weekly_pivot - pivot_high
+    weekly_r2 = weekly_pivot + (pivot_high - pivot_low)
+    weekly_s2 = weekly_pivot - (pivot_high - pivot_low)
     
-    # Calculate 1w EMA(34) for trend filter
-    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Align weekly pivot levels to 6h timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
+    weekly_r2_aligned = align_htf_to_ltf(prices, df_1d, weekly_r2)
+    weekly_s2_aligned = align_htf_to_ltf(prices, df_1d, weekly_s2)
+    
+    # Volume confirmation: 6h volume > 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(donchian_high_20_aligned[i]) or 
-            np.isnan(donchian_low_20_aligned[i]) or np.isnan(ema_34_1w_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or
+            np.isnan(weekly_s1_aligned[i]) or np.isnan(weekly_r2_aligned[i]) or
+            np.isnan(weekly_s2_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Position size inversely proportional to volatility (ATR), capped at 0.30
-        vol_norm = atr_14_1d_aligned[i] / close[i]
-        base_size = 0.30
-        size = base_size * (0.01 / vol_norm)  # Scale to ~1% daily vol
-        size = min(max(size, 0.10), 0.30)     # Clamp between 0.10 and 0.30
+        # Volume filter: current volume above average
+        vol_filter = volume[i] > vol_ma[i]
         
-        # Long: price breaks above Donchian high AND weekly EMA34 uptrend (price > EMA)
-        if (close[i] > donchian_high_20_aligned[i] and 
-            close[i] > ema_34_1w_aligned[i]):
-            signals[i] = size
+        # Long conditions:
+        # 1. Price breaks above 12h Donchian high (breakout)
+        # 2. Price above weekly pivot (bullish bias)
+        # 3. Volume confirmation
+        if (close[i] > donchian_high_aligned[i] and
+            close[i] > weekly_pivot_aligned[i] and
+            vol_filter):
+            signals[i] = 0.25
             
-        # Short: price breaks below Donchian low AND weekly EMA34 downtrend (price < EMA)
-        elif (close[i] < donchian_low_20_aligned[i] and 
-              close[i] < ema_34_1w_aligned[i]):
-            signals[i] = -size
+        # Short conditions:
+        # 1. Price breaks below 12h Donchian low (breakdown)
+        # 2. Price below weekly pivot (bearish bias)
+        # 3. Volume confirmation
+        elif (close[i] < donchian_low_aligned[i] and
+              close[i] < weekly_pivot_aligned[i] and
+              vol_filter):
+            signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "1d_Donchian20_WeeklyEMA34_VolSized_v1"
-timeframe = "1d"
+name = "6h_Donchian_WeeklyPivot_Breakout_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
