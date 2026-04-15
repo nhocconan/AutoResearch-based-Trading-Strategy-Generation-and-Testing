@@ -24,12 +24,12 @@ def generate_signals(prices):
     atr_14d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14d_aligned = align_htf_to_ltf(prices, daily, atr_14d)
     
-    # Volatility filter: ATR > 0.3% of price to avoid low volatility chop
-    vol_filter = atr_14d_aligned > (0.003 * close)
+    # Volatility filter: ATR > 0.8% of price to avoid low volatility chop
+    vol_filter = atr_14d_aligned > (0.008 * close)
     
-    # Calculate daily EMA20 for trend direction
-    daily_ema_20 = pd.Series(daily['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    daily_ema_20_aligned = align_htf_to_ltf(prices, daily, daily_ema_20)
+    # Calculate daily EMA21 for trend direction
+    daily_ema_21 = pd.Series(daily['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    daily_ema_21_aligned = align_htf_to_ltf(prices, daily, daily_ema_21)
     
     # Calculate daily EMA50 for additional trend confirmation
     daily_ema_50 = pd.Series(daily['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
@@ -43,12 +43,17 @@ def generate_signals(prices):
     vol_threshold = 1.5 * vol_ma_10d_aligned
     vol_spike = volume > vol_threshold
     
+    # Calculate 12h Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14d_aligned[i]) or np.isnan(daily_ema_20_aligned[i]) or 
-            np.isnan(daily_ema_50_aligned[i]) or np.isnan(vol_ma_10d_aligned[i])):
+        if (np.isnan(atr_14d_aligned[i]) or np.isnan(daily_ema_21_aligned[i]) or 
+            np.isnan(daily_ema_50_aligned[i]) or np.isnan(vol_ma_10d_aligned[i]) or
+            np.isnan(high_20[i]) or np.isnan(low_20[i])):
             continue
         
         # Only trade when volatility is sufficient (avoid chop)
@@ -56,21 +61,23 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        # Long: Price above both EMA20 and EMA50 + volume spike
-        if (close[i] > daily_ema_20_aligned[i] and 
+        # Long: Price above both EMA21 and EMA50 + volume spike + break above Donchian high
+        if (close[i] > daily_ema_21_aligned[i] and 
             close[i] > daily_ema_50_aligned[i] and 
-            vol_spike[i]):
-            signals[i] = 0.25
+            vol_spike[i] and 
+            close[i] > high_20[i]):
+            signals[i] = 0.30
         
-        # Short: Price below both EMA20 and EMA50 + volume spike
-        elif (close[i] < daily_ema_20_aligned[i] and 
+        # Short: Price below both EMA21 and EMA50 + volume spike + break below Donchian low
+        elif (close[i] < daily_ema_21_aligned[i] and 
               close[i] < daily_ema_50_aligned[i] and 
-              vol_spike[i]):
-            signals[i] = -0.25
+              vol_spike[i] and 
+              close[i] < low_20[i]):
+            signals[i] = -0.30
         
         # Exit: reverse signal on opposite direction
-        elif (close[i] < daily_ema_20_aligned[i] and signals[i-1] > 0) or \
-             (close[i] > daily_ema_20_aligned[i] and signals[i-1] < 0):
+        elif (close[i] < daily_ema_21_aligned[i] and signals[i-1] > 0) or \
+             (close[i] > daily_ema_21_aligned[i] and signals[i-1] < 0):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -79,6 +86,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_DailyEMA20_50_Volume_Spike_Filter"
-timeframe = "6h"
+name = "12h_DailyEMA21_50_Volume_Spike_Donchian_Breakout"
+timeframe = "12h"
 leverage = 1.0
