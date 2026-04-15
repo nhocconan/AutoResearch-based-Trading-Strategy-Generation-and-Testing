@@ -3,23 +3,27 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot breakout with 1d trend filter and volume confirmation
-# Long when price breaks above Camarilla R4 + 1d close > EMA34 + volume > 1.5x 20-period avg
-# Short when price breaks below Camarilla S4 + 1d close < EMA34 + volume > 1.5x 20-period avg
-# Uses discrete position sizing (0.25) to minimize fee drag and control drawdown.
-# 1d EMA34 provides trend filter reducing whipsaws in both bull and bear markets.
-# Volume threshold (1.5x) targets ~20-40 trades/year to minimize fee drag on 6h timeframe.
-# Camarilla levels calculated from prior 1d OHLC.
+# Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike
+# Long when price breaks above Camarilla R1 + 1d EMA34 uptrend + volume > 2.5x 20-period avg
+# Short when price breaks below Camarilla S1 + 1d EMA34 downtrend + volume > 2.5x 20-period avg
+# Uses discrete position sizing (0.30) to balance return and drawdown control.
+# Camarilla pivots derived from 1d OHLC provide institutional support/resistance levels.
+# 1d EMA34 offers medium-term trend filter reducing false breakouts in choppy markets.
+# Volume threshold (2.5x) targets ~20-40 trades/year to minimize fee drag on 12h timeframe.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    
+    # Precompute session hours (08-20 UTC) for filter
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
@@ -31,72 +35,63 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
+    # === 12h Camarilla Pivot Levels (from 1d OHLC) ===
+    # Camarilla: R1 = close + (high - low) * 1.1/12, S1 = close - (high - low) * 1.1/12
+    # Using prior 1d values aligned to 12h bars
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_for_pivot = df_1d['close'].values
+    
+    camarilla_r1 = close_1d_for_pivot + (high_1d - low_1d) * 1.1 / 12
+    camarilla_s1 = close_1d_for_pivot - (high_1d - low_1d) * 1.1 / 12
+    
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # Volume SMA for confirmation (using 20-period)
+    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = 34 + 5  # EMA34 + buffer
+    warmup = max(34, 20) + 5  # EMA34 + Donchian(20) equivalent + volume(20) + buffer
     
     for i in range(warmup, n):
+        # Skip if outside trading session (08-20 UTC)
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
+        
         # Skip if any required data is NaN
-        if np.isnan(ema_34_1d_aligned[i]):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Calculate Camarilla levels from prior 1d candle
-        # Need at least one completed 1d bar to calculate levels
-        if i < 24:  # Need at least 24 6h bars (1d) to get prior day
-            signals[i] = 0.0
-            continue
-            
-        # Get index of prior completed 1d bar in 6h data
-        # Each 1d = 4 6h bars, so prior day ends at index i - (i % 4) - 4
-        prior_day_end_idx = i - (i % 4) - 4
-        if prior_day_end_idx < 0:
-            signals[i] = 0.0
-            continue
-            
-        # Get OHLC of prior completed 1d bar
-        phigh = high[prior_day_end_idx - 3:prior_day_end_idx + 1].max()
-        plow = low[prior_day_end_idx - 3:prior_day_end_idx + 1].min()
-        pclose = close[prior_day_end_idx]
-        
-        # Calculate Camarilla levels
-        range_val = phigh - plow
-        if range_val <= 0:
-            signals[i] = 0.0
-            continue
-            
-        camarilla_r4 = pclose + (range_val * 1.1 / 2)
-        camarilla_s4 = pclose - (range_val * 1.1 / 2)
-        
-        # Volume filter: current volume > 1.5x 20-period volume SMA
-        if i >= 20:
-            vol_sma_20 = np.mean(volume[i-20:i])
-            vol_confirm = volume[i] > (vol_sma_20 * 1.5)
-        else:
-            vol_confirm = False
+        # Volume filter: current volume > 2.5x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 2.5)
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above Camarilla R4 (close > R4)
+        # 1. Price breaks above Camarilla R1 (close > R1)
         # 2. 1d EMA34 uptrend (close > EMA34)
         # 3. Volume confirmation
-        if (close[i] > camarilla_r4) and \
+        if (close[i] > camarilla_r1_aligned[i]) and \
            (close[i] > ema_34_1d_aligned[i]) and vol_confirm:
-            signals[i] = 0.25
+            signals[i] = 0.30
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below Camarilla S4 (close < S4)
+        # 1. Price breaks below Camarilla S1 (close < S1)
         # 2. 1d EMA34 downtrend (close < EMA34)
         # 3. Volume confirmation
-        elif (close[i] < camarilla_s4) and \
+        elif (close[i] < camarilla_s1_aligned[i]) and \
              (close[i] < ema_34_1d_aligned[i]) and vol_confirm:
-            signals[i] = -0.25
+            signals[i] = -0.30
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "6h_CamarillaR4S4_1dEMA34_Volume_Filter_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_1dEMA34_Volume_Spike_v1"
+timeframe = "12h"
 leverage = 1.0
