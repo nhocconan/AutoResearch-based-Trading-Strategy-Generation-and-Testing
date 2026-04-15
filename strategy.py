@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h EMA trend and 1d RSI momentum with volume confirmation
-# Uses 4h EMA200 for trend direction (bull/bear filter) and 1d RSI(14) for momentum strength
+# Hypothesis: 1h mean-reversion strategy using 4h Bollinger Bands and 1h RSI with volume confirmation
+# Uses 4h Bollinger Bands (20, 2.0) for mean-reversion zones and 1h RSI(14) for oversold/overbought
 # Volume filter ensures trades occur during high conviction periods
 # Designed for low trade frequency (target 15-35/year) to avoid fee drag
-# Works in bull markets (trend + momentum) and bear markets (counter-trend bounces when RSI extremes)
+# Works in ranging markets (mean reversion at BB extremes) and trending markets (avoid trades against trend)
 # Uses discrete position sizing (0.20) to minimize churn
 
 def generate_signals(prices):
@@ -20,25 +20,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h and 1d data once
+    # Load 4h data once
     df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 50 or len(df_1d) < 50:
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # 4h EMA200 for trend filter
+    # 4h Bollinger Bands (20, 2.0)
     close_4h = df_4h['close'].values
-    ema200_4h = pd.Series(close_4h).ewm(span=200, min_periods=200, adjust=False).mean().values
+    sma20_4h = pd.Series(close_4h).rolling(window=20, min_periods=20).mean().values
+    std20_4h = pd.Series(close_4h).rolling(window=20, min_periods=20).std().values
+    upper_bb_4h = sma20_4h + 2.0 * std20_4h
+    lower_bb_4h = sma20_4h - 2.0 * std20_4h
     
-    # 1d RSI(14) for momentum
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
+    # 1h RSI(14) for momentum
+    delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
     avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
     rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1h = 100 - (100 / (1 + rs))
     
     # 1h volume moving average for confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -49,34 +50,34 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Get aligned indicators
-        ema200_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)[i]
-        rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)[i]
+        upper_bb_aligned = align_htf_to_ltf(prices, df_4h, upper_bb_4h)[i]
+        lower_bb_aligned = align_htf_to_ltf(prices, df_4h, lower_bb_4h)[i]
         
         # Skip if not enough data
-        if np.isnan(ema200_aligned) or np.isnan(rsi_aligned) or np.isnan(volume_ma[i]):
+        if np.isnan(upper_bb_aligned) or np.isnan(lower_bb_aligned) or np.isnan(rsi_1h[i]) or np.isnan(volume_ma[i]):
             continue
         
         # Volume confirmation: current volume > 1.3x 20-period average
         vol_confirm = volume[i] > 1.3 * volume_ma[i]
         
-        # Long conditions: price above 4h EMA200 (bullish trend) AND RSI > 50 (bullish momentum)
-        if close[i] > ema200_aligned and rsi_aligned > 50 and vol_confirm and position <= 0:
+        # Long conditions: price touches lower BB (oversold) AND RSI < 30 (oversold momentum)
+        if close[i] <= lower_bb_aligned and rsi_1h[i] < 30 and vol_confirm and position <= 0:
             position = 1
             signals[i] = position_size
-        # Short conditions: price below 4h EMA200 (bearish trend) AND RSI < 50 (bearish momentum)
-        elif close[i] < ema200_aligned and rsi_aligned < 50 and vol_confirm and position >= 0:
+        # Short conditions: price touches upper BB (overbought) AND RSI > 70 (overbought momentum)
+        elif close[i] >= upper_bb_aligned and rsi_1h[i] > 70 and vol_confirm and position >= 0:
             position = -1
             signals[i] = -position_size
-        # Exit: trend reversal (price crosses EMA200) or momentum dies (RSI crosses 50 opposite)
-        elif position == 1 and (close[i] < ema200_aligned or rsi_aligned < 50):
+        # Exit: price returns to middle of BB or RSI returns to neutral zone
+        elif position == 1 and (close[i] >= sma20_4h[i//16] if i >= 16 else close[i] or rsi_1h[i] > 50):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > ema200_aligned or rsi_aligned > 50):
+        elif position == -1 and (close[i] <= sma20_4h[i//16] if i >= 16 else close[i] or rsi_1h[i] < 50):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "1h_4h_EMA200_1d_RSI_Volume"
+name = "1h_4h_BB_RSI_MeanReversion"
 timeframe = "1h"
 leverage = 1.0
