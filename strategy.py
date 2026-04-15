@@ -3,10 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Weekly Bollinger Breakout with Volume Confirmation and ADX Trend Filter
-# Uses the previous week's Bollinger Bands (20, 2) as support/resistance levels. 
-# Breakouts above upper band or below lower band are traded only when confirmed by volume and ADX > 25 (trending market).
-# Works in bull markets (breakouts up) and bear markets (breakouts down). Target: 30-100 total trades.
+# Hypothesis: 12h Donchian breakout with 1d ATR filter and volume confirmation
+# Uses 12h Donchian channel breakout (20-period) with confirmation from 1d ATR and volume.
+# Breakouts above upper band or below lower band are traded only when 1d ATR confirms volatility
+# and volume is above average. Designed to capture trending moves while filtering false breakouts.
+# Works in bull markets (upward breakouts) and bear markets (downward breakouts).
+# Target: 50-150 total trades over 4 years.
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,58 +20,37 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data for Bollinger Bands
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 1d data for ATR filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Bollinger Bands (20, 2) on weekly
-    sma_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
-    upper_band = sma_20 + 2 * std_20
-    lower_band = sma_20 - 2 * std_20
-    
-    # Previous week's bands (shifted by 1 to avoid look-ahead)
-    prev_upper = np.roll(upper_band, 1)
-    prev_lower = np.roll(lower_band, 1)
-    prev_upper[0] = np.nan  # First value has no previous week
-    prev_lower[0] = np.nan
-    
-    # Align previous week's bands to daily timeframe
-    prev_upper_aligned = align_htf_to_ltf(prices, df_1w, prev_upper)
-    prev_lower_aligned = align_htf_to_ltf(prices, df_1w, prev_lower)
-    
-    # Load 1d data for ADX trend filter (using daily data itself)
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    # Calculate 14-period ATR on 1d
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First value
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Load 12h data for Donchian channel
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Smoothed values
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    # Calculate 20-period Donchian channel on 12h
+    high_max_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # Align indicators to 12h timeframe
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    high_max_20_aligned = align_htf_to_ltf(prices, df_12h, high_max_20)
+    low_min_20_aligned = align_htf_to_ltf(prices, df_12h, low_min_20)
     
     signals = np.zeros(n)
     position = 0
@@ -77,36 +58,39 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(prev_upper_aligned[i]) or np.isnan(prev_lower_aligned[i]) or
-            np.isnan(adx[i])):
+        if (np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(high_max_20_aligned[i]) or 
+            np.isnan(low_min_20_aligned[i])):
             continue
         
-        # Long entry: price breaks above previous week's upper band + volume confirmation + ADX > 25
-        if (close[i] > prev_upper_aligned[i] and
-            volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-            adx[i] > 25 and
+        # Long entry: price breaks above Donchian upper band + ATR confirmation + volume confirmation
+        if (close[i] > high_max_20_aligned[i] and
+            atr_1d_aligned[i] > 0.5 * np.median(atr_1d_aligned[max(0, i-10):i+1]) and
+            volume[i] > 1.5 * np.median(volume[max(0, i-10):i+1]) and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below previous week's lower band + volume confirmation + ADX > 25
-        elif (close[i] < prev_lower_aligned[i] and
-              volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-              adx[i] > 25 and
+        # Short entry: price breaks below Donchian lower band + ATR confirmation + volume confirmation
+        elif (close[i] < low_min_20_aligned[i] and
+              atr_1d_aligned[i] > 0.5 * np.median(atr_1d_aligned[max(0, i-10):i+1]) and
+              volume[i] > 1.5 * np.median(volume[max(0, i-10):i+1]) and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse breakout or ADX < 20 (ranging market)
-        elif position == 1 and (close[i] < prev_lower_aligned[i] or adx[i] < 20):
+        # Exit: reverse breakout or ATR collapse (low volatility)
+        elif position == 1 and (close[i] < low_min_20_aligned[i] or 
+                                atr_1d_aligned[i] < 0.3 * np.median(atr_1d_aligned[max(0, i-10):i+1])):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > prev_upper_aligned[i] or adx[i] < 20):
+        elif position == -1 and (close[i] > high_max_20_aligned[i] or 
+                                 atr_1d_aligned[i] < 0.3 * np.median(atr_1d_aligned[max(0, i-10):i+1])):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "1d_Weekly_Bollinger_Breakout_Volume_ADX"
-timeframe = "1d"
+name = "12h_Donchian_Breakout_ATR_Volume"
+timeframe = "12h"
 leverage = 1.0
