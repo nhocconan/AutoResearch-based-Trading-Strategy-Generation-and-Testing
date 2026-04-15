@@ -3,11 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Donchian(20) breakout with 1w EMA200 trend filter and volume confirmation.
-# Uses 1d Donchian upper/lower bands for breakout signals, filtered by 1w EMA200 for long-term trend bias.
-# Volume confirmation ensures breakouts are supported by participation. Designed for low trade frequency
-# (12-37 trades/year) to minimize fee drag. Works in bull/bear: 1w EMA200 avoids counter-trend trades,
-# Donchian breakouts capture sustained momentum after consolidation.
+# Hypothesis: 1h strategy using 4h Donchian channel breakout with volume confirmation and 1d EMA trend filter.
+# Uses 4h Donchian(20) for breakout signals, filtered by 1d EMA50 for trend bias and volume spike for momentum confirmation.
+# Session filter (08-20 UTC) reduces noise trades. Designed for low trade frequency (15-35/year) to minimize fee drag.
+# Works in bull/bear: 1d EMA50 avoids counter-trend trades, Donchian breakouts capture sustained momentum with volume confirmation.
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,73 +22,73 @@ def generate_signals(prices):
     # Pre-compute session hours to avoid datetime operations in loop
     hours = pd.DatetimeIndex(open_time).hour
     
-    # Get 1d and 1w HTF data once before loop
+    # Get 4h and 1d HTF data once before loop
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 50 or len(df_1w) < 50:
+    if len(df_4h) < 30 or len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d Indicators: Donchian(20) Channels ===
-    # Donchian upper/lower = rolling max(high)/min(low) over 20 periods
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # === 4h Indicators: Donchian Channel (20) ===
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    # Donchian upper = max(high, lookback=20)
+    donch_high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    # Donchian lower = min(low, lookback=20)
+    donch_low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    donch_high_aligned = align_htf_to_ltf(prices, df_4h, donch_high_20)
+    donch_low_aligned = align_htf_to_ltf(prices, df_4h, donch_low_20)
     
-    # === 1w Indicators: Trend Filter ===
-    # 1w EMA(200) for long-term trend bias
-    close_1w = df_1w['close'].values
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # === 1d Indicators: Trend Filter ===
+    # 1d EMA(50) for trend bias
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = 200
+    warmup = 100
     
     for i in range(warmup, n):
-        # Session filter: 08-20 UTC only (reduces noise, maintains liquidity)
+        # Session filter: 08-20 UTC only
         hour = hours[i]
         if hour < 8 or hour > 20:
             signals[i] = 0.0
             continue
             
-        # Volume filter: current volume > 1.5x 50-period volume SMA
-        vol_sma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-        vol_confirm = volume[i] > (vol_sma_50[i] * 1.5)
+        # Volume filter: current volume > 2.0x 20-period volume SMA
+        vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
         
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(ema_200_1w_aligned[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 1d Donchian(20) upper band
-        # 2. 1w price above EMA200 (bullish long-term trend)
+        # 1. Price breaks above 4h Donchian upper (20-period high)
+        # 2. 1d price above EMA50 (bullish trend bias)
         # 3. Volume confirmation
-        if (close[i] > donchian_high_aligned[i] and
-            close[i] > ema_200_1w_aligned[i] and
+        if (close[i] > donch_high_aligned[i] and
+            close[i] > ema_50_1d_aligned[i] and
             vol_confirm):
-            signals[i] = 0.25
+            signals[i] = 0.20
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below 1d Donchian(20) lower band
-        # 2. 1w price below EMA200 (bearish long-term trend)
+        # 1. Price breaks below 4h Donchian lower (20-period low)
+        # 2. 1d price below EMA50 (bearish trend bias)
         # 3. Volume confirmation
-        elif (close[i] < donchian_low_aligned[i] and
-              close[i] < ema_200_1w_aligned[i] and
+        elif (close[i] < donch_low_aligned[i] and
+              close[i] < ema_50_1d_aligned[i] and
               vol_confirm):
-            signals[i] = -0.25
+            signals[i] = -0.20
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "12h_Donchian20_EMA200_1w_VolFilter_v1"
-timeframe = "12h"
+name = "1h_Donchian20_EMA50_VolFilter_v1"
+timeframe = "1h"
 leverage = 1.0
