@@ -26,10 +26,6 @@ def generate_signals(prices):
     atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate daily EMA(34) for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
     # Calculate 6h ATR(14) for volatility entry filter
     tr1_6h = high - low
     tr2_6h = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
@@ -45,44 +41,36 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(atr_14_6h[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(atr_14_6h[i]) or np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility regime filter: only trade when daily ATR is elevated (> 0.8% of price)
-        vol_regime = atr_14_1d_aligned[i] > 0.008 * close[i]
-        
-        # Trend filter: price above/below daily EMA(34)
-        above_ema = close[i] > ema_34_1d_aligned[i]
-        below_ema = close[i] < ema_34_1d_aligned[i]
+        # Volatility regime filter: only trade when daily ATR is elevated (> 0.6% of price)
+        # This avoids low-volatility chop and focuses on momentum/trend days
+        vol_regime = atr_14_1d_aligned[i] > 0.006 * close[i]
         
         # Long conditions:
-        # 1. Price above daily EMA(34) (bullish bias)
-        # 2. Volume confirmation: volume > 1.5x average
-        # 3. 6h ATR > 0.5% of price (ensure sufficient volatility for move)
-        # 4. Daily volatility regime filter (avoid chop)
-        if (above_ema and
-            volume_ratio[i] > 1.5 and
-            atr_14_6h[i] > 0.005 * close[i] and
-            vol_regime):
+        # 1. Daily volatility regime filter (avoid chop)
+        # 2. 6h ATR > 0.3% of price (ensure sufficient volatility for move)
+        # 3. Volume confirmation: volume > 1.2x average
+        if (vol_regime and
+            atr_14_6h[i] > 0.003 * close[i] and
+            volume_ratio[i] > 1.2):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. Price below daily EMA(34) (bearish bias)
-        # 2. Volume confirmation: volume > 1.5x average
-        # 3. 6h ATR > 0.5% of price
-        # 4. Daily volatility regime filter
-        elif (below_ema and
-              volume_ratio[i] > 1.5 and
-              atr_14_6h[i] > 0.005 * close[i] and
-              vol_regime):
+        # 1. Daily volatility regime filter (avoid chop)
+        # 2. 6h ATR > 0.3% of price
+        # 3. Volume confirmation: volume > 1.2x average
+        elif (vol_regime and
+              atr_14_6h[i] > 0.003 * close[i] and
+              volume_ratio[i] > 1.2):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "6h_EMA34_Volume_Volatility_Regime_v1"
+name = "6h_Vol_Regime_ATR_Volume_Breakout_v2"
 timeframe = "6h"
 leverage = 1.0
