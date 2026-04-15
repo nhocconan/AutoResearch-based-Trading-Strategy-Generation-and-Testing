@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 25:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,56 +13,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly Donchian channel (55 periods)
-    df_1w = get_htf_data(prices, '1w')
-    donch_high = pd.Series(df_1w['high']).rolling(window=55, min_periods=55).max().values
-    donch_low = pd.Series(df_1w['low']).rolling(window=55, min_periods=55).min().values
-    donch_high_aligned = align_htf_to_ltf(prices, df_1w, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1w, donch_low)
+    # 1-day ATR(14) for volatility filter
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Daily ATR for volatility filter (14 periods)
+    # Get 1-day high/low for support/resistance levels
     df_1d = get_htf_data(prices, '1d')
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly volume average for confirmation
-    vol_ma = pd.Series(df_1w['volume']).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1w, vol_ma)
+    # Calculate 1-day pivot points (standard)
+    pp = (high_1d + low_1d + close_1d) / 3
+    r1 = 2 * pp - low_1d
+    s1 = 2 * pp - high_1d
+    r2 = pp + (high_1d - low_1d)
+    s2 = pp - (high_1d - low_1d)
+    r3 = high_1d + 2 * (pp - low_1d)
+    s3 = low_1d - 2 * (high_1d - pp)
+    
+    # Align pivot levels to 6h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Volume filter: current > 1.3x median of last 20 periods
+    vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
+    vol_threshold = 1.3 * vol_median
     
     signals = np.zeros(n)
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or
-            np.isnan(atr_aligned[i]) or np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(atr14[i]) or np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(vol_threshold[i])):
             continue
         
-        # Long: break above weekly Donchian high + volume > 1.5x weekly average
-        if (close[i] > donch_high_aligned[i] and 
-            volume[i] > 1.5 * vol_ma_aligned[i]):
+        # Long conditions:
+        # 1. Price above daily pivot (bullish bias)
+        # 2. Pullback to S1 or S2 with volume confirmation
+        # 3. Volatility filter: ATR > 0
+        if (close[i] > pp_aligned[i] and 
+            ((close[i] <= s1_aligned[i] * 1.005) or (close[i] <= s2_aligned[i] * 1.005)) and
+            volume[i] > vol_threshold[i] and atr14[i] > 0):
             signals[i] = 0.25
         
-        # Short: break below weekly Donchian low + volume > 1.5x weekly average
-        elif (close[i] < donch_low_aligned[i] and 
-              volume[i] > 1.5 * vol_ma_aligned[i]):
+        # Short conditions:
+        # 1. Price below daily pivot (bearish bias)
+        # 2. Pullback to R1 or R2 with volume confirmation
+        # 3. Volatility filter: ATR > 0
+        elif (close[i] < pp_aligned[i] and 
+              ((close[i] >= r1_aligned[i] * 0.995) or (close[i] >= r2_aligned[i] * 0.995)) and
+              volume[i] > vol_threshold[i] and atr14[i] > 0):
             signals[i] = -0.25
         
-        # Exit: price crosses back inside the Donchian channel
-        elif (i > 0 and 
-              ((signals[i-1] == 0.25 and close[i] < donch_high_aligned[i]) or
-               (signals[i-1] == -0.25 and close[i] > donch_low_aligned[i]))):
-            signals[i] = 0.0
-        
-        # Otherwise, hold previous position
+        # Exit conditions: price crosses daily pivot
+        elif i > 0:
+            if (signals[i-1] == 0.25 and close[i] < pp_aligned[i]) or \
+               (signals[i-1] == -0.25 and close[i] > pp_aligned[i]):
+                signals[i] = 0.0
+            else:
+                signals[i] = signals[i-1]
         else:
             signals[i] = signals[i-1]
     
     return signals
 
-name = "12h_WeeklyDonchian_Volume_Breakout"
-timeframe = "12h"
+name = "6h_DailyPivot_Pullback_Volume"
+timeframe = "6h"
 leverage = 1.0
