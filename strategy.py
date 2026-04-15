@@ -13,47 +13,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly HTF data once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h HTF data once before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    weekly_close = df_1w['close'].values
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_volume = df_1w['volume'].values
+    # Calculate 12h Williams %R (14-period) for mean reversion signals
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # Values: 0 to -100, where > -20 is overbought, < -80 is oversold
+    hh_14 = pd.Series(df_12h['high']).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(df_12h['low']).rolling(window=14, min_periods=14).min().values
+    williams_r = (hh_14 - df_12h['close'].values) / (hh_14 - ll_14 + 1e-10) * -100
     
-    # Calculate 20-period weekly ATR for volatility regime filter
-    weekly_close_prev = np.concatenate([[weekly_close[0]], weekly_close[:-1]])
-    tr = np.maximum(weekly_high - weekly_low,
-                    np.maximum(np.abs(weekly_high - weekly_close_prev),
-                               np.abs(weekly_low - weekly_close_prev)))
-    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
-    atr_ma_50 = pd.Series(atr_20).rolling(window=50, min_periods=50).mean().values
-    volatility_ratio = atr_20 / (atr_ma_50 + 1e-10)
+    # Calculate 12h ATR (14-period) for volatility filter
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_prev = np.concatenate([[close_12h[0]], close_12h[:-1]])
+    tr = np.maximum(high_12h - low_12h,
+                    np.maximum(np.abs(high_12h - close_prev),
+                               np.abs(low_12h - close_prev)))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ma_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
+    volatility_filter = atr_14 > (atr_ma_50 * 0.5)  # Trade only when ATR > 50% of its MA
     
-    # Calculate 50-period weekly EMA for trend filter
-    ema_50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align HTF indicators to 6h timeframe with proper delay
+    williams_r_6h = align_htf_to_ltf(prices, df_12h, williams_r)
+    volatility_filter_6h = align_htf_to_ltf(prices, df_12h, volatility_filter)
     
-    # Calculate weekly RSI(14) for momentum filter
-    delta = np.diff(weekly_close, prepend=weekly_close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14 = 100 - (100 / (1 + rs))
-    
-    # Align HTF indicators to daily timeframe with proper delay
-    ema_50_1d = align_htf_to_ltf(prices, df_1w, ema_50)
-    rsi_14_1d = align_htf_to_ltf(prices, df_1w, rsi_14)
-    volatility_ratio_1d = align_htf_to_ltf(prices, df_1w, volatility_ratio)
-    
-    # Calculate daily Donchian channels (20-period)
+    # Calculate 6h Donchian channels (20-period) for breakout signals
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate daily volume ratio (current vs 20-period average)
+    # Calculate 6h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
@@ -61,39 +53,36 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d[i]) or np.isnan(rsi_14_1d[i]) or 
-            np.isnan(volatility_ratio_1d[i]) or np.isnan(highest_20[i]) or 
-            np.isnan(lowest_20[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(williams_r_6h[i]) or np.isnan(volatility_filter_6h[i]) or 
+            np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
         # Entry conditions:
-        # 1. Weekly trend filter: price above/below weekly EMA50
-        # 2. Weekly momentum filter: RSI not extreme
-        # 3. Volatility regime: only trade in normal/high volatility (avoid low vol squeezes)
-        # 4. Daily Donchian breakout with volume confirmation
+        # 1. Williams %R extreme readings for mean reversion (oversold/overbought)
+        # 2. Volatility filter: only trade when volatility is expanding
+        # 3. Donchian breakout in direction of mean reversion
+        # 4. Volume confirmation
         # 5. Discrete position sizing: 0.25
         
-        # Long conditions
-        if (close[i] > ema_50_1d[i] and  # Uptrend filter
-            rsi_14_1d[i] < 70 and       # Not overbought
-            volatility_ratio_1d[i] > 0.8 and  # Avoid low volatility squeezes
-            close[i] > highest_20[i] and     # Donchian breakout
-            volume_ratio[i] > 1.5):        # Volume confirmation
+        # Long conditions: oversold + volume + breakout
+        if (williams_r_6h[i] < -80 and      # Oversold condition
+            volatility_filter_6h[i] and     # Volatility expanding
+            close[i] > highest_20[i] and    # Donchian breakout
+            volume_ratio[i] > 1.3):         # Volume confirmation
             signals[i] = 0.25
             
-        # Short conditions
-        elif (close[i] < ema_50_1d[i] and   # Downtrend filter
-              rsi_14_1d[i] > 30 and       # Not oversold
-              volatility_ratio_1d[i] > 0.8 and  # Avoid low volatility squeezes
-              close[i] < lowest_20[i] and      # Donchian breakdown
-              volume_ratio[i] > 1.5):        # Volume confirmation
+        # Short conditions: overbought + volume + breakdown
+        elif (williams_r_6h[i] > -20 and   # Overbought condition
+              volatility_filter_6h[i] and  # Volatility expanding
+              close[i] < lowest_20[i] and  # Donchian breakdown
+              volume_ratio[i] > 1.3):      # Volume confirmation
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "1d_WeeklyEMA_RSI_Volume_Donchian_Breakout_v2"
-timeframe = "1d"
+name = "6h_WilliamsR_Donchian_Breakout_Volume"
+timeframe = "6h"
 leverage = 1.0
