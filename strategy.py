@@ -18,9 +18,9 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
+    daily_close = df_1d['close'].values
     daily_high = df_1d['high'].values
     daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
     
     # Calculate daily pivot points (standard floor trader's pivots)
     pivot = (daily_high + daily_low + daily_close) / 3.0
@@ -34,53 +34,57 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr_14 = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align HTF indicators to 4h timeframe with proper delay
-    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    atr_14_4h = align_htf_to_ltf(prices, df_1d, atr_14)
+    # Align HTF indicators to 1h timeframe with proper delay
+    pivot_1h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_1h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_1h = align_htf_to_ltf(prices, df_1d, s1)
+    atr_14_1h = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Calculate 4h Donchian channels (20-period) for breakout signals
+    # Calculate 1h Donchian channels (20-period) for breakout confirmation
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 4h volume ratio (current vs 20-period average)
+    # Calculate 1h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
+    
+    # Session filter: 08-20 UTC (pre-compute hours)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     
     for i in range(100, n):
-        # Skip if any required data is NaN
-        if (np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
-            np.isnan(atr_14_4h[i]) or np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
-            np.isnan(volume_ratio[i])):
+        # Skip if any required data is NaN or outside session
+        if (np.isnan(pivot_1h[i]) or np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or 
+            np.isnan(atr_14_1h[i]) or np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
+            np.isnan(volume_ratio[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
         
         # Entry conditions:
-        # 1. 4h price breaks above R1 with volume confirmation → long
-        # 2. 4h price breaks below S1 with volume confirmation → short
+        # 1. 1h price breaks above R1 with volume confirmation → long
+        # 2. 1h price breaks below S1 with volume confirmation → short
         # 3. Volatility filter: ATR > 0.5% of price (avoid low volatility chop)
         # 4. Volume confirmation: volume > 1.3x average
-        # 5. Discrete position sizing: 0.25
+        # 5. Discrete position sizing: 0.20
         
-        # Long conditions: 4h breakout above R1
-        if (close[i] > r1_4h[i] and            # 4h price above R1 pivot
+        # Long conditions: 1h breakout above R1
+        if (close[i] > r1_1h[i] and            # 1h price above R1 pivot
             volume_ratio[i] > 1.3 and          # Volume confirmation
-            atr_14_4h[i] > 0.005 * close[i]):  # Volatility filter
-            signals[i] = 0.25
+            atr_14_1h[i] > 0.005 * close[i]):  # Volatility filter
+            signals[i] = 0.20
             
-        # Short conditions: 4h breakdown below S1
-        elif (close[i] < s1_4h[i] and          # 4h price below S1 pivot
+        # Short conditions: 1h breakdown below S1
+        elif (close[i] < s1_1h[i] and          # 1h price below S1 pivot
               volume_ratio[i] > 1.3 and        # Volume confirmation
-              atr_14_4h[i] > 0.005 * close[i]): # Volatility filter
-            signals[i] = -0.25
+              atr_14_1h[i] > 0.005 * close[i]): # Volatility filter
+            signals[i] = -0.20
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Pivot_R1_S1_Breakout_Volume_ATR_Filter"
-timeframe = "4h"
+name = "1h_Pivot_R1_S1_Breakout_Volume_ATR_Filter"
+timeframe = "1h"
 leverage = 1.0
