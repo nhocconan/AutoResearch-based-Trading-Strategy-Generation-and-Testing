@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d ADX > 25 trend filter
-# Long when price breaks above 20-period Donchian high + volume > 1.5x 20-period avg + 1d ADX > 25
-# Short when price breaks below 20-period Donchian low + volume > 1.5x 20-period avg + 1d ADX > 25
-# Uses discrete position sizing (0.30) to balance return and drawdown. Designed for low trade frequency (20-40/year).
-# Donchian channels provide clear structure; volume confirms breakout strength; ADX filter ensures trending markets only.
-# Works in bull markets (trend continuation) and bear markets (strong downtrends) by requiring ADX > 25.
+# Hypothesis: 12h Williams %R mean reversion with 1d ADX trend filter and volume spike
+# Long when Williams %R < -80 (oversold) + price > 12h EMA34 + volume > 2.0x 20-period avg + 1d ADX > 25 (strong trend)
+# Short when Williams %R > -20 (overbought) + price < 12h EMA34 + volume > 2.0x 20-period avg + 1d ADX > 25 (strong trend)
+# Williams %R identifies exhaustion points in trends; ADX filter ensures we only trade strong trends to avoid chop.
+# Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend) by requiring ADX > 25.
+# Discrete position sizing (0.25) minimizes fee churn. Target trade frequency: 15-30/year.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -28,6 +28,20 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
+    
+    # === 12h Indicators: Williams %R (14) and EMA34 ===
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
+    
+    # EMA34
+    ema34 = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Volume SMA for confirmation (using 20-period)
+    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # === 1d Indicator: ADX (trend strength filter) ===
     high_1d = df_1d['high'].values
@@ -90,19 +104,10 @@ def generate_signals(prices):
     
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # === LT Indicators: Donchian Channels (20-period) ===
-    # Donchian High: highest high over 20 periods
-    # Donchian Low: lowest low over 20 periods
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume SMA for confirmation (using 20-period)
-    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = 50  # Enough for Donchian(20) and 1d ADX
+    warmup = 100
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -110,36 +115,40 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
+        # Volume filter: current volume > 2.0x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
         
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+        if (np.isnan(williams_r[i]) or np.isnan(ema34[i]) or
             np.isnan(adx_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 20-period Donchian high
-        # 2. Trend (1d ADX > 25)
-        # 3. Volume confirmation
-        if (close[i] > donchian_high[i]) and \
+        # 1. Williams %R < -80 (oversold)
+        # 2. Price above EMA34 (trend alignment)
+        # 3. Strong trend (ADX > 25)
+        # 4. Volume confirmation
+        if (williams_r[i] < -80) and \
+           (close[i] > ema34[i]) and \
            (adx_aligned[i] > 25) and vol_confirm:
-            signals[i] = 0.30
+            signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below 20-period Donchian low
-        # 2. Trend (1d ADX > 25)
-        # 3. Volume confirmation
-        elif (close[i] < donchian_low[i]) and \
+        # 1. Williams %R > -20 (overbought)
+        # 2. Price below EMA34 (trend alignment)
+        # 3. Strong trend (ADX > 25)
+        # 4. Volume confirmation
+        elif (williams_r[i] > -20) and \
+             (close[i] < ema34[i]) and \
              (adx_aligned[i] > 25) and vol_confirm:
-            signals[i] = -0.30
+            signals[i] = -0.25
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "4h_Donchian20_Volume_ADX25_Filter_v1"
-timeframe = "4h"
+name = "12h_WilliamsR_EMA34_Volume_ADX25_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
