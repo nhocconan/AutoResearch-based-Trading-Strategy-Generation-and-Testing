@@ -3,104 +3,83 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 12h ADX trend filter
-# Uses the last 20-period high/low on 4h as breakout levels. Trades only when:
-# 1. Price breaks above/below Donchian channel
-# 2. Volume > 1.5x 20-period median volume (confirmation)
-# 3. 12h ADX > 25 (trending market)
-# Works in both bull and bear markets by capturing breakouts in the direction of trend.
-# Target: 50-150 total trades over 4 years.
+# Hypothesis: 1h Time-Based Momentum with 4h Trend Filter and Volume Confirmation
+# Uses 4h EMA trend direction and daily volume profile for bias, enters on 1h momentum bursts
+# during active sessions (08-20 UTC) with volume confirmation. Works in bull/bear by
+# following 4h trend. Target: 60-150 total trades over 4 years.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Calculate Donchian channels (20-period) on 4h
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Pre-compute hour filter for session (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
-    # Load 12h data for ADX trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Load 4h data for trend filter (EMA21)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 21:
         return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    ema_4h = pd.Series(df_4h['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Calculate ADX (14-period) on 12h
-    # True Range
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    
-    # Directional Movement
-    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
-                       np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)), 
-                        np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    # Load daily data for volume average (20-day)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    vol_20d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_20d_aligned = align_htf_to_ltf(prices, df_1d, vol_20d)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25  # Position size
+    base_size = 0.20  # Position size
     
-    for i in range(20, n):
+    for i in range(100, n):
+        # Skip if outside trading session
+        if not in_session[i]:
+            continue
+            
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(vol_20d_aligned[i])):
             continue
         
-        # Volume condition: current volume > 1.5x median of last 20 periods
-        vol_median = np.median(volume[max(0, i-19):i+1])
-        vol_ok = volume[i] > 1.5 * vol_median
-        
-        # Long entry: price breaks above Donchian high + volume + ADX > 25
-        if (close[i] > donchian_high[i] and vol_ok and
-            adx_aligned[i] > 25 and position <= 0):
+        # Long: price above 4h EMA (uptrend) + volume spike + upward momentum
+        if (close[i] > ema_4h_aligned[i] and
+            volume[i] > 1.5 * vol_20d_aligned[i] and
+            close[i] > close[i-1] and
+            close[i-1] > close[i-2] and
+            position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below Donchian low + volume + ADX > 25
-        elif (close[i] < donchian_low[i] and vol_ok and
-              adx_aligned[i] > 25 and position >= 0):
+        # Short: price below 4h EMA (downtrend) + volume spike + downward momentum
+        elif (close[i] < ema_4h_aligned[i] and
+              volume[i] > 1.5 * vol_20d_aligned[i] and
+              close[i] < close[i-1] and
+              close[i-1] < close[i-2] and
+              position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse breakout or ADX < 20 (ranging market)
-        elif position == 1 and (close[i] < donchian_low[i] or adx_aligned[i] < 20):
+        # Exit: trend reversal or momentum fade
+        elif position == 1 and (close[i] < ema_4h_aligned[i] or 
+                                (close[i] < close[i-1] and close[i-1] < close[i-2])):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > donchian_high[i] or adx_aligned[i] < 20):
+        elif position == -1 and (close[i] > ema_4h_aligned[i] or 
+                                 (close[i] > close[i-1] and close[i-1] > close[i-2])):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian_Breakout_Volume_ADX"
-timeframe = "4h"
+name = "1h_Trend_Momentum_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
