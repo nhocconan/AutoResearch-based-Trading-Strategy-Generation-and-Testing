@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Weekly Pivot Reversal with Volume Spike
-# Uses weekly pivot points (S1, R1, S2, R2) from prior week. 
-# Enters long when price touches S1/S2 with volume spike (>2x median) and RSI < 30 (oversold).
-# Enters short when price touches R1/R2 with volume spike and RSI > 70 (overbought).
-# Weekly pivot provides institutional support/resistance levels that work in both bull and bear markets.
-# Volume spike confirms institutional interest at these levels.
-# Target: 50-150 total trades over 4 years = 12-37/year.
+# Hypothesis: 12h Williams %R with 1d Trend Filter and Volume Spike
+# Williams %R identifies overbought/oversold conditions. Combined with 1d EMA trend filter
+# and volume spikes, it captures mean reversion in trending markets.
+# Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
+# Target: 50-150 total trades over 4 years.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,102 +19,80 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data for pivot points
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 2:
+    # Load 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points (standard formula)
-    # P = (H + L + C) / 3
-    # S1 = (2*P) - H
-    # R1 = (2*P) - L
-    # S2 = P - (H - L)
-    # R2 = P + (H - L)
-    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    s1 = (2 * pivot) - weekly_high
-    r1 = (2 * pivot) - weekly_low
-    s2 = pivot - (weekly_high - weekly_low)
-    r2 = pivot + (weekly_high - weekly_low)
+    # Calculate 34-period EMA on 1d
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Shift by 1 week to avoid look-ahead (use previous week's levels)
-    pivot = np.roll(pivot, 1)
-    s1 = np.roll(s1, 1)
-    r1 = np.roll(r1, 1)
-    s2 = np.roll(s2, 1)
-    r2 = np.roll(r2, 1)
-    pivot[0] = np.nan
-    s1[0] = np.nan
-    r1[0] = np.nan
-    s2[0] = np.nan
-    r2[0] = np.nan
+    # Align 1d EMA to 12h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align weekly pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
-    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
-    s2_aligned = align_htf_to_ltf(prices, df_weekly, s2)
-    r2_aligned = align_htf_to_ltf(prices, df_weekly, r2)
+    # Calculate Williams %R (14-period) on 12h
+    # We need 12h data for Williams %R calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 14:
+        return np.zeros(n)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate RSI(14) on 6h
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate highest high and lowest low over 14 periods
+    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
     
-    # Wilder's smoothing
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    williams_r = (highest_high - close_12h) / (highest_high - lowest_low + 1e-10) * -100
+    
+    # Align Williams %R to 12h timeframe (already on 12h, but need to align to 12h index of prices)
+    # Since we're using 12h data, we need to align it to the 12h resolution in prices
+    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r)
+    
+    # Volume spike detection: volume > 2.0 * 20-period median
+    volume_median = pd.Series(volume).rolling(window=20, min_periods=1).median().values
+    volume_spike = volume > 2.0 * volume_median
     
     signals = np.zeros(n)
     position = 0
     base_size = 0.25  # Position size
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or
-            np.isnan(s2_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(rsi[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(williams_r_aligned[i])):
             continue
         
-        # Volume spike condition: current volume > 2x median of last 20 periods
-        vol_median = np.median(volume[max(0, i-20):i+1])
-        volume_spike = volume[i] > 2.0 * vol_median
+        # Long entry: Williams %R oversold (< -80) + price above 1d EMA (uptrend) + volume spike
+        if (williams_r_aligned[i] < -80 and
+            close[i] > ema_34_1d_aligned[i] and
+            volume_spike[i] and
+            position <= 0):
+            position = 1
+            signals[i] = base_size
         
-        # Long conditions: price touches S1 or S2 with volume spike and RSI oversold
-        if volume_spike and rsi[i] < 30:
-            if (abs(close[i] - s1_aligned[i]) < 0.001 * close[i] or  # Within 0.1% of S1
-                abs(close[i] - s2_aligned[i]) < 0.001 * close[i]):   # Within 0.1% of S2
-                if position <= 0:
-                    position = 1
-                    signals[i] = base_size
+        # Short entry: Williams %R overbought (> -20) + price below 1d EMA (downtrend) + volume spike
+        elif (williams_r_aligned[i] > -20 and
+              close[i] < ema_34_1d_aligned[i] and
+              volume_spike[i] and
+              position >= 0):
+            position = -1
+            signals[i] = -base_size
         
-        # Short conditions: price touches R1 or R2 with volume spike and RSI overbought
-        elif volume_spike and rsi[i] > 70:
-            if (abs(close[i] - r1_aligned[i]) < 0.001 * close[i] or  # Within 0.1% of R1
-                abs(close[i] - r2_aligned[i]) < 0.001 * close[i]):   # Within 0.1% of R2
-                if position >= 0:
-                    position = -1
-                    signals[i] = -base_size
-        
-        # Exit conditions: opposite touch or RSI returns to neutral zone
-        elif position == 1:
-            if (abs(close[i] - r1_aligned[i]) < 0.001 * close[i] or
-                abs(close[i] - r2_aligned[i]) < 0.001 * close[i] or
-                rsi[i] > 50):
-                position = 0
-                signals[i] = 0.0
-        elif position == -1:
-            if (abs(close[i] - s1_aligned[i]) < 0.001 * close[i] or
-                abs(close[i] - s2_aligned[i]) < 0.001 * close[i] or
-                rsi[i] < 50):
-                position = 0
-                signals[i] = 0.0
+        # Exit: Williams %R crosses back through -50 (mean reversion) or opposite signal
+        elif position == 1 and (williams_r_aligned[i] > -50 or 
+                               (williams_r_aligned[i] > -20 and close[i] < ema_34_1d_aligned[i])):
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and (williams_r_aligned[i] < -50 or 
+                                (williams_r_aligned[i] < -80 and close[i] > ema_34_1d_aligned[i])):
+            position = 0
+            signals[i] = 0.0
     
     return signals
 
-name = "6h_WeeklyPivot_Reversal_Volume_RSI"
-timeframe = "6h"
+name = "12h_WilliamsR_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
