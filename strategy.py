@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R1/S1 breakout with 1d volume spike and choppiness regime filter
-# Long when price breaks above 1d Camarilla R1 + 12h volume > 2x 20-period avg + CHOP(14) > 61.8 (range)
-# Short when price breaks below 1d Camarilla S1 + 12h volume > 2x 20-period avg + CHOP(14) > 61.8 (range)
-# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (12-30/year).
-# Camarilla levels provide high-probability reversal points in ranging markets. Volume spike confirms breakout validity.
-# Chop filter ensures we only trade in ranging conditions where mean reversion works, avoiding strong trends that break Camarilla levels.
-# Works in bull markets (buying dips at S1 in range) and bear markets (selling rallies at R1 in range) by requiring choppy regime.
+# Hypothesis: 4h Camarilla pivot breakout with 1d volume spike and choppiness regime filter
+# Long when price breaks above Camarilla R3 (1d) + volume > 2x 20-period average + CHOP > 61.8 (range market)
+# Short when price breaks below Camarilla S3 (1d) + volume > 2x 20-period average + CHOP > 61.8
+# Uses discrete position sizing (0.30) and ATR-based stoploss. Designed for 20-40 trades/year.
+# Camarilla pivots provide precise intraday support/resistance levels. Volume spike confirms breakout strength.
+# Choppiness filter ensures we only trade in ranging markets where mean reversion at pivots works best.
+# Works in both bull and bear markets by fading extreme moves back to the mean in range-bound conditions.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -30,64 +30,81 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d Indicator: Camarilla Pivot Levels (R1, S1) ===
+    # === 1d Indicator: Camarilla Pivot Levels (R3, S3) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot point
-    pivot = (high_1d + low_1d + close_1d) / 3.0
+    # Typical price for pivot calculation
+    typical_price = (high_1d + low_1d + close_1d) / 3.0
     range_1d = high_1d - low_1d
     
-    # Camarilla levels: R1 = close + (range * 1.1/12), S1 = close - (range * 1.1/12)
-    camarilla_r1 = close_1d + (range_1d * 1.1 / 12)
-    camarilla_s1 = close_1d - (range_1d * 1.1 / 12)
+    # Camarilla levels
+    camarilla_r3 = close_1d + (range_1d * 1.1 / 4.0)
+    camarilla_s3 = close_1d - (range_1d * 1.1 / 4.0)
     
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Align Camarilla levels to 4h timeframe (no extra delay needed for pivot points)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # === 12h Indicator: Volume Spike (20-period avg) ===
+    # === 4h Indicators: Volume Spike and Choppiness Index ===
+    # Volume SMA for confirmation (20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # === 12h Indicator: Choppiness Index (CHOP) for regime filter ===
-    # CHOP = 100 * log10(sum(ATR(14)) / log10(n)) / log10(n)
-    # High CHOP (>61.8) = ranging market (good for mean reversion)
-    # Low CHOP (<38.2) = trending market (avoid for Camarilla mean reversion)
+    # True Range for Choppiness Index
+    high_shift = np.roll(high, 1)
+    low_shift = np.roll(low, 1)
+    close_shift = np.roll(close, 1)
+    high_shift[0] = high[0]
+    low_shift[0] = low[0]
+    close_shift[0] = close[0]
     
-    # Calculate True Range for CHOP
     tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = high[0] - low[0]
-    tr2[0] = np.abs(high[0] - close[0])
-    tr3[0] = np.abs(low[0] - close[0])
+    tr2 = np.abs(high - close_shift)
+    tr3 = np.abs(low - close_shift)
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # ATR(14) using Wilder's smoothing
+    # ATR (14-period) for denominator of CHOP
     atr_period = 14
     atr = np.zeros_like(tr)
     atr[atr_period-1] = np.mean(tr[:atr_period])
     for i in range(atr_period, len(tr)):
         atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
     
-    # CHOP calculation: 100 * log10(sum(ATR(14) over 14 periods) / log10(14)) / log10(14)
+    # Sum of TRUE RANGE over chop_period for numerator
     chop_period = 14
-    atr_sum = np.zeros_like(atr)
-    for i in range(chop_period-1, len(atr)):
-        atr_sum[i] = np.sum(atr[i-chop_period+1:i+1])
-    
-    # Avoid log10(0) or log10(1) issues
-    chop = np.zeros_like(atr)
-    for i in range(chop_period-1, len(atr)):
-        if atr_sum[i] > 0 and i+1 > 1:
-            chop[i] = 100 * np.log10(atr_sum[i]) / np.log10(i+1)
+    sum_tr = np.zeros_like(tr)
+    for i in range(chop_period-1, len(tr)):
+        if i == chop_period-1:
+            sum_tr[i] = np.sum(tr[:chop_period])
         else:
-            chop[i] = 50.0  # neutral value
+            sum_tr[i] = sum_tr[i-1] - tr[i-chop_period] + tr[i]
+    
+    # Max and Min close over chop_period for denominator
+    max_close = np.zeros_like(close)
+    min_close = np.zeros_like(close)
+    for i in range(chop_period-1, len(close)):
+        if i == chop_period-1:
+            max_close[i] = np.max(close[:chop_period])
+            min_close[i] = np.min(close[:chop_period])
+        else:
+            max_close[i] = max(max_close[i-1], close[i])
+            min_close[i] = min(min_close[i-1], close[i])
+    
+    # Choppiness Index: CHOP = 100 * LOG10(sum_tr / (ATR * chop_period)) / LOG10(chop_period)
+    # Avoid division by zero and invalid values
+    denominator = atr * chop_period
+    chop_raw = np.zeros_like(tr)
+    valid_chop = (denominator > 0) & (sum_tr > 0)
+    chop_raw[valid_chop] = 100 * np.log10(sum_tr[valid_chop] / denominator[valid_chop]) / np.log10(chop_period)
+    
+    # CHOP values typically range 0-100; >61.8 = ranging, <38.2 = trending
+    chop = chop_raw
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(30, 20, chop_period) + 5  # 1d data + volume(20) + CHOP(14)
+    warmup = max(20, atr_period + chop_period) + 5  # volume(20) + ATR(14) + CHOP(14) + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -98,36 +115,36 @@ def generate_signals(prices):
         # Volume filter: current volume > 2x 20-period volume SMA
         vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
         
-        # Chop filter: CHOP > 61.8 (ranging market)
+        # Choppiness filter: CHOP > 61.8 (ranging market)
         chop_filter = chop[i] > 61.8
         
-        # Skip if any required data is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
+        # Skip if any required data is NaN or invalid
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
             np.isnan(vol_sma_20[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 1d Camarilla R1
+        # 1. Price breaks above Camarilla R3 (1d)
         # 2. Volume confirmation
-        # 3. Chopping regime (range-bound market)
-        if (close[i] > camarilla_r1_aligned[i]) and \
+        # 3. Chop filter (ranging market)
+        if (close[i] > camarilla_r3_aligned[i]) and \
            vol_confirm and chop_filter:
-            signals[i] = 0.25
+            signals[i] = 0.30
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below 1d Camarilla S1
+        # 1. Price breaks below Camarilla S3 (1d)
         # 2. Volume confirmation
-        # 3. Chopping regime (range-bound market)
-        elif (close[i] < camarilla_s1_aligned[i]) and \
+        # 3. Chop filter (ranging market)
+        elif (close[i] < camarilla_s3_aligned[i]) and \
              vol_confirm and chop_filter:
-            signals[i] = -0.25
+            signals[i] = -0.30
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "12h_Camarilla_R1S1_1dVolSpike2x_Chop_Filter_v1"
-timeframe = "12h"
+name = "4h_CamarillaR3S3_1dVolumeSpike_Chop_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
