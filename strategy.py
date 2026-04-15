@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h 1-day Range Breakout with Volume Confirmation and ADX Trend Filter
-# Uses the previous day's high/low as support/resistance levels. Breakouts above previous day's high
-# or below previous day's low are traded only when confirmed by volume and ADX > 25 (trending market).
-# Works in bull markets (breakouts up) and bear markets (breakouts down). Target: 50-150 total trades.
-# Timeframe: 12h, HTF: 1d
+# Hypothesis: 1d Weekly Range Breakout with Volume Confirmation and Trend Filter
+# Uses previous week's high/low as support/resistance. Breakouts above weekly high or below weekly low
+# are traded only when confirmed by volume (1.5x median) and weekly trend (close > weekly SMA50 for long, < for short).
+# Works in bull markets (breakouts up) and bear markets (breakouts down). Target: 30-100 total trades.
+# Timeframe: 1d, HTF: 1w
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,99 +19,69 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data for previous day's high/low
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load weekly data for previous week's high/low and trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Load 12h data for ADX trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Previous week's high and low (shifted by 1 to avoid look-ahead)
+    prev_high_1w = np.roll(high_1w, 1)
+    prev_low_1w = np.roll(low_1w, 1)
+    prev_high_1w[0] = np.nan  # First value has no previous week
+    prev_low_1w[0] = np.nan
     
-    # Previous day's high and low (shifted by 1 to avoid look-ahead)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_high_1d[0] = np.nan  # First value has no previous day
-    prev_low_1d[0] = np.nan
+    # Align previous week's high/low to daily timeframe
+    prev_high_1w_aligned = align_htf_to_ltf(prices, df_1w, prev_high_1w)
+    prev_low_1w_aligned = align_htf_to_ltf(prices, df_1w, prev_low_1w)
     
-    # Align previous day's high/low to 12h timeframe
-    prev_high_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_high_1d)
-    prev_low_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_low_1d)
+    # Weekly trend: close > SMA50 for bullish, < SMA50 for bearish
+    sma50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
+    weekly_bullish = close_1w > sma50_1w
+    weekly_bearish = close_1w < sma50_1w
     
-    # Calculate ADX (14-period) on 12h
-    # True Range
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    
-    # Directional Movement
-    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
-                       np.maximum(high_12h - np.roll(close_12h, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(close_12h, 1)), 
-                        np.maximum(np.roll(close_12h, 1) - low_12h, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    # Align weekly trend to daily timeframe
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
     
     signals = np.zeros(n)
     position = 0
     base_size = 0.25  # Position size
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(prev_high_1d_aligned[i]) or np.isnan(prev_low_1d_aligned[i]) or
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(prev_high_1w_aligned[i]) or np.isnan(prev_low_1w_aligned[i]) or
+            np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i])):
             continue
         
-        # Long entry: price breaks above previous day's high + volume confirmation + ADX > 25
-        if (close[i] > prev_high_1d_aligned[i] and
+        # Long entry: price breaks above previous week's high + volume confirmation + weekly bullish trend
+        if (close[i] > prev_high_1w_aligned[i] and
             volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-            adx_aligned[i] > 25 and
+            weekly_bullish_aligned[i] > 0.5 and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below previous day's low + volume confirmation + ADX > 25
-        elif (close[i] < prev_low_1d_aligned[i] and
+        # Short entry: price breaks below previous week's low + volume confirmation + weekly bearish trend
+        elif (close[i] < prev_low_1w_aligned[i] and
               volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-              adx_aligned[i] > 25 and
+              weekly_bearish_aligned[i] > 0.5 and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse breakout or ADX < 20 (ranging market)
-        elif position == 1 and (close[i] < prev_low_1d_aligned[i] or adx_aligned[i] < 20):
+        # Exit: reverse breakout or trend change
+        elif position == 1 and (close[i] < prev_low_1w_aligned[i] or weekly_bullish_aligned[i] <= 0.5):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > prev_high_1d_aligned[i] or adx_aligned[i] < 20):
+        elif position == -1 and (close[i] > prev_high_1w_aligned[i] or weekly_bearish_aligned[i] <= 0.5):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "12h_1d_Range_Breakout_Volume_ADX"
-timeframe = "12h"
+name = "1d_1w_Range_Breakout_Volume_Trend"
+timeframe = "1d"
 leverage = 1.0
