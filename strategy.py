@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA trend direction + RSI(2) mean reversion + volume spike filter
-# Long when: KAMA rising (bullish trend) + RSI(2) < 10 (extreme oversold) + volume > 2.0x 20-day avg
-# Short when: KAMA falling (bearish trend) + RSI(2) > 90 (extreme overbought) + volume > 2.0x 20-day avg
-# Uses discrete position sizing (0.30) to minimize fee churn. Designed for low trade frequency (10-25/year).
-# KAMA adapts to market noise, reducing whipsaws in choppy markets. RSI(2) captures short-term mean reversion.
-# Volume spike confirms institutional participation. Works in bull markets (buy oversold dips) and bear markets (sell overbought rallies).
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA34 trend filter and volume confirmation
+# Long when 6h Bull Power > 0 + 1d EMA34 rising + volume > 1.5x 20-period avg
+# Short when 6h Bear Power < 0 + 1d EMA34 falling + volume > 1.5x 20-period avg
+# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (12-30/year).
+# Elder Ray measures bull/bear power relative to EMA13. Combined with 1d EMA34 trend filter, it avoids counter-trend trades.
+# Works in bull markets (buy strength on dips) and bear markets (sell weakness on rallies) by requiring alignment with higher timeframe trend.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,80 +20,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Indicator: KAMA (trend direction) ===
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close, n=10))
-    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)[:len(change)]
-    er = np.where(volatility != 0, change / volatility, 0)
+    # Precompute session hours (08-20 UTC) for filter
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Get 1d HTF data once before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Initialize KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # === 1d Indicator: EMA34 (trend direction) ===
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # === 1d Indicator: RSI(2) ===
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate EMA34 slope (rising/falling)
+    ema34_slope = np.zeros_like(ema34_1d_aligned)
+    ema34_slope[1:] = ema34_1d_aligned[1:] - ema34_1d_aligned[:-1]
+    ema34_rising = ema34_slope > 0
+    ema34_falling = ema34_slope < 0
     
-    # First average
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    avg_gain[1] = np.mean(gain[:1]) if len(gain) >= 1 else 0
-    avg_loss[1] = np.mean(loss[:1]) if len(loss) >= 1 else 0
+    # === 6h Indicator: Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13) ===
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13  # Bull Power: High - EMA13
+    bear_power = low - ema13   # Bear Power: Low - EMA13
     
-    # Wilder's smoothing
-    for i in range(2, n):
-        avg_gain[i] = (avg_gain[i-1] * 1 + gain[i-1]) / 2
-        avg_loss[i] = (avg_loss[i-1] * 1 + loss[i-1]) / 2
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # === 1d Indicator: Volume SMA(20) ===
+    # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(30, 2, 20) + 5  # KAMA(30) + RSI(2) + volume(20)
+    warmup = max(34, 13, 20) + 2  # EMA34(34) + EMA13(13) + volume(20)
     
     for i in range(warmup, n):
-        # Volume filter: current volume > 2.0x 20-day volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
+        # Skip if outside trading session (08-20 UTC)
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
+        
+        # Volume filter: current volume > 1.5x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. KAMA rising (bullish trend)
-        # 2. RSI(2) < 10 (extreme oversold)
+        # 1. 6h Bull Power > 0 (buying strength)
+        # 2. 1d EMA34 rising (uptrend)
         # 3. Volume confirmation
-        if (kama[i] > kama[i-1]) and \
-           (rsi[i] < 10) and vol_confirm:
-            signals[i] = 0.30
+        if (bull_power[i] > 0) and \
+           ema34_rising[i] and vol_confirm:
+            signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. KAMA falling (bearish trend)
-        # 2. RSI(2) > 90 (extreme overbought)
+        # 1. 6h Bear Power < 0 (selling pressure)
+        # 2. 1d EMA34 falling (downtrend)
         # 3. Volume confirmation
-        elif (kama[i] < kama[i-1]) and \
-             (rsi[i] > 90) and vol_confirm:
-            signals[i] = -0.30
+        elif (bear_power[i] < 0) and \
+             ema34_falling[i] and vol_confirm:
+            signals[i] = -0.25
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "1d_KAMA_RSI2_Volume_Spike_v1"
-timeframe = "1d"
+name = "6h_ElderRay_EMA13_1dEMA34_Volume_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
