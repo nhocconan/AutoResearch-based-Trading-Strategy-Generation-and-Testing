@@ -26,14 +26,14 @@ def generate_signals(prices):
     r2 = pivot + (daily_high - daily_low)
     s2 = pivot - (daily_high - daily_low)
     
-    # Align pivot levels to 6h timeframe
+    # Align pivot levels to 12h timeframe
     pivot_aligned = align_htf_to_ltf(prices, daily, pivot)
     r1_aligned = align_htf_to_ltf(prices, daily, r1)
     s1_aligned = align_htf_to_ltf(prices, daily, s1)
     r2_aligned = align_htf_to_ltf(prices, daily, r2)
     s2_aligned = align_htf_to_ltf(prices, daily, s2)
     
-    # Volume filter: current 6h volume > 1.5x 20-period average volume
+    # Volume filter: current 12h volume > 1.5x 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
     
@@ -72,6 +72,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Pivot_R1_S1_R2_S2_Breakout_Volume_RangeFilter"
-timeframe = "6h"
+name = "12h_Pivot_R1_S1_R2_S2_Breakout_Volume_RangeFilter"
+timeframe = "12h"
 leverage = 1.0
