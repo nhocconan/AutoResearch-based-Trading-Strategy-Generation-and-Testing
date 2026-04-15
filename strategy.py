@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with volume confirmation and 1d EMA trend filter
-# Long when price breaks above 1d Camarilla R3 level + volume > 1.5x 20-period avg + price > 1d EMA50
-# Short when price breaks below 1d Camarilla S3 level + volume > 1.5x 20-period avg + price < 1d EMA50
-# Uses 1d price structure (Camarilla pivots) and 1d EMA for multi-timeframe trend alignment on 12h chart
-# Designed for low trade frequency (12-25/year) to minimize fee drag
-# Session filter (08-20 UTC) reduces noise during low-liquidity hours
-# Works in both bull and bear markets by requiring volume confirmation and trend alignment
+# Hypothesis: 4h Williams %R reversal with volume spike and 12h EMA trend filter
+# Long when Williams %R(14) crosses above -80 (oversold reversal) + volume > 2.0x 20-period avg + price > 12h EMA50
+# Short when Williams %R(14) crosses below -20 (overbought reversal) + volume > 2.0x 20-period avg + price < 12h EMA50
+# Uses 4h price momentum (Williams %R) and 12h EMA for multi-timeframe trend alignment
+# Designed for low trade frequency (15-25/year) to minimize fee drag while capturing reversals in both bull and bear markets
+# Volume spike filter ensures participation, reducing false signals
+# Works in ranging markets via mean reversion and in trending markets via trend filter alignment
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,30 +25,32 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d HTF data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    # Get 4h HTF data once before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # === 1d Indicators: Camarilla Pivot Levels (R3, S3) and EMA50 ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 12h HTF data once before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 60:
+        return np.zeros(n)
     
-    # Calculate pivot point (PP)
-    pivot_point_1d = (high_1d + low_1d + close_1d) / 3.0
+    # === 4h Indicators: Williams %R(14) ===
+    highest_high_4h = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_4h = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r_4h = -100 * (highest_high_4h - close) / (highest_high_4h - lowest_low_4h)
+    # Handle division by zero (when high == low)
+    williams_r_4h = np.where((highest_high_4h - lowest_low_4h) == 0, -50, williams_r_4h)
     
-    # Calculate Camarilla levels
-    camarilla_r3_1d = pivot_point_1d + (high_1d - low_1d) * 1.1 / 4.0
-    camarilla_s3_1d = pivot_point_1d - (high_1d - low_1d) * 1.1 / 4.0
+    # === 12h Indicator: EMA50 ===
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 1d EMA50
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align all HTF indicators to 12h timeframe
-    camarilla_r3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
-    camarilla_s3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align all HTF indicators to 4h timeframe
+    williams_r_4h_aligned = align_htf_to_ltf(prices, df_4h, williams_r_4h)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     
@@ -61,30 +63,34 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period volume SMA
+        # Volume filter: current volume > 2.0x 20-period volume SMA
         vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
+        vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
         
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3_1d_aligned[i]) or np.isnan(camarilla_s3_1d_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(williams_r_4h_aligned[i]) or np.isnan(ema_50_12h_aligned[i]) or
+            np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
+        # Previous Williams %R for crossover detection
+        prev_williams_r = williams_r_4h_aligned[i-1]
+        curr_williams_r = williams_r_4h_aligned[i]
+        
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 1d Camarilla R3 level
+        # 1. Williams %R crosses above -80 (oversold reversal)
         # 2. Volume confirmation
-        # 3. Price above 1d EMA50 (uptrend)
-        if (close[i] > camarilla_r3_1d_aligned[i]) and vol_confirm and \
-           (close[i] > ema_50_1d_aligned[i]):
+        # 3. Price above 12h EMA50 (uptrend filter)
+        if (prev_williams_r <= -80 and curr_williams_r > -80) and vol_confirm and \
+           (close[i] > ema_50_12h_aligned[i]):
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below 1d Camarilla S3 level
+        # 1. Williams %R crosses below -20 (overbought reversal)
         # 2. Volume confirmation
-        # 3. Price below 1d EMA50 (downtrend)
-        elif (close[i] < camarilla_s3_1d_aligned[i]) and vol_confirm and \
-             (close[i] < ema_50_1d_aligned[i]):
+        # 3. Price below 12h EMA50 (downtrend filter)
+        elif (prev_williams_r >= -20 and curr_williams_r < -20) and vol_confirm and \
+             (close[i] < ema_50_12h_aligned[i]):
             signals[i] = -0.25
         
         else:
@@ -92,6 +98,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Camarilla_R3S3_Volume_1dEMA50_Filter_v1"
-timeframe = "12h"
+name = "4h_WilliamsR_VolumeSpike_12hEMA50_TrendFilter_v1"
+timeframe = "4h"
 leverage = 1.0
