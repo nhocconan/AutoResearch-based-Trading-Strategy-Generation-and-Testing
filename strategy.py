@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h ADX-based trend following with 1d volatility filter
-# Uses ADX to identify strong trends (trending when ADX>25, ranging when ADX<20),
-# enters long when +DI crosses above -DI in trending markets with volatility filter,
-# and short when -DI crosses above +DI. Volatility filter avoids entries during
-# extreme volatility spikes that often lead to false breakouts. Designed to work
-# in both bull and bear markets by only taking trades in the direction of the
-# primary trend identified by ADX, with hysteresis to prevent whipsaw.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) + volume confirmation + weekly EMA trend filter
+# Elder Ray measures bull/bear power relative to EMA13. Strong bull power (high-EMA13) with
+# volume confirms uptrend strength; strong bear power (low-EMA13) with volume confirms
+# downtrend. Weekly EMA50 filters for higher-timeframe trend alignment. Works in bull
+# by taking longs with bull power, and in bear by taking shorts with bear power.
+# Target: 50-150 total trades over 4 years (12-37/year) with disciplined entries.
 
 def generate_signals(prices):
     n = len(prices)
@@ -21,63 +20,45 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data (primary timeframe) for price action and ADX calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Load 6h data for Elder Ray calculation
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 50:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
     
-    # Load 1d data for volatility filter (ATR)
+    # Load 1d data for volume average
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    vol_1d = df_1d['volume'].values
     
-    # Calculate ADX (14-period) on 4h
-    # True Range
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Load 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    close_1w = df_1w['close'].values
     
-    # Directional Movement
-    up_move = np.diff(high_4h, prepend=high_4h[0])
-    down_move = np.diff(low_4h, prepend=low_4h[0])
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Calculate EMA13 on 6h for Elder Ray
+    ema13_6h = pd.Series(close_6h).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Smoothed DM and TR
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
+    # Calculate Bull Power (High - EMA13) and Bear Power (Low - EMA13)
+    bull_power = high_6h - ema13_6h
+    bear_power = low_6h - ema13_6h
     
-    # ADX calculation
-    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10) * 100
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Calculate volume average (20-period on 1d)
+    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate ATR (14-period) on 1d for volatility filter
-    tr1d = high_1d - low_1d
-    tr2d = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3d = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_d = np.maximum(tr1d, np.maximum(tr2d, tr3d))
-    tr_d[0] = tr1d[0]  # First value
-    atr_1d = pd.Series(tr_d).rolling(window=14, min_periods=14).mean().values
+    # Calculate EMA50 on 1w for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volatility filter: avoid extreme volatility (ATR > 1.5 * 50-period MA of ATR)
-    atr_ma_50d = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
-    vol_filter = atr_1d < 1.5 * atr_ma_50d
-    
-    # Align all indicators to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
-    plus_di_aligned = align_htf_to_ltf(prices, df_4h, plus_di)
-    minus_di_aligned = align_htf_to_ltf(prices, df_4h, minus_di)
-    vol_filter_aligned = align_htf_to_ltf(prices, df_1d, vol_filter)
+    # Align all indicators to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_6h, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_6h, bear_power)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     signals = np.zeros(n)
     position = 0
@@ -85,38 +66,36 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx_aligned[i]) or np.isnan(plus_di_aligned[i]) or
-            np.isnan(minus_di_aligned[i]) or np.isnan(vol_filter_aligned[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
+            np.isnan(vol_avg_aligned[i]) or np.isnan(ema50_1w_aligned[i])):
             continue
         
-        # Long entry: ADX > 25 (trending) + +DI crosses above -DI + volatility filter
-        if (adx_aligned[i] > 25 and
-            plus_di_aligned[i] > minus_di_aligned[i] and
-            plus_di_aligned[i-1] <= minus_di_aligned[i-1] and
-            vol_filter_aligned[i] and
+        # Long entry: strong bull power + volume above average + price above weekly EMA50
+        if (bull_power_aligned[i] > 0 and
+            volume[i] > vol_avg_aligned[i] and
+            close[i] > ema50_1w_aligned[i] and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: ADX > 25 (trending) + -DI crosses above +DI + volatility filter
-        elif (adx_aligned[i] > 25 and
-              minus_di_aligned[i] > plus_di_aligned[i] and
-              minus_di_aligned[i-1] <= plus_di_aligned[i-1] and
-              vol_filter_aligned[i] and
+        # Short entry: strong bear power + volume above average + price below weekly EMA50
+        elif (bear_power_aligned[i] < 0 and
+              volume[i] > vol_avg_aligned[i] and
+              close[i] < ema50_1w_aligned[i] and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: ADX < 20 (ranging market) or opposite DI crossover
-        elif position == 1 and (adx_aligned[i] < 20 or minus_di_aligned[i] > plus_di_aligned[i]):
+        # Exit: opposite power signal or loss of weekly trend alignment
+        elif position == 1 and (bear_power_aligned[i] < 0 or close[i] < ema50_1w_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (adx_aligned[i] < 20 or plus_di_aligned[i] > minus_di_aligned[i]):
+        elif position == -1 and (bull_power_aligned[i] > 0 or close[i] > ema50_1w_aligned[i]):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_ADX_Trend_Filter_Volatility"
-timeframe = "4h"
+name = "6h_ElderRay_Volume_WeeklyTrend"
+timeframe = "6h"
 leverage = 1.0
