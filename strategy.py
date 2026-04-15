@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R Mean Reversion with Daily Trend Filter
-# Uses Williams %R(14) for mean reversion entries (oversold/overbought) in the direction of the daily trend.
-# In bull markets (price > daily SMA50): buy oversold (%R < -80), exit overbought (%R > -20).
-# In bear markets (price < daily SMA50): sell overbought (%R > -20), exit oversold (%R < -80).
-# Includes volume confirmation to filter low-probability signals. Target: 20-50 trades/year.
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d ADX filter
+# Long when price breaks above 20-period high + volume > 1.5x median volume + 1d ADX > 25
+# Short when price breaks below 20-period low + volume > 1.5x median volume + 1d ADX > 25
+# Exit on opposite breakout or 1d ADX < 20 (ranging market)
+# Works in bull markets (breakouts up) and bear markets (breakouts down)
+# Target: 100-200 total trades over 4 years (25-50/year)
 # Timeframe: 4h, HTF: 1d
 
 def generate_signals(prices):
@@ -20,72 +21,85 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data for trend filter and Williams %R calculation
+    # Load 1d data for ADX filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Williams %R (14-period) on 1d
-    # Highest high and lowest low over 14 periods
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # Calculate ADX (14-period) on 1d
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    williams_r = (highest_high - close_1d) / (highest_high - lowest_low + 1e-10) * -100
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(close_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(close_1d, 1)), 
+                        np.maximum(np.roll(close_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Calculate daily SMA50 for trend filter
-    sma_50 = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
+    # Smoothed values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
     
-    # Align Williams %R and SMA50 to 4h timeframe (wait for daily close)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    sma_50_aligned = align_htf_to_ltf(prices, df_1d, sma_50)
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
+    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate Donchian channels (20-period) on 4h
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25  # Position size (25% of capital)
+    base_size = 0.25  # Position size
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(sma_50_aligned[i])):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or np.isnan(adx_aligned[i])):
             continue
-            
-        # Determine trend: bullish if price > SMA50, bearish if price < SMA50
-        is_bullish = close_1d[-1] > sma_50[-1] if len(close_1d) > 0 else False  # Use latest daily values
-        # More robust: use aligned values for current bar
-        # We need to get the corresponding daily values for current 4h bar
-        # Since we can't easily map, we'll use the trend from the most recent completed daily bar
-        # For simplicity, we'll check if the current 4h close is above/below the aligned SMA50
-        # This approximates the trend alignment
         
-        # Long conditions: oversold (%R < -80) in bullish alignment + volume confirmation
-        if (williams_r_aligned[i] < -80 and 
-            close[i] > sma_50_aligned[i] and  # Price above daily SMA50 (bullish alignment)
+        # Long entry: price breaks above 20-period high + volume confirmation + ADX > 25
+        if (close[i] > high_max[i] and
             volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
+            adx_aligned[i] > 25 and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short conditions: overbought (%R > -20) in bearish alignment + volume confirmation
-        elif (williams_r_aligned[i] > -20 and 
-              close[i] < sma_50_aligned[i] and  # Price below daily SMA50 (bearish alignment)
+        # Short entry: price breaks below 20-period low + volume confirmation + ADX > 25
+        elif (close[i] < low_min[i] and
               volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
+              adx_aligned[i] > 25 and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit conditions: reverse signal or extreme reversion
-        elif position == 1 and (williams_r_aligned[i] > -20 or close[i] < sma_50_aligned[i]):
+        # Exit: opposite breakout or ADX < 20 (ranging market)
+        elif position == 1 and (close[i] < low_min[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (williams_r_aligned[i] < -80 or close[i] > sma_50_aligned[i]):
+        elif position == -1 and (close[i] > high_max[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_WilliamsR_MeanReversion_DailyTrend"
+name = "4h_Donchian_Breakout_Volume_ADX"
 timeframe = "4h"
 leverage = 1.0
