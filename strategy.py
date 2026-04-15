@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction filter and volume confirmation
-# Long when price breaks above Donchian high + weekly pivot resistance broken + volume spike
-# Short when price breaks below Donchian low + weekly pivot support broken + volume spike
-# Weekly pivot uses prior week's OHLC to calculate classic pivot points (P, R1/R2/R3, S1/S2/S3)
-# Designed to capture breakouts with institutional interest (volume) and structural bias (weekly pivot)
-# Conservative sizing (0.25) to limit trade frequency and avoid fee drag
+# Hypothesis: 12h Williams Alligator + 1d Volume Spike + ATR Filter
+# Uses Williams Alligator (Jaw, Teeth, Lips) to identify trend direction.
+# Long when Lips > Teeth > Jaw (bullish alignment), short when Lips < Teeth < Jaw (bearish alignment).
+# Volume confirmation requires > 1.5x 20-bar median volume.
+# ATR-based exit: close position when price moves against position by 1.5x ATR.
+# Designed to work in trending markets (both bull and bear) with clear directional signals.
+# Conservative sizing (0.25) to limit trade frequency and avoid fee drag.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,65 +21,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian(20) channels
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 1-day Williams Alligator
+    def smma(arr, period):
+        smoothed = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return smoothed
+        smoothed[period-1] = np.mean(arr[:period])
+        for i in range(period, len(arr)):
+            smoothed[i] = (smoothed[i-1] * (period-1) + arr[i]) / period
+        return smoothed
     
-    # Weekly OHLC for pivot points
-    df_1w = get_htf_data(prices, '1w')
-    # Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H-L), S2 = P - (H-L)
-    # R3 = H + 2*(P-L), S3 = L - 2*(H-P)
-    high_w = df_1w['high'].values
-    low_w = df_1w['low'].values
-    close_w = df_1w['close'].values
+    df_1d = get_htf_data(prices, '1d')
+    median_price_1d = (df_1d['high'].values + df_1d['low'].values) / 2
+    jaw = smma(median_price_1d, 13)  # Blue line
+    teeth = smma(median_price_1d, 8)  # Red line
+    lips = smma(median_price_1d, 5)   # Green line
     
-    pivot = (high_w + low_w + close_w) / 3.0
-    r1 = 2 * pivot - low_w
-    s1 = 2 * pivot - high_w
-    r2 = pivot + (high_w - low_w)
-    s2 = pivot - (high_w - low_w)
-    r3 = high_w + 2 * (pivot - low_w)
-    s3 = low_w - 2 * (high_w - pivot)
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
     
-    # Align weekly pivot levels to 6h timeframe (wait for weekly bar to close)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    # ATR for exit condition
+    def atr(high, low, close, period=14):
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr1[0] = high[0] - low[0]
+        tr2[0] = 0
+        tr3[0] = 0
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        atr_vals = np.full_like(tr, np.nan)
+        if len(tr) < period:
+            return atr_vals
+        atr_vals[period-1] = np.mean(tr[:period])
+        for i in range(period, len(tr)):
+            atr_vals[i] = (atr_vals[i-1] * (period-1) + tr[i]) / period
+        return atr_vals
     
-    # Volume confirmation: current > 2.0x median of last 50 bars
-    vol_median = pd.Series(volume).rolling(window=50, min_periods=50).median()
-    vol_threshold = 2.0 * vol_median
+    atr_vals = atr(high, low, close, 14)
+    
+    # Volume confirmation
+    vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
+    vol_threshold = 1.5 * vol_median
     
     signals = np.zeros(n)
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(30, n):
         # Skip if any required data is NaN
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(vol_threshold[i])):
+        if (np.isnan(lips_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(jaw_aligned[i]) or np.isnan(atr_vals[i]) or 
+            np.isnan(vol_threshold[i])):
             continue
         
-        # Long: break above Donchian high AND above weekly R3 + volume spike
-        if (close[i] > donch_high[i] and 
-            close[i] > r3_aligned[i] and 
-            volume[i] > vol_threshold[i]):
+        # Check for Alligator alignment
+        bullish_alignment = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
+        bearish_alignment = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
+        
+        # Long: Bullish alignment + volume spike
+        if bullish_alignment and volume[i] > vol_threshold[i]:
             signals[i] = 0.25
         
-        # Short: break below Donchian low AND below weekly S3 + volume spike
-        elif (close[i] < donch_low[i] and 
-              close[i] < s3_aligned[i] and 
-              volume[i] > vol_threshold[i]):
+        # Short: Bearish alignment + volume spike
+        elif bearish_alignment and volume[i] > vol_threshold[i]:
             signals[i] = -0.25
         
-        # Exit: price returns inside Donchian channel or volume drops
-        elif (i > 0 and 
-              ((signals[i-1] == 0.25 and (close[i] < donch_high[i] or volume[i] <= vol_threshold[i])) or
-               (signals[i-1] == -0.25 and (close[i] > donch_low[i] or volume[i] <= vol_threshold[i])))):
+        # Exit: Price moves against position by 1.5x ATR
+        elif signals[i-1] == 0.25 and close[i] < close[i-1] - 1.5 * atr_vals[i]:
+            signals[i] = 0.0
+        elif signals[i-1] == -0.25 and close[i] > close[i-1] + 1.5 * atr_vals[i]:
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -87,6 +97,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Donchian_WeeklyPivot_Volume"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_Volume_ATR"
+timeframe = "12h"
 leverage = 1.0
