@@ -29,40 +29,40 @@ def generate_signals(prices):
     atr_14d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14d_aligned = align_htf_to_ltf(prices, daily, atr_14d)
     
-    # Volume threshold: 2.5x median of last 20 bars (more restrictive)
-    vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median()
-    vol_threshold = 2.5 * vol_median
+    # Weekly median volume for threshold
+    weekly = get_htf_data(prices, '1w')
+    vol_w = weekly['volume'].values
+    vol_median_w = pd.Series(vol_w).rolling(window=4, min_periods=4).median()
+    vol_median_w_aligned = align_htf_to_ltf(prices, weekly, vol_median_w)
     
-    # ATR-based volatility filter: require ATR > 0.7% of price (avoid low volatility chop)
+    # Volatility filter: require ATR > 0.7% of price
     vol_filter = atr_14d_aligned > (0.007 * close)
-    
-    # 1d ATR-based volatility filter for position sizing
-    atr_factor = atr_14d_aligned / close
-    # Scale position size by volatility (inverse vol targeting)
-    vol_scaling = np.clip(0.007 / atr_factor, 0.5, 1.5)  # Target 0.7% daily vol
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14d_aligned[i]) or np.isnan(vol_threshold[i]) or 
+        if (np.isnan(atr_14d_aligned[i]) or np.isnan(vol_median_w_aligned[i]) or 
             np.isnan(vol_filter[i])):
             continue
         
-        # Only trade when volatility is sufficient (avoid chop)
+        # Only trade when volatility is sufficient
         if not vol_filter[i]:
             signals[i] = 0.0
             continue
             
+        # Volume threshold: 2.5x weekly median volume (more restrictive)
+        vol_threshold = 2.5 * vol_median_w_aligned[i]
+        
         # Long: Close above prior close + volume spike
         if (close[i] > close[i-1] and 
-            volume[i] > vol_threshold[i]):
-            signals[i] = 0.25 * vol_scaling[i]
+            volume[i] > vol_threshold):
+            signals[i] = 0.25
         
         # Short: Close below prior close + volume spike
         elif (close[i] < close[i-1] and 
-              volume[i] > vol_threshold[i]):
-            signals[i] = -0.25 * vol_scaling[i]
+              volume[i] > vol_threshold):
+            signals[i] = -0.25
         
         # Exit: reverse signal on opposite direction
         elif (close[i] < close[i-1] and signals[i-1] > 0) or \
@@ -75,6 +75,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Volatility_Volume_Momentum_v2"
-timeframe = "4h"
+name = "6h_1d_ATR_Volume_Momentum"
+timeframe = "6h"
 leverage = 1.0
