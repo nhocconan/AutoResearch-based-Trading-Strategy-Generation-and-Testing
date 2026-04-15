@@ -13,6 +13,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # 12-hour Donchian channel (20 periods)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donch_high = high_series.rolling(window=20, min_periods=20).max()
+    donch_low = low_series.rolling(window=20, min_periods=20).min()
+    
     # 1-day ATR for volatility filter
     df_1d = get_htf_data(prices, '1d')
     tr_1d = np.maximum(df_1d['high'].values - df_1d['low'].values,
@@ -20,13 +26,6 @@ def generate_signals(prices):
                                   np.abs(df_1d['low'].values - np.concatenate([[df_1d['close'][0]], df_1d['close'][:-1]]))))
     atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # 4-hour Bollinger Bands (20, 2)
-    close_series = pd.Series(close)
-    sma_4h = close_series.rolling(window=20, min_periods=20).mean()
-    std_4h = close_series.rolling(window=20, min_periods=20).std()
-    upper_4h = sma_4h + 2 * std_4h
-    lower_4h = sma_4h - 2 * std_4h
     
     # Volume confirmation: current > 1.5x median of last 20 bars
     vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
@@ -40,22 +39,22 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_4h[i]) or np.isnan(lower_4h[i]) or 
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
             np.isnan(vol_threshold[i]) or np.isnan(vol_filter[i])):
             continue
         
-        # Long: close breaks above upper band + volume + volatility filter
-        if close[i] > upper_4h[i] and volume[i] > vol_threshold[i] and vol_filter[i]:
+        # Long: close breaks above Donchian high + volume + volatility filter
+        if close[i] > donch_high[i] and volume[i] > vol_threshold[i] and vol_filter[i]:
             signals[i] = 0.25
         
-        # Short: close breaks below lower band + volume + volatility filter
-        elif close[i] < lower_4h[i] and volume[i] > vol_threshold[i] and vol_filter[i]:
+        # Short: close breaks below Donchian low + volume + volatility filter
+        elif close[i] < donch_low[i] and volume[i] > vol_threshold[i] and vol_filter[i]:
             signals[i] = -0.25
         
-        # Exit: close crosses back inside bands (mean reversion)
+        # Exit: close crosses back inside Donchian channel (mean reversion)
         elif (i > 0 and 
-              ((signals[i-1] == 0.25 and close[i] < upper_4h[i]) or
-               (signals[i-1] == -0.25 and close[i] > lower_4h[i]))):
+              ((signals[i-1] == 0.25 and close[i] < donch_high[i]) or
+               (signals[i-1] == -0.25 and close[i] > donch_low[i]))):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -64,6 +63,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Bollinger_Breakout_Volume_VolFilter"
-timeframe = "4h"
+name = "12h_Donchian_Breakout_Volume_VolFilter"
+timeframe = "12h"
 leverage = 1.0
