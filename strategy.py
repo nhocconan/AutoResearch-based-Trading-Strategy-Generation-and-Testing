@@ -13,70 +13,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data once
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load weekly data once
+    df_week = get_htf_data(prices, '1w')
+    if len(df_week) < 50:
         return np.zeros(n)
     
-    # Calculate 20-period EMA on 1d
-    close_1d = df_1d['close'].values
-    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Weekly ATR(14)
+    high_week = df_week['high'].values
+    low_week = df_week['low'].values
+    close_week = df_week['close'].values
+    tr1 = high_week - low_week
+    tr2 = np.abs(high_week - np.roll(close_week, 1))
+    tr3 = np.abs(low_week - np.roll(close_week, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first TR
+    atr_week = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 14-period RSI on 1d
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
+    # Weekly Donchian(20)
+    high_20_week = pd.Series(high_week).rolling(window=20, min_periods=20).max().values
+    low_20_week = pd.Series(low_week).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 12-period volume moving average
-    vol_ma_12 = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
-    
-    # Calculate 20-period Donchian channels
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Weekly EMA(50)
+    ema_50_week = pd.Series(close_week).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0
     position_size = 0.25  # 25% position size
     
     for i in range(100, n):
-        # Get aligned indicators
-        ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)[i]
-        rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)[i]
-        vol_ma_12_val = vol_ma_12[i]  # already LTF
+        # Get aligned weekly indicators
+        atr_week_aligned = align_htf_to_ltf(prices, df_week, atr_week)[i]
+        high_20_week_aligned = align_htf_to_ltf(prices, df_week, high_20_week)[i]
+        low_20_week_aligned = align_htf_to_ltf(prices, df_week, low_20_week)[i]
+        ema_50_week_aligned = align_htf_to_ltf(prices, df_week, ema_50_week)[i]
         
         # Check for NaN values
-        if (np.isnan(ema_20_aligned) or np.isnan(rsi_1d_aligned) or 
-            np.isnan(vol_ma_12_val) or np.isnan(high_20[i]) or np.isnan(low_20[i])):
+        if (np.isnan(atr_week_aligned) or np.isnan(high_20_week_aligned) or 
+            np.isnan(low_20_week_aligned) or np.isnan(ema_50_week_aligned)):
             continue
         
-        # Volume confirmation (> 1.2x average)
-        volume_confirm = volume[i] > 1.2 * vol_ma_12_val
+        # Volume filter (volume > 1.5x 20-period average)
+        vol_ma_20 = np.mean(volume[max(0, i-20):i+1]) if i >= 20 else volume[i]
+        volume_filter = volume[i] > 1.5 * vol_ma_20
         
         if position == 0:  # No position - look for entries
-            if volume_confirm:
-                # Long: Break above 20-period high + price above 1d EMA20 + RSI not overbought
-                if high[i] > high_20[i] and close[i] > ema_20_aligned and rsi_1d_aligned < 70:
+            if volume_filter:
+                # Long: Break above weekly Donchian high + above weekly EMA50
+                if high[i] > high_20_week_aligned and close[i] > ema_50_week_aligned:
                     position = 1
                     signals[i] = position_size
-                # Short: Break below 20-period low + price below 1d EMA20 + RSI not oversold
-                elif low[i] < low_20[i] and close[i] < ema_20_aligned and rsi_1d_aligned > 30:
+                # Short: Break below weekly Donchian low + below weekly EMA50
+                elif low[i] < low_20_week_aligned and close[i] < ema_50_week_aligned:
                     position = -1
                     signals[i] = -position_size
-        elif position == 1:  # Long position - exit when price breaks below 20-period low
-            if low[i] < low_20[i]:
+        elif position == 1:  # Long position - exit when price breaks below weekly Donchian low
+            if low[i] < low_20_week_aligned:
                 position = 0
                 signals[i] = 0.0
-        elif position == -1:  # Short position - exit when price breaks above 20-period high
-            if high[i] > high_20[i]:
+        elif position == -1:  # Short position - exit when price breaks above weekly Donchian high
+            if high[i] > high_20_week_aligned:
                 position = 0
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_Donchian20_EMA20_RSI_Volume_v1"
+name = "12h_WeeklyATR_Donchian20_EMA50_Volume"
 timeframe = "12h"
 leverage = 1.0
