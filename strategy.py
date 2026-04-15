@@ -1,11 +1,3 @@
-# 1d_Triple_RSI_WeeklyTrend_Reversion
-# Hypothesis: On daily timeframe, extreme weekly RSI indicates overextended conditions likely to revert.
-# Long when weekly RSI < 30 (oversold) and daily RSI < 40 (momentum aligning).
-# Short when weekly RSI > 70 (overbought) and daily RSI > 60 (momentum aligning).
-# Uses volume confirmation to avoid false signals in low-liquidity periods.
-# Weekly trend filter ensures we trade with the higher timeframe momentum when extreme.
-# Designed for low trade frequency (<15/year) to minimize fee drag in ranging/bear markets.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -21,64 +13,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily RSI (14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi_daily = 100 - (100 / (1 + rs))
-    rsi_daily = rsi_daily.fillna(50).values
+    # 1d data for context
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Weekly RSI (14) from 1w data - calculated once before loop
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    delta_w = pd.Series(close_1w).diff()
-    gain_w = delta_w.clip(lower=0)
-    loss_w = -delta_w.clip(upper=0)
-    avg_gain_w = gain_w.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss_w = loss_w.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs_w = avg_gain_w / avg_loss_w.replace(0, np.nan)
-    rsi_weekly_raw = 100 - (100 / (1 + rs_w))
-    rsi_weekly_raw = rsi_weekly_raw.fillna(50).values
-    # Align weekly RSI to daily timeframe (waits for weekly close)
-    rsi_weekly = align_htf_to_ltf(prices, df_1w, rsi_weekly_raw)
+    # 1d ATR(14) for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    atr_1d = np.zeros_like(close_1d)
+    atr_1d[14:] = pd.Series(tr).rolling(window=14, min_periods=14).mean().values[13:]
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Volume confirmation: current > 1.5x median of last 20 days
+    # 6h Donchian(20) breakout
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max()
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min()
+    middle = (highest_high + lowest_low) / 2
+    
+    # Volume filter: volume > 1.5x median of last 20 bars
     vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
     vol_threshold = 1.5 * vol_median
     
+    # Volatility filter: current 1d ATR > 0.8x median of last 50 bars
+    atr_median = pd.Series(atr_1d_aligned).rolling(window=50, min_periods=1).median()
+    vol_filter = atr_1d_aligned > (0.8 * atr_median)
+    
     signals = np.zeros(n)
     
-    for i in range(20, n):
-        # Skip if any required data is NaN
-        if (np.isnan(rsi_daily[i]) or np.isnan(rsi_weekly[i]) or 
-            np.isnan(vol_threshold[i])):
+    for i in range(50, n):
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(vol_threshold[i]) or np.isnan(vol_filter[i]):
             continue
         
-        # Long: Weekly oversold + daily momentum aligning + volume confirmation
-        if (rsi_weekly[i] < 30 and rsi_daily[i] < 40 and 
-            volume[i] > vol_threshold[i]):
+        # Long: price breaks above Donchian high + volume + volatility
+        if (close[i] > highest_high[i] and 
+            volume[i] > vol_threshold[i] and 
+            vol_filter[i]):
             signals[i] = 0.25
         
-        # Short: Weekly overbought + daily momentum aligning + volume confirmation
-        elif (rsi_weekly[i] > 70 and rsi_daily[i] > 60 and 
-              volume[i] > vol_threshold[i]):
+        # Short: price breaks below Donchian low + volume + volatility
+        elif (close[i] < lowest_low[i] and 
+              volume[i] > vol_threshold[i] and 
+              vol_filter[i]):
             signals[i] = -0.25
         
-        # Exit: RSI returns to neutral zone (40-60)
+        # Exit: price returns to middle of channel (mean reversion)
         elif (i > 0 and 
-              ((signals[i-1] == 0.25 and rsi_daily[i] >= 40) or
-               (signals[i-1] == -0.25 and rsi_daily[i] <= 60))):
+              ((signals[i-1] == 0.25 and close[i] < middle[i]) or
+               (signals[i-1] == -0.25 and close[i] > middle[i]))):
             signals[i] = 0.0
         
-        # Otherwise, hold previous position
         else:
             signals[i] = signals[i-1]
     
     return signals
 
-name = "1d_Triple_RSI_WeeklyTrend_Reversion"
-timeframe = "1d"
+name = "6h_Donchian_Breakout_Vol_VolFilter"
+timeframe = "6h"
 leverage = 1.0
