@@ -1,4 +1,15 @@
 #!/usr/bin/env python3
+"""
+Hypothesis: 6h Williams Alligator + 1d Volume Spike
+- Williams Alligator (Jaws, Teeth, Lips) on 6h to detect trend direction and alignment
+- 1d volume spike (current volume > 2x 20-period median) to confirm institutional participation
+- Long: Alligator aligned bullish (Lips > Teeth > Jaws) + volume spike
+- Short: Alligator aligned bearish (Lips < Teeth < Jaws) + volume spike
+- Exit: Opposite Alligator alignment or loss of volume confirmation
+- Works in bull (trend following) and bear (catching sharp moves on volume)
+- Target: 15-25 trades/year to minimize fee drag
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -8,83 +19,65 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    # 6h data for Williams Alligator
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for weekly Donchian
-    df_1w = get_htf_data(prices, '1w')
-    # Weekly Donchian channels (20 weeks)
-    weekly_high = df_1w['high'].rolling(window=20, min_periods=20).max()
-    weekly_low = df_1w['low'].rolling(window=20, min_periods=20).min()
-    weekly_high_arr = weekly_high.values
-    weekly_low_arr = weekly_low.values
-    # Align to daily timeframe with proper delay
-    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high_arr)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low_arr)
+    # Williams Alligator components (13,8,5 SMAs with future shifts)
+    # Jaws: 13-period SMA shifted 8 bars
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean()
+    jaw = jaw.shift(8)  # Shift 8 bars forward
     
-    # Weekly EMA50 for trend filter
-    weekly_close = df_1w['close'].values
-    weekly_ema50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    weekly_ema50_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema50)
+    # Teeth: 8-period SMA shifted 5 bars
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean()
+    teeth = teeth.shift(5)  # Shift 5 bars forward
     
-    # Daily ATR for volatility filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Lips: 5-period SMA shifted 3 bars
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean()
+    lips = lips.shift(3)  # Shift 3 bars forward
     
-    # Volume filter: current volume > 1.5x median of last 20 days
-    vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
-    vol_threshold = 1.5 * vol_median
+    # 1d volume data for spike detection
+    df_1d = get_htf_data(prices, '1d')
+    vol_1d = df_1d['volume'].values
+    # 20-period median volume on 1d
+    vol_median_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).median()
+    vol_spike_1d = vol_1d > (2.0 * vol_median_1d)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
     
     signals = np.zeros(n)
     
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or 
-            np.isnan(weekly_ema50_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_threshold[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(vol_spike_1d_aligned[i])):
             continue
-            
-        # Long conditions:
-        # 1. Price breaks above weekly Donchian high
-        # 2. Weekly close above weekly EMA50 (uptrend)
-        # 3. Volume confirmation
-        # 4. ATR > 0 (sufficient volatility)
-        if (close[i] > weekly_high_aligned[i] and 
-            weekly_ema50_aligned[i] > 0 and  # EMA calculated
-            volume[i] > vol_threshold[i] and
-            atr[i] > 0):
+        
+        # Bullish alignment: Lips > Teeth > Jaws
+        bullish = (lips[i] > teeth[i]) and (teeth[i] > jaw[i])
+        # Bearish alignment: Lips < Teeth < Jaws
+        bearish = (lips[i] < teeth[i]) and (teeth[i] < jaw[i])
+        # Volume spike confirmation
+        vol_spike = vol_spike_1d_aligned[i] > 0.5
+        
+        # Long: Bullish alignment + volume spike
+        if bullish and vol_spike:
             signals[i] = 0.25
-            
-        # Short conditions:
-        # 1. Price breaks below weekly Donchian low
-        # 2. Weekly close below weekly EMA50 (downtrend)
-        # 3. Volume confirmation
-        # 4. ATR > 0
-        elif (close[i] < weekly_low_aligned[i] and 
-              weekly_ema50_aligned[i] > 0 and  # EMA calculated
-              volume[i] > vol_threshold[i] and
-              atr[i] > 0):
+        # Short: Bearish alignment + volume spike
+        elif bearish and vol_spike:
             signals[i] = -0.25
-            
-        # Exit conditions:
-        # Exit long when price breaks below weekly EMA50
-        elif signals[i-1] == 0.25 and weekly_ema50_aligned[i] > 0 and close[i] < weekly_ema50_aligned[i]:
+        # Exit: Opposite alignment or loss of volume confirmation
+        elif (i > 0 and 
+              ((signals[i-1] == 0.25 and (bearish or not vol_spike)) or
+               (signals[i-1] == -0.25 and (bullish or not vol_spike)))):
             signals[i] = 0.0
-            
-        # Exit short when price breaks above weekly EMA50
-        elif signals[i-1] == -0.25 and weekly_ema50_aligned[i] > 0 and close[i] > weekly_ema50_aligned[i]:
-            signals[i] = 0.0
-            
-        # Otherwise hold position
+        # Otherwise, hold previous position
         else:
             signals[i] = signals[i-1]
     
     return signals
 
-name = "1d_WeeklyDonchian20_EMA50_Volume"
-timeframe = "1d"
+name = "6h_WilliamsAlligator_1dVolumeSpike"
+timeframe = "6h"
 leverage = 1.0
