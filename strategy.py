@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily HTF data once before loop (12h primary, 1d HTF)
+    # Get daily HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -57,28 +57,28 @@ def generate_signals(prices):
         # Entry conditions:
         # 1. 1d trend filter: price above/below daily EMA50
         # 2. 12h Donchian breakout: price breaks 20-period channel
-        # 3. 12h volume confirmation: volume > 2.0x average (strict filter)
-        # 4. 12h volatility filter: ATR > 0.5 * price (avoid low volatility chop)
+        # 3. 12h volume confirmation: volume > 1.5x average (moderate filter)
+        # 4. 12h volatility filter: ATR > 0.3% of price (avoid extremely low volatility)
         # 5. Discrete position sizing: 0.25
         
         # Long conditions: break above Donchian high in uptrend
         if (close[i] > ema_50_12h[i] and          # Daily uptrend filter
             close[i] > highest_20[i] and          # Donchian breakout
-            volume_ratio[i] > 2.0 and             # Strict volume confirmation
-            atr_14_12h[i] > 0.005 * close[i]):    # Volatility filter (ATR > 0.5% of price)
+            volume_ratio[i] > 1.5 and             # Moderate volume confirmation
+            atr_14_12h[i] > 0.003 * close[i]):    # Volatility filter (ATR > 0.3% of price)
             signals[i] = 0.25
             
         # Short conditions: break below Donchian low in downtrend
         elif (close[i] < ema_50_12h[i] and        # Daily downtrend filter
               close[i] < lowest_20[i] and         # Donchian breakdown
-              volume_ratio[i] > 2.0 and           # Strict volume confirmation
-              atr_14_12h[i] > 0.005 * close[i]):  # Volatility filter
+              volume_ratio[i] > 1.5 and           # Moderate volume confirmation
+              atr_14_12h[i] > 0.003 * close[i]):  # Volatility filter
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "12h_Donchian_Breakout_EMA50_Volume_ATR_Filter"
+name = "12h_Donchian_Breakout_EMA50_Volume_ATR_Filter_Moderate"
 timeframe = "12h"
 leverage = 1.0
