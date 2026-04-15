@@ -13,13 +13,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for 1d pivot levels
+    # Get daily data for pivot levels
     daily = get_htf_data(prices, '1d')
     daily_high = daily['high'].values
     daily_low = daily['low'].values
     daily_close = daily['close'].values
     
-    # Calculate daily pivot levels (classic formula)
+    # Calculate daily pivot levels
     pivot = (daily_high + daily_low + daily_close) / 3.0
     r1 = 2 * pivot - daily_low
     s1 = 2 * pivot - daily_high
@@ -29,33 +29,30 @@ def generate_signals(prices):
     r1_aligned = align_htf_to_ltf(prices, daily, r1)
     s1_aligned = align_htf_to_ltf(prices, daily, s1)
     
-    # Volume filter: current 6h volume > 1.8x 20-period average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.8 * vol_ma)
+    # Volume filter: current 6h volume > 1.5x 20-period average volume
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma)
     
-    # Range filter: avoid trading when price is within 0.5% of pivot
+    # Range filter: avoid trading when price is within 0.3% of pivot
     price_to_pivot = np.abs(close - pivot_aligned) / pivot_aligned
-    range_filter = price_to_pivot > 0.005
-    
-    # Momentum filter: current close > close 3 periods ago
-    momentum = pd.Series(close).diff(3).values
-    momentum_filter = momentum > 0
+    range_filter = price_to_pivot > 0.003
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
         if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(momentum[i])):
+            np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         # Only trade when volume filter and range filter both pass
-        if volume_filter[i] and range_filter[i] and momentum_filter[i]:
-            # Long conditions: price breaks above R1 with volume and momentum
+        if volume_filter[i] and range_filter[i]:
+            # Long conditions: price breaks above R1 with volume
             if close[i] > r1_aligned[i]:
                 signals[i] = 0.25
-            # Short conditions: price breaks below S1 with volume and momentum
+            # Short conditions: price breaks below S1 with volume
             elif close[i] < s1_aligned[i]:
                 signals[i] = -0.25
             else:
@@ -65,6 +62,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Pivot_R1_S1_Breakout_Volume_Range_Momentum"
+name = "6h_Pivot_R1_S1_Breakout_Volume_RangeFilter"
 timeframe = "6h"
 leverage = 1.0
