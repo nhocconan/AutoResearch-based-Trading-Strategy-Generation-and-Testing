@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d volume spike and ADX trend filter
-# Long when price breaks above 1d Camarilla R3 level + 1d ADX > 20 + volume > 2x 20-period avg
-# Short when price breaks below 1d Camarilla S3 level + 1d ADX > 20 + volume > 2x 20-period avg
-# Camarilla levels provide intraday support/resistance based on prior day's range.
-# ADX filter ensures we trade in trending markets, avoiding chop. Volume spike confirms conviction.
-# Designed for low trade frequency (12-30/year) with discrete position sizing (0.25) to minimize fee drag.
-# Works in bull markets (breakout continuation) and bear markets (strong downtrends) by requiring ADX > 20.
+# Hypothesis: 4h Donchian(20) breakout with 12h Supertrend filter and volume confirmation
+# Long when price breaks above 4h Donchian upper (20-period) + 12h Supertrend bullish + volume > 1.3x 20-period avg
+# Short when price breaks below 4h Donchian lower (20-period) + 12h Supertrend bearish + volume > 1.3x 20-period avg
+# Uses discrete position sizing (0.25) to minimize fee churn. Target: 15-30 trades/year.
+# Supertrend is more responsive than ADX for trend changes while still filtering chop.
+# Works in bull markets (trend continuation) and bear markets (strong downtrends) by requiring Supertrend alignment.
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,106 +24,102 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 1d HTF data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h HTF data once before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # === 1d Indicator: ADX (trend strength filter) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 12h Indicator: Supertrend (ATR=10, mult=3.0) ===
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate ADX components: +DM, -DM, TR
-    high_1d_shift = np.roll(high_1d, 1)
-    low_1d_shift = np.roll(low_1d, 1)
-    high_1d_shift[0] = high_1d[0]
-    low_1d_shift[0] = low_1d[0]
+    # Calculate ATR
+    high_12h_shift = np.roll(high_12h, 1)
+    low_12h_shift = np.roll(low_12h, 1)
+    close_12h_shift = np.roll(close_12h, 1)
     
-    plus_dm = np.where((high_1d - high_1d_shift) > (low_1d_shift - low_1d), 
-                       np.maximum(high_1d - high_1d_shift, 0), 0)
-    minus_dm = np.where((low_1d_shift - low_1d) > (high_1d - high_1d_shift), 
-                        np.maximum(low_1d_shift - low_1d, 0), 0)
+    high_12h_shift[0] = high_12h[0]
+    low_12h_shift[0] = low_12h[0]
+    close_12h_shift[0] = close_12h[0]
     
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]
-    tr2[0] = np.abs(high_1d[0] - close_1d[0])
-    tr3[0] = np.abs(low_1d[0] - close_1d[0])
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - close_12h_shift)
+    tr3 = np.abs(low_12h - close_12h_shift)
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Wilder's smoothing (alpha = 1/period)
-    period = 14
-    alpha = 1.0 / period
-    
+    atr_period = 10
     atr = np.zeros_like(tr)
-    atr[period-1] = np.mean(tr[:period])
-    for i in range(period, len(tr)):
-        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+    atr[atr_period-1] = np.mean(tr[:atr_period])
+    for i in range(atr_period, len(tr)):
+        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
     
-    plus_di = np.zeros_like(plus_dm)
-    minus_di = np.zeros_like(minus_dm)
+    # Supertrend calculation
+    factor = 3.0
+    hl2 = (high_12h + low_12h) / 2
+    upperband = hl2 + (factor * atr)
+    lowerband = hl2 - (factor * atr)
     
-    # Smooth +DM and -DM
-    plus_dm_smooth = np.zeros_like(plus_dm)
-    minus_dm_smooth = np.zeros_like(minus_dm)
+    # Initialize
+    upperband_final = np.full_like(upperband, np.nan)
+    lowerband_final = np.full_like(lowerband, np.nan)
+    supertrend = np.full_like(close_12h, np.nan)
+    direction = np.full_like(close_12h, np.nan)  # 1 for uptrend, -1 for downtrend
     
-    plus_dm_smooth[period-1] = np.mean(plus_dm[:period])
-    minus_dm_smooth[period-1] = np.mean(minus_dm[:period])
+    # First valid value
+    upperband_final[atr_period-1] = upperband[atr_period-1]
+    lowerband_final[atr_period-1] = lowerband[atr_period-1]
+    supertrend[atr_period-1] = upperband_final[atr_period-1]
+    direction[atr_period-1] = -1  # start in downtrend (will be updated)
     
-    for i in range(period, len(plus_dm)):
-        plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
-        minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
+    for i in range(atr_period, len(close_12h)):
+        # Upperband
+        if upperband[i] <= upperband_final[i-1] or close_12h[i-1] > upperband_final[i-1]:
+            upperband_final[i] = upperband[i]
+        else:
+            upperband_final[i] = upperband_final[i-1]
+            
+        # Lowerband
+        if lowerband[i] >= lowerband_final[i-1] or close_12h[i-1] < lowerband_final[i-1]:
+            lowerband_final[i] = lowerband[i]
+        else:
+            lowerband_final[i] = lowerband_final[i-1]
+        
+        # Supertrend and direction
+        if supertrend[i-1] == upperband_final[i-1]:
+            if close_12h[i] <= upperband_final[i]:
+                supertrend[i] = upperband_final[i]
+                direction[i] = -1  # downtrend
+            else:
+                supertrend[i] = lowerband_final[i]
+                direction[i] = 1   # uptrend
+        else:
+            if close_12h[i] >= lowerband_final[i]:
+                supertrend[i] = lowerband_final[i]
+                direction[i] = 1   # uptrend
+            else:
+                supertrend[i] = upperband_final[i]
+                direction[i] = -1  # downtrend
     
-    # Avoid division by zero
-    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
-    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
+    # Convert direction to bullish/bearish boolean
+    supertrend_bullish = (direction == 1)
+    supertrend_bearish = (direction == -1)
     
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    supertrend_bullish_aligned = align_htf_to_ltf(prices, df_12h, supertrend_bullish.astype(float))
+    supertrend_bearish_aligned = align_htf_to_ltf(prices, df_12h, supertrend_bearish.astype(float))
     
-    # Wilder's smoothing for ADX
-    adx = np.zeros_like(dx)
-    adx[2*period-1] = np.mean(dx[period-1:2*period])
-    for i in range(2*period, len(dx)):
-        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+    # === 4h Indicator: Donchian Channel (20-period) ===
+    donchian_window = 20
+    donchian_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    donchian_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # === 1d Indicator: Camarilla Pivot Levels (R3, S3) ===
-    # Based on prior day's OHLC
-    high_1d_shift = np.roll(high_1d, 1)
-    low_1d_shift = np.roll(low_1d, 1)
-    close_1d_shift = np.roll(close_1d, 1)
-    
-    # Handle first bar
-    high_1d_shift[0] = high_1d[0]
-    low_1d_shift[0] = low_1d[0]
-    close_1d_shift[0] = close_1d[0]
-    
-    # Camarilla calculations
-    camarilla_high = high_1d_shift
-    camarilla_low = low_1d_shift
-    camarilla_close = close_1d_shift
-    
-    camarilla_range = camarilla_high - camarilla_low
-    
-    # R3 = Close + (High - Low) * 1.1/4
-    # S3 = Close - (High - Low) * 1.1/4
-    camarilla_r3 = camarilla_close + camarilla_range * 1.1 / 4
-    camarilla_s3 = camarilla_close - camarilla_range * 1.1 / 4
-    
-    # Align to 12h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # === 1d Indicator: Volume SMA (20-period) for confirmation ===
+    # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(2*period, 20) + 5  # ADX(28) + volume(20) + buffer
+    warmup = max(donchian_window, atr_period*2) + 20  # Donchian(20) + Supertrend(~20) + volume(20)
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -132,29 +127,30 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 2x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
+        # Volume filter: current volume > 1.3x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.3)
         
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(supertrend_bullish_aligned[i]) or np.isnan(supertrend_bearish_aligned[i]) or
+            np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 1d Camarilla R3 level
-        # 2. Trend (1d ADX > 20)
+        # 1. Price breaks above 4h Donchian upper (20-period)
+        # 2. Trend (12h Supertrend bullish)
         # 3. Volume confirmation
-        if (close[i] > camarilla_r3_aligned[i]) and \
-           (adx_aligned[i] > 20) and vol_confirm:
+        if (close[i] > donchian_high[i]) and \
+           supertrend_bullish_aligned[i] > 0.5 and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below 1d Camarilla S3 level
-        # 2. Trend (1d ADX > 20)
+        # 1. Price breaks below 4h Donchian lower (20-period)
+        # 2. Trend (12h Supertrend bearish)
         # 3. Volume confirmation
-        elif (close[i] < camarilla_s3_aligned[i]) and \
-             (adx_aligned[i] > 20) and vol_confirm:
+        elif (close[i] < donchian_low[i]) and \
+             supertrend_bearish_aligned[i] > 0.5 and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -162,6 +158,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_CamarillaR3S3_1dADX20_Volume2x_Filter_v1"
-timeframe = "12h"
+name = "4h_Donchian20_12hSupertrend_Volume_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
