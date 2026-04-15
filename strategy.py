@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,65 +13,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for context
+    # Daily ATR for volatility filter (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first value
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Daily EMA(50) for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 1d ATR(14) for volatility filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    atr_1d = np.zeros_like(close_1d)
-    atr_1d[14:] = pd.Series(tr).rolling(window=14, min_periods=14).mean().values[13:]
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Daily Bollinger Bands (20, 2) for mean reversion zones
+    sma_20_1d = pd.Series(df_1d['close'].values).rolling(window=20, min_periods=20).mean().values
+    std_20_1d = pd.Series(df_1d['close'].values).rolling(window=20, min_periods=20).std().values
+    upper_bb_1d = sma_20_1d + 2 * std_20_1d
+    lower_bb_1d = sma_20_1d - 2 * std_20_1d
+    upper_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_1d)
+    lower_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_1d)
     
-    # 6h Donchian(20) breakout
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max()
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min()
-    middle = (highest_high + lowest_low) / 2
-    
-    # Volume filter: volume > 1.5x median of last 20 bars
+    # Volume filter: current volume > 1.5x median of last 20 bars
     vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
     vol_threshold = 1.5 * vol_median
-    
-    # Volatility filter: current 1d ATR > 0.8x median of last 50 bars
-    atr_median = pd.Series(atr_1d_aligned).rolling(window=50, min_periods=1).median()
-    vol_filter = atr_1d_aligned > (0.8 * atr_median)
     
     signals = np.zeros(n)
     
     for i in range(50, n):
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(vol_threshold[i]) or np.isnan(vol_filter[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(upper_bb_1d_aligned[i]) or 
+            np.isnan(lower_bb_1d_aligned[i]) or np.isnan(vol_threshold[i]) or np.isnan(atr[i])):
             continue
         
-        # Long: price breaks above Donchian high + volume + volatility
-        if (close[i] > highest_high[i] and 
-            volume[i] > vol_threshold[i] and 
-            vol_filter[i]):
+        # Long conditions:
+        # 1. Price below daily EMA50 (bearish trend)
+        # 2. Price touches or breaks below daily lower Bollinger Band (oversold)
+        # 3. Volume confirmation
+        # 4. ATR filter: volatility not too low
+        if (close[i] < ema_50_1d_aligned[i] and 
+            close[i] <= lower_bb_1d_aligned[i] and 
+            volume[i] > vol_threshold[i] and
+            atr[i] > 0.01 * close[i]):  # avoid extremely low volatility
             signals[i] = 0.25
         
-        # Short: price breaks below Donchian low + volume + volatility
-        elif (close[i] < lowest_low[i] and 
-              volume[i] > vol_threshold[i] and 
-              vol_filter[i]):
+        # Short conditions:
+        # 1. Price above daily EMA50 (bullish trend)
+        # 2. Price touches or breaks above daily upper Bollinger Band (overbought)
+        # 3. Volume confirmation
+        # 4. ATR filter
+        elif (close[i] > ema_50_1d_aligned[i] and 
+              close[i] >= upper_bb_1d_aligned[i] and 
+              volume[i] > vol_threshold[i] and
+              atr[i] > 0.01 * close[i]):
             signals[i] = -0.25
         
-        # Exit: price returns to middle of channel (mean reversion)
-        elif (i > 0 and 
-              ((signals[i-1] == 0.25 and close[i] < middle[i]) or
-               (signals[i-1] == -0.25 and close[i] > middle[i]))):
-            signals[i] = 0.0
-        
+        # Exit: price crosses back to the EMA50 (mean reversion to trend)
+        elif i > 0:
+            if (signals[i-1] == 0.25 and close[i] >= ema_50_1d_aligned[i]):
+                signals[i] = 0.0
+            elif (signals[i-1] == -0.25 and close[i] <= ema_50_1d_aligned[i]):
+                signals[i] = 0.0
+            else:
+                signals[i] = signals[i-1]
         else:
-            signals[i] = signals[i-1]
+            signals[i] = 0.0
     
     return signals
 
-name = "6h_Donchian_Breakout_Vol_VolFilter"
-timeframe = "6h"
+name = "4h_DailyEMA50_BB_MeanReversion"
+timeframe = "4h"
 leverage = 1.0
