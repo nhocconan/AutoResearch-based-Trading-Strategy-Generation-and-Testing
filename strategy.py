@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Camarilla pivot levels (R1/S1) for mean reversion entries in the direction of 1w EMA200 trend.
-# In 1w uptrend (close > EMA200), go long when price touches or breaks below S1 with volume spike.
-# In 1w downtrend (close < EMA200), go short when price touches or breaks above R1 with volume spike.
-# Uses choppiness regime filter (CHOP > 61.8) to avoid whipsaw in strong trends.
-# Designed for low trade frequency (20-40/year) to minimize fee drag while capturing mean reversion in trending markets.
+# Hypothesis: 12h strategy using 1d Donchian breakout (20) for trend direction and 1w RSI(14) for mean reversion timing.
+# In 1w uptrend (price > 1w upper Donchian), wait for 1d RSI < 30 to go long (pullback entry).
+# In 1w downtrend (price < 1w lower Donchian), wait for 1d RSI > 70 to go short (bounce entry).
+# Volume confirmation ensures momentum validity. Session filter (00-23 UTC) always active for 12h.
+# Designed for low trade frequency (12-37/year) to minimize fee drag while adapting to trend and mean reversion.
 
 def generate_signals(prices):
     n = len(prices)
@@ -29,68 +29,59 @@ def generate_signals(prices):
     if len(df_1d) < 30 or len(df_1w) < 30:
         return np.zeros(n)
     
-    # === 1d Indicators: Camarilla Pivot Levels (R1, S1) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === 1d Indicators: RSI(14) ===
     close_1d = df_1d['close'].values
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = pivot + (high_1d - low_1d) * 1.1 / 12.0
-    s1 = pivot - (high_1d - low_1d) * 1.1 / 12.0
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    delta = pd.Series(close_1d).diff().values
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # === 1w Indicators: EMA200 for trend direction ===
-    close_1w = df_1w['close'].values
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
-    
-    # === 1d Indicators: Choppiness Index (CHOP) for regime filter ===
-    atr_1d = pd.Series(np.maximum(np.maximum(high_1d - low_1d, np.abs(high_1d - close_1d.shift(1))), np.abs(low_1d - close_1d.shift(1)))).rolling(window=14, min_periods=14).mean().values
-    max_high_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop_denom = np.log10(max_high_1d - min_low_1d) * np.sqrt(14)
-    chop_1d = 100 * np.log10(atr_1d * np.sqrt(14) / chop_denom) / np.log10(14)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    # === 1w Indicators: Donchian Channel (20) ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = 200
+    warmup = 100
     
     for i in range(warmup, n):
-        # Session filter: 08-20 UTC only
+        # Session filter: 00-23 UTC (always active for 12h)
         hour = hours[i]
-        if hour < 8 or hour > 20:
+        if hour < 0 or hour > 23:
             signals[i] = 0.0
             continue
             
-        # Volume filter: current volume > 2.0x 20-period volume SMA
+        # Volume filter: current volume > 1.5x 20-period volume SMA
         vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_200_1w_aligned[i]) or np.isnan(chop_1d_aligned[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Regime filter: only trade in choppy markets (CHOP > 61.8)
-        if chop_1d_aligned[i] <= 61.8:
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(rsi_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. In 1w uptrend (close > EMA200)
-        # 2. Price touches or breaks below 1d S1 level
+        # 1. In 1w uptrend (price > 1w upper Donchian)
+        # 2. 1d RSI < 30 (oversold pullback)
         # 3. Volume confirmation
-        if (close[i] > ema_200_1w_aligned[i]) and (close[i] <= s1_aligned[i]) and vol_confirm:
+        if (close[i] > donchian_high_aligned[i]) and (rsi_1d_aligned[i] < 30) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. In 1w downtrend (close < EMA200)
-        # 2. Price touches or breaks above 1d R1 level
+        # 1. In 1w downtrend (price < 1w lower Donchian)
+        # 2. 1d RSI > 70 (overbought bounce)
         # 3. Volume confirmation
-        elif (close[i] < ema_200_1w_aligned[i]) and (close[i] >= r1_aligned[i]) and vol_confirm:
+        elif (close[i] < donchian_low_aligned[i]) and (rsi_1d_aligned[i] > 70) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -98,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_Camarilla_R1S1_1wEMA200_Volume_ChopFilter_v1"
-timeframe = "4h"
+name = "12h_1d_RSI14_1w_Donchian20_VolumeFilter_v1"
+timeframe = "12h"
 leverage = 1.0
