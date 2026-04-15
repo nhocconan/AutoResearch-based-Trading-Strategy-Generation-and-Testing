@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d/1w Donchian breakout with volume confirmation and ADX trend filter
-# Uses weekly Donchian channels (20-period high/low) as support/resistance.
-# Breakouts above weekly high or below weekly low are traded when confirmed by volume and ADX > 25.
-# Works in bull markets (breakouts up) and bear markets (breakouts down).
-# Timeframe: 1d, HTF: 1w
+# Hypothesis: 12h Choppiness Index Regime Filter + Donchian(20) Breakout + Volume Confirmation
+# In trending markets (CHOP < 38.2): trade Donchian breakouts (long at 20-period high, short at low)
+# In ranging markets (CHOP > 61.8): fade reversals at Bollinger Bands (2,2) - short at upper band, long at lower
+# Volume confirmation requires current volume > 1.5x 20-period median volume
+# Works in bull markets (trend following breakouts) and bear markets (trend following breakdowns or mean reversion in ranges)
+# Target: 50-150 total trades over 4 years (12-37/year)
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,91 +20,116 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data for Donchian channels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 1d data for Choppiness Index calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly Donchian channels (20-period)
-    high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    
-    # Align weekly Donchian channels to daily timeframe
-    high_20_aligned = align_htf_to_ltf(prices, df_1w, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1w, low_20)
-    
-    # Load weekly data for ADX trend filter
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    high_1w_adx = df_1w['high'].values
-    low_1w_adx = df_1w['low'].values
-    close_1w_adx = df_1w['close'].values
-    
-    # Calculate ADX (14-period) on weekly
-    tr1 = high_1w_adx - low_1w_adx
-    tr2 = np.abs(high_1w_adx - np.roll(close_1w_adx, 1))
-    tr3 = np.abs(low_1w_adx - np.roll(close_1w_adx, 1))
+    # Calculate Choppiness Index (14-period) on daily
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr[0] = tr1[0]  # First value
     
-    dm_plus = np.where((high_1w_adx - np.roll(high_1w_adx, 1)) > (np.roll(low_1w_adx, 1) - low_1w_adx), 
-                       np.maximum(high_1w_adx - np.roll(close_1w_adx, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1w_adx, 1) - low_1w_adx) > (high_1w_adx - np.roll(close_1w_adx, 1)), 
-                        np.maximum(np.roll(close_1w_adx, 1) - low_1w_adx, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Sum of true range over 14 periods
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
     
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    # Highest high and lowest low over 14 periods
+    hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
+    # Choppiness Index
+    chop = 100 * np.log10(tr_sum / (hh - ll)) / np.log10(14)
+    chop = np.where((hh - ll) == 0, 50, chop)  # Avoid division by zero
     
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # Align Choppiness Index to 12h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Align weekly ADX to daily timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    # Load 1d data for Bollinger Bands (for ranging market signals)
+    bb_period = 20
+    bb_std = 2.0
+    sma = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_bb = sma + (bb_std * std)
+    lower_bb = sma - (bb_std * std)
+    
+    # Align Bollinger Bands to 12h timeframe
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    
+    # Calculate Donchian Channels (20-period) on 12h
+    # Load 12h data for Donchian calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    
+    # Donchian Channels
+    donch_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian Channels to 12h timeframe (no additional delay needed)
+    donch_high_aligned = align_htf_to_ltf(prices, df_12h, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_12h, donch_low)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25  # Position size
+    base_size = 0.25  # Position size (25% of capital)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(chop_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
+            np.isnan(donch_low_aligned[i]) or np.isnan(upper_bb_aligned[i]) or 
+            np.isnan(lower_bb_aligned[i])):
             continue
         
-        # Long entry: price breaks above weekly Donchian high + volume confirmation + ADX > 25
-        if (close[i] > high_20_aligned[i] and
-            volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-            adx_aligned[i] > 25 and
-            position <= 0):
-            position = 1
-            signals[i] = base_size
+        # Volume confirmation: current volume > 1.5x 20-period median
+        vol_median = np.median(volume[max(0, i-19):i+1]) if i >= 20 else np.median(volume[:i+1])
+        vol_confirm = volume[i] > 1.5 * vol_median
         
-        # Short entry: price breaks below weekly Donchian low + volume confirmation + ADX > 25
-        elif (close[i] < low_20_aligned[i] and
-              volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-              adx_aligned[i] > 25 and
-              position >= 0):
-            position = -1
-            signals[i] = -base_size
-        
-        # Exit: reverse breakout or ADX < 20 (ranging market)
-        elif position == 1 and (close[i] < low_20_aligned[i] or adx_aligned[i] < 20):
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and (close[i] > high_20_aligned[i] or adx_aligned[i] < 20):
-            position = 0
-            signals[i] = 0.0
+        # Regime-based trading logic
+        if chop_aligned[i] < 38.2:  # Trending market - follow Donchian breakouts
+            # Long: price breaks above Donchian high
+            if close[i] > donch_high_aligned[i] and vol_confirm and position <= 0:
+                position = 1
+                signals[i] = base_size
+            # Short: price breaks below Donchian low
+            elif close[i] < donch_low_aligned[i] and vol_confirm and position >= 0:
+                position = -1
+                signals[i] = -base_size
+            # Exit trending position on opposite Donchian breakout
+            elif position == 1 and close[i] < donch_low_aligned[i]:
+                position = 0
+                signals[i] = 0.0
+            elif position == -1 and close[i] > donch_high_aligned[i]:
+                position = 0
+                signals[i] = 0.0
+                
+        elif chop_aligned[i] > 61.8:  # Ranging market - fade at Bollinger Bands
+            # Short at upper Bollinger Band (fade resistance)
+            if close[i] > upper_bb_aligned[i] and vol_confirm and position >= 0:
+                position = -1
+                signals[i] = -base_size
+            # Long at lower Bollinger Band (fade support)
+            elif close[i] < lower_bb_aligned[i] and vol_confirm and position <= 0:
+                position = 1
+                signals[i] = base_size
+            # Exit ranging position when price returns to middle (SMA)
+            elif position == 1 and close[i] > sma[min(i, len(sma)-1)] if not np.isnan(sma[min(i, len(sma)-1)]) else False:
+                position = 0
+                signals[i] = 0.0
+            elif position == -1 and close[i] < sma[min(i, len(sma)-1)] if not np.isnan(sma[min(i, len(sma)-1)]) else False:
+                position = 0
+                signals[i] = 0.0
     
     return signals
 
-name = "1d_1w_Donchian_Breakout_Volume_ADX"
-timeframe = "1d"
+name = "12h_Chop_Donchian_BB_Volume"
+timeframe = "12h"
 leverage = 1.0
