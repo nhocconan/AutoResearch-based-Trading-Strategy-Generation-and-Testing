@@ -3,9 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 12h Camarilla pivot breakout with volume confirmation and chop regime filter
+# Uses 1d Camarilla levels (R1, S1) for structure, 12h for entry timing
+# Volatility filter ensures trades only during sufficient movement
+# Chop filter avoids whipsaws in ranging markets
+# Designed to work in both bull (breakouts) and bear (breakdowns) markets
+# Target: 50-150 trades over 4 years (12-37/year) to minimize fee drag
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -15,72 +22,68 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily ATR(14) for volatility regime
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
-    tr3 = np.abs(df_1d['low'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Calculate 1d Camarilla pivot levels (based on previous day)
+    # Camarilla: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    rang = prev_high - prev_low
+    R1 = prev_close + 1.1 * rang / 12
+    S1 = prev_close - 1.1 * rang / 12
     
-    # Calculate daily EMA(50) for trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align Camarilla levels to 12h timeframe (already delayed by shift(1))
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Calculate daily RSI(14) for momentum filter
-    delta = pd.Series(df_1d['close'].values).diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14_1d = 100 - (100 / (1 + rs))
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
+    # Calculate 12h ATR(14) for volatility filter
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.concatenate([[close[0]], close[:-1]])), 
+                                          np.abs(low - np.concatenate([[close[0]], close[:-1]]))))
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 6h Donchian channels (20-period)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Calculate 12h Choppiness Index(14) for regime filter
+    # CHOP = 100 * log10(sum(ATR(14)) / log10(highest_high - lowest_low)) / log10(14)
+    atr_sum = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
+    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / (hh - ll + 1e-10)) / np.log10(14)
+    
+    # Calculate 12h volume ratio (current vs 20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / (vol_ma + 1e-10)
     
     signals = np.zeros(n)
     
-    for i in range(lookback, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(rsi_14_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(atr_14[i]) or np.isnan(chop[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade when daily ATR is elevated (> 0.3% of price)
-        vol_filter = atr_14_1d_aligned[i] > 0.003 * close[i]
+        # Volatility filter: ATR > 0.5% of price
+        vol_filter = atr_14[i] > 0.005 * close[i]
         
-        # Trend filter: price relative to daily EMA50
-        price_above_ema = close[i] > ema_50_1d_aligned[i]
-        price_below_ema = close[i] < ema_50_1d_aligned[i]
+        # Chop regime filter: only trade when NOT excessively choppy (CHOP < 61.8)
+        chop_filter = chop[i] < 61.8
         
-        # Momentum filter: daily RSI extremes
-        rsi_bullish = rsi_14_1d_aligned[i] > 55
-        rsi_bearish = rsi_14_1d_aligned[i] < 45
+        # Volume confirmation: volume > 1.5x average
+        vol_confirm = vol_ratio[i] > 1.5
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > highest_high[i-1]  # break above previous period high
-        breakout_down = close[i] < lowest_low[i-1]  # break below previous period low
-        
-        # Long conditions: bullish breakout with bullish bias
-        if (breakout_up and price_above_ema and rsi_bullish and vol_filter):
+        # Long breakout: price > R1 with volume and volatility confirmation
+        if (close[i] > R1_aligned[i] and vol_filter and chop_filter and vol_confirm):
             signals[i] = 0.25
             
-        # Short conditions: bearish breakout with bearish bias
-        elif (breakout_down and price_below_ema and rsi_bearish and vol_filter):
+        # Short breakdown: price < S1 with volume and volatility confirmation
+        elif (close[i] < S1_aligned[i] and vol_filter and chop_filter and vol_confirm):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "6h_Donchian20_EMA50_RSI_VolFilter"
-timeframe = "6h"
+name = "12h_Camarilla_Pivot_Breakout_Volume_Chop_v1"
+timeframe = "12h"
 leverage = 1.0
