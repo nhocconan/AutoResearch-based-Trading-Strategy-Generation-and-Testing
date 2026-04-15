@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily HTF data once before loop (12h primary, 1d HTF)
+    # Get daily HTF data once before loop (1d for trend and ATR)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -38,47 +38,47 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr_14 = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 1d EMA200 for trend filter
-    ema_200 = pd.Series(daily_close).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate 1d EMA50 for trend filter
+    ema_50 = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Align HTF indicators to 12h timeframe with proper delay
-    ema_200_12h = align_htf_to_ltf(prices, df_1d, ema_200)
+    ema_50_12h = align_htf_to_ltf(prices, df_1d, ema_50)
     atr_14_12h = align_htf_to_ltf(prices, df_1d, atr_14)
     
     signals = np.zeros(n)
     
-    for i in range(200, n):  # Start after EMA200 warmup
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_200_12h[i]) or np.isnan(atr_14_12h[i]) or 
+        if (np.isnan(ema_50_12h[i]) or np.isnan(atr_14_12h[i]) or 
             np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
         # Entry conditions:
-        # 1. 1d trend filter: price above/below daily EMA200 (strong trend)
+        # 1. 1d trend filter: price above/below daily EMA50
         # 2. 12h Donchian breakout: price breaks 20-period channel
-        # 3. 12h volume confirmation: volume > 1.8x average (slightly relaxed from 2.0)
-        # 4. 12h volatility filter: ATR > 0.3% of price (avoid extremely low volatility)
+        # 3. 12h volume confirmation: volume > 2.0x average (strict filter)
+        # 4. 12h volatility filter: ATR > 0.5 * price (avoid low volatility chop)
         # 5. Discrete position sizing: 0.25
         
-        # Long conditions: break above Donchian high in strong uptrend
-        if (close[i] > ema_200_12h[i] and          # Daily strong uptrend filter
+        # Long conditions: break above Donchian high in uptrend
+        if (close[i] > ema_50_12h[i] and          # Daily uptrend filter
             close[i] > highest_20[i] and          # Donchian breakout
-            volume_ratio[i] > 1.8 and             # Volume confirmation (relaxed from 2.0)
-            atr_14_12h[i] > 0.003 * close[i]):    # Volatility filter (ATR > 0.3% of price)
+            volume_ratio[i] > 2.0 and             # Strict volume confirmation
+            atr_14_12h[i] > 0.005 * close[i]):    # Volatility filter (ATR > 0.5% of price)
             signals[i] = 0.25
             
-        # Short conditions: break below Donchian low in strong downtrend
-        elif (close[i] < ema_200_12h[i] and        # Daily strong downtrend filter
+        # Short conditions: break below Donchian low in downtrend
+        elif (close[i] < ema_50_12h[i] and        # Daily downtrend filter
               close[i] < lowest_20[i] and         # Donchian breakdown
-              volume_ratio[i] > 1.8 and           # Volume confirmation
-              atr_14_12h[i] > 0.003 * close[i]):  # Volatility filter
+              volume_ratio[i] > 2.0 and           # Strict volume confirmation
+              atr_14_12h[i] > 0.005 * close[i]):  # Volatility filter
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "12h_Donchian_Breakout_EMA200_Volume_ATR_Filter"
+name = "12h_Donchian_Breakout_EMA50_Volume_ATR_Filter_v3"
 timeframe = "12h"
 leverage = 1.0
