@@ -3,95 +3,109 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h EMA200 mean reversion with 4h volume confirmation and 1d momentum filter
-# Targets low trade frequency (15-30/year) by requiring confluence of multiple timeframes
-# Works in bull markets (mean reversion from oversold) and bear markets (mean reversion from overbought)
-# Uses volume spike to confirm institutional interest and daily momentum to avoid counter-trend trades
+# Hypothesis: 4h Camarilla pivot-based mean reversion with 1d volume filter and 1w trend filter
+# Designed for low trade frequency (target 15-25/year) with high win probability
+# Uses Camarilla levels (L3/L4 for short, H3/H4 for long) from daily pivots
+# Only takes mean-reversion trades when 1w EMA50 trend aligns with expected reversal
+# Volume spike required to confirm institutional interest at pivot levels
+# Works in ranging markets (mean reversion) and trending markets (pullbacks to value)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
-    volume = prices['volume'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate EMA200 on 1h data
-    ema200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # Load 4h data for volume confirmation
+    # Load 4h data (primary timeframe) for entry timing
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    if len(df_4h) < 50:
         return np.zeros(n)
-    volume_4h = df_4h['volume'].values
     
-    # Load 1d data for momentum filter (RSI)
+    close_4h = df_4h['close'].values
+    
+    # Load 1d data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 4h volume average (20-period)
-    vol_avg_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    # Load 1w data for trend filter (EMA50)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 60:
+        return np.zeros(n)
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d RSI (14-period)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
+    # Calculate Camarilla pivot levels from previous day
+    # Standard Camarilla: H4 = C + 1.1*(H-L)/2, H3 = C + 1.1*(H-L)/4
+    # L3 = C - 1.1*(H-L)/4, L4 = C - 1.1*(H-L)/2
+    camarilla_H4 = close_1d + 1.1 * (high_1d - low_1d) / 2
+    camarilla_H3 = close_1d + 1.1 * (high_1d - low_1d) / 4
+    camarilla_L3 = close_1d - 1.1 * (high_1d - low_1d) / 4
+    camarilla_L4 = close_1d - 1.1 * (high_1d - low_1d) / 2
     
-    # Align indicators to 1h timeframe
-    ema200_aligned = ema200  # already on 1h
-    vol_avg_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_avg_4h)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Volume average (20-period on 1d) for spike detection
+    vol_avg = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Session filter: 8-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # EMA50 on 1w for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align all indicators to 4h timeframe
+    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
+    camarilla_H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3)
+    camarilla_L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3)
+    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.20  # Fixed position size to reduce churn
+    base_size = 0.25  # Base position size
     
-    for i in range(200, n):  # Start after EMA200 warmup
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(vol_avg_4h_aligned[i]) or np.isnan(rsi_1d_aligned[i])):
-            continue
-            
-        # Session filter: only trade 8-20 UTC
-        if not (8 <= hours[i] <= 20):
+        if (np.isnan(camarilla_H4_aligned[i]) or np.isnan(camarilla_H3_aligned[i]) or 
+            np.isnan(camarilla_L3_aligned[i]) or np.isnan(camarilla_L4_aligned[i]) or 
+            np.isnan(vol_avg_aligned[i]) or np.isnan(ema50_1w_aligned[i])):
             continue
         
-        # Long entry: price below EMA200 (oversold) + volume spike + bullish daily momentum
-        if (close[i] < ema200[i] and 
-            volume[i] > 2.0 * vol_avg_4h_aligned[i] and 
-            rsi_1d_aligned[i] > 50 and  # Bullish momentum on daily
+        # Long entry: price touches/slightly pierces L3/L4 + uptrend + volume spike
+        if (low[i] <= camarilla_L3_aligned[i] * 1.002 and  # Allow 0.2% penetration
+            close[i] > camarilla_L3_aligned[i] and          # Close back above L3
+            close[i] > ema50_1w_aligned[i] and              # Above weekly trend
+            volume[i] > 2.0 * vol_avg_aligned[i] and        # Strong volume confirmation
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price above EMA200 (overbought) + volume spike + bearish daily momentum
-        elif (close[i] > ema200[i] and 
-              volume[i] > 2.0 * vol_avg_4h_aligned[i] and 
-              rsi_1d_aligned[i] < 50 and  # Bearish momentum on daily
+        # Short entry: price touches/slightly pierces H3/H4 + downtrend + volume spike
+        elif (high[i] >= camarilla_H3_aligned[i] * 0.998 and  # Allow 0.2% penetration
+              close[i] < camarilla_H3_aligned[i] and          # Close back below H3
+              close[i] < ema50_1w_aligned[i] and              # Below weekly trend
+              volume[i] > 2.0 * vol_avg_aligned[i] and        # Strong volume confirmation
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: price crosses back above/below EMA200
-        elif position == 1 and close[i] > ema200[i]:
+        # Exit: price returns to mean (pivot) or trend breaks
+        elif position == 1 and (close[i] >= (camarilla_H3_aligned[i] + camarilla_L3_aligned[i]) / 2 or
+                                close[i] < ema50_1w_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] < ema200[i]:
+        elif position == -1 and (close[i] <= (camarilla_H3_aligned[i] + camarilla_L3_aligned[i]) / 2 or
+                                 close[i] > ema50_1w_aligned[i]):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "1h_EMA200_MeanReversion_4hVol_1dRSI"
-timeframe = "1h"
+name = "4h_Camarilla_Pivot_MeanReversion_1dVol_1wTrend"
+timeframe = "4h"
 leverage = 1.0
