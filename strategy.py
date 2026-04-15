@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for key levels
+    # Get daily data for pivot levels
     daily = get_htf_data(prices, '1d')
     
     # Calculate daily pivot levels (classic floor trader pivots)
@@ -29,7 +29,7 @@ def generate_signals(prices):
     r3 = daily_high + 2 * (pivot - daily_low)
     s3 = daily_low - 2 * (daily_high - pivot)
     
-    # Align pivot levels to 6h timeframe
+    # Align pivot levels to 12h timeframe
     pivot_aligned = align_htf_to_ltf(prices, daily, pivot)
     r1_aligned = align_htf_to_ltf(prices, daily, r1)
     s1_aligned = align_htf_to_ltf(prices, daily, s1)
@@ -38,7 +38,7 @@ def generate_signals(prices):
     r3_aligned = align_htf_to_ltf(prices, daily, r3)
     s3_aligned = align_htf_to_ltf(prices, daily, s3)
     
-    # Volume filter: current 6h volume > 1.5x 20-period average volume
+    # Volume filter: current 12h volume > 1.5x 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
     
@@ -69,6 +69,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Pivot_R1_S1_Breakout_Volume"
-timeframe = "6h"
+name = "12h_Pivot_R1_S1_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
