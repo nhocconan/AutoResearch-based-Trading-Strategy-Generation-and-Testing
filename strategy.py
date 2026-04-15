@@ -13,58 +13,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly trend: EMA(21) on weekly close
-    weekly = get_htf_data(prices, '1w')
-    weekly_close = weekly['close'].values
-    weekly_ema21 = pd.Series(weekly_close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    weekly_ema21_aligned = align_htf_to_ltf(prices, weekly, weekly_ema21)
-    
-    # Daily ATR(14) for volatility filter
+    # Load 1d data once
     daily = get_htf_data(prices, '1d')
     high_d = daily['high'].values
     low_d = daily['low'].values
     close_d = daily['close'].values
     
-    # True Range
+    # Calculate True Range for 1d ATR
     tr1 = high_d[1:] - low_d[1:]
     tr2 = np.abs(high_d[1:] - close_d[:-1])
     tr3 = np.abs(low_d[1:] - close_d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # ATR calculation
+    # ATR with proper min_periods
     atr_14d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     atr_14d_aligned = align_htf_to_ltf(prices, daily, atr_14d)
     
-    # Volume threshold: 1.5x median of last 20 days
-    vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median()
-    vol_threshold = 1.5 * vol_median
+    # 12h Donchian channels (20-period) - using rolling window
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume threshold: 2.0x median of last 12 bars
+    vol_median = pd.Series(volume).rolling(window=12, min_periods=12).median().values
+    vol_threshold = 2.0 * vol_median
+    
+    # Volatility filter: require ATR > 0.5% of price
+    vol_filter = atr_14d_aligned > (0.005 * close)
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(weekly_ema21_aligned[i]) or np.isnan(atr_14d_aligned[i]) or 
-            np.isnan(vol_threshold[i])):
+        if (np.isnan(atr_14d_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(vol_threshold[i]) or 
+            np.isnan(vol_filter[i])):
             continue
         
-        # Only trade when weekly trend is defined and volatility sufficient
-        if weekly_ema21_aligned[i] <= 0 or atr_14d_aligned[i] <= (0.003 * close[i]):
+        # Only trade when volatility is sufficient (avoid chop)
+        if not vol_filter[i]:
             signals[i] = 0.0
             continue
             
-        # Long: Close above weekly EMA21 + volume spike
-        if (close[i] > weekly_ema21_aligned[i] and 
+        # Long: Break above Donchian high + volume spike
+        if (close[i] > donchian_high[i-1] and 
             volume[i] > vol_threshold[i]):
             signals[i] = 0.25
         
-        # Short: Close below weekly EMA21 + volume spike
-        elif (close[i] < weekly_ema21_aligned[i] and 
+        # Short: Break below Donchian low + volume spike
+        elif (close[i] < donchian_low[i-1] and 
               volume[i] > vol_threshold[i]):
             signals[i] = -0.25
         
-        # Exit: reverse signal on opposite direction
-        elif (close[i] < weekly_ema21_aligned[i] and signals[i-1] > 0) or \
-             (close[i] > weekly_ema21_aligned[i] and signals[i-1] < 0):
+        # Exit: reverse signal on opposite breakout
+        elif (close[i] < donchian_low[i-1] and signals[i-1] > 0) or \
+             (close[i] > donchian_high[i-1] and signals[i-1] < 0):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -73,6 +75,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_WeeklyTrend_Volume_Filter"
-timeframe = "1d"
+name = "12h_Donchian_Breakout_Volume_Filter"
+timeframe = "12h"
 leverage = 1.0
