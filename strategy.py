@@ -23,9 +23,6 @@ def generate_signals(prices):
     daily_low = df_1d['low'].values
     daily_volume = df_1d['volume'].values
     
-    # Calculate daily EMA(21) for trend filter
-    ema_21 = pd.Series(daily_close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    
     # Calculate daily ATR(14) for volatility filter
     tr1 = pd.Series(daily_high - daily_low)
     tr2 = pd.Series(np.abs(daily_high - np.concatenate([[daily_close[0]], daily_close[:-1]])))
@@ -33,15 +30,21 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr_14 = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align HTF indicators to 4h timeframe with proper delay
-    ema_21_4h = align_htf_to_ltf(prices, df_1d, ema_21)
-    atr_14_4h = align_htf_to_ltf(prices, df_1d, atr_14)
+    # Calculate daily EMA(20) for trend filter
+    ema_20 = pd.Series(daily_close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate 4h Donchian channels (20-period) for breakout signals
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align HTF indicators to 6h timeframe with proper delay
+    atr_14_6h = align_htf_to_ltf(prices, df_1d, atr_14)
+    ema_20_6h = align_htf_to_ltf(prices, df_1d, ema_20)
     
-    # Calculate 4h volume ratio (current vs 20-period average)
+    # Calculate 6h Bollinger Bands (20, 2)
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
+    bb_width = (upper_bb - lower_bb) / (sma_20 + 1e-10)
+    
+    # Calculate 6h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
@@ -49,36 +52,39 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_21_4h[i]) or np.isnan(atr_14_4h[i]) or 
-            np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(atr_14_6h[i]) or np.isnan(ema_20_6h[i]) or np.isnan(upper_bb[i]) or 
+            np.isnan(lower_bb[i]) or np.isnan(bb_width[i]) or np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
         # Entry conditions:
-        # 1. 4h Donchian breakout/breakdown
-        # 2. Daily trend filter: price above/below daily EMA21
-        # 3. Volume confirmation: volume > 1.8x average
-        # 4. Volatility filter: ATR > 0.4% of price
-        # 5. Discrete position sizing: 0.25
+        # 1. Bollinger Band squeeze: width < 0.05 (5% of price)
+        # 2. Breakout above upper BB with volume confirmation
+        # 3. Breakdown below lower BB with volume confirmation
+        # 4. Daily trend filter: price above/below daily EMA20
+        # 5. Daily volatility filter: ATR > 0.5% of price (avoid low volatility chop)
+        # 6. Discrete position sizing: 0.25
         
-        # Long conditions: Donchian breakout above in uptrend
-        if (close[i] > ema_21_4h[i] and         # Daily uptrend filter
-            close[i] > highest_20[i] and        # 4h Donchian breakout
-            volume_ratio[i] > 1.8 and           # Volume confirmation
-            atr_14_4h[i] > 0.004 * close[i]):   # Volatility filter
+        # Long conditions: BB breakout above with volume in daily uptrend
+        if (bb_width[i] < 0.05 and           # Bollinger Band squeeze
+            close[i] > upper_bb[i] and       # Breakout above upper BB
+            close[i] > ema_20_6h[i] and      # Daily uptrend filter
+            volume_ratio[i] > 2.0 and        # Volume confirmation (2x average)
+            atr_14_6h[i] > 0.005 * close[i]): # Volatility filter
             signals[i] = 0.25
             
-        # Short conditions: Donchian breakdown below in downtrend
-        elif (close[i] < ema_21_4h[i] and       # Daily downtrend filter
-              close[i] < lowest_20[i] and       # 4h Donchian breakdown
-              volume_ratio[i] > 1.8 and         # Volume confirmation
-              atr_14_4h[i] > 0.004 * close[i]): # Volatility filter
+        # Short conditions: BB breakdown below with volume in daily downtrend
+        elif (bb_width[i] < 0.05 and         # Bollinger Band squeeze
+              close[i] < lower_bb[i] and     # Breakdown below lower BB
+              close[i] < ema_20_6h[i] and    # Daily downtrend filter
+              volume_ratio[i] > 2.0 and      # Volume confirmation (2x average)
+              atr_14_6h[i] > 0.005 * close[i]): # Volatility filter
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian_Breakout_EMA21_Volume_ATR_Filter"
-timeframe = "4h"
+name = "6h_Bollinger_Squeeze_Breakout_Volume_EMA20_ATR_Filter"
+timeframe = "6h"
 leverage = 1.0
