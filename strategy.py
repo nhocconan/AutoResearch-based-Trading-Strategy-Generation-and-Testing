@@ -21,92 +21,60 @@ def generate_signals(prices):
     weekly_close = df_1w['close'].values
     weekly_high = df_1w['high'].values
     weekly_low = df_1w['low'].values
+    weekly_volume = df_1w['volume'].values
     
-    # Calculate weekly Supertrend (ATR=10, mult=3.0)
-    # True Range
+    # Calculate weekly ATR(14) for volatility filter
     tr1 = pd.Series(weekly_high - weekly_low)
     tr2 = pd.Series(np.abs(weekly_high - np.concatenate([[weekly_close[0]], weekly_close[:-1]])))
     tr3 = pd.Series(np.abs(weekly_low - np.concatenate([[weekly_close[0]], weekly_close[:-1]])))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_10 = tr.ewm(span=10, adjust=False, min_periods=10).mean().values
+    atr_14 = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Supertrend calculation
-    hl2 = (weekly_high + weekly_low) / 2.0
-    upper_band = hl2 + (3.0 * atr_10)
-    lower_band = hl2 - (3.0 * atr_10)
+    # Calculate weekly Donchian channels (20-period) for breakout signals
+    highest_20 = pd.Series(weekly_high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(weekly_low).rolling(window=20, min_periods=20).min().values
     
-    # Initialize Supertrend arrays
-    supertrend = np.zeros_like(weekly_close)
-    direction = np.ones_like(weekly_close)  # 1 for uptrend, -1 for downtrend
+    # Align HTF indicators to 12h timeframe with proper delay
+    highest_20_12h = align_htf_to_ltf(prices, df_1w, highest_20)
+    lowest_20_12h = align_htf_to_ltf(prices, df_1w, lowest_20)
+    atr_14_12h = align_htf_to_ltf(prices, df_1w, atr_14)
     
-    for i in range(1, len(weekly_close)):
-        # Upper band logic
-        if upper_band[i] < supertrend[i-1] or weekly_close[i-1] > supertrend[i-1]:
-            upper_band[i] = upper_band[i]
-        else:
-            upper_band[i] = supertrend[i-1]
-        
-        # Lower band logic
-        if lower_band[i] > supertrend[i-1] or weekly_close[i-1] < supertrend[i-1]:
-            lower_band[i] = lower_band[i]
-        else:
-            lower_band[i] = supertrend[i-1]
-        
-        # Trend direction
-        if direction[i-1] == -1 and weekly_close[i] > upper_band[i]:
-            direction[i] = 1
-        elif direction[i-1] == 1 and weekly_close[i] < lower_band[i]:
-            direction[i] = -1
-        else:
-            direction[i] = direction[i-1]
-        
-        # Supertrend value
-        if direction[i] == 1:
-            supertrend[i] = lower_band[i]
-        else:
-            supertrend[i] = upper_band[i]
-    
-    # Calculate 6h Donchian channels (20-period) for breakout signals
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate 6h volume ratio (current vs 20-period average)
+    # Calculate 12h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
-    
-    # Align weekly Supertrend direction to 6h timeframe
-    supertrend_direction_6h = align_htf_to_ltf(prices, df_1w, direction)
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(supertrend_direction_6h[i]) or np.isnan(highest_20[i]) or 
-            np.isnan(lowest_20[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(highest_20_12h[i]) or np.isnan(lowest_20_12h[i]) or 
+            np.isnan(atr_14_12h[i]) or np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
         # Entry conditions:
-        # Long: Weekly uptrend + 6h price breaks above Donchian high + volume confirmation
-        # Short: Weekly downtrend + 6h price breaks below Donchian low + volume confirmation
-        # Discrete position sizing: 0.25
+        # 1. 12h price breaks above weekly Donchian high with volume confirmation → long
+        # 2. 12h price breaks below weekly Donchian low with volume confirmation → short
+        # 3. Volatility filter: ATR > 0.5% of price (avoid low volatility chop)
+        # 4. Volume confirmation: volume > 1.5x average
+        # 5. Discrete position sizing: 0.25
         
-        # Long conditions
-        if (supertrend_direction_6h[i] == 1 and            # Weekly uptrend
-            close[i] > highest_20[i] and                   # 6h breakout above Donchian high
-            volume_ratio[i] > 1.5):                        # Volume confirmation
+        # Long conditions: 12h breakout above weekly high
+        if (close[i] > highest_20_12h[i] and            # 12h price above weekly Donchian high
+            volume_ratio[i] > 1.5 and                  # Volume confirmation
+            atr_14_12h[i] > 0.005 * close[i]):         # Volatility filter
             signals[i] = 0.25
             
-        # Short conditions
-        elif (supertrend_direction_6h[i] == -1 and         # Weekly downtrend
-              close[i] < lowest_20[i] and                  # 6h breakdown below Donchian low
-              volume_ratio[i] > 1.5):                      # Volume confirmation
+        # Short conditions: 12h breakdown below weekly low
+        elif (close[i] < lowest_20_12h[i] and          # 12h price below weekly Donchian low
+              volume_ratio[i] > 1.5 and                # Volume confirmation
+              atr_14_12h[i] > 0.005 * close[i]):       # Volatility filter
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "6h_WeeklySupertrend_Donchian_Breakout_Volume_Filter"
-timeframe = "6h"
+name = "12h_WeeklyDonchian20_Breakout_Volume_ATR_Filter"
+timeframe = "12h"
 leverage = 1.0
