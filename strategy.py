@@ -13,91 +13,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d HTF data once before loop for all HTF indicators
+    # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50) and EMA(200) for trend filter
+    # Calculate 1d Williams %R (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14 + 1e-10)
     
-    # Align 1d EMAs to 4h
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Align 1d Williams %R to 6h with 2-bar delay for confirmation
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r, additional_delay_bars=2)
     
-    # Calculate 4h Donchian channels (20-period)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1w HTF data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    upper_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Calculate 1w EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Align 4h Donchian to 4h (no shift needed as we're already on 4h timeframe)
-    upper_20_4h = upper_20
-    lower_20_4h = lower_20
-    
-    # Calculate 4h ATR(14) for volatility filter and position sizing
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.concatenate([[close_4h[0]], close_4h[:-1]])) if len(close_4h) > 1 else np.array([np.inf])
-    tr3 = np.abs(low_4h - np.concatenate([[close_4h[0]], close_4h[:-1]])) if len(close_4h) > 1 else np.array([np.inf])
-    close_4h = df_4h['close'].values
+    # Calculate 6h ATR(14) for volatility filter
+    tr1 = high - low
+    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align 4h ATR to 4h
-    atr_14_4h = atr_14
+    # Calculate 6h volume ratio (current vs 20-period average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ratio = volume / (vol_ma_20 + 1e-10)
     
-    # Calculate 4h volume ratio (current vs 20-period average)
-    volume_4h = df_4h['volume'].values
-    vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    volume_ratio = volume_4h / (vol_ma_20 + 1e-10)
+    # Pre-compute session filter (08-20 UTC)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     
-    # For 4h timeframe, we work directly with 4h bars
-    for i in range(50, len(prices)):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_20_4h[i]) or np.isnan(lower_20_4h[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or 
-            np.isnan(atr_14_4h[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(atr_14[i]) or np.isnan(volume_ratio[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
-        
-        # Get 4h price data
-        idx_4h = i  # Since we're on 4h timeframe, index maps directly
-        if idx_4h >= len(close_4h):
-            signals[i] = 0.0
-            continue
-            
-        c = close_4h[idx_4h]
         
         # Long conditions:
-        # 1. 4h price breaks above 4h Donchian upper (20)
-        # 2. 1d EMA(50) > 1d EMA(200) (bullish trend)
+        # 1. 6h Williams %R oversold (< -80) with confirmation delay
+        # 2. 1w EMA(50) trend filter: price above EMA50 (bullish bias)
         # 3. Volume confirmation: volume > 1.5x average
-        if (c > upper_20_4h[idx_4h] and
-            ema_50_1d_aligned[i] > ema_200_1d_aligned[i] and
-            volume_ratio[idx_4h] > 1.5):
+        # 4. Volatility filter: ATR > 0.3% of price (avoid low volatility chop)
+        if (williams_r_aligned[i] < -80 and
+            close[i] > ema_50_1w_aligned[i] and
+            volume_ratio[i] > 1.5 and
+            atr_14[i] > 0.003 * close[i]):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. 4h price breaks below 4h Donchian lower (20)
-        # 2. 1d EMA(50) < 1d EMA(200) (bearish trend)
+        # 1. 6h Williams %R overbought (> -20) with confirmation delay
+        # 2. 1w EMA(50) trend filter: price below EMA50 (bearish bias)
         # 3. Volume confirmation: volume > 1.5x average
-        elif (c < lower_20_4h[idx_4h] and
-              ema_50_1d_aligned[i] < ema_200_1d_aligned[i] and
-              volume_ratio[idx_4h] > 1.5):
+        # 4. Volatility filter: ATR > 0.3% of price
+        elif (williams_r_aligned[i] > -20 and
+              close[i] < ema_50_1w_aligned[i] and
+              volume_ratio[i] > 1.5 and
+              atr_14[i] > 0.003 * close[i]):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian20_1d_EMA50_200_Volume_Filter"
-timeframe = "4h"
+name = "6h_WilliamsR14_1w_EMA50_Volume_Filter"
+timeframe = "6h"
 leverage = 1.0
