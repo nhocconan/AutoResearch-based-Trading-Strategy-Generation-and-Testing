@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian channel breakout with volume confirmation and 1w ADX trend filter
+# Hypothesis: 1d Donchian channel breakout with volume confirmation and 1w ADX trend filter
 # Long when price breaks above 20-period Donchian upper + volume > 1.5x 20-period avg + 1w ADX > 25 (strong trend)
 # Short when price breaks below 20-period Donchian lower + volume > 1.5x 20-period avg + 1w ADX > 25 (strong trend)
-# Uses discrete position sizing (0.30) to minimize fee churn. Designed for low trade frequency (12-30/year).
-# Donchian channels provide clear breakout levels. Weekly ADX ensures we only trade strong trends, avoiding chop.
+# Uses discrete position sizing (0.30) to minimize fee churn. Designed for low trade frequency (10-25/year).
+# Donchian channels provide objective breakout levels. 1w ADX filter ensures we only trade strong trends, avoiding chop and false breakouts.
 # Works in bull markets (trend continuation) and bear markets (strong downtrends) by requiring ADX > 25.
 
 def generate_signals(prices):
@@ -90,8 +90,9 @@ def generate_signals(prices):
     
     adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
-    # === 12h Indicators: Donchian Channel (20-period) ===
-    # Calculate Donchian channels: upper = max(high, 20), lower = min(low, 20)
+    # === Primary TF Indicators: Donchian Channel (20-period) ===
+    # Upper band = highest high over 20 periods
+    # Lower band = lowest low over 20 periods
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
@@ -141,6 +142,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_Volume_1wADX25_Filter_v1"
-timeframe = "12h"
+name = "1d_Donchian20_Volume_1wADX25_Filter_v1"
+timeframe = "1d"
 leverage = 1.0
