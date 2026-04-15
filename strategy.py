@@ -3,114 +3,94 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h 1-week Range Breakout with Volume Confirmation and ADX Trend Filter
-# Uses the previous week's high/low as support/resistance levels. Breakouts above previous week's high
-# or below previous week's low are traded only when confirmed by volume and ADX > 25 (trending market).
-# Works in bull markets (breakouts up) and bear markets (breakouts down). Target: 50-150 total trades.
+# Hypothesis: 4h KAMA Direction with RSI Filter and Volume Confirmation
+# Uses KAMA to determine trend direction, RSI for overbought/oversold conditions, and volume for confirmation.
+# Works in both bull and bear markets by adapting to volatility via KAMA's efficiency ratio.
+# Target: 50-150 total trades over 4 years.
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data for previous week's high/low
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Load 12h data for RSI filter (trend context)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    close_12h = df_12h['close'].values
     
-    # Load 1d data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate KAMA (2-period ER, 30-period smoothing) on close
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0)  # placeholder, will compute properly
     
-    # Previous week's high and low (shifted by 1 to avoid look-ahead)
-    prev_high_1w = np.roll(high_1w, 1)
-    prev_low_1w = np.roll(low_1w, 1)
-    prev_high_1w[0] = np.nan  # First value has no previous week
-    prev_low_1w[0] = np.nan
+    # Proper ER calculation
+    er = np.zeros_like(close)
+    for i in range(1, len(close)):
+        if i == 0:
+            er[i] = 0
+        else:
+            direction = np.abs(close[i] - close[i-14]) if i >= 14 else np.abs(close[i] - close[0])
+            volatility_sum = np.sum(np.abs(np.diff(close[max(0, i-13):i+1])))
+            er[i] = direction / (volatility_sum + 1e-10) if volatility_sum > 0 else 0
     
-    # Align previous week's high/low to 12h timeframe
-    prev_high_1w_aligned = align_htf_to_ltf(prices, df_1w, prev_high_1w)
-    prev_low_1w_aligned = align_htf_to_ltf(prices, df_1w, prev_low_1w)
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # smoothing constant
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Calculate ADX (14-period) on 1d
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    # Calculate RSI (14) on 12h
+    delta = np.diff(close_12h, prepend=close_12h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[0:14] = 50  # initialize
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align KAMA and RSI to 4h timeframe
+    kama_aligned = align_htf_to_ltf(prices, close, kama)  # using close as dummy for alignment
+    rsi_aligned = align_htf_to_ltf(prices, df_12h, rsi)
     
     signals = np.zeros(n)
     position = 0
     base_size = 0.25  # Position size
     
-    for i in range(100, n):
+    for i in range(30, n):
         # Skip if any required data is NaN
-        if (np.isnan(prev_high_1w_aligned[i]) or np.isnan(prev_low_1w_aligned[i]) or
-            np.isnan(adx_aligned[i])):
+        if np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]):
             continue
         
-        # Long entry: price breaks above previous week's high + volume confirmation + ADX > 25
-        if (close[i] > prev_high_1w_aligned[i] and
+        # Long: price above KAMA, RSI < 70 (not overbought), volume confirmation
+        if (close[i] > kama_aligned[i] and
+            rsi_aligned[i] < 70 and
             volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-            adx_aligned[i] > 25 and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below previous week's low + volume confirmation + ADX > 25
-        elif (close[i] < prev_low_1w_aligned[i] and
+        # Short: price below KAMA, RSI > 30 (not oversold), volume confirmation
+        elif (close[i] < kama_aligned[i] and
+              rsi_aligned[i] > 30 and
               volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-              adx_aligned[i] > 25 and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse breakout or ADX < 20 (ranging market)
-        elif position == 1 and (close[i] < prev_low_1w_aligned[i] or adx_aligned[i] < 20):
+        # Exit: reverse signal or RSI extreme
+        elif position == 1 and (close[i] < kama_aligned[i] or rsi_aligned[i] > 80):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > prev_high_1w_aligned[i] or adx_aligned[i] < 20):
+        elif position == -1 and (close[i] > kama_aligned[i] or rsi_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "12h_1w_Range_Breakout_Volume_ADX"
-timeframe = "12h"
+name = "4h_KAMA_Direction_RSI_Volume"
+timeframe = "4h"
 leverage = 1.0
