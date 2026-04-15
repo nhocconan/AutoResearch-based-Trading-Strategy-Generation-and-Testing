@@ -3,98 +3,75 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud strategy with 1d trend filter
-# Uses Tenkan-sen (9-period) and Kijun-sen (26-period) cross for momentum signals
-# Filters trades by Senkou Span (cloud) from 1d timeframe to avoid counter-trend trades
-# Works in bull markets (price above cloud) and bear markets (price below cloud)
-# Conservative sizing (0.25) to limit trade frequency and avoid fee drag
-# Target: 50-150 total trades over 4 years
+# Hypothesis: 1-hour RSI mean reversion with 4-hour EMA filter and volume confirmation
+# RSI(14) < 30 for long entry, > 70 for short entry, only in direction of 4h EMA(20)
+# Volume must be > 1.5x 20-bar median to ensure participation
+# Designed to work in both bull (buy dips in uptrend) and bear (sell rallies in downtrend)
+# Conservative sizing (0.20) to limit trade frequency and avoid fee drag
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate Ichimoku components on 6h data
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period_tenkan = 9
-    high_tenkan = pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max()
-    low_tenkan = pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min()
-    tenkan_sen = (high_tenkan + low_tenkan) / 2
+    # 4h EMA(20) for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period_kijun = 26
-    high_kijun = pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max()
-    low_kijun = pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min()
-    kijun_sen = (high_kijun + low_kijun) / 2
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    # Volume confirmation: current > 1.5x median of last 20 bars
+    vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
+    vol_threshold = 1.5 * vol_median
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period_senkou_b = 52
-    high_senkou_b = pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max()
-    low_senkou_b = pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min()
-    senkou_span_b = (high_senkou_b + low_senkou_b) / 2
-    
-    # Get 1d data for trend filter (cloud)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Calculate 1d Ichimoku cloud components
-    high_tenkan_1d = pd.Series(high_1d).rolling(window=9, min_periods=9).max()
-    low_tenkan_1d = pd.Series(low_1d).rolling(window=9, min_periods=9).min()
-    tenkan_sen_1d = (high_tenkan_1d + low_tenkan_1d) / 2
-    
-    high_kijun_1d = pd.Series(high_1d).rolling(window=26, min_periods=26).max()
-    low_kijun_1d = pd.Series(low_1d).rolling(window=26, min_periods=26).min()
-    kijun_sen_1d = (high_kijun_1d + low_kijun_1d) / 2
-    
-    senkou_span_a_1d = (tenkan_sen_1d + kijun_sen_1d) / 2
-    
-    high_senkou_b_1d = pd.Series(high_1d).rolling(window=52, min_periods=52).max()
-    low_senkou_b_1d = pd.Series(low_1d).rolling(window=52, min_periods=52).min()
-    senkou_span_b_1d = (high_senkou_b_1d + low_senkou_b_1d) / 2
-    
-    # Align 1d cloud to 6s timeframe
-    senkou_span_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a_1d)
-    senkou_span_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b_1d)
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     
-    for i in range(52, n):  # Start after warmup for Senkou Span B
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or
-            np.isnan(senkou_span_a[i]) or np.isnan(senkou_span_b[i]) or
-            np.isnan(senkou_span_a_1d_aligned[i]) or np.isnan(senkou_span_b_1d_aligned[i])):
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(rsi[i]) or
+            np.isnan(vol_threshold[i])):
             continue
         
-        # Determine cloud top and bottom for 1d
-        cloud_top = max(senkou_span_a_1d_aligned[i], senkou_span_b_1d_aligned[i])
-        cloud_bottom = min(senkou_span_a_1d_aligned[i], senkou_span_b_1d_aligned[i])
+        # Session filter
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            signals[i] = signals[i-1] if i > 0 else 0.0
+            continue
         
-        # Bullish TK cross: Tenkan-sen crosses above Kijun-sen
-        tk_cross_bullish = (tenkan_sen[i] > kijun_sen[i]) and (tenkan_sen[i-1] <= kijun_sen[i-1])
-        # Bearish TK cross: Tenkan-sen crosses below Kijun-sen
-        tk_cross_bearish = (tenkan_sen[i] < kijun_sen[i]) and (tenkan_sen[i-1] >= kijun_sen[i-1])
+        # Long: RSI < 30 + price above 4h EMA + volume spike
+        if (rsi[i] < 30 and 
+            close[i] > ema_4h_aligned[i] and 
+            volume[i] > vol_threshold[i]):
+            signals[i] = 0.20
         
-        # Long: Bullish TK cross + price above 1d cloud
-        if tk_cross_bullish and close[i] > cloud_top:
-            signals[i] = 0.25
+        # Short: RSI > 70 + price below 4h EMA + volume spike
+        elif (rsi[i] > 70 and 
+              close[i] < ema_4h_aligned[i] and 
+              volume[i] > vol_threshold[i]):
+            signals[i] = -0.20
         
-        # Short: Bearish TK cross + price below 1d cloud
-        elif tk_cross_bearish and close[i] < cloud_bottom:
-            signals[i] = -0.25
-        
-        # Exit: TK cross in opposite direction
+        # Exit: RSI returns to neutral zone (40-60)
         elif (i > 0 and 
-              ((signals[i-1] == 0.25 and tk_cross_bearish) or
-               (signals[i-1] == -0.25 and tk_cross_bullish))):
+              ((signals[i-1] == 0.20 and rsi[i] > 40) or
+               (signals[i-1] == -0.20 and rsi[i] < 60))):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -103,6 +80,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_IchimokuCloud_TKCross_1dFilter"
-timeframe = "6h"
+name = "1h_RSI_MeanReversion_4hEMAFilter_Volume"
+timeframe = "1h"
 leverage = 1.0
