@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian breakout with volume confirmation and 1w ATR filter
-# Donchian(20) breakout on daily chart captures strong multi-day momentum moves.
-# Volume > 1.5x 20-day median ensures institutional participation.
-# 1w ATR(14) filter avoids trading in extremely low volatility (chop) or extreme volatility (exhaustion).
+# Hypothesis: 4h Donchian breakout with volume confirmation and 1d ATR filter
+# Donchian(20) breakout captures strong momentum moves.
+# Volume > 1.5x 20-bar median ensures institutional participation.
+# 1d ATR(14) filter avoids trading in extremely low volatility (chop) or extreme volatility (exhaustion).
 # Designed to work in both bull (breakouts up) and bear (breakouts down) markets.
 # Conservative sizing (0.25) to limit trade frequency and avoid fee drag.
 
@@ -20,20 +20,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian(20) channels on daily
+    # Donchian(20) channels
     high_20 = pd.Series(high).rolling(window=20, min_periods=20).max()
     low_20 = pd.Series(low).rolling(window=20, min_periods=20).min()
     
-    # 1w ATR(14) for volatility filter
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    tr1 = np.maximum(high_1w[1:] - low_1w[1:], np.abs(high_1w[1:] - close_1w[:-1]))
-    tr2 = np.maximum(np.abs(low_1w[1:] - close_1w[:-1]), tr1)
+    # 1d ATR(14) for volatility filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
+    tr2 = np.maximum(np.abs(low_1d[1:] - close_1d[:-1]), tr1)
     tr = np.concatenate([[np.nan], tr2])  # first TR is NaN
     atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1w, atr_14)
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
     # Volume confirmation: current > 1.5x median of last 20 bars
     vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median()
@@ -75,6 +75,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_DonchianBreakout_Volume_ATRFilter"
-timeframe = "1d"
+name = "4h_DonchianBreakout_Volume_ATRFilter"
+timeframe = "4h"
 leverage = 1.0
