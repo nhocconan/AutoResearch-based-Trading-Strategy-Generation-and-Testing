@@ -1,83 +1,100 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h price reversal at 12h Bollinger Bands with volume confirmation
-# Uses mean reversion at Bollinger Band extremes (20, 2) on 12h timeframe,
-# confirmed by volume spike on 4h. Works in ranging markets (both bull and bear)
-# by fading extreme moves. Target: 50-150 total trades over 4 years.
+# Hypothesis: 1h momentum strategy using 4h RSI trend filter and 1d volume regime filter
+# Uses RSI(14) on 4h for trend direction (RSI > 50 = bullish, < 50 = bearish)
+# Entry on 1h when price crosses EMA(20) with volume above 1.5x average
+# Volume regime filter: only trade when 1d volume is above its 20-period average (high activity days)
+# Designed to work in both bull and bear markets by following the 4h RSI trend
+# Target: 60-150 total trades over 4 years (15-37/year) with disciplined entries
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Load 4h data (primary timeframe) for volume and price action
+    # Load 4h data for RSI trend filter
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    if len(df_4h) < 30:
         return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
     
-    # Load 12h data for Bollinger Bands
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 1d data for volume regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Bollinger Bands (20, 2) on 12h
-    sma_20 = pd.Series(close_12h).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_12h).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
+    # Calculate EMA(20) on 1h
+    ema_period = 20
+    ema = pd.Series(close).ewm(span=ema_period, adjust=False, min_periods=ema_period).mean().values
     
-    # Align Bollinger Bands to 4h timeframe
-    upper_bb_aligned = align_htf_to_ltf(prices, df_12h, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_12h, lower_bb)
+    # Calculate RSI(14) on 4h
+    rsi_period = 14
+    delta = pd.Series(close_4h).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Calculate volume average on 1d
+    vol_ma_period = 20
+    vol_ma = pd.Series(volume_1d).rolling(window=vol_ma_period, min_periods=vol_ma_period).mean().values
+    
+    # Align indicators to 1h timeframe
+    ema_aligned = ema  # already on 1h
+    rsi_aligned = align_htf_to_ltf(prices, df_4h, rsi)
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25  # Position size
+    base_size = 0.20  # Position size (20%)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i])):
+        if (np.isnan(ema_aligned[i]) or np.isnan(rsi_aligned[i]) or
+            np.isnan(vol_ma_aligned[i])):
             continue
         
-        # Long entry: price touches lower Bollinger Band + volume spike
-        if (low[i] <= lower_bb_aligned[i] and
-            volume[i] > 2.0 * np.median(volume[max(0, i-20):i+1]) and
+        # Volume regime filter: only trade when 1d volume is above average
+        volume_regime = volume_1d[i // 24] > vol_ma[i // 24] if i // 24 < len(volume_1d) else False
+        
+        # Long entry: price crosses above EMA(20) + 4h RSI > 50 (bullish) + volume regime
+        if (close[i] > ema_aligned[i] and 
+            rsi_aligned[i] > 50 and 
+            volume_regime and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price touches upper Bollinger Band + volume spike
-        elif (high[i] >= upper_bb_aligned[i] and
-              volume[i] > 2.0 * np.median(volume[max(0, i-20):i+1]) and
+        # Short entry: price crosses below EMA(20) + 4h RSI < 50 (bearish) + volume regime
+        elif (close[i] < ema_aligned[i] and 
+              rsi_aligned[i] < 50 and 
+              volume_regime and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: price returns to middle (SMA) or opposite band touch
-        elif position == 1 and (high[i] >= sma_20[i] if not np.isnan(sma_20[i]) else False):
+        # Exit: reverse EMA cross or 4h RSI crosses 50 (trend change)
+        elif position == 1 and (close[i] < ema_aligned[i] or rsi_aligned[i] < 50):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (low[i] <= sma_20[i] if not np.isnan(sma_20[i]) else False):
+        elif position == -1 and (close[i] > ema_aligned[i] or rsi_aligned[i] > 50):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_BollingerReversal_Volume_12h"
-timeframe = "4h"
+name = "1h_RSITrend_VolumeRegime_EMA_Cross"
+timeframe = "1h"
 leverage = 1.0
