@@ -16,10 +16,13 @@ def generate_signals(prices):
     # Get daily data for key levels
     daily = get_htf_data(prices, '1d')
     
-    # Calculate daily range (high-low) and its 20-period average for volatility filter
-    daily_range = daily['high'].values - daily['low'].values
-    avg_daily_range = pd.Series(daily_range).rolling(window=20, min_periods=20).mean().values
-    avg_daily_range_aligned = align_htf_to_ltf(prices, daily, avg_daily_range)
+    # Calculate daily high and low
+    daily_high = daily['high'].values
+    daily_low = daily['low'].values
+    
+    # Align daily levels to current timeframe
+    daily_high_aligned = align_htf_to_ltf(prices, daily, daily_high)
+    daily_low_aligned = align_htf_to_ltf(prices, daily, daily_low)
     
     # Volume spike detection: current volume > 1.5x 20-day average volume
     vol_ma_20d = pd.Series(daily['volume'].values).rolling(window=20, min_periods=20).mean().values
@@ -27,17 +30,19 @@ def generate_signals(prices):
     volume_threshold = 1.5 * vol_ma_20d_aligned
     volume_spike = volume > volume_threshold
     
+    # Volatility filter: average daily range > 1% of price
+    daily_range = daily_high - daily_low
+    avg_daily_range = pd.Series(daily_range).rolling(window=20, min_periods=20).mean().values
+    avg_daily_range_aligned = align_htf_to_ltf(prices, daily, avg_daily_range)
+    
     signals = np.zeros(n)
     
     for i in range(50, n):
         # Skip if any required data is NaN
-        if np.isnan(avg_daily_range_aligned[i]) or np.isnan(vol_ma_20d_aligned[i]):
+        if np.isnan(daily_high_aligned[i]) or np.isnan(daily_low_aligned[i]) or \
+           np.isnan(vol_ma_20d_aligned[i]) or np.isnan(avg_daily_range_aligned[i]):
             signals[i] = 0.0
             continue
-        
-        # Get today's daily high and low (aligned to current 12h bar)
-        daily_high = align_htf_to_ltf(prices, daily, daily['high'].values)[i]
-        daily_low = align_htf_to_ltf(prices, daily, daily['low'].values)[i]
         
         # Only trade when volatility is sufficient (avoid low volatility chop)
         if avg_daily_range_aligned[i] < 0.01 * close[i]:  # Less than 1% of price
@@ -45,17 +50,17 @@ def generate_signals(prices):
             continue
             
         # Long: Price breaks above daily high with volume spike
-        if close[i] > daily_high and volume_spike[i]:
+        if close[i] > daily_high_aligned[i] and volume_spike[i]:
             signals[i] = 0.25
         
         # Short: Price breaks below daily low with volume spike
-        elif close[i] < daily_low and volume_spike[i]:
+        elif close[i] < daily_low_aligned[i] and volume_spike[i]:
             signals[i] = -0.25
         
         # Exit: reverse signal when price returns to opposite daily level
-        elif close[i] < daily_low and signals[i-1] > 0:
+        elif close[i] < daily_low_aligned[i] and signals[i-1] > 0:
             signals[i] = 0.0
-        elif close[i] > daily_high and signals[i-1] < 0:
+        elif close[i] > daily_high_aligned[i] and signals[i-1] < 0:
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -64,6 +69,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1D_Range_Breakout_With_Volume_Confirmation"
-timeframe = "12h"
+name = "4h_1D_Range_Breakout_With_Volume_Confirmation"
+timeframe = "4h"
 leverage = 1.0
