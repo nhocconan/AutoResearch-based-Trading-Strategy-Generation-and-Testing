@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ADX trend filter
-# Uses 20-period Donchian channels on 4h for breakout signals. Long when price breaks above upper band,
-# short when breaks below lower band. Requires volume > 1.5x 20-period median and ADX(14) > 25 on 4h.
-# Works in bull markets (upward breakouts) and bear markets (downward breakouts).
-# Target: 50-150 total trades over 4 years.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) + Daily RSI filter + Volume Spike
+# Elder Ray measures bull/bear power relative to EMA. Bull Power = High - EMA, Bear Power = Low - EMA.
+# We go long when Bull Power > 0 and Bear Power rising (less negative), short when Bear Power < 0 and Bull Power falling.
+# Filtered by daily RSI (avoid extremes) and volume spikes to avoid chop.
+# Works in bull/bear via adaptive EMA. Target: 50-150 total trades.
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,78 +19,92 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period) on 4h
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Load daily data for EMA and RSI
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Calculate ADX (14-period) on 4h
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    # Calculate EMA(13) on daily close
+    close_1d = df_1d['close'].values
+    ema_13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Calculate RSI(14) on daily close
+    delta = np.diff(close_1d)
+    delta = np.concatenate([[np.nan], delta])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Smoothed values
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    # Align EMA and RSI to 6h timeframe
+    ema_13_aligned = align_htf_to_ltf(prices, df_1d, ema_13)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
+    # Calculate Elder Ray components using aligned EMA
+    bull_power = high - ema_13_aligned
+    bear_power = low - ema_13_aligned
     
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # Smooth Elder Ray with EMA(5) to reduce noise
+    bull_power_smooth = pd.Series(bull_power).ewm(span=5, adjust=False, min_periods=5).mean().values
+    bear_power_smooth = pd.Series(bear_power).ewm(span=5, adjust=False, min_periods=5).mean().values
     
-    # Volume median (20-period)
+    # Calculate change in smoothed power for momentum
+    bull_power_change = np.diff(bull_power_smooth, prepend=bull_power_smooth[0])
+    bear_power_change = np.diff(bear_power_smooth, prepend=bear_power_smooth[0])
+    
+    # Volume spike detection: volume > 1.5x 20-period median
     vol_median = pd.Series(volume).rolling(window=20, min_periods=20).median().values
+    vol_spike = volume > (1.5 * vol_median)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25  # Position size
+    base_size = 0.25
     
     for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(adx[i]) or np.isnan(vol_median[i])):
+        if (np.isnan(ema_13_aligned[i]) or np.isnan(rsi_aligned[i]) or
+            np.isnan(bull_power_smooth[i]) or np.isnan(bear_power_smooth[i]) or
+            np.isnan(vol_median[i])):
             continue
         
-        # Long entry: price breaks above Donchian upper + volume confirmation + ADX > 25
-        if (close[i] > highest_high[i] and
-            volume[i] > 1.5 * vol_median[i] and
-            adx[i] > 25 and
+        # Long conditions:
+        # 1. Bull power positive (above EMA)
+        # 2. Bear power increasing (becoming less negative)
+        # 3. RSI not overbought (< 70) to avoid exhaustion
+        # 4. Volume spike for confirmation
+        if (bull_power_smooth[i] > 0 and
+            bear_power_change[i] > 0 and
+            rsi_aligned[i] < 70 and
+            vol_spike[i] and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below Donchian lower + volume confirmation + ADX > 25
-        elif (close[i] < lowest_low[i] and
-              volume[i] > 1.5 * vol_median[i] and
-              adx[i] > 25 and
+        # Short conditions:
+        # 1. Bear power negative (below EMA)
+        # 2. Bull power decreasing (weakening)
+        # 3. RSI not oversold (> 30) to avoid exhaustion
+        # 4. Volume spike for confirmation
+        elif (bear_power_smooth[i] < 0 and
+              bull_power_change[i] < 0 and
+              rsi_aligned[i] > 30 and
+              vol_spike[i] and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse breakout or ADX < 20 (ranging market)
-        elif position == 1 and (close[i] < lowest_low[i] or adx[i] < 20):
+        # Exit: power divergence or RSI extreme
+        elif position == 1 and (bull_power_smooth[i] < 0 or rsi_aligned[i] > 80):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > highest_high[i] or adx[i] < 20):
+        elif position == -1 and (bear_power_smooth[i] > 0 or rsi_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "4h_Donchian_Breakout_Volume_ADX"
-timeframe = "4h"
+name = "6h_ElderRay_RSI_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
