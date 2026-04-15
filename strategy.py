@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with volume confirmation and 1d ADX trend filter
-# Long when price breaks above 20-period Donchian high + volume > 1.5x 20-period avg + 1d ADX > 20 (trending market)
-# Short when price breaks below 20-period Donchian low + volume > 1.5x 20-period avg + 1d ADX > 20 (trending market)
-# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (12-30/year).
-# Donchian channels provide objective breakout levels. ADX filter ensures we only trade when trends are present.
-# Works in bull markets (trend continuation) and bear markets (strong downtrends) by requiring ADX > 20.
-# Timeframe: 12h (primary), HTF: 1d for ADX filter.
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d ADX regime filter
+# Long when price breaks above Donchian upper band (20-period high) + volume > 1.5x 20-period volume SMA + 1d ADX > 20 (trending market)
+# Short when price breaks below Donchian lower band (20-period low) + volume > 1.5x 20-period volume SMA + 1d ADX > 20
+# Uses discrete position sizing (0.25) to minimize fee churn. Target: 20-40 trades/year.
+# Donchian channels provide objective breakout levels. ADX filter ensures we only trade in trending regimes, avoiding chop.
+# Works in bull markets (breakouts to new highs) and bear markets (breakdowns to new lows) by requiring ADX > 20.
 
 def generate_signals(prices):
     n = len(prices)
@@ -91,13 +90,11 @@ def generate_signals(prices):
     
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # === 12h Indicator: Donchian Channel (20-period) ===
-    # Calculate rolling max/min for 20 periods
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # === 4h Indicator: Donchian Channel (20-period) ===
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicator: Volume Confirmation ===
+    # === 4h Indicator: Volume SMA (20-period) ===
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -111,28 +108,28 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
+        # Volume filter: current volume > 1.5x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
+        
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
             np.isnan(adx_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
-        
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 20-period Donchian high
+        # 1. Price breaks above 4h Donchian upper band (20)
         # 2. Trending market (ADX > 20)
         # 3. Volume confirmation
-        if (close[i] > highest_high[i]) and \
+        if (close[i] > donchian_upper[i]) and \
            (adx_aligned[i] > 20) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below 20-period Donchian low
+        # 1. Price breaks below 4h Donchian lower band (20)
         # 2. Trending market (ADX > 20)
         # 3. Volume confirmation
-        elif (close[i] < lowest_low[i]) and \
+        elif (close[i] < donchian_lower[i]) and \
              (adx_aligned[i] > 20) and vol_confirm:
             signals[i] = -0.25
         
@@ -141,6 +138,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_Donchian20_Volume_1dADX20_Filter_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Volume_ADX20_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
