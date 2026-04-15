@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot R1/S1 breakout with 1d ADX trend filter and volume confirmation
-# Long when price breaks above Camarilla R1 (1d) + 1d ADX > 25 (trending) + volume > 1.5x 20-period avg
-# Short when price breaks below Camarilla S1 (1d) + 1d ADX > 25 (trending) + volume > 1.5x 20-period avg
+# Hypothesis: 6h Williams Alligator + Elder Ray Power with 1d regime filter
+# Uses Alligator (JAWS/TEETH/LIPS) to identify trendless markets and Elder Ray to measure bull/bear power
+# Long when: Elder Bull Power > 0 AND price above Alligator TEETH AND 1d ADX < 25 (range regime) for mean reversion
+# Short when: Elder Bear Power < 0 AND price below Alligator TEETH AND 1d ADX < 25 (range regime) for mean reversion
 # Uses discrete position sizing (0.25) to control drawdown and minimize fee drag.
-# Camarilla pivots from 1d provide institutional support/resistance levels that work in both bull and bear markets.
-# 1d ADX > 25 ensures we only trade in trending conditions, reducing whipsaws in ranging markets.
-# Volume confirmation (1.5x) targets ~20-30 trades/year on 4h timeframe to avoid overtrading.
+# Alligator identifies sideways markets where Elder Ray works best for mean reversion.
+# 1d ADX < 25 filter ensures we only trade in ranging conditions on higher timeframe.
 
 def generate_signals(prices):
     n = len(prices)
@@ -30,68 +30,77 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d Indicator: ADX(14) for trend strength ===
+    # === 1d Indicator: ADX for regime filter ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # True Range calculation
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    tr = np.concatenate([[np.nan], tr])  # align with index
     
     # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
     
-    # Smoothed values (Wilder's smoothing)
-    def wilders_smoothing(values, period):
-        smoothed = np.zeros_like(values)
-        smoothed[period-1] = np.nansum(values[:period])
-        for i in range(period, len(values)):
-            smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + values[i]
-        return smoothed
+    # Smoothed TR, DM+ and DM-
+    def ma_smoother(data, period):
+        return pd.Series(data).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     
-    period = 14
-    tr_period = wilders_smoothing(tr, period)
-    dm_plus_period = wilders_smoothing(dm_plus, period)
-    dm_minus_period = wilders_smoothing(dm_minus, period)
+    tr_ma = ma_smoother(tr, 14)
+    dm_plus_ma = ma_smoother(dm_plus, 14)
+    dm_minus_ma = ma_smoother(dm_minus, 14)
     
     # DI+ and DI-
-    di_plus = np.where(tr_period != 0, (dm_plus_period / tr_period) * 100, 0)
-    di_minus = np.where(tr_period != 0, (dm_minus_period / tr_period) * 100, 0)
+    di_plus = 100 * dm_plus_ma / tr_ma
+    di_minus = 100 * dm_minus_ma / tr_ma
     
     # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 
-                  np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
-    adx = np.zeros_like(dx)
-    adx[2*period-1] = np.nanmean(dx[period-1:2*period-1]) if np.any(~np.isnan(dx[period-1:2*period-1])) else 0
-    for i in range(2*period, len(dx)):
-        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = ma_smoother(dx, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # === 6h Indicators: Williams Alligator ===
+    # JAWS (Blue): 13-period SMMA smoothed 8 bars ahead
+    # TEETH (Red): 8-period SMMA smoothed 5 bars ahead  
+    # LIPS (Green): 5-period SMMA smoothed 3 bars ahead
+    def smma(data, period):
+        # Smoothed Moving Average
+        sma = pd.Series(data).rolling(window=period, min_periods=period).mean().values
+        smma_vals = np.full_like(data, np.nan, dtype=float)
+        if len(sma) >= period:
+            smma_vals[period-1] = sma[period-1]
+            for i in range(period, len(data)):
+                smma_vals[i] = (smma_vals[i-1] * (period-1) + data[i]) / period
+        return smma_vals
     
-    # === 1d Camarilla Pivot Levels (R1, S1) ===
-    # Camarilla: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    camarilla_r1_1d = close_1d + (1.1 * (high_1d - low_1d) / 12)
-    camarilla_s1_1d = close_1d - (1.1 * (high_1d - low_1d) / 12)
+    jaws = smma(close, 13)
+    teeth = smma(close, 8)
+    lips = smma(close, 5)
     
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
+    # Shift Alligator lines forward (JAWS: +8, TEETH: +5, LIPS: +3)
+    jaws_shifted = np.concatenate([np.full(8, np.nan), jaws[:-8]]) if len(jaws) > 8 else np.full_like(jaws, np.nan)
+    teeth_shifted = np.concatenate([np.full(5, np.nan), teeth[:-5]]) if len(teeth) > 5 else np.full_like(teeth, np.nan)
+    lips_shifted = np.concatenate([np.full(3, np.nan), lips[:-3]]) if len(lips) > 3 else np.full_like(lips, np.nan)
     
-    # Volume SMA for confirmation (using 20-period)
-    vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # === 6h Indicators: Elder Ray Power ===
+    # Bull Power = High - EMA(13)
+    # Bear Power = Low - EMA(13)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(2*period, 20) + 5  # ADX(28) + Donchian(20) + volume(20) + buffer
+    warmup = max(50, 20) + 10  # sufficient buffer for all indicators
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -100,31 +109,27 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(jaws_shifted[i]) or np.isnan(teeth_shifted[i]) or np.isnan(lips_shifted[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(adx_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
-        
-        # Trend filter: 1d ADX > 25 (trending market)
-        trending = adx_aligned[i] > 25
-        
         # === LONG CONDITIONS ===
-        # 1. Price breaks above Camarilla R1 (1d)
-        # 2. 1d ADX > 25 (trending)
-        # 3. Volume confirmation
-        if (close[i] > camarilla_r1_aligned[i]) and \
-           trending and vol_confirm:
+        # 1. Elder Bull Power > 0 (bulls in control)
+        # 2. Price above Alligator TEETH (trend bias up)
+        # 3. 1d ADX < 25 (range regime on higher timeframe for mean reversion)
+        if (bull_power[i] > 0) and \
+           (close[i] > teeth_shifted[i]) and \
+           (adx_1d_aligned[i] < 25):
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below Camarilla S1 (1d)
-        # 2. 1d ADX > 25 (trending)
-        # 3. Volume confirmation
-        elif (close[i] < camarilla_s1_aligned[i]) and \
-             trending and vol_confirm:
+        # 1. Elder Bear Power < 0 (bears in control)
+        # 2. Price below Alligator TEETH (trend bias down)
+        # 3. 1d ADX < 25 (range regime on higher timeframe for mean reversion)
+        elif (bear_power[i] < 0) and \
+             (close[i] < teeth_shifted[i]) and \
+             (adx_1d_aligned[i] < 25):
             signals[i] = -0.25
         
         else:
@@ -132,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Camarilla_R1S1_1dADX_Volume_Filter_v1"
-timeframe = "4h"
+name = "6h_Alligator_ElderRay_1dADX_RangeFilter_v1"
+timeframe = "6h"
 leverage = 1.0
