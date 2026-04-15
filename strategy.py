@@ -3,83 +3,89 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI(14) mean reversion with 4h trend filter and volume confirmation
-# Uses RSI extremes for mean reversion entries, filtered by 4h EMA trend direction,
-# with volume confirmation to avoid false signals. Works in both bull and bear by
-# only taking mean reversion trades in the direction of the 4h trend.
-# Target: 80-150 total trades over 4 years (20-38/year) with disciplined entries.
+# Hypothesis: 6h Donchian(20) breakout with weekly trend filter and volume confirmation
+# Uses 6h Donchian breakouts for entry, 1-week EMA50 for trend filter (only long in weekly uptrend, short in downtrend),
+# and volume confirmation to avoid false breakouts. Designed to work in both bull and bear by
+# following the weekly trend direction. Target: 60-120 total trades over 4 years (15-30/year).
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Load 6h data for Donchian calculation
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 50:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
     
-    # Calculate RSI(14) on 1h
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Load weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Calculate EMA50 on 4h for trend filter
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    close_1w = df_1w['close'].values
     
-    # Calculate volume average (20-period on 1h)
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate Donchian channels (20-period) on 6h
+    donch_high_6h = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    donch_low_6h = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
     
-    # Align 4h EMA50 to 1h
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Calculate EMA50 on weekly for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Volume average (20-period on 6h)
+    vol_avg_6h = pd.Series(df_6h['volume'].values).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all indicators to 6h timeframe
+    donch_high_6h_aligned = align_htf_to_ltf(prices, df_6h, donch_high_6h)
+    donch_low_6h_aligned = align_htf_to_ltf(prices, df_6h, donch_low_6h)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_6h, vol_avg_6h)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.20  # Position size
+    base_size = 0.25  # Position size
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi[i]) or np.isnan(ema50_4h_aligned[i]) or
-            np.isnan(vol_avg[i])):
+        if (np.isnan(donch_high_6h_aligned[i]) or np.isnan(donch_low_6h_aligned[i]) or
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_avg_aligned[i])):
             continue
         
-        # Long entry: RSI < 30 (oversold) + volume confirmation + price above 4h EMA50 (uptrend)
-        if (rsi[i] < 30 and
-            volume[i] > 1.2 * vol_avg[i] and
-            close[i] > ema50_4h_aligned[i] and
+        # Long entry: price breaks above 6h Donchian high + volume spike + weekly uptrend
+        if (close[i] > donch_high_6h_aligned[i] and
+            volume[i] > 1.5 * vol_avg_aligned[i] and
+            close[i] > ema50_1w_aligned[i] and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: RSI > 70 (overbought) + volume confirmation + price below 4h EMA50 (downtrend)
-        elif (rsi[i] > 70 and
-              volume[i] > 1.2 * vol_avg[i] and
-              close[i] < ema50_4h_aligned[i] and
+        # Short entry: price breaks below 6h Donchian low + volume spike + weekly downtrend
+        elif (close[i] < donch_low_6h_aligned[i] and
+              volume[i] > 1.5 * vol_avg_aligned[i] and
+              close[i] < ema50_1w_aligned[i] and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: RSI returns to neutral range (40-60) or opposite extreme
-        elif position == 1 and (rsi[i] > 40):
+        # Exit: reverse signal
+        elif position == 1 and close[i] < donch_low_6h_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (rsi[i] < 60):
+        elif position == -1 and close[i] > donch_high_6h_aligned[i]:
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "1h_RSI_MeanReversion_4hTrend_Filter"
-timeframe = "1h"
+name = "6h_Donchian_WeeklyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
