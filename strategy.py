@@ -3,9 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h 1-day Williams Fractal Breakout with Volume Confirmation and ADX Trend Filter
-# Uses daily Williams Fractal highs/lows as support/resistance. Breakouts above bullish fractal high or below bearish fractal low are traded only when confirmed by volume and ADX > 25 (trending market).
-# Works in bull markets (breakouts up) and bear markets (breakouts down). Target: 50-150 total trades over 4 years (12-37/year).
+# Hypothesis: 4h/1d Range Breakout with Volume Spike and ADX Filter
+# Uses previous day's high/low as key levels. Trades breakouts only when confirmed by
+# volume spike (>2x median) and ADX > 25 (trending market). Designed to work in both
+# bull (breakouts up) and bear (breakouts down) markets. Target: 20-50 trades/year.
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,9 +18,9 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Williams Fractals
+    # Load 1d data for previous day's high/low
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 2:
         return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -32,26 +33,15 @@ def generate_signals(prices):
     low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
     
-    # Calculate Williams Fractals (5-bar window: 2 bars on each side)
-    # Bearish fractal: high is highest of 5 bars
-    # Bullish fractal: low is lowest of 5 bars
-    bearish_fractal = np.full(len(high_1d), np.nan)
-    bullish_fractal = np.full(len(low_1d), np.nan)
+    # Previous day's high and low (shifted by 1 to avoid look-ahead)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_high_1d[0] = np.nan  # First value has no previous day
+    prev_low_1d[0] = np.nan
     
-    for i in range(2, len(high_1d) - 2):
-        # Bearish fractal: current high is highest in window
-        if (high_1d[i] >= high_1d[i-2] and high_1d[i] >= high_1d[i-1] and
-            high_1d[i] >= high_1d[i+1] and high_1d[i] >= high_1d[i+2]):
-            bearish_fractal[i] = high_1d[i]
-        
-        # Bullish fractal: current low is lowest in window
-        if (low_1d[i] <= low_1d[i-2] and low_1d[i] <= low_1d[i-1] and
-            low_1d[i] <= low_1d[i+1] and low_1d[i] <= low_1d[i+2]):
-            bullish_fractal[i] = low_1d[i]
-    
-    # Williams Fractals need 2 extra bars for confirmation (they form at bar i, confirmed at bar i+2)
-    bearish_fractal_confirmed = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_confirmed = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    # Align previous day's high/low to 4h timeframe
+    prev_high_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_high_1d)
+    prev_low_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_low_1d)
     
     # Calculate ADX (14-period) on 12h
     # True Range
@@ -82,7 +72,7 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Align ADX to 12h timeframe
+    # Align ADX to 4h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
     signals = np.zeros(n)
@@ -91,36 +81,40 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(bearish_fractal_confirmed[i]) or np.isnan(bullish_fractal_confirmed[i]) or
+        if (np.isnan(prev_high_1d_aligned[i]) or np.isnan(prev_low_1d_aligned[i]) or
             np.isnan(adx_aligned[i])):
             continue
         
-        # Long entry: price breaks above bullish fractal high + volume confirmation + ADX > 25
-        if (close[i] > bullish_fractal_confirmed[i] and
-            volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
+        # Calculate volume threshold: 2x median of last 20 bars
+        vol_median = np.median(volume[max(0, i-20):i+1])
+        vol_threshold = 2.0 * vol_median
+        
+        # Long entry: price breaks above previous day's high + volume spike + ADX > 25
+        if (close[i] > prev_high_1d_aligned[i] and
+            volume[i] > vol_threshold and
             adx_aligned[i] > 25 and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below bearish fractal low + volume confirmation + ADX > 25
-        elif (close[i] < bearish_fractal_confirmed[i] and
-              volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
+        # Short entry: price breaks below previous day's low + volume spike + ADX > 25
+        elif (close[i] < prev_low_1d_aligned[i] and
+              volume[i] > vol_threshold and
               adx_aligned[i] > 25 and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
         # Exit: reverse breakout or ADX < 20 (ranging market)
-        elif position == 1 and (close[i] < bearish_fractal_confirmed[i] or adx_aligned[i] < 20):
+        elif position == 1 and (close[i] < prev_low_1d_aligned[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > bullish_fractal_confirmed[i] or adx_aligned[i] < 20):
+        elif position == -1 and (close[i] > prev_high_1d_aligned[i] or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "12h_1d_Williams_Fractal_Breakout_Volume_ADX"
-timeframe = "12h"
+name = "4h_1d_Range_Breakout_Volume_Spike_ADX"
+timeframe = "4h"
 leverage = 1.0
