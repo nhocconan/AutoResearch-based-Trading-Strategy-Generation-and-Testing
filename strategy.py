@@ -13,87 +13,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d HTF data once before loop (for Camarilla pivots and ATR)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 12h HTF data once before loop (trend filter)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate daily ATR(14) for volatility regime filter
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
-    tr3 = np.abs(df_1d['low'] - np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Calculate 12h EMA(50) for trend filter
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate daily Camarilla pivot levels (using prior day's OHLC)
-    prior_high = df_1d['high'].shift(1).values
-    prior_low = df_1d['low'].shift(1).values
-    prior_close = df_1d['close'].shift(1).values
+    # Get 4h HTF data once before loop (volume confirmation)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
     
-    camarilla_pivot = (prior_high + prior_low + prior_close) / 3.0
-    camarilla_r3 = camarilla_pivot + 1.1 * (prior_high - prior_low)
-    camarilla_s3 = camarilla_pivot - 1.1 * (prior_high - prior_low)
-    
-    # Align Camarilla levels to 12h
-    camarilla_pivot_12h = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    camarilla_r3_12h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_12h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Calculate 12h ATR(14) for volatility entry filter
-    tr1_12h = high - low
-    tr2_12h = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3_12h = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
-    atr_14_12h = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Calculate 12h volume ratio (current vs 20-period average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ratio = volume / (vol_ma_20 + 1e-10)
+    # Calculate 4h volume MA(20) for volume confirmation
+    vol_ma_20_4h = pd.Series(df_4h['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20_4h)
     
     signals = np.zeros(n)
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(camarilla_pivot_12h[i]) or 
-            np.isnan(camarilla_r3_12h[i]) or np.isnan(camarilla_s3_12h[i]) or 
-            np.isnan(atr_14_12h[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma_20_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility regime filter: only trade when daily ATR is elevated (> 0.8% of price)
-        vol_regime = atr_14_1d_aligned[i] > 0.008 * close[i]
+        # Volume confirmation: current 4h volume > 1.5x 20-period average
+        volume_conf = volume[i] > 1.5 * vol_ma_20_4h_aligned[i]
         
         # Long conditions:
-        # 1. Price above Camarilla pivot (bullish bias)
-        # 2. Price breaks above Camarilla R3 with volume (bullish continuation)
-        # 3. Volume confirmation: volume > 1.5x average (stricter to reduce trades)
-        # 4. 12h ATR > 0.5% of price (ensure sufficient volatility)
-        # 5. Daily volatility regime filter
-        if (close[i] > camarilla_pivot_12h[i] and
-            close[i] > camarilla_r3_12h[i] and
-            volume_ratio[i] > 1.5 and
-            atr_14_12h[i] > 0.005 * close[i] and
-            vol_regime):
+        # 1. Price above 12h EMA(50) (bullish trend)
+        # 2. Volume confirmation
+        if (close[i] > ema_50_12h_aligned[i] and
+            volume_conf):
             signals[i] = 0.25
             
         # Short conditions:
-        # 1. Price below Camarilla pivot (bearish bias)
-        # 2. Price breaks below Camarilla S3 with volume (bearish continuation)
-        # 3. Volume confirmation: volume > 1.5x average
-        # 4. 12h ATR > 0.5% of price
-        # 5. Daily volatility regime filter
-        elif (close[i] < camarilla_pivot_12h[i] and
-              close[i] < camarilla_s3_12h[i] and
-              volume_ratio[i] > 1.5 and
-              atr_14_12h[i] > 0.005 * close[i] and
-              vol_regime):
+        # 1. Price below 12h EMA(50) (bearish trend)
+        # 2. Volume confirmation
+        elif (close[i] < ema_50_12h_aligned[i] and
+              volume_conf):
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "12h_Vol_Regime_Camarilla_Pivot_R3S3_Breakout_v1"
-timeframe = "12h"
+name = "4h_12h_EMA50_Volume_Confirmation_v1"
+timeframe = "4h"
 leverage = 1.0
