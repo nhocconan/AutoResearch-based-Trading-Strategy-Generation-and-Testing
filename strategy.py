@@ -1,17 +1,17 @@
-# 12h_OvernightBreakout_With_Volume_Spike
-# Hypothesis: Overnight price moves (21:00-09:00 UTC) often break the prior session's range.
-# In BTC/ETH, these moves are driven by Asian session momentum and can be filtered by volume spikes.
-# Breakouts above/below the prior session high/low are taken only with volume > 2x median.
-# Works in both bull and bear markets as it captures momentum bursts regardless of direction.
-# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 4h Williams %R + Volume Spike + ADX Trend Filter
+# Williams %R identifies overbought/oversold conditions. In trending markets (ADX > 25),
+# we fade extreme readings: short when %R > -20 (overbought), long when %R < -80 (oversold).
+# Volume spike confirms participation. Works in both bull and bear markets by fading extremes
+# within the prevailing trend. Target: 50-150 total trades.
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,61 +19,101 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data for session range calculation
+    # Load 4h data for Williams %R calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 14:
+        return np.zeros(n)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # Calculate Williams %R (14-period) on 4h
+    highest_high = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
+    wr = -100 * (highest_high - close_4h) / (highest_high - lowest_low + 1e-10)
+    
+    # Align Williams %R to 4h timeframe (no additional delay needed)
+    wr_aligned = align_htf_to_ltf(prices, df_4h, wr)
+    
+    # Load 12h data for ADX trend filter
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    if len(df_12h) < 50:
         return np.zeros(n)
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Previous session high/low (shifted by 1 bar)
-    prev_high_12h = np.roll(high_12h, 1)
-    prev_low_12h = np.roll(low_12h, 1)
-    prev_high_12h[0] = np.nan
-    prev_low_12h[0] = np.nan
+    # Calculate ADX (14-period) on 12h
+    # True Range
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Align previous session range to current timeframe
-    prev_high_12h_aligned = align_htf_to_ltf(prices, df_12h, prev_high_12h)
-    prev_low_12h_aligned = align_htf_to_ltf(prices, df_12h, prev_low_12h)
+    # Directional Movement
+    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
+                       np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)), 
+                        np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Volume spike filter: current volume > 2x median of last 20 bars
-    vol_median = pd.Series(volume).rolling(window=20, min_periods=1).median().values
+    # Smoothed values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
+    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25  # Position size (25% of capital)
+    base_size = 0.25  # Position size
     
-    for i in range(20, n):
-        # Skip if required data is NaN
-        if (np.isnan(prev_high_12h_aligned[i]) or 
-            np.isnan(prev_low_12h_aligned[i]) or
-            np.isnan(vol_median[i])):
+    for i in range(100, n):
+        # Skip if any required data is NaN
+        if (np.isnan(wr_aligned[i]) or np.isnan(adx_aligned[i])):
             continue
         
-        # Long entry: break above prior session high + volume spike
-        if (close[i] > prev_high_12h_aligned[i] and
-            volume[i] > 2.0 * vol_median[i] and
+        # Calculate volume spike (current volume > 1.5x median of past 20 bars)
+        vol_median = np.median(volume[max(0, i-20):i+1])
+        vol_spike = volume[i] > 1.5 * vol_median
+        
+        # Long entry: Williams %R oversold (< -80) + volume spike + ADX > 25 (trending)
+        if (wr_aligned[i] < -80 and
+            vol_spike and
+            adx_aligned[i] > 25 and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: break below prior session low + volume spike
-        elif (close[i] < prev_low_12h_aligned[i] and
-              volume[i] > 2.0 * vol_median[i] and
+        # Short entry: Williams %R overbought (> -20) + volume spike + ADX > 25 (trending)
+        elif (wr_aligned[i] > -20 and
+              vol_spike and
+              adx_aligned[i] > 25 and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse breakout (opposite session level)
-        elif position == 1 and close[i] < prev_low_12h_aligned[i]:
+        # Exit: Williams %R returns to neutral range (-80 to -20) or ADX < 20 (ranging)
+        elif position == 1 and (wr_aligned[i] > -50 or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > prev_high_12h_aligned[i]:
+        elif position == -1 and (wr_aligned[i] < -50 or adx_aligned[i] < 20):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "12h_OvernightBreakout_With_Volume_Spike"
-timeframe = "12h"
+name = "4h_WilliamsR_Volume_ADX_Trend"
+timeframe = "4h"
 leverage = 1.0
