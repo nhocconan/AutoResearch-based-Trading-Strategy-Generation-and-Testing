@@ -23,13 +23,21 @@ def generate_signals(prices):
     daily_low = df_1d['low'].values
     daily_volume = df_1d['volume'].values
     
-    # Calculate daily Williams %R (14-period)
-    highest_high_14 = pd.Series(daily_high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(daily_low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - daily_close) / (highest_high_14 - lowest_low_14 + 1e-10)
-    
-    # Calculate daily EMA(50) for trend filter
-    ema_50 = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate daily pivot points (standard floor trader's pivots)
+    # P = (H + L + C) / 3
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    # R2 = P + (H - L)
+    # S2 = P - (H - L)
+    # R3 = H + 2*(P - L)
+    # S3 = L - 2*(H - P)
+    pivot = (daily_high + daily_low + daily_close) / 3.0
+    r1 = 2 * pivot - daily_low
+    s1 = 2 * pivot - daily_high
+    r2 = pivot + (daily_high - daily_low)
+    s2 = pivot - (daily_high - daily_low)
+    r3 = daily_high + 2 * (pivot - daily_low)
+    s3 = daily_low - 2 * (daily_high - pivot)
     
     # Calculate daily ATR(14) for volatility filter
     tr1 = pd.Series(daily_high - daily_low)
@@ -38,16 +46,21 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr_14 = tr.ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align HTF indicators to 1d timeframe (no extra delay needed for Williams %R/EMA/ATR)
-    williams_r_1d = align_htf_to_ltf(prices, df_1d, williams_r)
-    ema_50_1d = align_htf_to_ltf(prices, df_1d, ema_50)
-    atr_14_1d = align_htf_to_ltf(prices, df_1d, atr_14)
+    # Align HTF indicators to 6h timeframe with proper delay
+    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
+    r2_6h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_6h = align_htf_to_ltf(prices, df_1d, s2)
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    atr_14_6h = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Calculate 1d Donchian channels (20-period) for breakout signals
+    # Calculate 6h Donchian channels (20-period) for breakout signals
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1d volume ratio (current vs 20-period average)
+    # Calculate 6h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / (vol_ma_20 + 1e-10)
     
@@ -55,39 +68,36 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_1d[i]) or np.isnan(ema_50_1d[i]) or np.isnan(atr_14_1d[i]) or 
+        if (np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or 
+            np.isnan(r2_6h[i]) or np.isnan(s2_6h[i]) or np.isnan(r3_6h[i]) or 
+            np.isnan(s3_6h[i]) or np.isnan(atr_14_6h[i]) or 
             np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
         # Entry conditions:
-        # 1. Daily Williams %R extreme (oversold/overbought)
-        # 2. 1d Donchian breakout in direction of Williams %R signal
-        # 3. Daily trend filter: price above/below daily EMA50
-        # 4. 1d volume confirmation: volume > 1.5x average
-        # 5. 1d volatility filter: ATR > 0.3% of price (avoid low volatility chop)
-        # 6. Discrete position sizing: 0.25
+        # 1. 6h price breaks above R1 with volume confirmation → long
+        # 2. 6h price breaks below S1 with volume confirmation → short
+        # 3. Volatility filter: ATR > 0.5% of price (avoid low volatility chop)
+        # 4. Volume confirmation: volume > 1.3x average
+        # 5. Discrete position sizing: 0.25
         
-        # Long conditions: Williams %R oversold (< -80) + Donchian breakout above in uptrend
-        if (williams_r_1d[i] < -80 and          # Daily oversold
-            close[i] > ema_50_1d[i] and         # Daily uptrend filter
-            close[i] > highest_20[i] and        # 1d Donchian breakout
-            volume_ratio[i] > 1.5 and           # Volume confirmation
-            atr_14_1d[i] > 0.003 * close[i]):   # Volatility filter
+        # Long conditions: 6h breakout above R1
+        if (close[i] > r1_6h[i] and            # 6h price above R1 pivot
+            volume_ratio[i] > 1.3 and          # Volume confirmation
+            atr_14_6h[i] > 0.005 * close[i]):  # Volatility filter
             signals[i] = 0.25
             
-        # Short conditions: Williams %R overbought (> -20) + Donchian breakdown below in downtrend
-        elif (williams_r_1d[i] > -20 and        # Daily overbought
-              close[i] < ema_50_1d[i] and       # Daily downtrend filter
-              close[i] < lowest_20[i] and       # 1d Donchian breakdown
-              volume_ratio[i] > 1.5 and         # Volume confirmation
-              atr_14_1d[i] > 0.003 * close[i]): # Volatility filter
+        # Short conditions: 6h breakdown below S1
+        elif (close[i] < s1_6h[i] and          # 6h price below S1 pivot
+              volume_ratio[i] > 1.3 and        # Volume confirmation
+              atr_14_6h[i] > 0.005 * close[i]): # Volatility filter
             signals[i] = -0.25
         else:
             signals[i] = 0.0
     
     return signals
 
-name = "1d_WilliamsR_Donchian_Breakout_EMA50_Volume_ATR_Filter"
-timeframe = "1d"
+name = "6h_Pivot_R1_S1_Breakout_Volume_ATR_Filter"
+timeframe = "6h"
 leverage = 1.0
