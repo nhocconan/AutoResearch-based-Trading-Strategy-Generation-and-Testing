@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Donchian channel breakout with volume confirmation and ADX trend filter.
-# In trending markets (ADX > 25), breakout of 1d Donchian(20) signals continuation.
-# Volume filter ensures momentum validity. Designed for low trade frequency (20-50/year) to minimize fee drag.
-# Works in both bull (breakouts up) and bear (breakouts down) via symmetric long/short logic.
+# Hypothesis: 12h strategy using 1d Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout)
+# combined with 12h EMA34 trend filter and volume confirmation. In ranging markets (price between R3-S3),
+# fade extremes; in trending markets (price outside R4-S4), breakout continuation. Volume filter ensures
+# momentum validity. Designed for low trade frequency (12-30/year) to minimize fee drag while adapting to regime.
 
 def generate_signals(prices):
     n = len(prices)
@@ -27,54 +27,30 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # === 1d Indicators: Donchian Channel (20) ===
+    # === 1d Indicators: Camarilla Pivot Levels (using typical price) ===
+    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
+    
+    # Calculate pivot and support/resistance levels
+    pivot_1d = typical_price_1d
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    range_1d = high_1d - low_1d
     
-    # Donchian upper/lower bands (20-period)
-    donch_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Camarilla levels
+    r3_1d = pivot_1d + (range_1d * 1.1 / 4)
+    s3_1d = pivot_1d - (range_1d * 1.1 / 4)
+    r4_1d = pivot_1d + (range_1d * 1.1 / 2)
+    s4_1d = pivot_1d - (range_1d * 1.1 / 2)
     
-    # Align to 4h timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
+    # Align to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
-    # === 1d Indicators: ADX (14) for trend filter ===
-    # TR = max(high-low, abs(high-prev_close), abs(low-prev_close))
-    prev_close_1d = np.roll(df_1d['close'].values, 1)
-    prev_close_1d[0] = df_1d['close'].values[0]
-    tr_1d = np.maximum(
-        high_1d - low_1d,
-        np.maximum(
-            np.abs(high_1d - prev_close_1d),
-            np.abs(low_1d - prev_close_1d)
-        )
-    )
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    
-    # +DM and -DM
-    up_move_1d = high_1d - np.roll(high_1d, 1)
-    down_move_1d = np.roll(low_1d, 1) - low_1d
-    up_move_1d[0] = 0
-    down_move_1d[0] = 0
-    plus_dm_1d = np.where((up_move_1d > down_move_1d) & (up_move_1d > 0), up_move_1d, 0)
-    minus_dm_1d = np.where((down_move_1d > up_move_1d) & (down_move_1d > 0), down_move_1d, 0)
-    
-    # Smoothed +DM, -DM, TR
-    tr_sum_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
-    plus_dm_sum_1d = pd.Series(plus_dm_1d).rolling(window=14, min_periods=14).sum().values
-    minus_dm_sum_1d = pd.Series(minus_dm_1d).rolling(window=14, min_periods=14).sum().values
-    
-    # +DI and -DI
-    plus_di_1d = 100 * (plus_dm_sum_1d / tr_sum_1d)
-    minus_di_1d = 100 * (minus_dm_sum_1d / tr_sum_1d)
-    
-    # DX and ADX
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    adx_1d = pd.Series(dx_1d).rolling(window=14, min_periods=14).mean().values
-    
-    # Align ADX to 4h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # === 12h Indicators: Trend Filter ===
+    # 12h EMA(34) for trend bias
+    ema_34_12h = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     signals = np.zeros(n)
     
@@ -88,31 +64,49 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
             
-        # Volume filter: current volume > 1.5x 20-period volume SMA
+        # Volume filter: current volume > 1.8x 20-period volume SMA
         vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.8)
         
         # Skip if any required data is NaN
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or
-            np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(ema_34_12h[i])):
             signals[i] = 0.0
             continue
         
-        # === ENTRY LOGIC ===
-        # Trending market: ADX > 25
-        # Breakout long: price > 1d Donchian high
-        # Breakout short: price < 1d Donchian low
-        if adx_1d_aligned[i] > 25 and vol_confirm:
-            if close[i] > donch_high_aligned[i]:
-                signals[i] = 0.30  # long
-            elif close[i] < donch_low_aligned[i]:
-                signals[i] = -0.30  # short
+        # === REGIME DETECTION ===
+        # Ranging market: price between R3 and S3
+        # Trending market: price outside R4 and S4
+        # Transition zone: between R3-S3 and R4-S4 (no trade)
+        
+        in_range = (s3_aligned[i] <= close[i] <= r3_aligned[i])
+        in_uptrend = close[i] > r4_aligned[i]
+        in_downtrend = close[i] < s4_aligned[i]
+        
+        # === LONG CONDITIONS ===
+        # 1. In ranging market AND price at S3 support (mean reversion long)
+        # 2. OR in uptrend AND breakout above R4 (continuation long)
+        # 3. Volume confirmation
+        if vol_confirm:
+            if (in_range and close[i] <= s3_aligned[i] * 1.002) or \
+               (in_uptrend and close[i] > r4_aligned[i]):
+                signals[i] = 0.25
+        
+        # === SHORT CONDITIONS ===
+        # 1. In ranging market AND price at R3 resistance (mean reversion short)
+        # 2. OR in downtrend AND breakdown below S4 (continuation short)
+        # 3. Volume confirmation
+        elif vol_confirm:
+            if (in_range and close[i] >= r3_aligned[i] * 0.998) or \
+               (in_downtrend and close[i] < s4_aligned[i]):
+                signals[i] = -0.25
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "4h_1d_Donchian20_ADX25_VolumeFilter_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_R4S4_EMA34_VolFilter_v1"
+timeframe = "12h"
 leverage = 1.0
