@@ -3,62 +3,71 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 1-day Bollinger Band Filter
-# Williams %R identifies overbought/oversold conditions on 6h chart.
-# Bollinger Bands on 1-day chart define volatility regime: trade only when price is outside bands (high volatility breakouts).
-# Long when Williams %R < -80 (oversold) and price > upper BB(1d)
-# Short when Williams %R > -20 (overbought) and price < lower BB(1d)
-# Uses Bollinger Band squeeze/expansion as volatility filter to avoid ranging markets.
+# Hypothesis: 4h Donchian breakout + 12h volume confirmation + 12h EMA trend filter
+# Uses Donchian(20) channel breakout for directional signals in both bull and bear markets.
+# Long when price breaks above upper band and 12h EMA50 > 12h EMA200 (bullish trend).
+# Short when price breaks below lower band and 12h EMA50 < 12h EMA200 (bearish trend).
+# Volume confirmation requires current volume > 1.5x 20-bar median volume on 12h timeframe.
 # Conservative sizing (0.25) to limit trade frequency and avoid fee drag.
-# Works in both bull and bear markets by capturing volatility breakouts from extremes.
+# Designed to work in trending markets (trend following) and avoid false breakouts in ranging markets.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 1-day Bollinger Bands (20, 2)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean()
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std()
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb.values)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb.values)
+    # 12h EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema200_12h = pd.Series(close_12h).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    ema200_12h_aligned = align_htf_to_ltf(prices, df_12h, ema200_12h)
     
-    # Williams %R on 6h (14 periods)
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
-    williams_r = (highest_high - close) / (highest_high - lowest_low + 1e-10) * -100
+    # 12h volume confirmation
+    vol_12h = df_12h['volume'].values
+    vol_median_12h = pd.Series(vol_12h).rolling(window=20, min_periods=1).median()
+    vol_threshold_12h = 1.5 * vol_median_12h
+    vol_threshold_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_threshold_12h.values)
+    
+    # Donchian channel (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=1).max()
+    low_20 = pd.Series(low).rolling(window=20, min_periods=1).min()
+    upper_band = high_20.values
+    lower_band = low_20.values
     
     signals = np.zeros(n)
     
-    for i in range(20, n):  # Start after warmup for BB
+    for i in range(50, n):  # Start after warmup for EMA200
         # Skip if any required data is NaN
-        if (np.isnan(williams_r[i]) or np.isnan(upper_bb_aligned[i]) or 
-            np.isnan(lower_bb_aligned[i])):
+        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(ema200_12h_aligned[i]) or 
+            np.isnan(vol_threshold_12h_aligned[i]) or np.isnan(upper_band[i]) or 
+            np.isnan(lower_band[i])):
             continue
         
-        # Long: Williams %R oversold (< -80) and price above 1-day upper BB (volatility breakout up)
-        if (williams_r[i] < -80 and 
-            close[i] > upper_bb_aligned[i]):
+        # Long: price breaks above upper band, bullish 12h trend (EMA50 > EMA200), volume spike
+        if (close[i] > upper_band[i] and 
+            ema50_12h_aligned[i] > ema200_12h_aligned[i] and 
+            volume[i] > vol_threshold_12h_aligned[i]):
             signals[i] = 0.25
         
-        # Short: Williams %R overbought (> -20) and price below 1-day lower BB (volatility breakout down)
-        elif (williams_r[i] > -20 and 
-              close[i] < lower_bb_aligned[i]):
+        # Short: price breaks below lower band, bearish 12h trend (EMA50 < EMA200), volume spike
+        elif (close[i] < lower_band[i] and 
+              ema50_12h_aligned[i] < ema200_12h_aligned[i] and 
+              volume[i] > vol_threshold_12h_aligned[i]):
             signals[i] = -0.25
         
-        # Exit: Williams %R returns to neutral range (-50 to -50) or opposite extreme
+        # Exit: price returns to middle of channel or trend changes
         elif (i > 0 and 
-              ((signals[i-1] == 0.25 and williams_r[i] > -50) or
-               (signals[i-1] == -0.25 and williams_r[i] < -50))):
+              ((signals[i-1] == 0.25 and (close[i] < (upper_band[i] + lower_band[i]) / 2 or 
+                                          ema50_12h_aligned[i] < ema200_12h_aligned[i])) or
+               (signals[i-1] == -0.25 and (close[i] > (upper_band[i] + lower_band[i]) / 2 or 
+                                           ema50_12h_aligned[i] > ema200_12h_aligned[i])))):
             signals[i] = 0.0
         
         # Otherwise, hold previous position
@@ -67,6 +76,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_WilliamsR_1dBB_VolatilityBreakout"
-timeframe = "6h"
+name = "4h_Donchian_12hEMA_Volume"
+timeframe = "4h"
 leverage = 1.0
