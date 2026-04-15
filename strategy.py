@@ -3,10 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian Breakout with Volume Confirmation and 1d ADX Trend Filter
-# Uses 12h Donchian(20) breakouts confirmed by volume and 1d ADX > 25.
-# Works in bull markets (breakouts up) and bear markets (breakouts down).
-# Target: 50-150 total trades over 4 years.
+# Hypothesis: 6h Ichimoku Cloud with Daily Filter
+# Uses Ichimoku components (Tenkan, Kijun, Senkou A/B, Chikou) on 6h timeframe.
+# Long when price > cloud and Tenkan > Kijun (bullish), short when price < cloud and Tenkan < Kijun (bearish).
+# Filters trades using daily trend: only take longs when 1d EMA50 > EMA200, shorts when EMA50 < EMA200.
+# Works in bull markets (captures uptrends via cloud) and bear markets (shorts below cloud).
+# Target: 50-150 total trades over 4 years (12-37/year).
 
 def generate_signals(prices):
     n = len(prices)
@@ -16,90 +18,95 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Load 1d data for ADX trend filter
+    # Ichimoku parameters
+    tenkan_period = 9
+    kijun_period = 26
+    senkou_span_b_period = 52
+    
+    # Calculate Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    highest_tenkan = pd.Series(high).rolling(window=tenkan_period, min_periods=tenkan_period).max()
+    lowest_tenkan = pd.Series(low).rolling(window=tenkan_period, min_periods=tenkan_period).min()
+    tenkan = (highest_tenkan + lowest_tenkan) / 2
+    
+    # Calculate Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    highest_kijun = pd.Series(high).rolling(window=kijun_period, min_periods=kijun_period).max()
+    lowest_kijun = pd.Series(low).rolling(window=kijun_period, min_periods=kijun_period).min()
+    kijun = (highest_kijun + lowest_kijun) / 2
+    
+    # Calculate Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
+    
+    # Calculate Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    highest_senkou_b = pd.Series(high).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).max()
+    lowest_senkou_b = pd.Series(low).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).min()
+    senkou_b = (highest_senkou_b + lowest_senkou_b) / 2
+    
+    # Load 1d data for daily trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 200:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Load 12h data for Donchian channels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Calculate daily EMA50 and EMA200
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate ADX (14-period) on 1d
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    # Align Ichimoku components to 6h timeframe (no shift - Ichimoku is calculated on close)
+    tenkan_aligned = align_htf_to_ltf(prices, prices, tenkan.values)
+    kijun_aligned = align_htf_to_ltf(prices, prices, kijun.values)
+    senkou_a_aligned = align_htf_to_ltf(prices, prices, senkou_a.values)
+    senkou_b_aligned = align_htf_to_ltf(prices, prices, senkou_b.values)
     
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
-    
-    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate Donchian channels (20-period) on 12h
-    donch_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    
-    # Align indicators to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    donch_high_aligned = align_htf_to_ltf(prices, df_12h, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_12h, donch_low)
+    # Align daily EMAs to 6h timeframe (need to wait for daily close)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
     signals = np.zeros(n)
     position = 0
-    base_size = 0.25
+    base_size = 0.25  # Position size
     
     for i in range(100, n):
-        if (np.isnan(adx_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or
+            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(ema200_1d_aligned[i])):
             continue
         
-        # Long entry: breakout above Donchian high + volume + ADX > 25
-        if (close[i] > donch_high_aligned[i] and
-            volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-            adx_aligned[i] > 25 and
+        # Determine cloud top and bottom
+        cloud_top = max(senkou_a_aligned[i], senkou_b_aligned[i])
+        cloud_bottom = min(senkou_a_aligned[i], senkou_b_aligned[i])
+        
+        # Check daily trend
+        daily_uptrend = ema50_1d_aligned[i] > ema200_1d_aligned[i]
+        daily_downtrend = ema50_1d_aligned[i] < ema200_1d_aligned[i]
+        
+        # Long entry: price above cloud, Tenkan > Kijun, and daily uptrend
+        if (close[i] > cloud_top and
+            tenkan_aligned[i] > kijun_aligned[i] and
+            daily_uptrend and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: breakout below Donchian low + volume + ADX > 25
-        elif (close[i] < donch_low_aligned[i] and
-              volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-              adx_aligned[i] > 25 and
+        # Short entry: price below cloud, Tenkan < Kijun, and daily downtrend
+        elif (close[i] < cloud_bottom and
+              tenkan_aligned[i] < kijun_aligned[i] and
+              daily_downtrend and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse breakout or ADX < 20 (ranging market)
-        elif position == 1 and (close[i] < donch_low_aligned[i] or adx_aligned[i] < 20):
+        # Exit: opposite Ichimoku signal or daily trend reversal
+        elif position == 1 and (close[i] < cloud_bottom or tenkan_aligned[i] < kijun_aligned[i] or not daily_uptrend):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > donch_high_aligned[i] or adx_aligned[i] < 20):
+        elif position == -1 and (close[i] > cloud_top or tenkan_aligned[i] > kijun_aligned[i] or not daily_downtrend):
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "12h_Donchian_Breakout_Volume_ADX"
-timeframe = "12h"
+name = "6h_Ichimoku_DailyTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
