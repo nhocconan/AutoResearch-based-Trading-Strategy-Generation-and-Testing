@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation
-# Long when price breaks above 20-period Donchian high + price > 12h EMA50 + volume > 1.5x 20-period avg
-# Short when price breaks below 20-period Donchian low + price < 12h EMA50 + volume > 1.5x 20-period avg
-# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (15-25/year).
-# Donchian channels provide objective breakout levels. EMA50 on 12h ensures we trade with the higher timeframe trend.
-# Volume confirmation reduces false breakouts. Works in bull markets (upside breakouts) and bear markets (downside breakdowns).
+# Hypothesis: 1h EMA crossover with 4h trend filter and volume confirmation
+# Long when 1h EMA12 crosses above EMA26, 4h EMA50 is rising (trend up), and volume > 1.5x 20-period avg
+# Short when 1h EMA12 crosses below EMA26, 4h EMA50 is falling (trend down), and volume > 1.5x 20-period avg
+# Uses discrete position sizing (0.20) to minimize fee churn. Session filter (08-20 UTC) reduces noise.
+# Designed for low trade frequency (15-35/year) by requiring EMA crossover + 4h trend alignment + volume spike.
+# Works in bull markets (trend following) and bear markets (trend continuation) by aligning with 4h EMA50 direction.
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,28 +24,41 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 12h HTF data once before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 4h HTF data once before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # === 12h Indicator: EMA50 (trend filter) ===
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # === 4h Indicator: EMA50 (trend direction) ===
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # === Primary TF Indicators: Donchian(20) and Volume SMA(20) ===
-    # Donchian high: highest high over past 20 bars
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    # Donchian low: lowest low over past 20 bars
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    # Volume SMA: 20-period average volume
+    # 4h EMA50 slope (rising/falling) - using 3-bar change for trend confirmation
+    ema_50_slope_4h = np.diff(ema_50_4h_aligned, prefill=0)
+    ema_50_rising = ema_50_slope_4h > 0
+    ema_50_falling = ema_50_slope_4h < 0
+    
+    # === 1h Indicators: EMA12, EMA26 ===
+    ema_12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema_26 = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean().values
+    
+    # EMA crossover signals
+    ema_12_prev = np.roll(ema_12, 1)
+    ema_26_prev = np.roll(ema_26, 1)
+    ema_12_prev[0] = ema_12[0]
+    ema_26_prev[0] = ema_26[0]
+    
+    ema_12_cross_above = (ema_12 > ema_26) & (ema_12_prev <= ema_26_prev)
+    ema_12_cross_below = (ema_12 < ema_26) & (ema_12_prev >= ema_26_prev)
+    
+    # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = 100
+    warmup = 50
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -57,32 +70,30 @@ def generate_signals(prices):
         vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(ema_12[i]) or np.isnan(ema_26[i]) or
+            np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above 20-period Donchian high
-        # 2. Price above 12h EMA50 (uptrend)
+        # 1. 1h EMA12 crosses above EMA26
+        # 2. 4h EMA50 is rising (trend up)
         # 3. Volume confirmation
-        if (close[i] > donchian_high[i]) and \
-           (close[i] > ema_50_12h_aligned[i]) and vol_confirm:
-            signals[i] = 0.25
+        if ema_12_cross_above[i] and ema_50_rising[i] and vol_confirm:
+            signals[i] = 0.20
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below 20-period Donchian low
-        # 2. Price below 12h EMA50 (downtrend)
+        # 1. 1h EMA12 crosses below EMA26
+        # 2. 4h EMA50 is falling (trend down)
         # 3. Volume confirmation
-        elif (close[i] < donchian_low[i]) and \
-             (close[i] < ema_50_12h_aligned[i]) and vol_confirm:
-            signals[i] = -0.25
+        elif ema_12_cross_below[i] and ema_50_falling[i] and vol_confirm:
+            signals[i] = -0.20
         
         else:
             signals[i] = 0.0  # flat
     
     return signals
 
-name = "4h_Donchian20_EMA50_12h_Volume_Filter_v1"
-timeframe = "4h"
+name = "1h_EMA12_26_Crossover_4hEMA50_Volume_Filter_v1"
+timeframe = "1h"
 leverage = 1.0
