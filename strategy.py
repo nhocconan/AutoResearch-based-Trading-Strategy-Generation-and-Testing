@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot R4/S4 breakout with 1d EMA50 trend filter and volume spike
-# Long when price breaks above Camarilla R4 + 1d EMA50 uptrend + volume > 2.0x 20-period avg
-# Short when price breaks below Camarilla S4 + 1d EMA50 downtrend + volume > 2.0x 20-period avg
+# Hypothesis: 12h Donchian(20) breakout with 1d ADX(14) trend filter and volume confirmation
+# Long when price breaks above Donchian upper band (20-period high) + 1d ADX > 25 + volume > 1.5x 20-period avg
+# Short when price breaks below Donchian lower band (20-period low) + 1d ADX > 25 + volume > 1.5x 20-period avg
 # Uses discrete position sizing (0.25) to control drawdown and minimize fee drag.
-# 1d EMA50 provides strong trend filter reducing whipsaws in both bull and bear markets.
-# Volume threshold (2.0x) targets ~15-30 trades/year on 6h timeframe to avoid overtrading.
-# Camarilla pivots calculated from prior 6h bar's high/low/close for structure-based entries.
-# R4/S4 levels represent strong breakout points with higher probability of continuation.
+# 1d ADX > 25 ensures we only trade in trending markets, reducing whipsaws in ranging conditions.
+# Volume confirmation (1.5x) targets ~15-30 trades/year on 12h timeframe to avoid overtrading.
+# Donchian channels provide clear structural breakout levels that work in both bull and bear markets.
 
 def generate_signals(prices):
     n = len(prices)
@@ -28,29 +27,55 @@ def generate_signals(prices):
     
     # Get 1d HTF data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # === 1d Indicator: EMA50 ===
+    # === 1d Indicator: ADX(14) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === 6h Camarilla Pivot Levels (based on prior bar) ===
-    # Pivot = (H + L + C) / 3
-    # R4 = Pivot + (H - L) * 1.1 / 2
-    # S4 = Pivot - (H - L) * 1.1 / 2
-    # Using prior bar's OHLC to avoid look-ahead
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Calculate True Range (TR)
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
     
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    camarilla_r4 = pivot + (prev_high - prev_low) * 1.1 / 2.0
-    camarilla_s4 = pivot - (prev_high - prev_low) * 1.1 / 2.0
+    # Calculate Directional Movement (+DM and -DM)
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
+    
+    # Smooth TR, +DM, -DM using Wilder's smoothing (EMA with alpha=1/period)
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            # First value is simple average
+            result[period-1] = np.nanmean(data[:period])
+            # Subsequent values: Wilder's smoothing
+            for i in range(period, len(data)):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    atr = wilder_smooth(tr, 14)
+    plus_di = 100 * wilder_smooth(plus_dm, 14) / atr
+    minus_di = 100 * wilder_smooth(minus_dm, 14) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilder_smooth(dx, 14)
+    
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # === 12h Donchian Channel (20-period) ===
+    # Upper band = 20-period high
+    # Lower band = 20-period low
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -58,7 +83,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(50, 20) + 5  # EMA50 + volume(20) + buffer
+    warmup = max(20, 20) + 5  # Donchian(20) + volume(20) + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -67,28 +92,31 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r4[i]) or np.isnan(camarilla_s4[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
+            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 2.0x 20-period volume SMA
-        vol_confirm = volume[i] > (vol_sma_20[i] * 2.0)
+        # Volume filter: current volume > 1.5x 20-period volume SMA
+        vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
+        
+        # Trend filter: 1d ADX > 25 (strong trend)
+        trend_filter = adx_1d_aligned[i] > 25
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above Camarilla R4 (close > R4)
-        # 2. 1d EMA50 uptrend (close > EMA50)
+        # 1. Price breaks above Donchian upper band (close > upper)
+        # 2. 1d ADX > 25 (strong trend)
         # 3. Volume confirmation
-        if (close[i] > camarilla_r4[i]) and \
-           (close[i] > ema_50_1d_aligned[i]) and vol_confirm:
+        if (close[i] > donchian_upper[i]) and \
+           trend_filter and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below Camarilla S4 (close < S4)
-        # 2. 1d EMA50 downtrend (close < EMA50)
+        # 1. Price breaks below Donchian lower band (close < lower)
+        # 2. 1d ADX > 25 (strong trend)
         # 3. Volume confirmation
-        elif (close[i] < camarilla_s4[i]) and \
-             (close[i] < ema_50_1d_aligned[i]) and vol_confirm:
+        elif (close[i] < donchian_lower[i]) and \
+             trend_filter and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -96,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_Camarilla_R4S4_1dEMA50_Volume_Filter_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dADX14_Volume_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
