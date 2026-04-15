@@ -3,10 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h 1-day Range Breakout with Volume Confirmation and ADX Trend Filter
-# Uses the previous day's high/low as support/resistance levels. Breakouts above previous day's high
-# or below previous day's low are traded only when confirmed by volume and ADX > 25 (trending market).
-# Works in bull markets (breakouts up) and bear markets (breakouts down). Target: 50-150 total trades.
+# Hypothesis: 1d Choppiness Index + Donchian Breakout with Volume Filter
+# Uses weekly trend filter to avoid counter-trend trades. In trending markets (ADX > 25 on weekly),
+# trade breakouts of daily Donchian channels only when choppiness is low (< 38.2) indicating trending regime.
+# In ranging markets (Choppiness > 61.8), fade extremes at Bollinger Bands.
+# Works in both bull and bear markets by following the weekly trend direction.
+# Target: 20-60 trades per year.
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,99 +20,136 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data for previous day's high/low
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load weekly data for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 30:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # Load 12h data for ADX trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load daily data for Donchian and Bollinger calculations
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 50:
         return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    daily_high = df_daily['high'].values
+    daily_low = df_daily['low'].values
+    daily_close = df_daily['close'].values
     
-    # Previous day's high and low (shifted by 1 to avoid look-ahead)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_high_1d[0] = np.nan  # First value has no previous day
-    prev_low_1d[0] = np.nan
-    
-    # Align previous day's high/low to 4h timeframe
-    prev_high_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_high_1d)
-    prev_low_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_low_1d)
-    
-    # Calculate ADX (14-period) on 12h
+    # Calculate weekly ADX (14-period) for trend strength
     # True Range
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr1 = weekly_high - weekly_low
+    tr2 = np.abs(weekly_high - np.roll(weekly_close, 1))
+    tr3 = np.abs(weekly_low - np.roll(weekly_close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    tr[0] = tr1[0]
     
     # Directional Movement
-    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
-                       np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)), 
-                        np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
+    dm_plus = np.where((weekly_high - np.roll(weekly_high, 1)) > (np.roll(weekly_low, 1) - weekly_low), 
+                       np.maximum(weekly_high - np.roll(weekly_high, 1), 0), 0)
+    dm_minus = np.where((np.roll(weekly_low, 1) - weekly_low) > (weekly_high - np.roll(weekly_high, 1)), 
+                        np.maximum(np.roll(weekly_low, 1) - weekly_low, 0), 0)
     dm_plus[0] = 0
     dm_minus[0] = 0
     
     # Smoothed values
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_weekly = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
     dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
     
     # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
+    di_plus = 100 * dm_plus_smooth / (atr_weekly + 1e-10)
+    di_minus = 100 * dm_minus_smooth / (atr_weekly + 1e-10)
     
     # DX and ADX
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_weekly = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    # Align weekly ADX to daily timeframe
+    adx_weekly_aligned = align_htf_to_ltf(prices, df_weekly, adx_weekly)
+    
+    # Calculate daily Donchian channels (20-period)
+    donchian_high = pd.Series(daily_high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(daily_low).rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian levels to daily timeframe (already aligned since we used daily data)
+    
+    # Calculate daily Bollinger Bands (20, 2.0)
+    bb_middle = pd.Series(daily_close).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(daily_close).rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2.0 * bb_std
+    bb_lower = bb_middle - 2.0 * bb_std
+    
+    # Calculate daily Choppiness Index (14-period)
+    # True Range for each period
+    tr1_daily = daily_high - daily_low
+    tr2_daily = np.abs(daily_high - np.roll(daily_close, 1))
+    tr3_daily = np.abs(daily_low - np.roll(daily_close, 1))
+    tr_daily = np.maximum(tr1_daily, np.maximum(tr2_daily, tr3_daily))
+    tr_daily[0] = tr1_daily[0]
+    
+    # Sum of true range over 14 periods
+    atr_sum = pd.Series(tr_daily).rolling(window=14, min_periods=14).sum().values
+    
+    # Maximum high - minimum low over 14 periods
+    max_high = pd.Series(daily_high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(daily_low).rolling(window=14, min_periods=14).min().values
+    range_max = max_high - min_low
+    
+    # Choppiness Index = 100 * log10(atr_sum / range_max) / log10(14)
+    # Avoid division by zero and log of zero
+    ratio = np.where(range_max > 0, atr_sum / range_max, 1.0)
+    chop = 100 * np.log10(np.maximum(ratio, 1e-10)) / np.log10(14)
     
     signals = np.zeros(n)
     position = 0
     base_size = 0.25  # Position size
     
-    for i in range(100, n):
+    for i in range(50, n):  # Start after enough data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(prev_high_1d_aligned[i]) or np.isnan(prev_low_1d_aligned[i]) or
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(adx_weekly_aligned[i]) or np.isnan(chop[i]) or
+            np.isnan(bb_upper[i]) or np.isnan(bb_lower[i])):
             continue
         
-        # Long entry: price breaks above previous day's high + volume confirmation + ADX > 25
-        if (close[i] > prev_high_1d_aligned[i] and
-            volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-            adx_aligned[i] > 25 and
-            position <= 0):
-            position = 1
-            signals[i] = base_size
+        # Long entry conditions
+        long_breakout = close[i] > donchian_high[i]
+        long_fade = close[i] < bb_lower[i]  # Oversold bounce
         
-        # Short entry: price breaks below previous day's low + volume confirmation + ADX > 25
-        elif (close[i] < prev_low_1d_aligned[i] and
-              volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-              adx_aligned[i] > 25 and
-              position >= 0):
-            position = -1
-            signals[i] = -base_size
+        # Short entry conditions
+        short_breakout = close[i] < donchian_low[i]
+        short_fade = close[i] > bb_upper[i]  # Overbought reversal
         
-        # Exit: reverse breakout or ADX < 20 (ranging market)
-        elif position == 1 and (close[i] < prev_low_1d_aligned[i] or adx_aligned[i] < 20):
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and (close[i] > prev_high_1d_aligned[i] or adx_aligned[i] < 20):
-            position = 0
-            signals[i] = 0.0
+        # Regime filters
+        is_trending = adx_weekly_aligned[i] > 25  # Strong trend
+        is_chopping = chop[i] > 61.8  # High chopping = ranging market
+        
+        # Enter long: breakout in trending OR fade in ranging
+        if (long_breakout and is_trending) or (long_fade and is_chopping):
+            if position <= 0:  # Only enter if not already long
+                position = 1
+                signals[i] = base_size
+        
+        # Enter short: breakout in trending OR fade in ranging
+        elif (short_breakout and is_trending) or (short_fade and is_chopping):
+            if position >= 0:  # Only enter if not already short
+                position = -1
+                signals[i] = -base_size
+        
+        # Exit conditions
+        elif position == 1:
+            # Exit long: opposite breakout or fading signal
+            if short_breakout or close[i] > bb_upper[i]:
+                position = 0
+                signals[i] = 0.0
+        elif position == -1:
+            # Exit short: opposite breakout or fading signal
+            if long_breakout or close[i] < bb_lower[i]:
+                position = 0
+                signals[i] = 0.0
     
     return signals
 
-name = "4h_1d_Range_Breakout_Volume_ADX"
-timeframe = "4h"
+name = "1d_Choppiness_Donchian_BB_WeeklyTrend"
+timeframe = "1d"
 leverage = 1.0
