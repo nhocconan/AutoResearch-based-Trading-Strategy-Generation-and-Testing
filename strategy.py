@@ -1,16 +1,17 @@
-# 1d_1w_Range_Breakout_Volume_ADX
-# Hypothesis: 1d range breakout (previous day high/low) with volume confirmation and ADX(14) trend filter on 1w.
-# Works in bull markets (breakouts up) and bear markets (breakouts down). Target: 30-100 total trades over 4 years.
-# Uses 1d as primary timeframe and 1w for ADX trend filter to avoid overtrading and capture multi-day trends.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 6h Donchian(20) breakout + weekly pivot direction + volume confirmation
+# Uses 20-period Donchian channels for breakout detection. Trade only in direction of weekly pivot
+# (bullish if price above weekly pivot, bearish if below). Volume confirmation requires current volume
+# > 1.5x median of past 20 periods. Works in bull markets (long breakouts above weekly pivot) and
+# bear markets (short breakouts below weekly pivot). Target: 50-150 total trades over 4 years.
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,99 +19,69 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data for previous day's high/low
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Load 1w data for ADX trend filter
+    # Load weekly data for pivot calculation
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 1:
         return np.zeros(n)
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Previous day's high and low (shifted by 1 to avoid look-ahead)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
+    # Calculate weekly pivot points (standard formula)
+    # Pivot = (H + L + C) / 3
+    # Support 1 = (2 * Pivot) - High
+    # Resistance 1 = (2 * Pivot) - Low
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    # We only need the pivot level for direction, not full support/resistance
     
-    # Align previous day's high/low to 1d timeframe (already aligned, but use helper for safety)
-    prev_high_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_high_1d)
-    prev_low_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_low_1d)
+    # Align weekly pivot to 6h timeframe (no additional delay needed for pivot)
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
     
-    # Calculate ADX (14-period) on 1w
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    
-    # Directional Movement
-    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), 
-                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), 
-                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align ADX to 1d timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    # Calculate Donchian channels (20-period) on 6h
+    # Upper channel = highest high of past 20 periods
+    # Lower channel = lowest low of past 20 periods
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0
     base_size = 0.25  # Position size (25% of capital)
     
-    for i in range(100, n):
+    for i in range(20, n):  # Start after Donchian warmup
         # Skip if any required data is NaN
-        if (np.isnan(prev_high_1d_aligned[i]) or np.isnan(prev_low_1d_aligned[i]) or
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(pivot_1w_aligned[i]) or 
+            np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i])):
             continue
         
-        # Long entry: price breaks above previous day's high + volume confirmation + ADX > 25
-        if (close[i] > prev_high_1d_aligned[i] and
+        # Long entry: price breaks above Donchian upper + price above weekly pivot + volume confirmation
+        if (close[i] > donchian_upper[i] and
+            close[i] > pivot_1w_aligned[i] and
             volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-            adx_aligned[i] > 25 and
             position <= 0):
             position = 1
             signals[i] = base_size
         
-        # Short entry: price breaks below previous day's low + volume confirmation + ADX > 25
-        elif (close[i] < prev_low_1d_aligned[i] and
+        # Short entry: price breaks below Donchian lower + price below weekly pivot + volume confirmation
+        elif (close[i] < donchian_lower[i] and
+              close[i] < pivot_1w_aligned[i] and
               volume[i] > 1.5 * np.median(volume[max(0, i-20):i+1]) and
-              adx_aligned[i] > 25 and
               position >= 0):
             position = -1
             signals[i] = -base_size
         
-        # Exit: reverse breakout or ADX < 20 (ranging market)
-        elif position == 1 and (close[i] < prev_low_1d_aligned[i] or adx_aligned[i] < 20):
+        # Exit: reverse breakout (opposite Donchian channel break)
+        elif position == 1 and close[i] < donchian_lower[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > prev_high_1d_aligned[i] or adx_aligned[i] < 20):
+        elif position == -1 and close[i] > donchian_upper[i]:
             position = 0
             signals[i] = 0.0
     
     return signals
 
-name = "1d_1w_Range_Breakout_Volume_ADX"
-timeframe = "1d"
+name = "6h_Donchian_WeeklyPivot_Volume"
+timeframe = "6h"
 leverage = 1.0
