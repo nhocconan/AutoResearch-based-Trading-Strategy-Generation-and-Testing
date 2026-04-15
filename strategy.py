@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
-# Long when price breaks above 4h Donchian upper(20) + 1d EMA34 uptrend + volume > 1.5x 20-period avg
-# Short when price breaks below 4h Donchian lower(20) + 1d EMA34 downtrend + volume > 1.5x 20-period avg
-# Uses discrete position sizing (0.25) to minimize fee drag and control drawdown.
-# 1d EMA34 provides strong trend filter reducing whipsaws in both bull and bear markets.
-# Volume threshold (1.5x) targets ~20-40 trades/year to minimize fee drag on 4h timeframe.
-# Donchian channels calculated from 4h HTF data for proper structure.
+# Hypothesis: 1d Williams %R (14) mean reversion with 1w EMA34 trend filter and volume confirmation
+# Long when Williams %R < -80 (oversold) + 1w EMA34 uptrend (price > EMA) + volume > 1.5x 20-period avg
+# Short when Williams %R > -20 (overbought) + 1w EMA34 downtrend (price < EMA) + volume > 1.5x 20-period avg
+# Williams %R identifies extreme reversals; 1w EMA34 filters counter-trend trades in strong trends
+# Volume confirmation ensures breakout validity. Discrete sizing (0.25) minimizes fee drag.
+# Target: 20-40 trades/year to avoid fee drag on 1d timeframe. Works in both bull and bear via mean reversion + trend filter.
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,35 +24,26 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Get 4h HTF data once before loop (primary timeframe is 4h, so we use 4h for Donchian)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get 1w HTF data once before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Get 1d HTF data once before loop for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # === 1w Indicator: EMA34 ===
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # === 4h Indicator: Donchian Channel(20) ===
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    
-    # Calculate Donchian upper(20) and lower(20) on 4h data
-    donchian_high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    
-    # Align to lower timeframe (15m) - but since primary is 4h, we need to align 4h to 4h (identity)
-    # Actually, since we're using 4h as primary timeframe, we need to align the 4h indicators to 4h bars
-    # The get_htf_data returns 4h data, we need to map it back to the original price array
-    # Since primary timeframe is 4h, prices array IS the 4h data
-    donchian_high_20_4h = donchian_high_20
-    donchian_low_20_4h = donchian_low_20
-    
-    # === 1d Indicator: EMA34 ===
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # === Williams %R (14) on 1d ===
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = np.full(n, np.nan)
+    for i in range(n):
+        if highest_high_14[i] != lowest_low_14[i]:  # avoid division by zero
+            williams_r[i] = ((highest_high_14[i] - close[i]) / (highest_high_14[i] - lowest_low_14[i])) * -100
+        else:
+            williams_r[i] = -50.0  # neutral when range is zero
     
     # Volume SMA for confirmation (using 20-period)
     vol_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -61,7 +51,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     
     # Warmup: ensure all indicators are valid
-    warmup = max(34, 20) + 5  # EMA34 + Donchian(20) + volume(20) + buffer
+    warmup = max(34, 14, 20) + 5  # EMA34 + Williams %R(14) + volume(20) + buffer
     
     for i in range(warmup, n):
         # Skip if outside trading session (08-20 UTC)
@@ -70,8 +60,7 @@ def generate_signals(prices):
             continue
         
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_20_4h[i]) or np.isnan(donchian_low_20_4h[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_sma_20[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_sma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -79,19 +68,19 @@ def generate_signals(prices):
         vol_confirm = volume[i] > (vol_sma_20[i] * 1.5)
         
         # === LONG CONDITIONS ===
-        # 1. Price breaks above Donchian upper(20) (close > upper)
-        # 2. 1d EMA34 uptrend (close > EMA34)
+        # 1. Williams %R < -80 (oversold)
+        # 2. 1w EMA34 uptrend (close > EMA)
         # 3. Volume confirmation
-        if (close[i] > donchian_high_20_4h[i]) and \
-           (close[i] > ema_34_1d_aligned[i]) and vol_confirm:
+        if (williams_r[i] < -80) and \
+           (close[i] > ema_34_1w_aligned[i]) and vol_confirm:
             signals[i] = 0.25
         
         # === SHORT CONDITIONS ===
-        # 1. Price breaks below Donchian lower(20) (close < lower)
-        # 2. 1d EMA34 downtrend (close < EMA34)
+        # 1. Williams %R > -20 (overbought)
+        # 2. 1w EMA34 downtrend (close < EMA)
         # 3. Volume confirmation
-        elif (close[i] < donchian_low_20_4h[i]) and \
-             (close[i] < ema_34_1d_aligned[i]) and vol_confirm:
+        elif (williams_r[i] > -20) and \
+             (close[i] < ema_34_1w_aligned[i]) and vol_confirm:
             signals[i] = -0.25
         
         else:
@@ -99,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_Donchian20_1dEMA34_Volume_Filter_v1"
-timeframe = "4h"
+name = "1d_WilliamsR_14_1wEMA34_Volume_Filter_v1"
+timeframe = "1d"
 leverage = 1.0
